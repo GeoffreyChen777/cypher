@@ -4,7 +4,9 @@
 //! tested, not asserted.
 
 use super::*;
-use zeron_proto::{HarnessId, SandboxLevel, SessionStatus};
+use zeron_proto::{
+    HarnessId, SandboxLevel, SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus,
+};
 
 fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
@@ -295,6 +297,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         status,
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
+        subagents: Vec::new(),
     }
 }
 
@@ -338,6 +341,77 @@ fn server_round(
     for (i, batch) in acks {
         docs[i].ack_batch(&batch, *seq);
     }
+}
+
+fn subagents() -> Vec<SubagentRun> {
+    vec![SubagentRun {
+        run_id: "run-1".into(),
+        tool_call_id: Some("t1".into()),
+        agent: "planner".into(),
+        model: Some("anthropic/claude-sonnet-4".into()),
+        task: "Plan the panel".into(),
+        mode: SubagentRunMode::Async,
+        status: SubagentRunStatus::Running,
+        progress: Some("line 1".into()),
+        started_at: 1000,
+        updated_at: 2000,
+        ended_at: None,
+    }]
+}
+
+/// Session `subagents` is a live projection on the row: non-empty writes
+/// the JSON field, an empty snapshot deletes it (settled snapshots clear
+/// the column), and old rows without the field read as empty.
+#[test]
+fn session_subagents_round_trip_and_clear() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut s = session("chat-1", "dev-a", SessionStatus::Idle);
+    s.subagents = subagents();
+    doc.upsert_session(&s).unwrap();
+
+    let read = doc.read_sessions().unwrap();
+    assert_eq!(read[0].subagents, subagents());
+    assert_eq!(read[0].status, SessionStatus::Idle);
+    assert_eq!(read[0].started_at, Some(ts(3_000)));
+
+    // Empty snapshot deletes the field; the row still reads back (empty).
+    let mut cleared = session("chat-1", "dev-a", SessionStatus::Idle);
+    cleared.subagents = Vec::new();
+    doc.upsert_session(&cleared).unwrap();
+    let read = doc.read_sessions().unwrap();
+    assert!(read[0].subagents.is_empty());
+    assert_eq!(read[0].status, SessionStatus::Idle);
+
+    // A row that never had the field reads as empty (old-writer compat).
+    let mut doc2 = RegistryDoc::new("dev-a");
+    doc2.upsert_session(&session("chat-2", "dev-a", SessionStatus::Working))
+        .unwrap();
+    assert!(doc2.read_sessions().unwrap()[0].subagents.is_empty());
+}
+
+/// Subagents ride the same registry rows as status — the OWNING host writes
+/// (writer discipline), the peer sees the projection through the broadcast,
+/// and a clear on the host converges to empty on both.
+#[test]
+fn session_subagents_sync_across_peers() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut live = session("chat-1", "dev-a", SessionStatus::Working);
+    live.subagents = subagents();
+    a.upsert_session(&live).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut HashMap::new(), &mut 0, &mut docs);
+    assert_eq!(a.read_sessions().unwrap()[0].subagents, subagents());
+    assert_eq!(b.read_sessions().unwrap()[0].subagents, subagents());
+
+    // Clear on the owning host propagates to the peer.
+    let mut cleared = session("chat-1", "dev-a", SessionStatus::Working);
+    cleared.subagents = Vec::new();
+    a.upsert_session(&cleared).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut HashMap::new(), &mut 0, &mut docs);
+    assert!(a.read_sessions().unwrap()[0].subagents.is_empty());
+    assert!(b.read_sessions().unwrap()[0].subagents.is_empty());
 }
 
 #[test]

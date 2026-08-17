@@ -2851,7 +2851,15 @@ impl Pickers {
                     let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
                     let (icon_path, tint) = harness_brand_icon(row.harness);
                     let label: SharedString = row.model.label.clone().into();
-                    let harness_name = row.harness_name.clone();
+                    // Harness identity subline (t3 `showProvider`); the
+                    // model's description rides the same muted line after a
+                    // dot (proto: "rendered under the name in the model
+                    // picker, 11px muted") — for pi it carries the provider,
+                    // which is what tells same-named vendor models apart.
+                    let subline: SharedString = match &row.model.description {
+                        Some(description) => format!("{} · {description}", row.harness_name).into(),
+                        None => row.harness_name.clone(),
+                    };
                     let harness = row.harness;
                     let star_model = row.model.id.clone();
                     let mut el = div()
@@ -2925,7 +2933,7 @@ impl Pickers {
                                                 .truncate()
                                                 .text_size(px(11.0))
                                                 .text_color(theme.text_muted.opacity(0.7))
-                                                .child(harness_name),
+                                                .child(subline),
                                         ),
                                 ),
                         );

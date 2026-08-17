@@ -54,6 +54,9 @@ export type SessionMessagePart =
       /** Capped tool output — kept by the policy (the caps are the size
        * discipline; unlike raw inputs, output is the rendered record). */
       readonly output?: string;
+      /** Live progress tail for an UNRESOLVED tool (transient run state —
+       * cleared on resolve, so it never survives a settled chip). */
+      readonly progress?: string;
       /** Capped inline diff — kept for the same reason. */
       readonly diff?: ToolPartDiff;
     };
@@ -133,6 +136,7 @@ export const toRenderParts = (
           call: sanitizeToolCall(p.call),
           ...(typeof p.isError === "boolean" ? { isError: p.isError } : {}),
           ...(typeof p.output === "string" ? { output: p.output } : {}),
+          ...(typeof p.progress === "string" ? { progress: p.progress } : {}),
           ...(p.diff !== undefined ? { diff: p.diff } : {})
         }
       : p

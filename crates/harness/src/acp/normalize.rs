@@ -24,7 +24,8 @@ fn str_field(v: &Value, key: &str) -> String {
 }
 
 /// Truncate on a char boundary, marking the cut so the UI can say "truncated".
-fn cap_text(text: &str, cap: usize) -> String {
+/// Shared with the pi harness (tool-output cap).
+pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_owned();
     }

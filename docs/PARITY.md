@@ -59,7 +59,7 @@ not built yet).
 | Cursor (ACP) | done | Shared `AcpHarness` spec; `cursor-agent acp` (Cursor's native ACP server), turn-boundary steering, no effort ladder (effort rides the model id's bracket suffix). Cursor's blocking extension methods are answered: `cursor/ask_question` → requestInput, `cursor/create_plan` auto-accepts, `cursor/update_todos` → todo chip. **Live-verified against the real `cursor-agent` CLI**: model discovery, streamed reply, todo chip and exec tool calls. |
 | Grok (ACP) | done | Shared `AcpHarness` spec; `grok agent stdio`, turn-boundary steering. |
 | Hermes (ACP) | done | Shared `AcpHarness` spec; `hermes acp` (Nous Research's native ACP server), turn-boundary steering, no effort ladder yet. |
-| Pi (ACP) | done | Shared `AcpHarness` spec; community `pi-acp` adapter (pinned 0.0.33, npx fallback), turn-boundary steering, minimal→max thinking ladder. |
+| Pi (native RPC) | done | `crates/harness/src/pi/`: `pi --mode rpc` directly (no pi-acp adapter) — step-boundary steering, minimal→max thinking ladder, real model discovery (`provider/id`), extension UI dialogs bridged to the input panel, zeron-owned session store. Discovery live-verified against the real `pi` CLI 0.84.1 (`get_state` / `get_available_models` / `get_commands`). |
 | Mock harness | done | Scripted event replay; powers tests + the e2e smoke. |
 
 ## §5 Session doc schema

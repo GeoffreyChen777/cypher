@@ -428,6 +428,44 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     }
 }
 
+/// The privacy-safe info a subagent panel needs from a doc tool part's call
+/// (the pi `subagent` tool, `extensions/subagents`): agent name, task text
+/// (≤500 chars after the doc-side sanitize), and whether it was launched
+/// async. `None` for any other call, or a subagent call with no agent.
+///
+/// Shared by the transcript chip (`tool_chip_content`) and the session-level
+/// subagent panel (`zeron-ui::subagents`), so both surfaces read the same
+/// fields from the same source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentCallInfo {
+    pub agent: String,
+    pub task: String,
+    pub is_async: bool,
+}
+
+pub fn subagent_call_info(call: &crate::ToolCall) -> Option<SubagentCallInfo> {
+    let crate::ToolCall::Unknown { name, input } = call else {
+        return None;
+    };
+    if name != "subagent" {
+        return None;
+    }
+    let args = input.as_ref().and_then(serde_json::Value::as_object)?;
+    let agent = args.get("agent").and_then(serde_json::Value::as_str)?;
+    Some(SubagentCallInfo {
+        agent: agent.to_owned(),
+        task: args
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        is_async: args
+            .get("async")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
 ///
 /// Takes `(call, is_error)` pairs so each viewport can keep its own row model;
@@ -582,6 +620,96 @@ pub fn checkout_label(kind: CheckoutKind, picked: Option<&crate::RepoRef>) -> &'
                 "Current checkout"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_chip_tests {
+    use super::*;
+    use crate::ToolCall;
+
+    #[test]
+    fn subagent_chips_use_the_generic_tool_label() {
+        // The subagent tool is a generic Unknown in the transcript: it labels
+        // as a plain "Tool" chip (no special agent/task head in the feed —
+        // that surfaced live-card detail moved to the session-level subagent
+        // panel).
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({
+                "agent": "planner",
+                "task": "Plan the live tool card\n(step by step)",
+                "cwd": "/repo",
+                "async": false,
+            })),
+        };
+        assert_eq!(tool_chip_content(&call), ("Tool", "subagent".to_string()));
+        // Missing/blank args keep the same generic label.
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: None,
+        };
+        assert_eq!(tool_chip_content(&call), ("Tool", "subagent".to_string()));
+        // Other Unknown tools keep the generic "Tool" label too.
+        let call = ToolCall::Unknown {
+            name: "send_message".into(),
+            input: None,
+        };
+        assert_eq!(
+            tool_chip_content(&call),
+            ("Tool", "send_message".to_string())
+        );
+    }
+
+    #[test]
+    fn subagent_call_info_extracts_agent_task_and_async() {
+        // Complete: agent/task/async all present.
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({
+                "agent": "planner",
+                "task": "Plan the panel",
+                "async": true,
+                "cwd": "/secret",
+            })),
+        };
+        let info = subagent_call_info(&call).expect("extracts");
+        assert_eq!(info.agent, "planner");
+        assert_eq!(info.task, "Plan the panel");
+        assert!(info.is_async);
+        // Missing async defaults to sync (the sync tool call omitted it).
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({ "agent": "actor", "task": "T" })),
+        };
+        let info = subagent_call_info(&call).expect("extracts");
+        assert!(!info.is_async);
+        // Missing task defaults to empty.
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({ "agent": "actor" })),
+        };
+        assert_eq!(subagent_call_info(&call).unwrap().task, "");
+        // Missing agent → None.
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({ "task": "T" })),
+        };
+        assert!(subagent_call_info(&call).is_none());
+        // Non-subagent calls (typed or other Unknown) → None.
+        assert!(
+            subagent_call_info(&ToolCall::Exec {
+                command: "ls".into()
+            })
+            .is_none()
+        );
+        assert!(
+            subagent_call_info(&ToolCall::Unknown {
+                name: "send_message".into(),
+                input: None,
+            })
+            .is_none()
+        );
     }
 }
 

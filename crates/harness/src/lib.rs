@@ -3,11 +3,12 @@
 //!
 //! Every production harness is the shared [`AcpHarness`] with a per-agent
 //! spec: Claude Code via the org-maintained `claude-agent-acp` adapter, Codex
-//! via `codex-acp`, Cursor, Grok Build and Hermes natively, pi via the
-//! community `pi-acp` adapter. Decision record:
-//! docs/research/acp.md (the bespoke stream-json/app-server adapters this
-//! crate used to hold are documented historically in
-//! docs/research/harness.md).
+//! via `codex-acp`, Cursor, Grok Build and Hermes natively — and pi via its
+//! OWN RPC protocol (`pi --mode rpc`, the [`pi`] harness), not an adapter.
+//! Decision records: docs/research/acp.md (ACP + the pi migration note),
+//! docs/research/pi-rpc.md (the native pi harness). The bespoke
+//! stream-json/app-server adapters this crate used to hold are documented
+//! historically in docs/research/harness.md.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -86,6 +87,7 @@ pub mod claude;
 pub mod codex;
 pub(crate) mod jsonrpc;
 pub mod mock;
+pub mod pi;
 pub mod shell_env;
 
 /// Bin directories where npm-installed CLIs land under Node version managers.

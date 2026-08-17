@@ -12,7 +12,8 @@ pub enum HarnessId {
     Grok,
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     Hermes,
-    /// The pi coding agent (pi.dev), driven over ACP via the `pi-acp` adapter.
+    /// The pi coding agent (pi.dev), driven over its native RPC protocol
+    /// (`pi --mode rpc` — see `crates/harness/src/pi/`).
     Pi,
     /// Test harness; never shown in production pickers.
     Mock,
@@ -201,6 +202,62 @@ pub struct SlashCommand {
     pub input_hint: Option<String>,
 }
 
+/// How a subagent run was launched (pi `zeron.subagents.v1` status protocol,
+/// `extensions/subagents`). `Sync` = the parent tool call waited for the
+/// result; `Async` = background launch (the parent tool call is just a launch
+/// ack); `Message` = subagent-to-subagent message activity with no parent
+/// tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentRunMode {
+    Sync,
+    Async,
+    Message,
+}
+
+/// Lifecycle status of one subagent run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentRunStatus {
+    Running,
+    Done,
+    Error,
+}
+
+/// One subagent run's live status snapshot (pi `zeron.subagents.v1`).
+///
+/// Published by the pi extension's status publisher (bounded: ≤32 runs, task
+/// ≤500 chars, progress tail ≤8 lines/4KiB, whole snapshot ≤64KiB); parsed by
+/// the native pi harness and projected onto the chat's [`Session`] by the
+/// engine. Transient run state — it is never transcript content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRun {
+    /// Extension-local run id (uuid); stable for the life of the run.
+    pub run_id: String,
+    /// The doc tool part id this run answers to (sync/async parent tool call).
+    /// Absent for subagent-to-subagent message activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Subagent name.
+    pub agent: String,
+    /// Actual model in use (`None` until the child reports one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Task text (≤500 chars at the publisher; readers cap defensively).
+    pub task: String,
+    pub mode: SubagentRunMode,
+    pub status: SubagentRunStatus,
+    /// Live progress tail (≤8 lines/4KiB at the publisher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// Epoch millis.
+    pub started_at: i64,
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,6 +340,20 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
     },
+    /// Live progress for an UNRESOLVED tool (pi `tool_execution_update`): the
+    /// streamed partial output while a long-running tool — a subagent, a long
+    /// build — is still in flight. The journal records it; the doc fold
+    /// refreshes the tool part's transient `progress` column, and resolve
+    /// (`ToolResult`) clears it. Transient run state, never content: unlike
+    /// `ToolResult::output` it is NOT a one-liner policy question — it is
+    /// gone the moment the tool resolves.
+    #[serde(rename_all = "camelCase")]
+    ToolProgress {
+        id: String,
+        /// Partial output, already capped by the emitting harness; the doc
+        /// fold tails it again before anything persists.
+        output: String,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -320,6 +391,15 @@ pub enum AgentEvent {
         error: Option<String>,
         session_id: Option<String>,
     },
+    /// Live subagent status projection (pi `zeron.subagents.v1`). The engine
+    /// consumes this as run-state only: it updates the chat's session
+    /// projection and neither folds it into the transcript doc nor journals
+    /// it (no transcript row, no workspace last-message bump, no
+    /// Working/Idle transition).
+    #[serde(rename_all = "camelCase")]
+    SubagentStatus {
+        runs: Vec<SubagentRun>,
+    },
 }
 
 #[cfg(test)]
@@ -335,6 +415,20 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn tool_progress_round_trips_camel_case() {
+        let ev = AgentEvent::ToolProgress {
+            id: "t1".into(),
+            output: "line\nline 2".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"toolProgress","id":"t1","output":"line\nline 2"}"#
+        );
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
     }
 
@@ -362,6 +456,62 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
             "\"claude-code\""
+        );
+    }
+
+    #[test]
+    fn subagent_status_event_round_trips_camel_case() {
+        let ev = AgentEvent::SubagentStatus {
+            runs: vec![
+                SubagentRun {
+                    run_id: "run-1".into(),
+                    tool_call_id: Some("t1".into()),
+                    agent: "planner".into(),
+                    model: Some("anthropic/claude-sonnet-4".into()),
+                    task: "Plan the panel".into(),
+                    mode: SubagentRunMode::Async,
+                    status: SubagentRunStatus::Running,
+                    progress: Some("line 1\nline 2".into()),
+                    started_at: 1000,
+                    updated_at: 2000,
+                    ended_at: None,
+                },
+                SubagentRun {
+                    run_id: "run-2".into(),
+                    tool_call_id: None,
+                    agent: "reviewer".into(),
+                    model: None,
+                    task: "Review the diff".into(),
+                    mode: SubagentRunMode::Message,
+                    status: SubagentRunStatus::Done,
+                    progress: None,
+                    started_at: 3000,
+                    updated_at: 4000,
+                    ended_at: Some(4000),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subagentStatus","runs":[{"runId":"run-1","toolCallId":"t1","agent":"planner","model":"anthropic/claude-sonnet-4","task":"Plan the panel","mode":"async","status":"running","progress":"line 1\nline 2","startedAt":1000,"updatedAt":2000},{"runId":"run-2","agent":"reviewer","task":"Review the diff","mode":"message","status":"done","startedAt":3000,"updatedAt":4000,"endedAt":4000}]}"#
+        );
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+        // Optional fields (toolCallId/model/progress/endedAt) omit cleanly.
+        let bare = serde_json::json!({ "type": "subagentStatus", "runs": [] });
+        let parsed: AgentEvent = serde_json::from_value(bare).unwrap();
+        assert_eq!(parsed, AgentEvent::SubagentStatus { runs: vec![] });
+    }
+
+    #[test]
+    fn subagent_run_enums_use_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&SubagentRunMode::Sync).unwrap(),
+            "\"sync\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SubagentRunStatus::Error).unwrap(),
+            "\"error\""
         );
     }
 }

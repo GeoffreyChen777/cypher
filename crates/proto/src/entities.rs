@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{HarnessId, ReasoningLevel, SandboxLevel};
+use crate::{HarnessId, ReasoningLevel, SandboxLevel, SubagentRun};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +191,12 @@ pub struct Session {
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// Live subagent runs for this chat (pi `zeron.subagents.v1` projection —
+    /// the extension publishes snapshots, the engine mirrors them here).
+    /// Transient run state: never transcript content, never a status driver
+    /// (the UI merges it with the doc's own tool parts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<SubagentRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

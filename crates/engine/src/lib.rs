@@ -227,6 +227,12 @@ impl EngineCore {
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
+        // The previous engine died with subagents in flight: terminalize this
+        // device's durable Running projections (remote rows untouched — their
+        // owners may still be live). Pure projection fix; never a status flip.
+        if let Err(err) = sessions.recover_orphaned_subagents() {
+            tracing::error!(error = %err, "orphaned-subagent recovery failed");
+        }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
         let terminals = Terminals::new();
@@ -699,17 +705,19 @@ impl Engine {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
 
+        // The zeron-owned pi session store (`pi --mode rpc --session-dir`).
+        let pi_sessions_root = profile.store_root().join("agent-sessions");
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry()),
+                Arc::new(default_registry(pi_sessions_root)),
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry()),
+                Arc::new(default_registry(pi_sessions_root)),
                 config.default_harness,
                 edge.clone(),
             )?,

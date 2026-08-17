@@ -455,7 +455,7 @@ impl Harness for PersistentHarness {
     }
     async fn run(
         &self,
-        request: RunRequest,
+        _request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         *self.runs_started.lock().unwrap() += 1;
@@ -853,7 +853,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     let assemble_real = || {
         EngineCore::assemble(
             &dir,
-            Arc::new(zeron_engine::default_registry()),
+            Arc::new(zeron_engine::default_registry(dir.join("agent-sessions"))),
             HarnessId::ClaudeCode,
             None,
         )

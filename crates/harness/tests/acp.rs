@@ -278,7 +278,6 @@ async fn claude_and_codex_specs_drive_the_same_wire() {
             "hermes",
             AcpHarness::hermes().with_executable(fixture_path()),
         ),
-        ("pi", AcpHarness::pi().with_executable(fixture_path())),
         (
             "cursor",
             AcpHarness::cursor().with_executable(fixture_path()),
@@ -908,10 +907,11 @@ async fn models_enrich_from_the_static_catalog_on_id_match() {
 
 #[tokio::test]
 async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
-    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    // Hermes's static catalog answers when the agent can't be probed.
+    let harness = AcpHarness::hermes().with_executable("/nonexistent/never-a-hermes");
     let models = harness.models().await.expect("static fallback");
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["default"], "{models:?}");
+    assert_eq!(ids, vec!["hermes-4-405b", "hermes-4-70b"], "{models:?}");
 }
 
 #[cfg(unix)]
@@ -957,30 +957,13 @@ fn cursor_descriptor_surface_matches_registry_expectations() {
 }
 
 #[test]
-fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
+fn hermes_descriptor_surface_matches_registry_expectations() {
     let hermes = AcpHarness::hermes();
     assert_eq!(hermes.id(), HarnessId::Hermes);
     assert_eq!(hermes.display_name(), "Hermes");
     assert!(hermes.supports_steering());
     assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
     assert!(hermes.reasoning_levels().is_empty());
-
-    let pi = AcpHarness::pi();
-    assert_eq!(pi.id(), HarnessId::Pi);
-    assert_eq!(pi.display_name(), "Pi");
-    assert!(pi.supports_steering());
-    assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
-    assert_eq!(
-        pi.reasoning_levels(),
-        &[
-            zeron_proto::ReasoningLevel::Minimal,
-            zeron_proto::ReasoningLevel::Low,
-            zeron_proto::ReasoningLevel::Medium,
-            zeron_proto::ReasoningLevel::High,
-            zeron_proto::ReasoningLevel::XHigh,
-            zeron_proto::ReasoningLevel::Max,
-        ]
-    );
 }
 
 /// The 2026-08-12 stuck-Working wedge, end to end: a prompt whose turn was
@@ -1342,7 +1325,6 @@ async fn real_all_harnesses_settle_with_a_mid_turn_steer() {
         ("codex", AcpHarness::codex()),
         ("cursor", AcpHarness::cursor()),
         ("grok", AcpHarness::grok()),
-        ("pi", AcpHarness::pi()),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, h) in agents {

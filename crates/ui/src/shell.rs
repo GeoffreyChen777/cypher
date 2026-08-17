@@ -48,6 +48,7 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
+use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript};
@@ -747,6 +748,11 @@ pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    /// Session-level subagents chrome (current chat's live subagent runs): a
+    /// compact trigger on the status strip's right edge with an upward
+    /// inspector popover. Renders Empty without records, so the fixed-height
+    /// status strip (and the measured bottom stack) never shifts.
+    subagents: Entity<SubagentsPanel>,
     /// External file drag hovering the conversation column — shows the
     /// "Drop images to attach" veil over the whole chat area; a drop stages
     /// the files in the composer.
@@ -927,6 +933,7 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // Every send glides the prompt to the viewport top and reserves the
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
@@ -1009,6 +1016,7 @@ impl Shell {
             state,
             transcript,
             composer,
+            subagents,
             file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
@@ -4623,6 +4631,10 @@ impl Shell {
                         .absolute()
                         .inset_0(),
                     )
+                    // The session-level subagents trigger lives INSIDE the
+                    // status strip (right edge, next to the composer); the
+                    // inspector it opens is a floating layer and never
+                    // participates in this stack's measurement.
                     .child(status)
                     .when(has_spaces, |el| el.child(self.composer.clone()))
                     .child(self.render_terminal_container(cx))
@@ -4794,14 +4806,21 @@ impl Shell {
 
     /// Working indicator strip: gradient spinner + rotating flavour word (7s,
     /// seeded per chat) + elapsed, staleness-gated via [`Indicator`]; falls back
-    /// to a "Sending…" bridge and then the engine mode line.
+    /// to a "Sending…" bridge and then the engine mode line. The strip's right
+    /// side hosts the session-level subagents trigger — `[left status][flex
+    /// spacer][Subagents accessory]` — so the left status and the right
+    /// accessory can coexist. The trigger's right edge aligns with the
+    /// composer pill's right INNER edge (the strip keeps its 24px left gutter
+    /// but drops to the composer's 16px right gutter).
     fn render_status_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let state = self.state.read(cx);
 
         // Aligned with the composer column: centered, same max width, small
-        // inner gutter (zeron's `mx-auto h-6 max-w-3xl px-2`).
+        // inner gutter (zeron's `mx-auto h-6 max-w-3xl px-2`). Right padding
+        // matches the composer's `px-4` so the accessory lines up with the
+        // pill's right inner edge.
         let strip = div()
             .h(px(Theme::STATUS_STRIP_HEIGHT))
             .flex_none()
@@ -4811,60 +4830,74 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(Theme::SPACE_SM))
-            .px(px(Theme::SPACE_LG + 8.0))
+            .pl(px(Theme::SPACE_LG + 8.0))
+            .pr(px(Theme::SPACE_LG))
             .text_size(px(11.0));
 
-        let Some(chat_id) = state.selected_chat.clone() else {
-            return strip.into_any_element();
-        };
-        let indicator = state.indicator_for(&chat_id, now);
-        // Timer base: the freshest of the session row's turn start and the
-        // in-flight send. During the send→ack window the row (if any) still
-        // carries the PREVIOUS turn's start, and using it opened the timer at
-        // the old turn's elapsed instead of 0:00.
-        let started = state
-            .session_for(&chat_id)
-            .and_then(|s| s.started_at)
-            .into_iter()
-            .chain(state.pending_send_started(&chat_id, now))
-            .max();
-        let elapsed_secs = started
-            .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-            .unwrap_or(0);
-        let sending = self.composer.read(cx).is_sending();
+        let left: AnyElement = match state.selected_chat.as_deref() {
+            None => Empty.into_any_element(),
+            Some(chat_id) => {
+                let indicator = state.indicator_for(chat_id, now);
+                // Timer base: the freshest of the session row's turn start and
+                // the in-flight send. During the send→ack window the row (if
+                // any) still carries the PREVIOUS turn's start, and using it
+                // opened the timer at the old turn's elapsed instead of 0:00.
+                let started = state
+                    .session_for(chat_id)
+                    .and_then(|s| s.started_at)
+                    .into_iter()
+                    .chain(state.pending_send_started(chat_id, now))
+                    .max();
+                let _ = started;
+                let sending = self.composer.read(cx).is_sending();
 
-        // Unused here since the Working loader moved into the transcript
-        // (its trailer computes its own elapsed).
-        let _ = elapsed_secs;
-        match indicator {
-            // The working loader lives in the TRANSCRIPT now, under the
-            // streaming reply (user request) — the strip stays empty (its
-            // reserved height still steadies the composer).
-            Indicator::Working => strip.into_any_element(),
-            // No label: the QuestionPanel right below IS the awaiting-input
-            // surface — a strip caption above it was redundant (user request).
-            Indicator::AwaitingInput => strip.into_any_element(),
-            Indicator::Errored => strip
-                .text_color(theme.danger)
-                .child(SharedString::from("Run failed"))
-                .into_any_element(),
-            Indicator::None if sending => strip
-                .child(loaders::gradient_spinner(
-                    "sending-indicator",
-                    &theme,
-                    2.5,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Sending…")),
-                )
-                .into_any_element(),
-            Indicator::None => strip.into_any_element(),
-        }
+                // Unused here since the Working loader moved into the transcript
+                // (its trailer computes its own elapsed).
+                match indicator {
+                    // The working loader lives in the TRANSCRIPT now, under the
+                    // streaming reply (user request) — the strip stays empty
+                    // (its reserved height still steadies the composer).
+                    Indicator::Working => Empty.into_any_element(),
+                    // No label: the QuestionPanel right below IS the
+                    // awaiting-input surface — a strip caption above it was
+                    // redundant (user request).
+                    Indicator::AwaitingInput => Empty.into_any_element(),
+                    Indicator::Errored => div()
+                        .text_color(theme.danger)
+                        .child(SharedString::from("Run failed"))
+                        .into_any_element(),
+                    Indicator::None if sending => div()
+                        .flex()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .child(loaders::gradient_spinner(
+                            "sending-indicator",
+                            &theme,
+                            2.5,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from("Sending…")),
+                        )
+                        .into_any_element(),
+                    Indicator::None => Empty.into_any_element(),
+                }
+            }
+        };
+
+        strip
+            .child(left)
+            // Flex spacer keeps the left status left-aligned and the subagents
+            // trigger pinned to the composer-aligned right edge; when the
+            // trigger renders Empty (no records) the strip is just the left
+            // content.
+            .child(div().flex_1())
+            .child(self.subagents.clone())
+            .into_any_element()
     }
 
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by

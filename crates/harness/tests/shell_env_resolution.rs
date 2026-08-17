@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use zeron_harness::AcpHarness;
+use zeron_harness::pi::PiHarness;
 
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -24,7 +25,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     write_executable(&shell_bin.join("codex-acp"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("claude-agent-acp"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("hermes"), "#!/bin/sh\nexit 0\n");
-    write_executable(&shell_bin.join("pi-acp"), "#!/bin/sh\nexit 0\n");
+    write_executable(&shell_bin.join("pi"), "#!/bin/sh\nexit 0\n");
 
     // A $SHELL whose init shapes PATH — the shape resolution must survive.
     let fake_shell = dir.path().join("fake-shell");
@@ -50,7 +51,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::remove_var("CODEX_ACP_EXECUTABLE");
         std::env::remove_var("CLAUDE_ACP_EXECUTABLE");
         std::env::remove_var("HERMES_EXECUTABLE");
-        std::env::remove_var("PI_ACP_EXECUTABLE");
+        std::env::remove_var("PI_EXECUTABLE");
         std::env::remove_var("ZERON_NO_LOGIN_SHELL");
     }
 
@@ -76,8 +77,9 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         .launch_program()
         .expect("hermes resolves via login-shell PATH");
     assert_eq!(hermes, shell_bin.join("hermes"), "{hermes:?}");
-    let pi = AcpHarness::pi()
+    // The native pi harness resolves the pi CLI itself (no pi-acp adapter).
+    let pi = PiHarness::new(dir.path().join("agent-sessions"))
         .launch_program()
-        .expect("pi-acp resolves via login-shell PATH");
-    assert_eq!(pi, shell_bin.join("pi-acp"), "{pi:?}");
+        .expect("pi resolves via login-shell PATH");
+    assert_eq!(pi, shell_bin.join("pi"), "{pi:?}");
 }

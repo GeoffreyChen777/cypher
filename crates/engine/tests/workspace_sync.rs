@@ -672,6 +672,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 status: SessionStatus::Idle,
                 started_at: Some(now),
                 updated_at: now,
+                subagents: Vec::new(),
             })
             .unwrap();
         store

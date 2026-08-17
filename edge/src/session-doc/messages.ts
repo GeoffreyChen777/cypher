@@ -27,6 +27,9 @@ export interface DocMessagePart {
   /** kind === "tool" — render-only (§1.2). */
   readonly call?: RenderToolCall;
   readonly isError?: boolean;
+  /** kind === "tool" — transient live-progress tail for an UNRESOLVED tool
+   * (the fold clears it on resolve). */
+  readonly progress?: string;
   /** kind === "input" — the part id doubles as the requestId. */
   readonly questions?: ReadonlyArray<UserInputQuestion>;
   readonly resolved?: boolean;
@@ -47,7 +50,8 @@ export const toDocParts = (
           id: p.id,
           kind: "tool",
           call: p.call,
-          ...(typeof p.isError === "boolean" ? { isError: p.isError } : {})
+          ...(typeof p.isError === "boolean" ? { isError: p.isError } : {}),
+          ...(typeof p.progress === "string" ? { progress: p.progress } : {})
         };
       case "input":
         return {
@@ -74,7 +78,8 @@ export const fromDocParts = (
               kind: "tool",
               id: p.id,
               call: p.call as never,
-              ...(typeof p.isError === "boolean" ? { isError: p.isError } : {})
+              ...(typeof p.isError === "boolean" ? { isError: p.isError } : {}),
+              ...(typeof p.progress === "string" ? { progress: p.progress } : {})
             }
           : { kind: "text", id: p.id, text: "" };
       case "input":

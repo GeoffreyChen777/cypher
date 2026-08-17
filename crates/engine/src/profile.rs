@@ -376,9 +376,10 @@ mod tests {
     async fn profile_assembler_uses_the_resolved_local_roots() {
         let dir = tempfile::tempdir().unwrap();
         let profile = EngineProfile::local(dir.path()).unwrap();
+        let pi_sessions = profile.store_root().join("agent-sessions");
         let core = crate::EngineCore::assemble_with_profile(
             profile,
-            std::sync::Arc::new(crate::default_registry()),
+            std::sync::Arc::new(crate::default_registry(pi_sessions)),
             zeron_proto::HarnessId::Mock,
             None,
         )
@@ -402,7 +403,7 @@ mod tests {
         let expected = EngineProfile::development(dir.path(), &org_id, &user_id);
         let core = crate::EngineCore::assemble(
             dir.path(),
-            std::sync::Arc::new(crate::default_registry()),
+            std::sync::Arc::new(crate::default_registry(dir.path().join("agent-sessions"))),
             zeron_proto::HarnessId::Mock,
             None,
         )

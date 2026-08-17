@@ -67,6 +67,9 @@ export type MessagePart =
       readonly isError?: boolean;
       /** Capped tool output text (ACP harnesses; absent on claude/codex). */
       readonly output?: string;
+      /** Live progress tail for an UNRESOLVED tool (transient run state —
+       * the fold overwrites it on every tick and clears it on resolve). */
+      readonly progress?: string;
       /** Capped inline file diff for edit-shaped tools (ACP harnesses). */
       readonly diff?: ToolPartDiff;
     }

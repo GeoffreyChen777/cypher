@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space};
+use zeron_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space, SubagentRun};
 
 use crate::schema::DocError;
 
@@ -431,6 +431,8 @@ impl WorkspaceDoc {
 
     /// Upsert a session-status row (writer discipline: each device writes only its
     /// own runs' rows). Staleness is checked client-side against `updatedAt`.
+    /// The live `subagents` projection rides the row: non-empty → the JSON
+    /// value, empty → a delete (settled snapshots clear the column).
     pub fn upsert_session(&self, session: &Session) -> Result<(), DocError> {
         let row = self.row("sessions", &session.chat_id)?;
         row.insert("chatId", session.chat_id.as_str())?;
@@ -438,6 +440,14 @@ impl WorkspaceDoc {
         row.insert("status", status_str(session.status))?;
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
+        if session.subagents.is_empty() {
+            row.delete("subagents")?;
+        } else {
+            row.insert(
+                "subagents",
+                LoroValue::from(serde_json::to_value(&session.subagents)?),
+            )?;
+        }
         self.doc.commit();
         Ok(())
     }
@@ -684,6 +694,10 @@ pub(crate) struct RawSession {
     started_at: Option<i64>,
     #[serde(default)]
     updated_at: i64,
+    /// Live subagent runs (pi `zeron.subagents.v1` projection); absent on old
+    /// rows and old writers → empty.
+    #[serde(default)]
+    subagents: Option<Vec<SubagentRun>>,
 }
 
 impl From<RawSession> for Session {
@@ -694,6 +708,7 @@ impl From<RawSession> for Session {
             status: raw.status,
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
+            subagents: raw.subagents.unwrap_or_default(),
         }
     }
 }
@@ -765,6 +780,7 @@ mod tests {
             status,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            subagents: Vec::new(),
         }
     }
 
@@ -844,6 +860,40 @@ mod tests {
         other.import(&bytes).unwrap();
         let restored = WorkspaceDoc::from_doc(other);
         assert_eq!(restored.read_all().unwrap(), ws.read_all().unwrap());
+    }
+
+    /// Legacy Loro session rows carry the live `subagents` projection too:
+    /// non-empty writes the JSON field, empty deletes it, absent reads empty.
+    #[test]
+    fn session_subagents_round_trip_and_clear_in_loro_doc() {
+        use zeron_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus};
+        let ws = WorkspaceDoc::new();
+        let mut live = session("chat-1", "dev-a", SessionStatus::Working);
+        live.subagents = vec![SubagentRun {
+            run_id: "run-1".into(),
+            tool_call_id: Some("t1".into()),
+            agent: "planner".into(),
+            model: None,
+            task: "Plan the panel".into(),
+            mode: SubagentRunMode::Async,
+            status: SubagentRunStatus::Running,
+            progress: Some("line 1".into()),
+            started_at: 1000,
+            updated_at: 2000,
+            ended_at: None,
+        }];
+        ws.upsert_session(&live).unwrap();
+        let read = ws.read_sessions().unwrap();
+        assert_eq!(read[0].subagents, live.subagents);
+        assert_eq!(read[0].status, SessionStatus::Working);
+
+        // Empty snapshot deletes the field; old rows without it read empty.
+        ws.upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+            .unwrap();
+        assert!(ws.read_sessions().unwrap()[0].subagents.is_empty());
+        ws.upsert_session(&session("chat-2", "dev-a", SessionStatus::Idle))
+            .unwrap();
+        assert!(ws.read_sessions().unwrap()[1].subagents.is_empty());
     }
 
     #[test]

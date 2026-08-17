@@ -18,9 +18,9 @@ use gpui::{
     DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, PathPromptOptions, Pixels, Point,
-    ScrollWheelEvent, SharedString, Style, StyledImage as _, Subscription, Task, TextRun,
-    TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, img, point,
-    prelude::*, px, quad, relative, size,
+    ScrollHandle, ScrollWheelEvent, SharedString, Style, StyledImage as _, Subscription, Task,
+    TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
+    img, point, prelude::*, px, quad, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -3309,6 +3309,10 @@ pub struct Composer {
     mention: FileMentionState,
     slash_task: Option<Task<()>>,
     slash: SlashState,
+    /// Scroll position of the `/` popup's command list (rows are the scroll
+    /// container's direct children, so keyboard `scroll_to_item(active)`
+    /// maps 1:1 — the pickers' model-menu pattern).
+    slash_scroll: ScrollHandle,
     /// Advertised commands per harness (one `ListCommands` per harness per
     /// composer lifetime; the engine caches discovery on its side too).
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
@@ -3430,6 +3434,7 @@ impl Composer {
             mention: FileMentionState::default(),
             slash_task: None,
             slash: SlashState::default(),
+            slash_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
             current_key,
             sending: false,
@@ -4002,6 +4007,7 @@ impl Composer {
             return;
         }
         self.slash.token = token.clone();
+        self.slash_scroll.set_offset(Point::default());
         self.slash.harness = harness;
         self.slash.error = None;
         if token.is_none() {
@@ -4091,6 +4097,11 @@ impl Composer {
     fn move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.slash.active =
             crate::popover::menu_step(self.slash.active, self.slash.filtered.len(), delta);
+        // Keep the keyboard-highlighted row in view (rows are the scroll
+        // container's direct children, indices map 1:1).
+        if let Some(active) = self.slash.active {
+            self.slash_scroll.scroll_to_item(active);
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -4159,8 +4170,6 @@ impl Composer {
             .unwrap_or_default();
         let mut card = crate::popover::popover_card(theme)
             .w(px(380.0))
-            .max_h(px(280.0))
-            .overflow_hidden()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         if self.slash.loading && commands.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -4193,6 +4202,7 @@ impl Composer {
                     }),
             );
         } else {
+            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
             for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
                 let Some(command) = commands.get(cmd_ix) else {
                     continue;
@@ -4208,7 +4218,7 @@ impl Composer {
                     }
                 }
                 let description: SharedString = description.into();
-                card = card.child(
+                rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -4244,9 +4254,24 @@ impl Composer {
                                         .text_color(theme.text_muted)
                                         .child(description),
                                 ),
-                        ),
+                        )
+                        .into_any_element(),
                 );
             }
+            // The scroll container owns the height cap; rows are its direct
+            // children so `scroll_to_item(active)` maps 1:1 (the pickers'
+            // model-menu pattern). Without it the list hard-clips at the
+            // card's max height and neither wheel nor keys can scroll.
+            card = card.child(
+                div()
+                    .id("slash-menu-scroll")
+                    .max_h(px(280.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.slash_scroll)
+                    .children(rows),
+            );
         }
         let anchor = self
             .input

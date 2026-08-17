@@ -17,6 +17,11 @@ use crate::constants::MSG_INLINE_MAX;
 /// summary, so 160 is generous.
 pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
 
+/// Char cap for the `subagent` tool's `task` kept in the doc (privacy-safe
+/// persistence, [`sanitize_tool_call`]). Cut on a Unicode-char boundary, so
+/// the stored string is always valid UTF-8.
+pub const SUBAGENT_TASK_MAX_CHARS: usize = 500;
+
 /// The doc-resident form of a tool output (docs/chat2-sync.md A1; the R2
 /// sidecar is PARKED as of 2026-08-10, so this IS the whole record in the
 /// doc — the full text survives only in the host's local run journal):
@@ -63,6 +68,43 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
     let mut out = line[..end].to_owned();
     out.push('…');
     Some(out)
+}
+
+/// Tail-cap for the transient `progress` column: keep the LAST at most
+/// [`TOOL_PROGRESS_MAX_LINES`] lines within [`TOOL_PROGRESS_MAX_BYTES`] — a
+/// live tail, not a summary. The harness already caps each progress tick at
+/// its output cap; this is the doc's own defense so a chatty tool (a subagent
+/// streaming full transcripts) can never grow the transient column unbounded.
+/// Cutting the head (not the middle) is deliberate: the live card shows what
+/// is happening RIGHT NOW; the settled output summary owns the beginning.
+pub const TOOL_PROGRESS_MAX_LINES: usize = 8;
+pub const TOOL_PROGRESS_MAX_BYTES: usize = 4096;
+
+/// Keep the tail of a live progress blob: last ≤8 lines, whole lines, within
+/// 4KB (truncating by bytes would split a line mid-character; lines are the
+/// UI's render unit).
+pub fn tail_progress(text: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    // Walk from the LAST line backwards, keeping as many of the last 8 as fit
+    // in 4KB; the first (most recent) line always rides so a stream never
+    // degrades to an empty tail.
+    for line in text.lines().rev().take(TOOL_PROGRESS_MAX_LINES) {
+        let add = line.len() + usize::from(!kept.is_empty()); // + the join newline
+        if !kept.is_empty() && bytes + add > TOOL_PROGRESS_MAX_BYTES {
+            break;
+        }
+        kept.push(line);
+        bytes += add;
+    }
+    kept.reverse();
+    let mut out = kept.join("\n");
+    // Preserve a trailing newline so a partial last line still reads as
+    // "still streaming" — and never grow past the byte budget on re-join.
+    if text.ends_with('\n') && !kept.is_empty() && out.len() < TOOL_PROGRESS_MAX_BYTES {
+        out.push('\n');
+    }
+    out
 }
 
 /// Per-file diff stats persisted in place of inline diff text (t3's shape).
@@ -132,6 +174,15 @@ pub enum MessagePart {
         /// render this field either way, so the strip is invisible to them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        /// Live progress for an UNRESOLVED tool: the tail of the streamed
+        /// partial output while the tool is still running (pi
+        /// `tool_execution_update` → [`AgentEvent::ToolProgress`]). Transient
+        /// run state, not content — the fold overwrites it on every progress
+        /// tick and CLEARS it on resolve (`ToolResult`), so a resolved chip
+        /// collapses back to its plain form. Tailed by [`tail_progress`]
+        /// before persisting (last ≤8 lines within 4KB).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        progress: Option<String>,
         /// Inline file diff — written by pre-strip app versions only; new
         /// folds persist [`Self::Tool::diff_stats`] + `diff_ref` instead.
         /// Kept so old docs render their diffs.
@@ -181,12 +232,14 @@ impl MessagePart {
             MessagePart::Tool {
                 call,
                 output,
+                progress,
                 diff,
                 diff_stats,
                 ..
             } => {
                 serde_json::to_vec(call).map_or(0, |v| v.len())
                     + output.as_ref().map_or(0, String::len)
+                    + progress.as_ref().map_or(0, String::len)
                     + diff
                         .as_ref()
                         .map_or(0, |d| serde_json::to_vec(d).map_or(0, |v| v.len()))
@@ -249,12 +302,32 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     is_error: false,
                     resolved: false,
                     output: None,
+                    progress: None,
                     diff: None,
                     output_ref: None,
                     output_bytes: None,
                     diff_ref: None,
                     diff_stats: None,
                 });
+            }
+        }
+        AgentEvent::ToolProgress { id, output } => {
+            // Live tail onto an UNRESOLVED tool part only: an unknown id (the
+            // fold reset at a steer/park since the call) or a resolved tool
+            // (result already folded) ignores the tick — the transient column
+            // exists only while the tool is actually in flight.
+            for p in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: pid,
+                    resolved,
+                    progress,
+                    ..
+                } = p
+                    && pid == id
+                    && !*resolved
+                {
+                    *progress = Some(tail_progress(output));
+                }
             }
         }
         AgentEvent::ToolResult {
@@ -269,6 +342,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     is_error: e,
                     resolved,
                     output: out_slot,
+                    progress,
                     diff: diff_slot,
                     output_bytes,
                     diff_stats,
@@ -278,6 +352,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 {
                     *e = *is_error;
                     *resolved = true;
+                    // Resolve clears the live tail: the transient progress
+                    // column is a running-state artifact, gone the moment the
+                    // tool settles (the chip collapses back to its plain
+                    // form).
+                    *progress = None;
                     // Tool OUTPUTS never enter the doc (2026-08-10 product
                     // call: chips are one-liners — name + call info — like
                     // pre-output builds; the R2 sidecar is parked with them,
@@ -337,10 +416,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             }
         }
         // AvailableCommands feeds the engine's per-harness command cache, not
-        // the transcript.
+        // the transcript. SubagentStatus is a live session projection (the
+        // engine consumes it before the fold) — never transcript content.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
-        | AgentEvent::AvailableCommands { .. } => {}
+        | AgentEvent::AvailableCommands { .. }
+        | AgentEvent::SubagentStatus { .. } => {}
     }
 }
 
@@ -425,6 +506,40 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             tool: tool.clone(),
             input: None,
         },
+        // The pi subagent tool (`extensions/subagents` registers `agent` /
+        // `task` / `cwd` / `async` / `timeoutSeconds`): keep ONLY the
+        // privacy-safe fields the transcript chip and the subagent panel need
+        // — agent, task (≤500 Unicode chars, cut on a char boundary so the
+        // stored string is always valid UTF-8), async. Everything else (cwd,
+        // timeoutSeconds, …) is dropped; the full input lives only in the
+        // run journal.
+        ToolCall::Unknown { name, input } if name == "subagent" => {
+            let args = input.as_ref().and_then(serde_json::Value::as_object);
+            let agent = args
+                .and_then(|a| a.get("agent"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let task: String = args
+                .and_then(|a| a.get("task"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(SUBAGENT_TASK_MAX_CHARS)
+                .collect();
+            let is_async = args
+                .and_then(|a| a.get("async"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let mut kept = serde_json::Map::new();
+            kept.insert("agent".into(), serde_json::Value::String(agent));
+            kept.insert("task".into(), serde_json::Value::String(task));
+            kept.insert("async".into(), serde_json::Value::Bool(is_async));
+            ToolCall::Unknown {
+                name: name.clone(),
+                input: Some(serde_json::Value::Object(kept)),
+            }
+        }
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
             input: None,
@@ -609,6 +724,78 @@ mod tests {
         assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
+    /// The subagent tool keeps ONLY the panel/chip fields (agent, task,
+    /// async) — cwd/timeout/anything else never enter the doc. Idempotent.
+    #[test]
+    fn sanitize_subagent_keeps_only_privacy_safe_fields() {
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({
+                "agent": "planner",
+                "task": "Plan the panel\n(step by step)",
+                "cwd": "/secret/repo",
+                "async": true,
+                "timeoutSeconds": 600,
+            })),
+        };
+        let clean = sanitize_tool_call(&call);
+        let ToolCall::Unknown { name, input } = &clean else {
+            panic!("stays an unknown tool");
+        };
+        assert_eq!(name, "subagent");
+        let args = input
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("kept input");
+        assert_eq!(args.len(), 3, "only agent/task/async survive");
+        assert_eq!(args["agent"], "planner");
+        assert_eq!(args["task"], "Plan the panel\n(step by step)");
+        assert_eq!(args["async"], true);
+        assert!(args.get("cwd").is_none());
+        assert!(args.get("timeoutSeconds").is_none());
+        // Idempotent: sanitizing the sanitized call is a no-op.
+        assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    /// A task longer than [`SUBAGENT_TASK_MAX_CHARS`] is cut on a Unicode
+    /// boundary so the stored string stays valid UTF-8.
+    #[test]
+    fn sanitize_subagent_truncates_task_on_char_boundary() {
+        let long = "é".repeat(SUBAGENT_TASK_MAX_CHARS + 40);
+        let call = ToolCall::Unknown {
+            name: "subagent".into(),
+            input: Some(serde_json::json!({ "agent": "actor", "task": long })),
+        };
+        let clean = sanitize_tool_call(&call);
+        let ToolCall::Unknown { input, .. } = clean else {
+            panic!("stays unknown");
+        };
+        let args = input
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("kept input");
+        let task = args["task"].as_str().expect("task string");
+        assert_eq!(task.chars().count(), SUBAGENT_TASK_MAX_CHARS);
+        assert!(std::str::from_utf8(task.as_bytes()).is_ok(), "valid UTF-8");
+    }
+
+    /// Ordinary Unknown tools still clear their input wholesale.
+    #[test]
+    fn sanitize_other_unknown_still_clears_input() {
+        let call = ToolCall::Unknown {
+            name: "send_message".into(),
+            input: Some(serde_json::json!({ "to": "main", "content": "secret" })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Unknown {
+                name: "send_message".into(),
+                input: None
+            }
+        );
+    }
+
     #[test]
     fn split_and_join_round_trip() {
         let big = "x".repeat(MSG_INLINE_MAX * 2 + 100);
@@ -625,6 +812,7 @@ mod tests {
                 is_error: false,
                 resolved: true,
                 output: None,
+                progress: None,
                 diff: None,
                 output_ref: None,
                 output_bytes: None,
@@ -760,6 +948,167 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_progress_tails_onto_unresolved_parts_and_resolve_clears() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::Unknown {
+                    name: "subagent".into(),
+                    input: None,
+                },
+            },
+        );
+        // A long stream keeps the LAST 8 lines (cut head, keep tail).
+        let long = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolProgress {
+                id: "t".into(),
+                output: long.clone(),
+            },
+        );
+        match &parts[0] {
+            MessagePart::Tool { progress, .. } => {
+                let progress = progress.as_deref().expect("progress column set");
+                assert_eq!(progress.lines().count(), 8);
+                assert!(
+                    progress.starts_with("line 12"),
+                    "tail keeps the LAST lines: {progress}"
+                );
+                assert!(progress.ends_with("line 19"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // A later tick overwrites the tail.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolProgress {
+                id: "t".into(),
+                output: "fresh".into(),
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool { progress: Some(p), .. } if p == "fresh"
+        ));
+        // Resolve clears it — the chip collapses back.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: false,
+                output: Some("final".into()),
+                diff: None,
+            },
+        );
+        match &parts[0] {
+            MessagePart::Tool {
+                resolved: true,
+                progress: None,
+                ..
+            } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_progress_ignores_unknown_and_resolved_ids() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::Exec {
+                    command: "ls".into(),
+                },
+            },
+        );
+        // Unknown id: no tool part matches — ignored, parts untouched.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolProgress {
+                id: "ghost".into(),
+                output: "noise".into(),
+            },
+        );
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool { progress: None, .. }
+        ));
+        // Resolve, then a late tick for the same id: ignored.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolProgress {
+                id: "t".into(),
+                output: "late".into(),
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool {
+                resolved: true,
+                progress: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tail_progress_caps_lines_and_bytes_without_splitting_lines() {
+        assert_eq!(tail_progress(""), "");
+        assert_eq!(tail_progress("a\nb"), "a\nb");
+        // Line cap: last 8.
+        let many = (0..30)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_progress(&many);
+        assert_eq!(tail.lines().count(), 8);
+        assert!(tail.ends_with("l29"));
+        // Byte cap: whole lines only (never a mid-line cut).
+        let huge_line = "x".repeat(TOOL_PROGRESS_MAX_BYTES + 100);
+        let single = format!("head\n{huge_line}");
+        let tail = tail_progress(&single);
+        assert_eq!(
+            tail, huge_line,
+            "the oversized last line rides whole (single line stays readable)"
+        );
+        // Both caps: last lines within 4KB.
+        let wide = (0..200)
+            .map(|i| format!("line {i} {}", "y".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_progress(&wide);
+        assert!(
+            tail.len() <= TOOL_PROGRESS_MAX_BYTES,
+            "{} bytes",
+            tail.len()
+        );
+        assert!(
+            tail.starts_with("line "),
+            "kept the TAIL, not the head: {tail}"
+        );
+        // Trailing newline is preserved when budget allows.
+        let tail = tail_progress("a\nb\n");
+        assert_eq!(tail, "a\nb\n");
     }
 
     #[test]

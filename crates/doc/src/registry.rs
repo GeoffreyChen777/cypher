@@ -1081,13 +1081,25 @@ impl RegistryDoc {
 
     /// Upsert a session-status row (writer discipline: each device writes only
     /// its own runs' rows). Staleness is checked client-side via `updatedAt`.
+    /// The live `subagents` projection rides the same row: non-empty → the
+    /// JSON array field, empty → a Null delete (a settled snapshot clears the
+    /// column).
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
+        let subagents = serde_json::to_value(&session.subagents)?;
         let set = fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
+            (
+                "subagents",
+                if session.subagents.is_empty() {
+                    Value::Null
+                } else {
+                    subagents
+                },
+            ),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1212,6 +1224,7 @@ impl RegistryDoc {
         }
         for session in &state.sessions {
             let ms = newest(&[Some(session.updated_at), session.started_at]);
+            let subagents = serde_json::to_value(&session.subagents)?;
             seed(
                 KIND_SESSIONS,
                 &session.chat_id,
@@ -1222,6 +1235,14 @@ impl RegistryDoc {
                     ("status", serde_json::to_value(session.status)?),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
+                    (
+                        "subagents",
+                        if session.subagents.is_empty() {
+                            Value::Null
+                        } else {
+                            subagents
+                        },
+                    ),
                 ]),
             );
         }

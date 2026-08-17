@@ -28,8 +28,14 @@ fn config(
 }
 
 fn assemble(profile: EngineProfile) -> EngineCore {
-    EngineCore::assemble_with_profile(profile, Arc::new(default_registry()), HarnessId::Mock, None)
-        .expect("assemble profile")
+    let pi_sessions = profile.store_root().join("agent-sessions");
+    EngineCore::assemble_with_profile(
+        profile,
+        Arc::new(default_registry(pi_sessions)),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("assemble profile")
 }
 
 async fn shutdown(core: EngineCore) {

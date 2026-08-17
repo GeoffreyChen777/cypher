@@ -2,9 +2,9 @@
 //! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s. One
 //! implementation covers every ACP agent; [`AcpHarness::grok`] configures it
 //! for xAI's Grok Build (`grok agent stdio`), the first registered agent —
-//! [`AcpHarness::hermes`] (Nous Research, `hermes acp`), [`AcpHarness::pi`]
-//! (pi.dev via `pi-acp`) and [`AcpHarness::cursor`] (`cursor-agent acp`)
-//! followed.
+//! [`AcpHarness::hermes`] (Nous Research, `hermes acp`) and
+//! [`AcpHarness::cursor`] (`cursor-agent acp`) followed. (pi moved off ACP
+//! onto its native RPC harness — see `crates/harness/src/pi/`.)
 //!
 //! - `initialize` (protocolVersion 1, fs/terminal capabilities declined) →
 //!   `session/new`, or `session/load` with a fresh-session fallback when
@@ -30,7 +30,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 mod cursor;
-mod normalize;
+pub(crate) mod normalize;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -74,7 +74,7 @@ struct AcpAgentSpec {
     extra_paths: fn() -> Vec<PathBuf>,
     /// The agent's own CLI binary (`claude`, `codex`, …) — what "installed"
     /// means to the user. Distinct from `executable` where the spawned adapter
-    /// wraps the CLI (`claude-agent-acp`, `codex-acp`, `pi-acp`), and the npx
+    /// wraps the CLI (`claude-agent-acp`, `codex-acp`), and the npx
     /// fallback deliberately doesn't count: npx can fetch an adapter on
     /// demand, but an absent CLI still means no logins/config to drive.
     cli_executable: &'static str,
@@ -235,12 +235,13 @@ fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
     match exe {
         "claude-agent-acp" => || npm_global_bins("claude-agent-acp"),
         "codex-acp" => || npm_global_bins("codex-acp"),
-        "pi-acp" => || npm_global_bins("pi-acp"),
         _ => || Vec::new(),
     }
 }
 
-fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
+/// Fixed npm-global bin locations for a CLI name (`npm i -g` installs). Also
+/// used by the pi harness's executable resolution.
+pub(crate) fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join(".local").join("bin").join(exe));
@@ -430,59 +431,6 @@ fn hermes_spec() -> AcpAgentSpec {
     }
 }
 
-fn pi_spec() -> AcpAgentSpec {
-    AcpAgentSpec {
-        id: HarnessId::Pi,
-        display_name: "Pi",
-        executable: "pi-acp",
-        env_override: "PI_ACP_EXECUTABLE",
-        args: &[],
-        npm_package: Some("pi-acp@0.0.33"),
-        extra_paths: npm_global_paths("pi-acp"),
-        cli_executable: "pi",
-        cli_extra_paths: || npm_global_bins("pi"),
-        install_hint: "pi-acp (searched PATH, the login shell's PATH, npm global bins, \
-             and fnm/nvm/volta/pnpm/bun install dirs; zeron installs the pinned \
-             pi-acp automatically when npm is available — the pi CLI itself is \
-             still required, `npm install -g --ignore-scripts \
-             @earendil-works/pi-coding-agent`; set PI_ACP_EXECUTABLE to override)",
-        // pi routes models through its own provider config (~/.pi); the picker
-        // advertises the pass-through entry and pi keeps whatever the user set
-        // up. Unknown ids are skipped by the config-option set.
-        models: || {
-            vec![Model {
-                id: "default".into(),
-                label: "pi default".into(),
-                description: Some("Runs the model configured in pi (`pi` settings)".into()),
-                reasoning_levels: vec![
-                    ReasoningLevel::Minimal,
-                    ReasoningLevel::Low,
-                    ReasoningLevel::Medium,
-                    ReasoningLevel::High,
-                    ReasoningLevel::XHigh,
-                    ReasoningLevel::Max,
-                ],
-                options: Vec::new(),
-            }]
-        },
-        // The adapter has no `_session/steering` extension: turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
-        // pi's thinking ladder (minimal→max; its extra "off" tier has no zeron
-        // equivalent and is left to the agent default).
-        reasoning_levels: &[
-            ReasoningLevel::Minimal,
-            ReasoningLevel::Low,
-            ReasoningLevel::Medium,
-            ReasoningLevel::High,
-            ReasoningLevel::XHigh,
-            ReasoningLevel::Max,
-        ],
-        prompt_transform: identity_transform,
-        effort_values: default_effort_values,
-        ladder_extras: &[],
-    }
-}
-
 /// Background-install managed npm adapters for agents whose CLI is present
 /// on this device, so a first chat never pays (or trips over) an npm run.
 /// Skips agents whose adapter is already resolvable; failures are logged and
@@ -492,7 +440,7 @@ pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    for spec in [claude_spec(), codex_spec(), grok_spec(), pi_spec()] {
+    for spec in [claude_spec(), codex_spec(), grok_spec()] {
         let Some(pkg) = spec.npm_package else {
             continue;
         };
@@ -592,12 +540,6 @@ impl AcpHarness {
     /// Hermes Agent (`hermes acp`) — Nous Research's native ACP server.
     pub fn hermes() -> Self {
         Self::with_spec(hermes_spec())
-    }
-
-    /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
-    /// pi's RPC mode.
-    pub fn pi() -> Self {
-        Self::with_spec(pi_spec())
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.

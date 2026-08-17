@@ -276,10 +276,14 @@ impl HarnessRegistry {
     }
 }
 
-/// The production registry: MockHarness (hidden from production pickers) plus a lazy
-/// `claude-code` slot resolved through `zeron_harness` on first use (subprocess
-/// discovery only happens when a run/model call actually needs it).
-pub fn default_registry() -> HarnessRegistry {
+/// The production registry: MockHarness (hidden from production pickers) plus lazy
+/// slots resolved through `zeron_harness` on first use (subprocess discovery only
+/// happens when a run/model call actually needs it).
+///
+/// `pi_sessions_root` is the zeron-owned pi session store the pi harness points
+/// `pi --mode rpc --session-dir` at (callers pass
+/// `profile.store_root().join("agent-sessions")`).
+pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
     zeron_harness::shell_env::prewarm();
@@ -431,15 +435,19 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
-    // pi over ACP (community `pi-acp` adapter), same lazy pattern: the static
-    // descriptor mirrors AcpHarness::pi() exactly — turn-boundary steering,
-    // pi's thinking ladder minus its "off" tier.
+    // pi over its native RPC (`pi --mode rpc`, the `crates/harness/src/pi`
+    // harness — no pi-acp adapter), same lazy pattern: the static descriptor
+    // mirrors PiHarness exactly — step-boundary steering (pi delivers a steer
+    // after the current assistant message's tool calls, before the next LLM
+    // call), pi's thinking ladder minus its "off" tier. The lazy closure
+    // captures the zeron-owned session root for `--session-dir`.
+    let pi_sessions = pi_sessions_root.clone();
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Pi,
             name: "Pi".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Minimal,
                 ReasoningLevel::Low,
@@ -451,8 +459,13 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::pi().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
+        Box::new(move || zeron_harness::pi::PiHarness::new(pi_sessions_root.clone()).installed()),
+        Box::new(move || {
+            Ok(
+                Arc::new(zeron_harness::pi::PiHarness::new(pi_sessions.clone()))
+                    as Arc<dyn Harness>,
+            )
+        }),
     );
     registry
 }
@@ -499,7 +512,8 @@ mod tests {
 
     #[test]
     fn default_registry_lists_mock_claude_codex_and_grok_slots() {
-        let registry = default_registry();
+        let dir = tempfile::tempdir().unwrap();
+        let registry = default_registry(dir.path().join("agent-sessions"));
         let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
         assert_eq!(
             ids,
@@ -547,7 +561,9 @@ mod tests {
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
         assert_eq!(pi.display_name(), "Pi");
-        assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
+        // Native RPC harness: steer lands mid-turn (after the current
+        // assistant message's tool calls), so the descriptor is StepBoundary.
+        assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
         assert_eq!(
             pi.reasoning_levels(),
             &[
@@ -658,7 +674,8 @@ mod tests {
     /// as-is here; flagged for its own pass.)
     #[test]
     fn codex_lazy_descriptor_matches_resolved_harness() {
-        let registry = default_registry();
+        let dir = tempfile::tempdir().unwrap();
+        let registry = default_registry(dir.path().join("agent-sessions"));
         let before = registry
             .descriptors()
             .into_iter()

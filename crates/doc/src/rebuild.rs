@@ -168,6 +168,7 @@ mod tests {
                     is_error: false,
                     resolved: true,
                     output: Some(fat_output()), // ~4KB fat inline, incompressible
+                    progress: None,
                     diff: Some(ToolDiff {
                         path: "/w/a.rs".into(),
                         old_text: Some("a\nb\n".into()),

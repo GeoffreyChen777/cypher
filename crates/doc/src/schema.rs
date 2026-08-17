@@ -75,6 +75,10 @@ struct DocPartJson {
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+    /// Transient live-progress tail for an UNRESOLVED tool (additive; the
+    /// fold clears it on resolve, so it never survives a settled chip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    progress: Option<String>,
     /// Capped inline tool diff (additive; pre-strip writers only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diff: Option<serde_json::Value>,
@@ -107,6 +111,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             is_error,
             resolved,
             output,
+            progress,
             diff,
             output_ref,
             output_bytes,
@@ -120,6 +125,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             // its presence IS the resolution marker.
             is_error: if *resolved { Some(*is_error) } else { None },
             output: output.clone(),
+            progress: progress.clone(),
             diff: diff.as_ref().map(serde_json::to_value).transpose()?,
             output_ref: output_ref.clone(),
             output_bytes: *output_bytes,
@@ -158,6 +164,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 is_error: p.is_error.unwrap_or(false),
                 resolved: p.is_error.is_some(),
                 output: p.output,
+                progress: p.progress,
                 diff: p.diff.and_then(|d| serde_json::from_value(d).ok()),
                 output_ref: p.output_ref,
                 output_bytes: p.output_bytes,
@@ -550,6 +557,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
+    if let Some(progress) = &doc_part.progress {
+        map.insert("progress", progress.as_str())?;
+    }
     if let Some(diff) = &doc_part.diff {
         map.insert("diff", loro_value_from_json(diff))?;
     }
@@ -692,6 +702,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
                 .unwrap_or(true),
             output: obj
                 .get("output")
+                .and_then(|x| x.as_str())
+                .map(str::to_owned),
+            progress: obj
+                .get("progress")
                 .and_then(|x| x.as_str())
                 .map(str::to_owned),
             diff: None,
@@ -901,6 +915,13 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
+    }
+    if let Some(progress) = &doc_part.progress {
+        map.insert("progress", progress.as_str())?;
+    } else {
+        // Resolve clears the transient column — the delete must actually land
+        // in Loro, or a settled chip would keep rendering a stale live tail.
+        map.delete("progress")?;
     }
     if let Some(diff) = &doc_part.diff {
         map.insert("diff", loro_value_from_json(diff))?;
@@ -1125,6 +1146,78 @@ mod tests {
         }
     }
 
+    /// Live progress is transient column state: a ToolCall creates the part
+    /// without it, ToolProgress writes the tail into Loro, and ToolResult
+    /// CLEARS it (the delete must actually land in Loro — not just in the
+    /// fold's in-memory mirror — or a settled chip keeps a stale live tail).
+    #[test]
+    fn segment_writer_persists_progress_and_clears_on_resolve() {
+        let doc = SessionDoc::init("chat-4").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t1".into(),
+                call: ToolCall::Exec {
+                    command: "ls".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert!(matches!(
+            &entries[0].parts[0],
+            MessagePart::Tool {
+                progress: None,
+                resolved: false,
+                ..
+            }
+        ));
+
+        // A progress tick writes the transient tail into Loro.
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolProgress {
+                id: "t1".into(),
+                output: "compiling\nlinking".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool {
+                progress,
+                resolved: false,
+                ..
+            } => assert_eq!(progress.as_deref(), Some("compiling\nlinking")),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Resolve clears the column in Loro.
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                id: "t1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        );
+        writer.sync(&folded).unwrap();
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool {
+                resolved: true,
+                progress: None,
+                ..
+            } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     /// The ToolResult resolution path goes through `update_part_fields` —
     /// the stripped output summary, sidecar refs, and diff stats must survive
     /// the doc round trip (regression: output/diff were silently dropped
@@ -1207,6 +1300,7 @@ mod tests {
                 is_error: false,
                 resolved: true,
                 output: Some("full inline output\nline 2".into()),
+                progress: None,
                 diff: Some(zeron_proto::ToolDiff {
                     path: "/w/a.rs".into(),
                     old_text: Some("old".into()),

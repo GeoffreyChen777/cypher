@@ -1974,7 +1974,7 @@ mod tests {
         let daemon_dir = tempfile::tempdir().unwrap();
         let core = EngineCore::assemble(
             daemon_dir.path(),
-            Arc::new(default_registry()),
+            Arc::new(default_registry(daemon_dir.path().join("agent-sessions"))),
             HarnessId::Mock,
             None,
         )
@@ -2073,6 +2073,7 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
+            subagents: Vec::new(),
         }
     }
 

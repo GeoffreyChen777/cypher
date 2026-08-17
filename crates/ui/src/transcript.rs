@@ -4234,6 +4234,7 @@ mod tests {
             is_error: false,
             resolved: true,
             output: None,
+            progress: None,
             diff: None,
             output_ref: None,
             output_bytes: None,

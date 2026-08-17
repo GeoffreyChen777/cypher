@@ -30,8 +30,8 @@ use zeron_doc::{
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, SubagentRun,
+    SubagentRunStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -212,6 +212,56 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
+    /// Live subagent projection (pi `zeron.subagents.v1`): mirror the latest
+    /// snapshot onto the chat's session row — `subagents` + `updated_at` ONLY.
+    /// Deliberately no status transition and no `started_at` change: a
+    /// background subagent finishing must not flip a parked session Working
+    /// nor reset the elapsed timer. The `updated_at` bump keeps the row
+    /// inside the UI's 45s staleness window while only a subagent is active.
+    pub fn set_subagents(&self, chat_id: &str, runs: Vec<SubagentRun>) {
+        self.inner.set_subagents(chat_id, runs);
+    }
+
+    /// Owner-death terminalization: the harness run for `chat_id` has truly
+    /// ended — any subagent run still projected `Running` flips to `Error`
+    /// (the owner that would have published its terminal state is gone). The
+    /// session row/watch/workspace mirror updates; `status`/`started_at` stay
+    /// untouched. Called ONLY when the real harness owner ends (drive_run's
+    /// final exit, startup/early-fatal returns) — never on a parked Done,
+    /// where a legal background subagent stays Running on the open stream.
+    pub fn fail_orphaned_subagents(&self, chat_id: &str, reason: &str) {
+        self.inner.fail_orphaned_subagents(chat_id, reason);
+    }
+
+    /// Boot recovery: sweep THIS device's durable session rows and terminalize
+    /// any subagent run still projected `Running` (the previous engine died
+    /// with them in flight — they can never settle on their own). Remote
+    /// device rows are untouched: their owners may still be live. Pure
+    /// projection fix — `status`/`started_at` never change. Called right after
+    /// [`Self::recover_stale`] at engine assembly.
+    pub fn recover_orphaned_subagents(&self) -> Result<usize, EngineError> {
+        const REASON: &str = "Subagent owner ended before engine restart";
+        let Some(ws) = self.inner.workspace() else {
+            return Ok(0);
+        };
+        let rows = ws.read_sessions()?;
+        let mut fixed = 0usize;
+        for mut row in rows {
+            if row.device_id != self.inner.device_id {
+                continue; // another device's row: its owner may still be live
+            }
+            let failed = fail_running_subagents(&mut row.subagents, now_ms(), REASON);
+            if failed > 0 {
+                ws.record_session(&row);
+                fixed += failed;
+            }
+        }
+        if fixed > 0 {
+            tracing::info!(fixed, "orphaned subagent runs terminalized on boot");
+        }
+        Ok(fixed)
+    }
+
     /// Any run currently working or blocked on input — the auto-updater's
     /// "don't restart from under a session" gate.
     pub fn any_active(&self) -> bool {
@@ -307,20 +357,35 @@ impl SessionsEngine {
             )
         });
         if let Some((run_id, steerable, steer_tx, ledger)) = routed {
-            let message = SteerMessage {
-                prompt: request.prompt.clone(),
-                message_id: message_id.clone(),
-            };
-            if steerable && steer_tx.try_send(message).is_ok() {
-                // The run can vanish between the send and here (the idle
-                // reaper, a parked child death): the ledger entry below is
-                // the at-least-once guarantee — the run task's exit drain
-                // re-dispatches any accepted steer no `Steered` confirmed.
-                let user_id = message_id.clone().unwrap_or_else(new_id);
-                lock(&ledger).push_back(RoutedSteer {
+            let user_id = message_id.clone().unwrap_or_else(new_id);
+            // The ledger entry and the mailbox send are atomic under the
+            // ledger lock: the entry goes in BEFORE try_send, so the run
+            // task can never observe an accepted mailbox message without its
+            // ledger entry (the parked-pi path emits Steered immediately on
+            // mailbox receive, and the exit drain must always find what it
+            // owns). A failed send rolls the exact entry back while still
+            // holding the lock, then falls through to a fresh run below.
+            let sent = if steerable {
+                let mut ledger = lock(&ledger);
+                ledger.push_back(RoutedSteer {
                     prompt: request.prompt.clone(),
                     message_id: user_id.clone(),
                 });
+                let message = SteerMessage {
+                    prompt: request.prompt.clone(),
+                    message_id: message_id.clone(),
+                };
+                let ok = steer_tx.try_send(message).is_ok();
+                if !ok {
+                    // Mailbox closed (runtime mid-teardown / non-steering
+                    // harness): drop the exact entry we just added.
+                    ledger.retain(|s| s.message_id != user_id);
+                }
+                ok
+            } else {
+                false
+            };
+            if sent {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
@@ -470,23 +535,39 @@ impl SessionsEngine {
         let Some((run_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
-        let message = SteerMessage {
-            prompt: prompt.to_string(),
-            message_id: message_id.clone(),
+        let user_id = message_id.clone().unwrap_or_else(new_id);
+        // Accepted: the ledger entry and the mailbox send are atomic under
+        // the ledger lock — the entry goes in BEFORE try_send, so the run
+        // task can never observe an accepted mailbox message without its
+        // ledger entry (the parked-pi path emits Steered immediately on
+        // mailbox receive, and the exit drain must always find what it
+        // owns). A failed send rolls the exact entry back while still
+        // holding the lock. After that, the user entry (client-minted id),
+        // then Working BEFORE the lastMessageAt bump — same causal-order
+        // invariant as the dispatch route (an observer must never hold [new
+        // message, settled status]: the phantom "completed" flash,
+        // 2026-07-31).
+        let sent = {
+            let mut ledger = lock(&ledger);
+            ledger.push_back(RoutedSteer {
+                prompt: prompt.to_string(),
+                message_id: user_id.clone(),
+            });
+            let message = SteerMessage {
+                prompt: prompt.to_string(),
+                message_id: message_id.clone(),
+            };
+            let ok = steer_tx.try_send(message).is_ok();
+            if !ok {
+                // Mailbox closed (runtime mid-teardown / non-steering
+                // harness): drop the exact entry we just added.
+                ledger.retain(|s| s.message_id != user_id);
+            }
+            ok
         };
-        if steer_tx.try_send(message).is_err() {
+        if !sent {
             return Ok(SteerOutcome::NotSteerable);
         }
-        // Accepted: ledger first (at-least-once across a dying run), then the
-        // user entry (client-minted id), then Working BEFORE the
-        // lastMessageAt bump — same causal-order invariant as the dispatch
-        // route (an observer must never hold [new message, settled status]:
-        // the phantom "completed" flash, 2026-07-31).
-        let user_id = message_id.unwrap_or_else(new_id);
-        lock(&ledger).push_back(RoutedSteer {
-            prompt: prompt.to_string(),
-            message_id: user_id.clone(),
-        });
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
@@ -774,6 +855,39 @@ impl Inner {
         }
     }
 
+    /// Live subagent projection (pi `zeron.subagents.v1`): update the chat's
+    /// session row's `subagents` + `updated_at` ONLY — no status transition,
+    /// no `started_at` change, and a missing row is created Idle (a subagent
+    /// can be the chat's only activity). The `updated_at` bump doubles as the
+    /// staleness heartbeat so a run whose ONLY activity is subagent status
+    /// never reads stale.
+    fn set_subagents(&self, chat_id: &str, runs: Vec<SubagentRun>) {
+        let now = Utc::now();
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let entry = statuses
+                .entry(chat_id.to_string())
+                .or_insert_with(|| Session {
+                    chat_id: chat_id.to_string(),
+                    device_id: self.device_id.clone(),
+                    status: SessionStatus::Idle,
+                    started_at: None,
+                    updated_at: now,
+                    subagents: Vec::new(),
+                });
+            entry.subagents = runs;
+            entry.updated_at = now;
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         let now = Utc::now();
         let session = {
@@ -786,6 +900,7 @@ impl Inner {
                     status,
                     started_at: None,
                     updated_at: now,
+                    subagents: Vec::new(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -935,6 +1050,57 @@ impl Inner {
             runs.remove(chat_id);
         }
     }
+
+    /// Owner-death sweep for one chat's live projection: flip every `Running`
+    /// subagent to `Error` with a bounded reason (the harness owner that would
+    /// have published its terminal state is gone). Only the projection
+    /// changes — session `status`/`started_at` are never touched. Updates the
+    /// in-memory row + watch + workspace mirror. No-op when nothing is running.
+    fn fail_orphaned_subagents(&self, chat_id: &str, reason: &str) {
+        let now = now_ms();
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if fail_running_subagents(&mut entry.subagents, now, reason) == 0 {
+                return;
+            }
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+}
+
+/// Pure owner-death terminalization of one run list: only `Running` runs flip
+/// to `Error` with `updated_at`/`ended_at` stamped now and `progress` set to a
+/// length-controlled reason; settled runs (Done/Error) are untouched. Returns
+/// how many runs were failed. Never a status/started_at change at the session
+/// level — that lives with the caller.
+fn fail_running_subagents(runs: &mut [SubagentRun], now_ms: i64, reason: &str) -> usize {
+    // Bound the reason so a long owner-death message can never blow the
+    // snapshot's per-run progress cap (the publisher caps at 4KiB; this is
+    // a defensive reader-side trim for engine-synthesized reasons only).
+    let reason: String = reason.chars().take(200).collect();
+    let mut failed = 0usize;
+    for run in runs {
+        if run.status != SubagentRunStatus::Running {
+            continue;
+        }
+        run.status = SubagentRunStatus::Error;
+        run.updated_at = now_ms;
+        run.ended_at = Some(now_ms);
+        run.progress = Some(reason.clone());
+        failed += 1;
+    }
+    failed
 }
 
 // ── run task ────────────────────────────────────────────────────────────────
@@ -951,6 +1117,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 is_error,
                 resolved,
                 output,
+                progress,
                 diff,
                 output_ref,
                 output_bytes,
@@ -964,8 +1131,11 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 // Output summaries, diff stats, and sidecar refs are
                 // deliberately kept: unlike raw tool inputs they are the
                 // transcript's record of what happened, and the strip already
-                // bounded them (docs/chat2-sync.md A1).
+                // bounded them (docs/chat2-sync.md A1). The transient
+                // progress tail rides through too — the fold clears it on
+                // resolve, so it never survives a settled chip.
                 output: output.clone(),
+                progress: progress.clone(),
                 diff: diff.clone(),
                 output_ref: output_ref.clone(),
                 output_bytes: *output_bytes,
@@ -1096,6 +1266,8 @@ async fn drive_run(
                     session_id: None,
                 },
             );
+            // The owner never came up: nothing will ever settle its subagents.
+            inner.fail_orphaned_subagents(&chat_id, "Subagent owner failed to start");
             inner.remove_run(&chat_id, &run_id);
             inner.set_status(&chat_id, SessionStatus::Errored, false);
             return;
@@ -1328,6 +1500,17 @@ async fn drive_run(
             }
         };
 
+        // SubagentStatus is a LIVE PROJECTION, not run activity: mirror it
+        // onto the chat's session row and stop — no journal append, no doc
+        // fold, no status transition, no session freshness touch, and no
+        // parked-session resume or quiesce-watchdog push (a background
+        // subagent finishing must never re-arm a parked session as Working;
+        // `set_subagents`' own updated_at bump keeps the row fresh instead).
+        if let AgentEvent::SubagentStatus { runs } = &event {
+            inner.set_subagents(&chat_id, runs.clone());
+            continue;
+        }
+
         // Any stream activity proves the run is alive — keep the session's
         // freshness inside the UI's 45s staleness window (throttled), and
         // push the quiesce watchdog's window out.
@@ -1472,6 +1655,12 @@ async fn drive_run(
             {
                 continue;
             }
+            // `ToolProgress` deliberately falls through: it arrives with its
+            // ToolCall in the SAME segment, so it is never a stale echo here
+            // — and the doc fold is the single authority on whether to apply
+            // it (id known + !resolved). A cross-segment tick reaches the
+            // fold with no matching part and is a no-op there; a post-resolve
+            // tick is ignored the same way. No exemption arm needed.
             _ => {}
         }
 
@@ -1504,6 +1693,8 @@ async fn drive_run(
                 chat = %chat_id,
                 "run died before session start; retrying once (resume kept)"
             );
+            // This harness owner is gone (nothing ever started under it).
+            inner.fail_orphaned_subagents(&chat_id, "Subagent owner failed to start");
             inner.remove_run(&chat_id, &run_id);
             let engine = SessionsEngine {
                 inner: inner.clone(),
@@ -1705,6 +1896,19 @@ async fn drive_run(
         .filter(|h| h.run_id == run_id)
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
+    // The harness owner for this chat has ended (stream EOF/error, interrupt,
+    // idle reaper, or a final Done on a non-parked harness). Any subagent run
+    // still projected Running can never settle on its own — terminalize it.
+    // This deliberately does NOT fire on a parked Done (steerable sessions
+    // keep the stream open; a legal background subagent stays Running on it).
+    let owner_reason = if interrupted {
+        "Subagent owner interrupted"
+    } else if final_status == SessionStatus::Errored {
+        "Subagent owner ended in error"
+    } else {
+        "Subagent owner session ended"
+    };
+    inner.fail_orphaned_subagents(&chat_id, owner_reason);
     inner.remove_run(&chat_id, &run_id);
     inner.set_status(&chat_id, final_status, false);
     if !interrupted && !orphans.is_empty() {
