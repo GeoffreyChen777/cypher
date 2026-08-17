@@ -44,7 +44,9 @@ pub use diff_sync::{
 pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
-pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
+pub use registry::{
+    HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
+};
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
@@ -707,17 +709,28 @@ impl Engine {
 
         // The zeron-owned pi session store (`pi --mode rpc --session-dir`).
         let pi_sessions_root = profile.store_root().join("agent-sessions");
+        // The Zeron bridge URL every pi child gets as `ZERON_ENGINE_WS_URL`:
+        // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
+        // headless and headed modes). Test-only `EngineCore::assemble` keeps
+        // `None` — it never serves IPC.
+        let engine_ws_url = Some(format!("ws://127.0.0.1:{}", config.ipc_port));
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry(pi_sessions_root)),
+                Arc::new(default_registry_with_bridge(
+                    pi_sessions_root,
+                    engine_ws_url,
+                )),
                 config.default_harness,
                 edge.clone(),
                 lock,
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry(pi_sessions_root)),
+                Arc::new(default_registry_with_bridge(
+                    pi_sessions_root,
+                    engine_ws_url,
+                )),
                 config.default_harness,
                 edge.clone(),
             )?,

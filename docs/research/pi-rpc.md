@@ -171,6 +171,105 @@ TUI-furniture rule above:
   background child finishes), and subagent-to-subagent message activity
   (`mode: "message"`, no `toolCallId`).
 
+## Zeron-hosted child chats (`StartSubagent` bridge, 2026-08)
+
+In Zeron RPC mode the ENGINE can host a subagent's child chat as a **first-class
+navigable session**, instead of the extension owning an ephemeral child pi
+process. This is the “native pi RPC only” path: a standalone pi TUI keeps the
+extension's own `spawnInteractiveSubagent` fallback untouched.
+
+### Ownership & data model
+
+- The parent/child relation is **stored by Zeron** (never assumed from pi): the
+  synced `Chat` row carries an additive `child` metadata block — `parentChatId`,
+  `parentRunId` (the `zeron.subagents.v1` run id), `toolCallId` (the durable
+  link to the parent's transcript part), `agent`, `task`, `mode`, and a
+  persisted child agent profile (`systemPrompt` / `tools` / `model` /
+  `thinking`). The profile is what later direct turns in the child chat
+  re-apply — no arbitrary persisted env maps.
+- The messaging **channel is deliberately NOT persisted or synced**: the
+  channel root is an absolute host-local path (`/tmp/pi-subagents-messages/...`)
+  that is stale after a reboot and outside this sync/ownership boundary. The
+  engine keeps it in a LOCAL runtime map (keyed by child chat id) only long
+  enough for the initial queued run — registered by `StartSubagent`, consumed
+  at first dispatch, bounded (capped, removed on child delete/rollback). Later
+  child turns launch `PI_SUBAGENT_ROLE=child` with the persisted profile but
+  have NO message channel; the messaging tools then honestly report
+  unavailable.
+- The `zeron.subagents.v1` projection's per-run `childChatId` (a `SubagentRun`
+  field) links a snapshot run to its navigable child chat.
+- Child chats are **hidden from the root sidebar/session overview**; they are
+  reached only through the parent's Subagents inspector and remain reopenable
+  after completion (their pi session file persists like any chat). The
+  inspector merges the parent's durable child Chat rows into its aggregation:
+  a child row matched by `parentRunId` (or the doc part's `toolCallId`)
+  restores `childChatId`/agent/task/mode unconditionally, the child's OWN
+  session row is the execution truth (Working/AwaitingInput → Running/Stale,
+  Errored → Error, Idle → Done), and a child row with no parent-side entry is
+  synthesized — so completed children stay clickable even after the parent's
+  snapshot goes empty or the parent restarts.
+- Parent delete **cascades**: the child chat rows/docs are tombstoned and live
+  child runs interrupted (best-effort — see the deletion tests).
+
+### Bridge surface (local engine IPC, `ws://127.0.0.1:<ipc_port>`)
+
+The harness injects `ZERON_ENGINE_WS_URL` (production `Engine::assemble_runtime`
+knows `ipc_port`) and `ZERON_CHAT_ID` into every pi child; discovery processes
+never receive a parent id (they have no `RunControls`).
+
+- **`StartSubagent`** (unary, strict bounded params): validates the parent exists
+  and is hosted locally, idempotently creates the same-device child chat
+  (deterministic lookup by `parentChatId`+`runId`), inherits the parent's
+  space/device/cwd/sandbox, creates a Pi-configured titled row carrying the
+  child metadata, registers the messaging channel in a LOCAL runtime map, and
+  queues the normal durable Run command, then replies `{childChatId}`. An
+  idempotent retry of `(parentChatId, runId)` returns the existing child's id
+  WITHOUT queueing a second Run (exactly one run command per child). Optional
+  `model`/`thinking` are length-bounded. A queue failure rolls the row back —
+  no bogus navigable chat.
+- **`WatchAgentEvents`** (stream): replayable per-chat agent events (journal
+  replay after `afterSeq`, then live) — the parent extension observes the
+  child's terminal `done`/result.
+- Interrupt/abort/timeout teardown queues a normal child `Interrupt` command
+  (`QueueCommand`), never an extension-owned kill.
+
+### Child run semantics
+
+The engine's pi harness launches the child run with child-agent semantics from
+the persisted profile: `--append-system-prompt` (persisted system prompt),
+`--tools` = agent allowlist ∪ `send_message`/`read_inbox`/`reply_message`,
+`--model`/`--thinking` preserved, and env `PI_SUBAGENT_ROLE=child` +
+`PI_SUBAGENT_CHANNEL_ROOT`/`PI_SUBAGENT_RUN_ID`/`PI_SUBAGENT_AGENT`/
+`PI_SUBAGENT_CHILD_INDEX` (the messaging channel identity) — the channel env
+applies ONLY to the initial queued run (it comes from the engine-local map);
+later child turns keep the profile but have no channel and the messaging tools
+report unavailable. The run flows through the normal SessionsEngine (journal,
+doc fold, status lifecycle, warm parked sessions, resume) — nothing is
+special-cased.
+
+### Navigation & status ownership
+
+- Clicking an Inspector row whose run carries a child chat id closes the
+  popover and calls the normal `AppState::select_chat(Some(childId))`; the
+  Shell's existing `NavHistory` observation records the switch, so Back returns
+  to the parent session (no second transcript view). The inspector has real
+  focused-row keyboard navigation (Up/Down move the tracked active row,
+  Enter/Space open it, Escape closes); rows themselves are click targets only.
+- The child Chat/session is the execution truth; the parent's `SubagentStatus`
+  snapshot remains a summary projection. The durable child rows are merged
+  into the inspector aggregation (see Ownership above), so a completed child
+  stays reopenable even after the parent snapshot went empty or the parent
+  restarted, and the child's own session status (Working/AwaitingInput →
+  Running/Stale, Errored → Error, Idle → Done) is what the row displays when
+  available.
+- The engine never resurrects ghosts: the parent status board publishes
+  `Running` only once the child chat is real (the `StartSubagent` reply), and
+  settled/errored runs terminalize normally.
+
+`message`-mode pooled activities (subagent-to-subagent routing) remain on the
+extension-owned spawn path in this first implementation — they are not
+engine-hosted children.
+
 ## No-activity termination
 A `prompt` accepted by pi but followed by **zero agent-lifecycle events**
 must not leave the run "Working" forever (an extension command whose handler

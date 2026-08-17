@@ -256,6 +256,12 @@ pub struct SubagentRun {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
+    /// The Zeron child chat id backing this run, when the engine hosts it
+    /// (`StartSubagent` bridge): the Inspector row becomes clickable and
+    /// navigation selects the child's real live session. Additive + serde
+    /// defaulted so older publishers/writers keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_chat_id: Option<String>,
 }
 
 /// A file modification carried inline on a tool result (ACP
@@ -475,6 +481,7 @@ mod tests {
                     started_at: 1000,
                     updated_at: 2000,
                     ended_at: None,
+                    child_chat_id: Some("child-1".into()),
                 },
                 SubagentRun {
                     run_id: "run-2".into(),
@@ -488,13 +495,14 @@ mod tests {
                     started_at: 3000,
                     updated_at: 4000,
                     ended_at: Some(4000),
+                    child_chat_id: None,
                 },
             ],
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"subagentStatus","runs":[{"runId":"run-1","toolCallId":"t1","agent":"planner","model":"anthropic/claude-sonnet-4","task":"Plan the panel","mode":"async","status":"running","progress":"line 1\nline 2","startedAt":1000,"updatedAt":2000},{"runId":"run-2","agent":"reviewer","task":"Review the diff","mode":"message","status":"done","startedAt":3000,"updatedAt":4000,"endedAt":4000}]}"#
+            r#"{"type":"subagentStatus","runs":[{"runId":"run-1","toolCallId":"t1","agent":"planner","model":"anthropic/claude-sonnet-4","task":"Plan the panel","mode":"async","status":"running","progress":"line 1\nline 2","startedAt":1000,"updatedAt":2000,"childChatId":"child-1"},{"runId":"run-2","agent":"reviewer","task":"Review the diff","mode":"message","status":"done","startedAt":3000,"updatedAt":4000,"endedAt":4000}]}"#
         );
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
         // Optional fields (toolCallId/model/progress/endedAt) omit cleanly.

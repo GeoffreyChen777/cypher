@@ -60,8 +60,48 @@ use zeron_proto::{
 use crate::acp::normalize::{OUTPUT_CAP, cap_text, parse_commands};
 use crate::pi::client::{Incoming, PiClient};
 use crate::{
-    Harness, HarnessError, RunControls, Signal, crash_message, send_signal, shutdown_child,
+    Harness, HarnessError, RunControls, RunHostContext, Signal, crash_message, send_signal,
+    shutdown_child,
 };
+
+/// Env vars the subagents extension keys on (mirrors
+/// `extensions/subagents/message.ts`): a child pi process loads the extension
+/// in child mode and registers the generic messaging tools.
+pub(crate) const ENV_ROLE: &str = "PI_SUBAGENT_ROLE";
+pub(crate) const ROLE_CHILD: &str = "child";
+pub(crate) const ENV_CHANNEL_ROOT: &str = "PI_SUBAGENT_CHANNEL_ROOT";
+pub(crate) const ENV_RUN_ID: &str = "PI_SUBAGENT_RUN_ID";
+pub(crate) const ENV_AGENT: &str = "PI_SUBAGENT_AGENT";
+pub(crate) const ENV_CHILD_INDEX: &str = "PI_SUBAGENT_CHILD_INDEX";
+/// The chat id this pi process belongs to (parent or child) — injected by the
+/// harness, consumed by the extension for the Zeron bridge.
+pub(crate) const ENV_ZERON_CHAT_ID: &str = "ZERON_CHAT_ID";
+/// Local engine IPC WebSocket URL the extension's Zeron bridge helper dials
+/// (`StartSubagent` / `WatchAgentEvents`). Injected by the harness.
+pub(crate) const ENV_ZERON_ENGINE_WS_URL: &str = "ZERON_ENGINE_WS_URL";
+
+/// The messaging tools every child gets regardless of its allowlist (the
+/// extension's `spawn.ts` appends the same trio).
+const MESSAGING_TOOLS: [&str; 3] = ["send_message", "read_inbox", "reply_message"];
+
+/// Write the child agent's persisted system prompt to a 0600 temp file
+/// (`--append-system-prompt` takes a path) and return it for later cleanup.
+fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<PathBuf> {
+    let safe = agent.replace(
+        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_',
+        "_",
+    );
+    let dir = std::env::temp_dir().join(format!("pi-subagent-{safe}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("prompt.md");
+    std::fs::write(&path, prompt)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
 
 /// pi's thinking ladder in zeron terms (its extra "off" tier has no zeron
 /// equivalent and stays the agent default).
@@ -115,6 +155,10 @@ const SUBAGENTS_TASK_MAX_CHARS: usize = 500;
 /// Max progress lines / bytes per run.
 const SUBAGENTS_PROGRESS_MAX_LINES: usize = 8;
 const SUBAGENTS_PROGRESS_MAX_BYTES: usize = 4096;
+/// Max chars for the Zeron child chat id a run may carry (a child chat id is
+/// an engine-minted uuid string; a longer value is a publisher bug and is
+/// rejected with the rest of the strict per-run parse).
+const SUBAGENTS_CHILD_CHAT_ID_MAX_CHARS: usize = 256;
 
 /// Parse a `zeron.subagents.v1` `statusText` into runs.
 ///
@@ -208,6 +252,13 @@ fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
     {
         return None;
     }
+    // Bounded child chat id: a too-long value is a publisher bug — reject the
+    // whole snapshot like the other over-cap fields.
+    let child_chat_id = match v.get("childChatId").and_then(Value::as_str) {
+        Some(id) if id.chars().count() > SUBAGENTS_CHILD_CHAT_ID_MAX_CHARS => return None,
+        Some(id) => Some(id.to_owned()),
+        None => None,
+    };
     Some(SubagentRun {
         run_id,
         tool_call_id: v
@@ -223,6 +274,10 @@ fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
         started_at: v.get("startedAt").and_then(Value::as_i64)?,
         updated_at: v.get("updatedAt").and_then(Value::as_i64)?,
         ended_at: v.get("endedAt").and_then(Value::as_i64),
+        // The extension publishes the Zeron child chat id when the engine
+        // hosts the run (`StartSubagent` bridge). Absent on standalone runs
+        // and on old publishers.
+        child_chat_id,
     })
 }
 
@@ -422,6 +477,12 @@ pub struct PiHarness {
     /// no agent activity at all (e.g. an extension command whose handler
     /// only notifies) must never sit "Working" forever.
     no_activity_grace: Duration,
+    /// Local engine IPC WebSocket URL (`ws://127.0.0.1:<ipc_port>`) — injected
+    /// into every pi child as `ZERON_ENGINE_WS_URL` so the subagents extension
+    /// can reach the engine's `StartSubagent`/`WatchAgentEvents` bridge.
+    /// Set by `default_registry_with_bridge` (production assembly knows
+    /// `ipc_port`); `None` in bare tests and edge-less engines.
+    engine_ws_url: Option<String>,
     /// Discovery result cache: the RAW `get_commands` probe result (extension /
     /// prompt / skill commands) survives across calls. It stays the
     /// interception authority — `commands()` appends the synthesized built-ins
@@ -441,9 +502,17 @@ impl PiHarness {
             kill_grace: Duration::from_secs(3),
             handshake_timeout: Duration::from_secs(120),
             no_activity_grace: Duration::from_secs(2),
+            engine_ws_url: None,
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Point pi children at the local engine IPC WebSocket URL (production
+    /// assembly). `None` keeps the harness standalone (tests, edge-less).
+    pub fn with_engine_bridge(mut self, url: Option<String>) -> Self {
+        self.engine_ws_url = url;
+        self
     }
 
     /// Use a fixed pi binary instead of PATH/known-location resolution.
@@ -501,24 +570,93 @@ impl PiHarness {
         }
     }
 
-    async fn spawn_child(
+    /// Test seam: the `std::process::Command` a run would spawn — CLI args,
+    /// PATH composition, cwd, and the bridge env — without spawning a child.
+    /// Lets tests assert `ZERON_ENGINE_WS_URL` (and child-env) injection
+    /// deterministically.
+    #[doc(hidden)]
+    pub fn spawn_command(
         &self,
         cwd: Option<&str>,
-    ) -> Result<(Child, crate::StderrTail), HarnessError> {
-        let (exe, args) = self.resolve_program()?;
+        host: &RunHostContext,
+        append_prompt: Option<&PathBuf>,
+    ) -> Result<Command, HarnessError> {
+        let (exe, mut args) = self.resolve_program()?;
+        // Child-subagent semantics (Zeron-hosted child chats): restrict tools
+        // to the persisted agent allowlist plus the messaging tools, append
+        // the persisted system prompt, preserve model/thinking.
+        if let Some(child) = &host.child {
+            let mut tools = child.tools.clone();
+            for tool in MESSAGING_TOOLS {
+                if !tools.iter().any(|t| t == tool) {
+                    tools.push(tool.to_string());
+                }
+            }
+            if !tools.is_empty() {
+                args.push("--tools".into());
+                args.push(tools.join(","));
+            }
+            if let Some(model) = &child.model {
+                args.push("--model".into());
+                args.push(model.clone());
+            }
+            if let Some(thinking) = &child.thinking {
+                args.push("--thinking".into());
+                args.push(thinking.clone());
+            }
+            if let Some(path) = append_prompt
+                && !child.system_prompt.trim().is_empty()
+            {
+                args.push("--append-system-prompt".into());
+                args.push(path.display().to_string());
+            }
+        }
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
+        // Zeron bridge identity: the chat this run belongs to plus the local
+        // engine IPC WebSocket URL (so the extension can StartSubagent +
+        // WatchAgentEvents). Discovery processes pass an empty host context and
+        // therefore never receive a parent chat id.
+        if let Some(chat_id) = host.chat_id.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env(ENV_ZERON_CHAT_ID, chat_id);
+        }
+        if let Some(url) = self.engine_ws_url.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env(ENV_ZERON_ENGINE_WS_URL, url);
+        }
+        if let Some(child) = &host.child {
+            cmd.env(ENV_ROLE, ROLE_CHILD);
+            // The messaging channel is host-local and only exists for the
+            // initial run; later child turns have no channel and the child's
+            // messaging tools honestly report "unavailable".
+            if let Some(channel_root) = &child.channel_root {
+                cmd.env(ENV_CHANNEL_ROOT, channel_root);
+            }
+            cmd.env(ENV_RUN_ID, &child.run_id);
+            cmd.env(ENV_AGENT, &child.agent);
+            cmd.env(ENV_CHILD_INDEX, child.child_index.to_string());
+        }
+        Ok(cmd)
+    }
+
+    async fn spawn_child(
+        &self,
+        cwd: Option<&str>,
+        host: &RunHostContext,
+        append_prompt: Option<&PathBuf>,
+    ) -> Result<(Child, crate::StderrTail), HarnessError> {
+        let mut cmd = self.spawn_command(cwd, host, append_prompt)?;
+        let exe = cmd.as_std().get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(exe.clone())
             } else {
                 HarnessError::Io(e)
             }
@@ -541,7 +679,9 @@ impl PiHarness {
     /// liveness probe — the child is up and serving) then
     /// `get_available_models`, mapping the wire entries onto [`Model`]s.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_child(None).await?;
+        let (mut child, _stderr) = self
+            .spawn_child(None, &RunHostContext::default(), None)
+            .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
             _ => {
@@ -565,7 +705,9 @@ impl PiHarness {
     /// Short-lived discovery run for [`Harness::commands`]: `get_commands`
     /// (extension / prompt / skill commands, all three sources).
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_child(None).await?;
+        let (mut child, _stderr) = self
+            .spawn_child(None, &RunHostContext::default(), None)
+            .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
             _ => {
@@ -642,7 +784,35 @@ impl Harness for PiHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // The session store must exist before pi is pointed at it.
         std::fs::create_dir_all(&self.session_dir)?;
-        let (mut child, stderr_tail) = self.spawn_child(Some(&request.cwd)).await?;
+        // Child-subagent runs append the persisted system prompt from a temp
+        // file (`--append-system-prompt` takes a path); owned by the run task
+        // so it is cleaned up when the run ends (even on early error).
+        let mut temp_prompt: Option<PathBuf> = None;
+        if let Some(child) = controls.host.child.as_ref()
+            && !child.system_prompt.trim().is_empty()
+        {
+            temp_prompt = Some(
+                match write_temp_prompt(&child.agent, &child.system_prompt) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return Err(HarnessError::Io(err));
+                    }
+                },
+            );
+        }
+        let spawn = self
+            .spawn_child(Some(&request.cwd), &controls.host, temp_prompt.as_ref())
+            .await;
+        let (mut child, stderr_tail) = match spawn {
+            Ok(child) => child,
+            Err(err) => {
+                if let Some(path) = &temp_prompt {
+                    let _ = std::fs::remove_file(path);
+                    let _ = path.parent().map(std::fs::remove_dir);
+                }
+                return Err(err);
+            }
+        };
         let stdin = child
             .stdin
             .take()
@@ -675,6 +845,7 @@ impl Harness for PiHarness {
             no_activity_grace: self.no_activity_grace,
             stderr_tail,
             intercept,
+            temp_prompt,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -699,6 +870,9 @@ struct Session {
     /// Which synthesized built-in commands this run intercepts (computed from
     /// the discovery cache at run start).
     intercept: BuiltinIntercept,
+    /// Temp file holding the child agent's persisted system prompt
+    /// (`--append-system-prompt`), removed when the run ends.
+    temp_prompt: Option<PathBuf>,
 }
 
 /// Which synthesized built-in commands a run intercepts. A same-name
@@ -968,6 +1142,19 @@ fn steer_call_future(
     })
 }
 
+/// Owns the child prompt temp file for the run's lifetime: removing it on
+/// drop covers every `run_session` return path (early errors included).
+struct TempPromptGuard(Option<PathBuf>);
+
+impl Drop for TempPromptGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+            let _ = path.parent().map(std::fs::remove_dir);
+        }
+    }
+}
+
 /// The per-run event loop: one task multiplexing agent events, the steering
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
@@ -984,12 +1171,17 @@ async fn run_session(session: Session) {
         no_activity_grace,
         stderr_tail,
         intercept,
+        temp_prompt,
     } = session;
+    // Dropped at the end of every path — the temp prompt file never leaks.
+    let _temp_prompt = TempPromptGuard(temp_prompt);
     let RunControls {
         request_input,
         mut steering,
         interrupt,
+        host,
     } = controls;
+    let _host = host; // child env was already applied at spawn; kept for clarity
     let request_input = std::sync::Arc::new(request_input);
     let agent_name = "pi";
 
@@ -2207,6 +2399,11 @@ mod tests {
         assert!(parse_subagent_status(&run(json!({ "progress": "l\n".repeat(9) }))).is_none());
         // Progress over 4KiB.
         assert!(parse_subagent_status(&run(json!({ "progress": "y".repeat(5000) }))).is_none());
+        // childChatId over 256 chars is a publisher bug — rejected too.
+        assert!(parse_subagent_status(&run(json!({ "childChatId": "c".repeat(257) }))).is_none());
+        // A normal childChatId parses through.
+        let ok = parse_subagent_status(&run(json!({ "childChatId": "child-1" }))).expect("valid");
+        assert_eq!(ok[0].child_chat_id.as_deref(), Some("child-1"));
         // Unknown mode / status enums.
         assert!(parse_subagent_status(&run(json!({ "mode": "blocking" }))).is_none());
         assert!(parse_subagent_status(&run(json!({ "status": "pending" }))).is_none());

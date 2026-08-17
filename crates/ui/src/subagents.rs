@@ -33,7 +33,9 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageStatus, SessionMessageEntry};
-use zeron_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus, view::subagent_call_info};
+use zeron_proto::{
+    SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus, view::subagent_call_info,
+};
 
 use crate::motion;
 use crate::popover::{self, Popup};
@@ -74,6 +76,16 @@ pub struct SubagentPanelEntry {
     pub started_at: i64,
     pub updated_at: i64,
     pub ended_at: Option<i64>,
+    /// Zeron child chat id backing this run (engine-owned): the row is
+    /// clickable and navigation selects the child's real live session.
+    pub child_chat_id: Option<String>,
+}
+
+impl SubagentPanelEntry {
+    /// A row with a Zeron child chat behind it (navigable via the Inspector).
+    pub fn is_navigable(&self) -> bool {
+        self.child_chat_id.is_some()
+    }
 }
 
 /// Inspector header / trigger counts. The statuses are kept SPLIT (a stale
@@ -157,6 +169,7 @@ fn merge_snapshot(entry: &mut SubagentPanelEntry, run: &SubagentRun, now_ms: i64
     entry.started_at = entry.started_at.min(run.started_at);
     entry.updated_at = entry.updated_at.max(run.updated_at);
     entry.ended_at = run.ended_at;
+    entry.child_chat_id = run.child_chat_id.clone();
     if entry.progress.is_none() {
         entry.progress = run.progress.clone();
     }
@@ -187,6 +200,7 @@ fn from_snapshot(run: &SubagentRun, now_ms: i64) -> SubagentPanelEntry {
         started_at: run.started_at,
         updated_at: run.updated_at,
         ended_at: run.ended_at,
+        child_chat_id: run.child_chat_id.clone(),
     }
 }
 
@@ -245,6 +259,7 @@ pub fn aggregate_subagents(
                 started_at: created,
                 updated_at: created,
                 ended_at: None,
+                child_chat_id: None,
             });
         }
     }
@@ -266,6 +281,120 @@ pub fn aggregate_subagents(
         }
     }
     out
+}
+
+/// A durable Zeron child chat row of the selected parent (from the synced
+/// `Chat.child` relation), reduced to what the Inspector needs: the child chat
+/// id + the persisted relation metadata. This is the DURABLE truth for
+/// reopenability — it survives an empty parent snapshot and a parent restart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurableChildRow {
+    pub chat_id: String,
+    /// The parent `zeron.subagents.v1` run id (the extension's stable run id).
+    pub parent_run_id: String,
+    /// The parent tool call id this run answers to (durable link to the
+    /// transcript part; matches doc-only rows after a restart).
+    pub tool_call_id: Option<String>,
+    pub agent: String,
+    pub task: String,
+    pub mode: SubagentRunMode,
+    /// Child chat creation time (epoch ms) — synthesized rows order by it.
+    pub created_at_ms: i64,
+}
+
+/// Execution truth of a child chat from its OWN session row: Working /
+/// AwaitingInput → Running (or Stale past the staleness window), Errored →
+/// Error, Idle → Done. The child session row is durable — the parent snapshot
+/// and restart cannot erase it.
+pub fn child_session_panel_status(
+    status: SessionStatus,
+    updated_at_ms: i64,
+    now_ms: i64,
+) -> PanelStatus {
+    match status {
+        SessionStatus::Working | SessionStatus::AwaitingInput => {
+            if now_ms.saturating_sub(updated_at_ms) > SUBAGENT_STALE_MS {
+                PanelStatus::Stale
+            } else {
+                PanelStatus::Running
+            }
+        }
+        SessionStatus::Errored => PanelStatus::Error,
+        SessionStatus::Idle => PanelStatus::Done,
+    }
+}
+
+/// Merge the parent's durable child chat rows into the aggregated panel.
+///
+/// - Match by `parent_run_id` first (the extension's stable run id), then by
+///   `tool_call_id` (so a doc-only row still links after the parent snapshot
+///   went empty / the parent restarted — never two rows for one child).
+/// - ALWAYS restore `child_chat_id`/agent/task/mode from the durable row, so a
+///   completed child stays clickable.
+/// - The child's OWN session row is the execution truth where available.
+/// - A child row with no panel entry (parent transcript/snapshot no longer
+///   carries the run) is synthesized so the child stays navigable.
+pub fn merge_child_rows(
+    mut entries: Vec<SubagentPanelEntry>,
+    children: &[DurableChildRow],
+    child_status: impl Fn(&str) -> Option<PanelStatus>,
+) -> Vec<SubagentPanelEntry> {
+    for child in children {
+        // 1) Already linked (a live snapshot carried the child chat id).
+        // 2) Matched by run id (snapshot runs use the parent run uuid).
+        // 3) Matched by tool call id (doc-only rows after a restart).
+        let linked = entries.iter_mut().find(|e| {
+            e.child_chat_id.as_deref() == Some(child.chat_id.as_str())
+                || e.run_id == child.parent_run_id
+                || (child.tool_call_id.is_some()
+                    && e.tool_call_id.as_deref() == child.tool_call_id.as_deref())
+        });
+        if let Some(entry) = linked {
+            // The durable relation always wins for the row's identity fields.
+            entry.run_id = child.parent_run_id.clone();
+            entry.child_chat_id = Some(child.chat_id.clone());
+            entry.agent = child.agent.clone();
+            entry.task = child.task.clone();
+            entry.mode = child.mode;
+            if let Some(status) = child_status(&child.chat_id) {
+                entry.status = status;
+            }
+            continue;
+        }
+        // Synthesize: the parent side no longer knows this run, but the child
+        // row is durable — keep it navigable. Without a session the run is
+        // still in-flight (queued); with one, the session is the truth.
+        let status = child_status(&child.chat_id).unwrap_or(PanelStatus::Starting);
+        entries.push(SubagentPanelEntry {
+            run_id: child.parent_run_id.clone(),
+            tool_call_id: child.tool_call_id.clone(),
+            agent: child.agent.clone(),
+            task: child.task.clone(),
+            model: None,
+            mode: child.mode,
+            status,
+            progress: None,
+            started_at: child.created_at_ms,
+            updated_at: child.created_at_ms,
+            ended_at: None,
+            child_chat_id: Some(child.chat_id.clone()),
+        });
+    }
+    entries
+}
+
+/// The next focused inspector row index under Up/Down: wraps, and a `None`
+/// current row starts at the first (Down) / last (Up). Pure selection logic.
+pub fn next_active_index(current: Option<usize>, delta: i32, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let start = match current {
+        Some(i) => i as i64,
+        None if delta > 0 => -1,
+        None => len as i64,
+    };
+    Some((start + delta as i64).rem_euclid(len as i64) as usize)
 }
 
 /// Order for the inspector: in-flight (running/stale/starting) first by
@@ -387,6 +516,14 @@ pub struct SubagentsPanel {
     /// close); closing restores composer focus through the shell's
     /// focus-lost fallback.
     focus: FocusHandle,
+    /// Keyboard focus for the OPEN inspector's row list: real focused-row
+    /// navigation — the list is `track_focus`'d and Up/Down move a tracked
+    /// active row, Enter/Space open it, Escape closes. Distinct from the
+    /// trigger's handle (two elements can never share one).
+    list_focus: FocusHandle,
+    /// The focused row index within the ordered inspector list (`None` until
+    /// the user navigates). UI memory only.
+    active_row: Option<usize>,
     /// Re-render when AppState changes (transcript/sessions frames).
     _state_observation: Subscription,
 }
@@ -407,6 +544,8 @@ impl SubagentsPanel {
             state,
             popup: Popup::default(),
             focus: cx.focus_handle(),
+            list_focus: cx.focus_handle(),
+            active_row: None,
             _state_observation,
         }
     }
@@ -414,12 +553,14 @@ impl SubagentsPanel {
     /// Close through the exit animation. Best-effort keyboard restore: when
     /// the focused trigger initiated the close (Escape), blur hands focus
     /// back to the composer (the shell's focus-lost fallback); pointer-driven
-    /// closes leave focus where the click landed.
+    /// closes leave focus where the click landed. Any focus inside the
+    /// inspector (the tracked row list) is released too.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.begin_close() {
             popover::reap_popup(cx, |this: &mut Self| &mut this.popup);
         }
-        if self.focus.is_focused(window) {
+        self.active_row = None;
+        if self.focus.is_focused(window) || self.list_focus.is_focused(window) {
             window.blur();
         }
         cx.notify();
@@ -441,6 +582,11 @@ impl SubagentsPanel {
             self.close(window, cx);
         } else {
             self.popup.open(chat_id);
+            self.active_row = None;
+            // Land keyboard focus on the tracked inspector list so Up/Down /
+            // Enter / Escape work immediately after opening (the handle is
+            // focusable before the mounted list's first paint).
+            window.focus(&self.list_focus, cx);
             cx.notify();
         }
     }
@@ -450,6 +596,39 @@ impl SubagentsPanel {
     /// (hairline separators, no nested cards), scrolled. Width
     /// `min(520, main column − 32)` — a fixed width capped by the window,
     /// since a floating layer has no ancestor to resolve `w_full` against.
+    /// Open a Zeron child chat from the inspector: close the popover (the
+    /// exit animation reaps it) and select the child through the normal
+    /// `AppState::select_chat` path. The Shell's NavHistory observation
+    /// records the switch, so Back returns to this parent session.
+    fn open_child_chat(&mut self, child_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.begin_close() {
+            popover::reap_popup(cx, |this: &mut Self| &mut this.popup);
+        }
+        self.active_row = None;
+        // Keyboard focus must not stay on the now-closing inspector row — the
+        // shell's focus-lost fallback routes it back to the composer.
+        if self.focus.is_focused(window) || self.list_focus.is_focused(window) {
+            window.blur();
+        }
+        let state = self.state.clone();
+        state.update(cx, |state, cx| state.select_chat(Some(child_id), cx));
+        cx.notify();
+    }
+
+    /// Move the focused inspector row by `delta` (wrapping), landing keyboard
+    /// focus on the tracked list so the keys keep coming. Pure selection logic
+    /// lives in [`next_active_index`].
+    fn move_active(&mut self, delta: i32, len: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if len == 0 {
+            return;
+        }
+        self.active_row = next_active_index(self.active_row, delta, len);
+        if !self.list_focus.is_focused(window) {
+            window.focus(&self.list_focus, cx);
+        }
+        cx.notify();
+    }
+
     fn inspector(
         &mut self,
         window: &Window,
@@ -460,6 +639,11 @@ impl SubagentsPanel {
     ) -> AnyElement {
         let window_w = f32::from(window.viewport_size().width);
         let width = (520.0_f32).min((window_w - 32.0).max(280.0));
+        let active = self.active_row;
+        // Owned copy of the ordered rows' child ids so the key listener below
+        // (a 'static closure) can open the active row without borrowing `ordered`.
+        let child_ids: Vec<Option<String>> =
+            ordered.iter().map(|e| e.child_chat_id.clone()).collect();
 
         let mut rows = div().flex().flex_col();
         for (ix, entry) in ordered.iter().enumerate() {
@@ -471,7 +655,52 @@ impl SubagentsPanel {
                         .bg(crate::theme::hairline(0.05)),
                 );
             }
-            rows = rows.child(inspector_row(theme, entry));
+            let row = inspector_row(theme, entry);
+            rows = rows.child(match entry.child_chat_id.clone() {
+                // Zeron-hosted child runs are navigable. Keyboard navigation
+                // is REAL focused-row navigation on the tracked list (Up/Down
+                // move `active_row`, Enter/Space open the active row, Escape
+                // closes) — the rows themselves are click targets only, never
+                // individually focused. Clicking (or activating) closes the
+                // inspector and selects the child's REAL live session through
+                // the normal AppState::select_chat path — the Shell's
+                // NavHistory observation records the switch, so Back returns
+                // to this parent session.
+                Some(child_id) => {
+                    let id = format!("subagent-open-{}", entry.run_id);
+                    let hover_id = id.clone();
+                    let click_child = child_id.clone();
+                    let mut row_wrap = div()
+                        .id(id)
+                        .cursor_pointer()
+                        .on_hover(motion::hover_listener(&hover_id))
+                        .bg(motion::hover_blend(
+                            &hover_id,
+                            gpui::transparent_black(),
+                            crate::theme::ink(0.05),
+                        ))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let child = click_child.clone();
+                            this.open_child_chat(child, window, cx);
+                        }));
+                    if active == Some(ix) {
+                        // The focused row highlight (distinct from hover).
+                        row_wrap = row_wrap.bg(crate::theme::ink(0.09));
+                    }
+                    row_wrap.child(row).into_any_element()
+                }
+                None => {
+                    let row_wrap = div();
+                    if active == Some(ix) {
+                        row_wrap
+                            .bg(crate::theme::ink(0.09))
+                            .child(row)
+                            .into_any_element()
+                    } else {
+                        row.into_any_element()
+                    }
+                }
+            });
         }
 
         let header = div()
@@ -500,15 +729,31 @@ impl SubagentsPanel {
 
         // Outside-click + Escape close (the established popover pattern);
         // rows live in a max_h 197px scroll region → the whole card tops out
-        // at ~232px (34 header + 1 hairline + 197).
+        // at ~232px (34 header + 1 hairline + 197). The tracked list focus is
+        // where real focused-row keyboard navigation happens: Up/Down move
+        // the active row, Enter/Space open the active navigable row.
+        let ordered_len = ordered.len();
         popover::popover_card_flush(theme)
             .w(px(width))
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close(window, cx)))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.close(window, cx);
+            .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                match ev.keystroke.key.as_str() {
+                    "escape" => this.close(window, cx),
+                    "up" => this.move_active(-1, ordered_len, window, cx),
+                    "down" => this.move_active(1, ordered_len, window, cx),
+                    "enter" | " " => {
+                        if let Some(child) = this
+                            .active_row
+                            .and_then(|ix| child_ids.get(ix))
+                            .cloned()
+                            .flatten()
+                        {
+                            this.open_child_chat(child, window, cx);
+                        }
+                    }
+                    _ => {}
                 }
             }))
             .child(header)
@@ -521,6 +766,7 @@ impl SubagentsPanel {
             .child(
                 div()
                     .id("subagents-inspector-list")
+                    .track_focus(&self.list_focus)
                     .max_h(px(197.0))
                     .overflow_y_scroll()
                     .child(rows),
@@ -651,7 +897,17 @@ fn inspector_row(theme: &Theme, entry: &SubagentPanelEntry) -> gpui::Div {
                 .text_size(px(11.5))
                 .text_color(theme.text_muted)
                 .child(task_head),
-        );
+        )
+        .when(entry.is_navigable(), |el| {
+            // Subtle chevron affordance: the row opens the child's live session.
+            el.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from("›")),
+            )
+        });
 
     let mut row = div()
         .h(px(if in_flight { 50.0 } else { 34.0 }))
@@ -696,7 +952,40 @@ impl Render for SubagentsPanel {
             .session_for(&chat_id)
             .map(|s| s.subagents.clone())
             .unwrap_or_default();
-        let entries = aggregate_subagents(&state.transcript, &snapshot, now_ms);
+        // Merge the parent's DURABLE child chat rows (the synced `Chat.child`
+        // relation) into the aggregation: they keep completed children
+        // navigable even after the parent's live snapshot goes empty or the
+        // parent restarts, and the child's own session row is the execution
+        // truth where available.
+        let children: Vec<DurableChildRow> = state
+            .chats
+            .iter()
+            .filter_map(|c| {
+                let child = c.child.as_ref()?;
+                if child.parent_chat_id != chat_id {
+                    return None;
+                }
+                Some(DurableChildRow {
+                    chat_id: c.id.clone(),
+                    parent_run_id: child.parent_run_id.clone(),
+                    tool_call_id: child.tool_call_id.clone(),
+                    agent: child.agent.clone(),
+                    task: child.task.clone(),
+                    mode: child.mode,
+                    created_at_ms: c.created_at.timestamp_millis(),
+                })
+            })
+            .collect();
+        let child_status = |child_id: &str| {
+            state.session_for(child_id).map(|s| {
+                child_session_panel_status(s.status, s.updated_at.timestamp_millis(), now_ms)
+            })
+        };
+        let entries = merge_child_rows(
+            aggregate_subagents(&state.transcript, &snapshot, now_ms),
+            &children,
+            child_status,
+        );
         // No records → no trigger at all.
         if entries.is_empty() {
             return Empty.into_any_element();
@@ -860,6 +1149,7 @@ mod tests {
             } else {
                 Some(updated_at)
             },
+            child_chat_id: None,
         }
     }
 
@@ -1117,6 +1407,7 @@ mod tests {
                 started_at: ms(1000),
                 updated_at: ms(1000),
                 ended_at: Some(ms(2000) - 3000 + 200 * i as i64),
+                child_chat_id: None,
             });
         }
         let ordered = order_panel(more);
@@ -1446,5 +1737,211 @@ mod tests {
         assert_eq!(info.agent, "planner");
         assert_eq!(info.task, "Plan\nmore");
         assert!(info.is_async);
+    }
+
+    /// The Zeron child chat id rides the snapshot run into the panel entry:
+    /// a run with `childChatId` reads navigable (the row opens the child's
+    /// live session), and a run without one never does (standalone spawns).
+    #[test]
+    fn child_chat_id_propagates_and_marks_navigable() {
+        let entries = vec![entry(vec![subagent_part("t1", true, false, false)])];
+        let now = ms(2000);
+        let mut navigable = run(
+            "r1",
+            Some("t1"),
+            SubagentRunMode::Async,
+            SubagentRunStatus::Running,
+            now,
+        );
+        navigable.child_chat_id = Some("child-1".into());
+        let out = aggregate_subagents(&entries, &[navigable], now);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_navigable());
+        assert_eq!(out[0].child_chat_id.as_deref(), Some("child-1"));
+
+        // A plain run (no child chat) stays non-navigable.
+        let out = aggregate_subagents(
+            &entries,
+            &[run(
+                "r2",
+                Some("t1"),
+                SubagentRunMode::Async,
+                SubagentRunStatus::Running,
+                now,
+            )],
+            now,
+        );
+        assert_eq!(out[0].child_chat_id, None);
+        assert!(!out[0].is_navigable());
+
+        // Snapshot-only runs (no transcript part) keep the id too.
+        let out = aggregate_subagents(
+            &[],
+            &[SubagentRun {
+                run_id: "r3".into(),
+                tool_call_id: None,
+                agent: "planner".into(),
+                model: None,
+                task: "T".into(),
+                mode: SubagentRunMode::Message,
+                status: SubagentRunStatus::Running,
+                progress: None,
+                started_at: now,
+                updated_at: now,
+                ended_at: None,
+                child_chat_id: Some("child-3".into()),
+            }],
+            now,
+        );
+        assert_eq!(out[0].child_chat_id.as_deref(), Some("child-3"));
+        assert!(out[0].is_navigable());
+    }
+
+    // ---- durable child rows (CRITICAL: reopenability/status truth) ----
+
+    fn child_row(
+        chat_id: &str,
+        parent_run_id: &str,
+        tool_call_id: Option<&str>,
+        created_at: i64,
+    ) -> DurableChildRow {
+        DurableChildRow {
+            chat_id: chat_id.into(),
+            parent_run_id: parent_run_id.into(),
+            tool_call_id: tool_call_id.map(str::to_owned),
+            agent: "planner".into(),
+            task: "Plan the panel".into(),
+            mode: SubagentRunMode::Async,
+            created_at_ms: created_at,
+        }
+    }
+
+    /// A completed child stays navigable after an EMPTY parent snapshot: the
+    /// durable child row synthesizes the run (child session Idle → Done).
+    #[test]
+    fn child_rows_keep_completed_children_navigable_after_empty_snapshot() {
+        let now = ms(2000);
+        // Async launch ack with no snapshot: the plain aggregate drops it.
+        let entries = vec![entry(vec![subagent_part("t1", true, true, false)])];
+        let base = aggregate_subagents(&entries, &[], now);
+        assert!(base.is_empty(), "an ack must not outlive its snapshot");
+        // The durable child row restores the run and keeps it clickable.
+        let children = vec![child_row("child-1", "run-1", Some("t1"), ms(1000))];
+        let out = merge_child_rows(base, &children, |_| Some(PanelStatus::Done));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_navigable());
+        assert_eq!(out[0].child_chat_id.as_deref(), Some("child-1"));
+        assert_eq!(out[0].run_id, "run-1");
+        assert_eq!(out[0].status, PanelStatus::Done);
+        assert_eq!(out[0].tool_call_id.as_deref(), Some("t1"));
+    }
+
+    /// After a parent RESTART the sync doc row (run id = tool call id) links
+    /// to the durable child by `tool_call_id` — exactly ONE navigable row,
+    /// never a doc row plus a synthesized twin.
+    #[test]
+    fn child_rows_link_doc_rows_to_children_after_restart() {
+        let now = ms(2000);
+        let entries = vec![entry(vec![subagent_part("t1", false, true, false)])];
+        let base = aggregate_subagents(&entries, &[], now);
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].run_id, "t1", "doc-only row keys by tool call id");
+        assert!(!base[0].is_navigable());
+        let children = vec![child_row("child-1", "run-1", Some("t1"), ms(1000))];
+        let out = merge_child_rows(base, &children, |_| Some(PanelStatus::Done));
+        assert_eq!(out.len(), 1, "no duplicate row for one child");
+        assert_eq!(out[0].run_id, "run-1", "renamed to the durable run id");
+        assert!(out[0].is_navigable());
+        assert_eq!(out[0].child_chat_id.as_deref(), Some("child-1"));
+        assert_eq!(out[0].status, PanelStatus::Done);
+    }
+
+    /// The child's OWN session row is the execution truth for a merged row.
+    #[test]
+    fn child_rows_use_child_session_as_execution_truth() {
+        let children = vec![child_row("child-1", "run-1", None, ms(1000))];
+        assert_eq!(
+            merge_child_rows(vec![], &children, |_| Some(PanelStatus::Running))[0].status,
+            PanelStatus::Running
+        );
+        assert_eq!(
+            merge_child_rows(vec![], &children, |_| Some(PanelStatus::Error))[0].status,
+            PanelStatus::Error
+        );
+        assert_eq!(
+            merge_child_rows(vec![], &children, |_| Some(PanelStatus::Done))[0].status,
+            PanelStatus::Done
+        );
+        // No session row yet → the run is still in-flight (queued), never a
+        // false terminal.
+        assert_eq!(
+            merge_child_rows(vec![], &children, |_| None)[0].status,
+            PanelStatus::Starting
+        );
+    }
+
+    /// The durable relation wins on a matched row, and the child session
+    /// overrides a stale parent-side status (e.g. a leftover Running edge).
+    #[test]
+    fn child_rows_durable_relation_wins_and_session_overrides_status() {
+        let now = ms(2000);
+        let entries = vec![entry(vec![subagent_part("t1", false, false, false)])];
+        let snapshot = vec![run(
+            "run-1",
+            Some("t1"),
+            SubagentRunMode::Sync,
+            SubagentRunStatus::Running,
+            now,
+        )];
+        let base = aggregate_subagents(&entries, &snapshot, now);
+        assert!(!base[0].is_navigable());
+        let children = vec![child_row("child-1", "run-1", Some("t1"), ms(1000))];
+        let out = merge_child_rows(base, &children, |_| Some(PanelStatus::Done));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_navigable());
+        assert_eq!(out[0].status, PanelStatus::Done, "child session wins");
+        assert_eq!(out[0].agent, "planner");
+        assert_eq!(out[0].task, "Plan the panel");
+    }
+
+    /// Child session status mapping: Working/AwaitingInput → Running (Stale
+    /// past the staleness window), Errored → Error, Idle → Done.
+    #[test]
+    fn child_session_status_maps_to_panel() {
+        let now = ms(2000);
+        assert_eq!(
+            child_session_panel_status(SessionStatus::Working, now, now),
+            PanelStatus::Running
+        );
+        assert_eq!(
+            child_session_panel_status(SessionStatus::AwaitingInput, now, now),
+            PanelStatus::Running
+        );
+        assert_eq!(
+            child_session_panel_status(SessionStatus::Working, now - SUBAGENT_STALE_MS - 1000, now),
+            PanelStatus::Stale
+        );
+        assert_eq!(
+            child_session_panel_status(SessionStatus::Errored, now, now),
+            PanelStatus::Error
+        );
+        assert_eq!(
+            child_session_panel_status(SessionStatus::Idle, now, now),
+            PanelStatus::Done
+        );
+    }
+
+    /// Focused-row selection: Down starts at the first row, Up at the last,
+    /// and movement wraps at both ends.
+    #[test]
+    fn next_active_index_wraps_and_starts_at_ends() {
+        assert_eq!(next_active_index(None, 1, 3), Some(0));
+        assert_eq!(next_active_index(None, -1, 3), Some(2));
+        assert_eq!(next_active_index(Some(0), 1, 3), Some(1));
+        assert_eq!(next_active_index(Some(2), 1, 3), Some(0), "wraps forward");
+        assert_eq!(next_active_index(Some(0), -1, 3), Some(2), "wraps backward");
+        assert_eq!(next_active_index(Some(1), 0, 3), Some(1));
+        assert_eq!(next_active_index(None, 1, 0), None);
+        assert_eq!(next_active_index(Some(0), 1, 0), None);
     }
 }

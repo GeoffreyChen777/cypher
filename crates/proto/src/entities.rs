@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{HarnessId, ReasoningLevel, SandboxLevel, SubagentRun};
+use crate::{HarnessId, ReasoningLevel, SandboxLevel, SubagentRun, SubagentRunMode};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,61 @@ pub struct Device {
     /// glance (Devices page). Optional so pre-existing docs stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+/// Zeron-owned child-chat metadata (navigable Zeron child subagent chats).
+/// Stored ADDITIVELY on the synced `Chat` row by the engine's `StartSubagent`
+/// bridge — never assumed from pi. A row with `child: Some(..)` is a child
+/// chat: hidden from the root sidebar/overview, reachable only through the
+/// parent's Subagents inspector, and re-openable after the run completes
+/// (the durable row is what keeps a completed child navigable even after the
+/// parent's live `zeron.subagents.v1` snapshot goes empty or the parent
+/// restarts). The persisted profile (system prompt / tools / model /
+/// thinking) is what later direct turns in the child chat re-apply.
+///
+/// Deliberately NO host-local state here: the messaging channel root (an
+/// absolute `/tmp/pi-subagents-messages/...` path) is host-local, stale after
+/// a reboot, and outside this sync/ownership boundary — it is kept in a
+/// local engine runtime map only long enough for the initial queued run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildChat {
+    /// The parent chat whose Inspector spawned this child.
+    pub parent_chat_id: String,
+    /// The parent's `zeron.subagents.v1` run id this child answers to
+    /// (extension-local uuid; the deterministic idempotence key with
+    /// `parent_chat_id`).
+    pub parent_run_id: String,
+    /// Subagent name.
+    pub agent: String,
+    /// Task text (bounded at the bridge, ≤500 chars like the status board).
+    pub task: String,
+    /// How the run was launched (sync/async/message).
+    pub mode: SubagentRunMode,
+    /// The parent tool call id this run answers to (sync/async) — the durable
+    /// link to the parent's transcript part. Persisted so the Inspector can
+    /// match the parent's doc-only row to this child even after the parent's
+    /// live `zeron.subagents.v1` snapshot is gone or the parent restarted
+    /// (the panel matches by `parent_run_id` first, `tool_call_id` second).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Persisted child agent profile — reapplied on later child turns.
+    pub profile: ChildAgentProfile,
+}
+
+/// The persisted subagent agent profile (the `agents/<name>.md` frontmatter
+/// + body the parent extension reads): system prompt + tool allowlist +
+/// model/thinking. Deliberately a bounded struct, never an arbitrary env map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildAgentProfile {
+    pub system_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// A synced (device, folder) pair — the unit of organization in the sidebar.
@@ -126,6 +181,24 @@ pub struct Chat {
     /// dials the room the registry names. Per-chat and instantly revertible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_gen: Option<u32>,
+    /// Zeron-owned child-chat metadata. `Some` ⇒ this chat is a navigable
+    /// Zeron child subagent chat (hidden from the root sidebar/overview).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<ChildChat>,
+}
+
+impl Chat {
+    /// True for a Zeron-hosted child subagent chat (engine-owned child
+    /// relation — see [`ChildChat`]). Child chats are hidden from the root
+    /// sidebar/overview and reached only through the parent's Inspector.
+    pub fn is_child(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// The parent chat id, when this is a child chat.
+    pub fn parent_chat_id(&self) -> Option<&str> {
+        self.child.as_ref().map(|c| c.parent_chat_id.as_str())
+    }
 }
 
 impl Chat {

@@ -54,10 +54,14 @@ use futures::stream::BoxStream;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::sync::watch;
 
-use zeron_doc::{MessagePart, SessionCommandPayload};
-use zeron_proto::{ChatConfig, EngineInfo, HarnessId, ToolCall, WorkspaceScope};
+use zeron_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
+use zeron_proto::{
+    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SubagentRunMode, ToolCall,
+    WorkspaceScope,
+};
 use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
@@ -273,6 +277,40 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
+/// `StartSubagent` params — the Zeron bridge's bounded start request. All
+/// string fields are length-checked at the handler (see the bounds below) so
+/// a misbehaving publisher can never mint an unbounded persisted row.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartSubagentParams {
+    parent_chat_id: String,
+    /// Parent `zeron.subagents.v1` run id — the idempotence key with
+    /// `parent_chat_id`.
+    run_id: String,
+    agent: String,
+    task: String,
+    mode: SubagentRunMode,
+    /// Parent tool call id this run answers to (sync/async); persisted on the
+    /// child row as the durable link to the parent's transcript part.
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    /// Optional cwd override; defaults to the parent's cwd.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Persisted child agent profile (reapplied on later child turns).
+    system_prompt: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    /// Messaging-channel root (the parent extension's `messageRoot`).
+    message_root: String,
+    #[serde(default)]
+    child_index: u32,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -384,6 +422,10 @@ pub struct EngineRpc {
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
+    /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
+    /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
+    /// read-then-create scan and mint twins or double-queue the initial run.
+    start_subagent_lock: Mutex<()>,
 }
 
 impl EngineRpc {
@@ -419,6 +461,7 @@ impl EngineRpc {
             updater: None,
             local_import: None,
             engine_info,
+            start_subagent_lock: Mutex::new(()),
         }
     }
 
@@ -597,6 +640,266 @@ impl EngineRpc {
         paths
     }
 
+    /// `StartSubagent` handler: validate the parent (exists + hosted locally),
+    /// idempotently create the same-device child Chat with additive Zeron-owned
+    /// metadata, and queue its initial durable Pi run. Strict bounded params — a
+    /// bad frame is rejected before any row is written. On queue failure the
+    /// child row is removed so no bogus navigable row survives. Serialized by
+    /// `start_subagent_lock` so concurrent starts of the same (parent, run)
+    /// cannot race the read-then-create scan.
+    async fn start_subagent(&self, params: StartSubagentParams) -> Result<RpcReply, RpcError> {
+        // One `StartSubagent` at a time: the idempotence scan, the row create,
+        // and the initial-run queue must be atomic relative to each other (a
+        // concurrent duplicate must see the row we just created and never
+        // double-queue). Everything below is synchronous, but the guard is held
+        // across the whole operation for the same reason.
+        let _guard = self.start_subagent_lock.lock().await;
+
+        // Strict bounds (mirror the extension's own publisher caps + headroom).
+        let bad = |msg: &str| RpcError::BadParams(msg.into());
+        if params.parent_chat_id.chars().count() > 256 {
+            return Err(bad("parentChatId too long"));
+        }
+        if params.run_id.chars().count() > 200 {
+            return Err(bad("runId too long"));
+        }
+        if params.agent.chars().count() > 100 || params.agent.trim().is_empty() {
+            return Err(bad("agent invalid"));
+        }
+        if params.task.chars().count() > 500 {
+            return Err(bad("task too long"));
+        }
+        if params.system_prompt.len() > 64 * 1024 {
+            return Err(bad("systemPrompt too large"));
+        }
+        if params.message_root.chars().count() > 512 {
+            return Err(bad("messageRoot too long"));
+        }
+        if params.tools.len() > 32
+            || params
+                .tools
+                .iter()
+                .any(|t| t.chars().count() > 128 || t.trim().is_empty())
+        {
+            return Err(bad("tools invalid"));
+        }
+        if params
+            .cwd
+            .as_deref()
+            .is_some_and(|c| c.chars().count() > 1024)
+        {
+            return Err(bad("cwd too long"));
+        }
+        if params.child_index > 32 {
+            return Err(bad("childIndex too large"));
+        }
+        if params
+            .model
+            .as_deref()
+            .is_some_and(|m| m.chars().count() > 200 || m.trim().is_empty())
+        {
+            return Err(bad("model invalid"));
+        }
+        if params
+            .thinking
+            .as_deref()
+            .is_some_and(|t| t.chars().count() > 32 || t.trim().is_empty())
+        {
+            return Err(bad("thinking invalid"));
+        }
+
+        let parent = self
+            .workspace
+            .chat(&params.parent_chat_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .ok_or_else(|| RpcError::Failed("parent chat not found".into()))?;
+        if parent.device_id != self.doc_host.device_id() {
+            return Err(RpcError::Failed(
+                "parent chat is not hosted on this device".into(),
+            ));
+        }
+
+        let title = if params.task.trim().is_empty() {
+            format!("{} subagent", params.agent)
+        } else {
+            let head: String = params.task.trim().chars().take(60).collect();
+            format!("{} · {}", params.agent, head)
+        };
+        let profile = ChildAgentProfile {
+            system_prompt: params.system_prompt.clone(),
+            tools: params.tools.clone(),
+            model: params.model.clone(),
+            thinking: params.thinking.clone(),
+        };
+        let child_chat_id = self
+            .workspace
+            .create_child_chat(
+                &parent,
+                &params.run_id,
+                &params.agent,
+                &params.task,
+                params.mode,
+                params.tool_call_id.clone(),
+                profile,
+                &title,
+            )
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let child_id = child_chat_id.id().to_string();
+
+        // Does the initial Run still need to be queued? A FRESH child always
+        // does. An EXISTING child does only when its row is an orphan — no
+        // Pending/Applied Run in the durable ledger AND no dispatch evidence
+        // (a message or harness session on the row). That is exactly the
+        // crash-gap state (row created, process died before queueing) or a
+        // child whose only run command was rejected/expired/cancelled.
+        // Ordinary retries — the initial run already queued or already
+        // dispatched — return the id WITHOUT queueing a second Run.
+        let needs_initial_run = if child_chat_id.created() {
+            true
+        } else {
+            !self.child_initial_run_evident(&child_id)?
+        };
+
+        if needs_initial_run {
+            // Remember the messaging channel LOCALLY (never synced — the
+            // channel root is an absolute host-local path) so the initial
+            // queued run below can reach the parent's message root. Consumed at
+            // first dispatch; later child turns have no channel.
+            self.sessions.register_child_channel(
+                &child_id,
+                &params.message_root,
+                params.child_index,
+            );
+
+            // The normal durable Run command (idempotent by child chat + message id;
+            // the engine's own executor picks it up and dispatches through the pi
+            // harness with the child's persisted profile + local messaging channel).
+            let request = RunRequest {
+                prompt: if params.task.trim().is_empty() {
+                    "Task: (no description provided)".to_string()
+                } else {
+                    format!("Task: {}", params.task)
+                },
+                harness: Some(HarnessId::Pi),
+                model: params.model.clone(),
+                reasoning: None,
+                model_options: Default::default(),
+                cwd: params
+                    .cwd
+                    .clone()
+                    .filter(|c| !c.trim().is_empty())
+                    .or_else(|| parent.cwd.clone())
+                    .unwrap_or_else(|| "~".into()),
+                sandbox: parent
+                    .config
+                    .as_ref()
+                    .map(|c| c.sandbox)
+                    .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
+                auto_approve: false,
+                resume: None,
+                attachments: Vec::new(),
+            };
+            if let Err(err) = self.doc_host.queue_command(
+                &child_id,
+                SessionCommandPayload::Run {
+                    request,
+                    message_id: crate::new_id(),
+                },
+            ) {
+                // Rollback: no bogus navigable row — the queue is what makes the
+                // child real. The local channel entry goes with it.
+                let _ = self.workspace.delete_chat(&child_id);
+                self.sessions.remove_child_channel(&child_id);
+                return Err(RpcError::Failed(format!("child start queue failed: {err}")));
+            }
+        }
+        RpcReply::value(&serde_json::json!({
+            "childChatId": child_id
+        }))
+    }
+
+    /// Does an EXISTING child already show its initial run was queued or
+    /// dispatched? True when the durable command ledger holds a Pending or
+    /// Applied Run command, or the chat row carries dispatch evidence
+    /// (`last_message_at` set, or a harness session id recorded). False for an
+    /// orphan row — the crash gap between row creation and queueing, or a child
+    /// whose only run command was rejected/expired/cancelled — which the caller
+    /// then recovers by registering the fresh channel and queueing exactly one
+    /// initial Run.
+    fn child_initial_run_evident(&self, child_id: &str) -> Result<bool, RpcError> {
+        if let Some(chat) = self
+            .workspace
+            .chat(child_id)
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            && (chat.last_message_at.is_some() || chat.harness_session_id.is_some())
+        {
+            // A message or a harness session means the initial run dispatched —
+            // it must have been queued to dispatch.
+            return Ok(true);
+        }
+        match self.doc_host.open(child_id) {
+            Ok(handle) => {
+                let commands = handle
+                    .doc()
+                    .read_commands()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                Ok(commands.iter().any(|c| {
+                    matches!(c.payload, SessionCommandPayload::Run { .. })
+                        && matches!(
+                            c.status,
+                            SessionCommandStatus::Pending | SessionCommandStatus::Applied
+                        )
+                }))
+            }
+            // No (readable) ledger — treat as an orphan: the caller recovers by
+            // queueing the initial Run rather than leaving the row stuck.
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// `WatchAgentEvents` handler: replayable per-chat agent events from the
+    /// sessions journal/hub (journal replay after `afterSeq`, then live). The
+    /// parent extension subscribes to the child chat and maps terminal
+    /// `Done.result` back into its own result semantics.
+    fn watch_agent_events(&self, chat_id: String, after_seq: u64) -> Result<RpcReply, RpcError> {
+        let (replay, rx) = self
+            .sessions
+            .subscribe(&chat_id, after_seq)
+            .map_err(|e| RpcError::Failed(e.to_string()))?;
+        let replay = futures::stream::iter(replay.into_iter().map(|entry| {
+            serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string()))
+        }));
+        // Journaled events are tagged JSON (`AgentEvent`'s own serde); the
+        // live hub carries the same shape.
+        let live = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.ok().map(|entry| {
+                (
+                    serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string())),
+                    rx,
+                )
+            })
+        });
+        let stream = replay
+            .chain(live)
+            .filter_map({
+                let chat_id = chat_id.clone();
+                move |item: Result<serde_json::Value, RpcError>| {
+                    let chat = chat_id.clone();
+                    async move {
+                        match item {
+                            Ok(value) => Some(value),
+                            Err(err) => {
+                                tracing::warn!(chat = %chat, error = %err, "watch agent events serialization failed");
+                                None
+                            }
+                        }
+                    }
+                }
+            })
+            .boxed();
+        Ok(RpcReply::Stream(stream))
+    }
+
     /// Forward a device-addressed call over the target device's relay. On transport
     /// failure the cached link is invalidated so the next call re-dials.
     async fn forward(
@@ -738,8 +1041,34 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
+                // Parent delete CASCADES to its Zeron child chats (rows + docs +
+                // session interruption): a deleted parent must not leave orphaned
+                // navigable child rows behind (no dangling navigation). Child rows
+                // are tombstoned in the same mutation, then torn down async.
+                let children = self.workspace.child_chats(&chat_id).map_err(failed)?;
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
+                if !children.is_empty() {
+                    let sessions = self.sessions.clone();
+                    let doc_host = self.doc_host.clone();
+                    let workspace = self.workspace.clone();
+                    tokio::spawn(async move {
+                        for child in children {
+                            // Interrupt first so the run settles and its
+                            // terminal bookkeeping lands BEFORE the row goes
+                            // (a live run's late claim could otherwise
+                            // resurrect the tombstoned row).
+                            if let Err(err) = sessions.interrupt(&child.id).await {
+                                tracing::debug!(chat = %child.id, error = %err, "child interrupt skipped");
+                            }
+                            // The host-local channel entry (initial-run only)
+                            // dies with the row.
+                            sessions.remove_child_channel(&child.id);
+                            let _ = workspace.delete_chat(&child.id);
+                            doc_host.purge_chat(&child.id);
+                        }
+                    });
+                }
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self
@@ -1713,6 +2042,24 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
+            }
+            methods::START_SUBAGENT => {
+                let p: StartSubagentParams = parse_params(params)?;
+                self.start_subagent(p).await
+            }
+            methods::WATCH_AGENT_EVENTS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    chat_id: String,
+                    #[serde(default)]
+                    after_seq: Option<u64>,
+                }
+                let p: P = parse_params(params)?;
+                if p.chat_id.chars().count() > 256 {
+                    return Err(RpcError::BadParams("chatId too long".into()));
+                }
+                self.watch_agent_events(p.chat_id, p.after_seq.unwrap_or(0))
             }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }

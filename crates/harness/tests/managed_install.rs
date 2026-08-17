@@ -12,7 +12,7 @@
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zeron_harness::{AcpHarness, Harness, RunControls};
+use zeron_harness::{AcpHarness, Harness, RunControls, RunHostContext};
 use zeron_proto::{AgentEvent, RunRequest};
 
 #[tokio::test]
@@ -32,6 +32,7 @@ async fn managed_install_reaches_session_started() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: interrupt.clone(),
+        host: RunHostContext::default(),
     };
     let request = RunRequest {
         prompt: "say the word ok and stop".into(),

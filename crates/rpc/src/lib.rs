@@ -132,6 +132,15 @@ pub mod methods {
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
+    /// Zeron child-subagent bridge (IPC-only, unary): idempotently create the
+    /// same-device child Chat for `(parentChatId, runId)` and queue its initial
+    /// durable Pi run; replies `{childChatId}`. See `StartSubagent` in the
+    /// engine RPC + docs/research/pi-rpc.md.
+    pub const START_SUBAGENT: &str = "StartSubagent";
+    /// Zeron child-subagent bridge (IPC-only, stream): replayable agent events
+    /// for a chat (journal replay after `afterSeq`, then live) — the parent
+    /// extension observes the child's terminal `Done`/result through this.
+    pub const WATCH_AGENT_EVENTS: &str = "WatchAgentEvents";
 }
 
 #[derive(Debug, thiserror::Error)]

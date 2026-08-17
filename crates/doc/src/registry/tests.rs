@@ -274,6 +274,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         space_id: None,
         last_seen_at: None,
         room_gen: None,
+        child: None,
     }
 }
 
@@ -356,6 +357,7 @@ fn subagents() -> Vec<SubagentRun> {
         started_at: 1000,
         updated_at: 2000,
         ended_at: None,
+        child_chat_id: None,
     }]
 }
 
@@ -509,6 +511,39 @@ fn spaces_round_trip_and_mutate() {
 
     assert!(!ws.rename_space("nope", Some("x")).unwrap());
     assert!(!ws.set_space_git("nope", true, None, ts(1)).unwrap());
+}
+
+/// The additive Zeron-owned child metadata rides the registry chat row too
+/// (the workspace mirror is the Loro doc; the registry is the synced row
+/// store): a child chat round-trips through the registry and survives a
+/// peer sync, while old rows read `child: None`.
+#[test]
+fn child_chat_metadata_round_trips_through_registry() {
+    use zeron_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
+    let mut ws = RegistryDoc::new("dev-a");
+    let mut child = chat("child-1", "dev-a");
+    child.child = Some(ChildChat {
+        parent_chat_id: "parent-1".into(),
+        parent_run_id: "run-1".into(),
+        agent: "planner".into(),
+        task: "Plan the panel".into(),
+        mode: SubagentRunMode::Async,
+        tool_call_id: None,
+        profile: ChildAgentProfile {
+            system_prompt: "You are the planner.".into(),
+            tools: vec!["read".into(), "bash".into()],
+            model: None,
+            thinking: None,
+        },
+    });
+    ws.upsert_chat(&child).unwrap();
+    let read = ws.chat("child-1").unwrap().unwrap();
+    assert!(read.is_child());
+    assert_eq!(read.parent_chat_id(), Some("parent-1"));
+    assert_eq!(read.child, child.child);
+    // A plain chat reads child: None.
+    ws.upsert_chat(&chat("plain", "dev-a")).unwrap();
+    assert_eq!(ws.chat("plain").unwrap().unwrap().child, None);
 }
 
 #[test]

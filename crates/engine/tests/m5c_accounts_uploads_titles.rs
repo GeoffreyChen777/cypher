@@ -585,8 +585,18 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     })
     .await;
     assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
-    // Branch renamed from the title, chat row updated to match.
-    assert_eq!(chat.branch.as_deref(), Some("zeron/fix-login-flow"));
+    // Branch renamed from the title, chat row updated to match. The rename
+    // lands in its own commit after the title — wait for it before asserting
+    // (the title wait above can race it).
+    wait_for("branch rename", || {
+        core.workspace
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .filter(|c| c.branch.as_deref() == Some("zeron/fix-login-flow"))
+            .map(|c| ())
+    })
+    .await;
     let head = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(&worktree.path)

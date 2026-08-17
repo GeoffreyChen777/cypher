@@ -28,7 +28,9 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space, SubagentRun};
+use zeron_proto::{
+    Chat, ChatConfig, ChildChat, Device, Session, SessionStatus, Space, SubagentRun,
+};
 
 use crate::schema::DocError;
 
@@ -265,6 +267,10 @@ impl WorkspaceDoc {
         )?;
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
+        match &chat.child {
+            Some(child) => row.insert("child", LoroValue::from(serde_json::to_value(child)?))?,
+            None => row.delete("child")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -659,6 +665,8 @@ pub(crate) struct RawChat {
     last_seen_at: Option<i64>,
     #[serde(default)]
     room_gen: Option<u32>,
+    #[serde(default)]
+    child: Option<ChildChat>,
 }
 
 impl From<RawChat> for Chat {
@@ -680,6 +688,7 @@ impl From<RawChat> for Chat {
             space_id: raw.space_id,
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
+            child: raw.child,
         }
     }
 }
@@ -757,6 +766,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            child: None,
         }
     }
 
@@ -795,6 +805,56 @@ mod tests {
             .expect("export b");
         b.doc().import(&a_update).expect("import into b");
         a.doc().import(&b_update).expect("import into a");
+    }
+
+    /// The additive Zeron-owned child metadata rides the synced chat row: a
+    /// child chat round-trips through the Loro doc and reads back as a child
+    /// (hidden from the root sidebar by the UI), while an absent field on old
+    /// rows reads `None` (compatibility default).
+    #[test]
+    fn child_chat_metadata_round_trips_and_defaults_absent() {
+        use zeron_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
+        let ws = WorkspaceDoc::new();
+        let mut child = chat("child-1", "dev-a");
+        child.child = Some(ChildChat {
+            parent_chat_id: "parent-1".into(),
+            parent_run_id: "run-1".into(),
+            agent: "planner".into(),
+            task: "Plan the panel".into(),
+            mode: SubagentRunMode::Async,
+            tool_call_id: None,
+            profile: ChildAgentProfile {
+                system_prompt: "You are the planner.".into(),
+                tools: vec!["read".into(), "bash".into()],
+                model: Some("anthropic/claude-sonnet-4".into()),
+                thinking: None,
+            },
+        });
+        ws.upsert_chat(&child).unwrap();
+        let read = ws.chat("child-1").unwrap().expect("child row exists");
+        assert!(read.is_child());
+        assert_eq!(read.parent_chat_id(), Some("parent-1"));
+        assert_eq!(read.child, child.child);
+        assert_eq!(
+            read.child.as_ref().unwrap().profile.model.as_deref(),
+            Some("anthropic/claude-sonnet-4")
+        );
+
+        // A snapshot round-trip preserves the field across docs.
+        let other = LoroDoc::new();
+        other.import(&ws.export_snapshot().unwrap()).unwrap();
+        let restored = WorkspaceDoc::from_doc(other);
+        assert_eq!(
+            restored.chat("child-1").unwrap().unwrap().child,
+            child.child
+        );
+
+        // Old rows without the field read None (never a child).
+        assert!(ws.chat("nope").unwrap().is_none());
+        let plain = chat("plain", "dev-a");
+        ws.upsert_chat(&plain).unwrap();
+        assert_eq!(ws.chat("plain").unwrap().unwrap().child, None);
+        assert!(!ws.chat("plain").unwrap().unwrap().is_child());
     }
 
     #[test]
@@ -881,6 +941,7 @@ mod tests {
             started_at: 1000,
             updated_at: 2000,
             ended_at: None,
+            child_chat_id: None,
         }];
         ws.upsert_session(&live).unwrap();
         let read = ws.read_sessions().unwrap();

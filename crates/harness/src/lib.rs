@@ -40,6 +40,44 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// Host-side run context: which chat this run belongs to and whether the
+/// engine hosts it as a Zeron child subagent. A NON-SERIALIZED internal seam
+/// (never rides the wire — `RunRequest` stays clean); the engine builds it
+/// from the chat row at dispatch time. Discovery processes never see it (they
+/// have no `RunControls`), so a parent id can never leak into a probe.
+#[derive(Debug, Clone, Default)]
+pub struct RunHostContext {
+    /// The chat id this run belongs to (injected as `ZERON_CHAT_ID` into the
+    /// child pi process — the subagents extension publishes it in its
+    /// `zeron.subagents.v1` projection as `childChatId`). Discovery processes
+    /// never see it (they have no `RunControls`), so a parent id can never
+    /// leak into a probe.
+    pub chat_id: Option<String>,
+    /// Zeron child-subagent env (present only for child chats): the persisted
+    /// agent profile plus the messaging-channel identity for the initial run.
+    pub child: Option<ChildRunEnv>,
+}
+
+/// The child-subagent runtime env the engine derives from the chat row's
+/// persisted [`zeron_proto::ChildChat`] metadata + the engine-local channel
+/// info. Bounded struct (never an arbitrary env map); the pi harness injects
+/// it as env + CLI flags into the child pi process so the extension loads in
+/// child mode (`PI_SUBAGENT_ROLE=child`) and registers the messaging tools.
+/// The messaging channel is HOST-LOCAL and present only for the initial run:
+/// `channel_root: None` (later child turns, restarts) means the child has no
+/// message channel — the extension's messaging tools then report unavailable.
+#[derive(Debug, Clone)]
+pub struct ChildRunEnv {
+    pub system_prompt: String,
+    pub tools: Vec<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub channel_root: Option<String>,
+    pub run_id: String,
+    pub agent: String,
+    pub child_index: u32,
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
@@ -52,6 +90,9 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Host-side run context (chat identity + child env). Non-serialized
+    /// internal seam — see [`RunHostContext`].
+    pub host: RunHostContext,
 }
 
 #[async_trait]

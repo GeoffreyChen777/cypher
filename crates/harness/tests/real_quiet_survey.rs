@@ -16,7 +16,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{
+    AcpHarness, CancellationToken, Harness, RunControls, RunHostContext, SteerMessage,
+};
 use zeron_proto::{
     AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
 };
@@ -41,6 +43,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        host: RunHostContext::default(),
     };
     (controls, steer_tx, token)
 }

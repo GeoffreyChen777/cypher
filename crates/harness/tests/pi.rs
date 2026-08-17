@@ -8,7 +8,9 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::pi::PiHarness;
-use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
+use zeron_harness::{
+    CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
+};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
     ToolCall, UserInputAnswer,
@@ -70,6 +72,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        host: RunHostContext::default(),
     };
     (controls, steer_tx, token)
 }
@@ -96,6 +99,38 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
             _ => None,
         })
         .collect()
+}
+
+/// The engine bridge (`ZERON_ENGINE_WS_URL`) must be injected into every pi
+/// child when `with_engine_bridge` is set — and absent otherwise. The spawn
+/// seam builds the exact command a run would spawn, so no child is needed.
+#[test]
+fn engine_bridge_url_is_injected_into_children() {
+    let url = std::ffi::OsStr::new("ws://127.0.0.1:4242");
+    let key = std::ffi::OsStr::new("ZERON_ENGINE_WS_URL");
+
+    let bridged = PiHarness::new(std::env::temp_dir().join("zeron-pi-bridge-sessions"))
+        .with_executable(fixture_path())
+        .with_engine_bridge(Some("ws://127.0.0.1:4242".into()));
+    let cmd = bridged
+        .spawn_command(None, &RunHostContext::default(), None)
+        .expect("command builds");
+    let envs: std::collections::HashMap<_, _> = cmd.as_std().get_envs().collect();
+    assert_eq!(
+        envs.get(key),
+        Some(&Some(url)),
+        "bridged children receive the engine WS URL"
+    );
+
+    let plain = PiHarness::new(std::env::temp_dir().join("zeron-pi-bridge-sessions"))
+        .with_executable(fixture_path());
+    let cmd = plain
+        .spawn_command(None, &RunHostContext::default(), None)
+        .expect("command builds");
+    assert!(
+        cmd.as_std().get_envs().all(|(k, _)| k != key),
+        "unbridged children must not receive the engine WS URL"
+    );
 }
 
 #[tokio::test]

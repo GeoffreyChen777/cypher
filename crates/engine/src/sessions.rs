@@ -28,7 +28,9 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{
+    CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
+};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, SubagentRun,
     SubagentRunStatus, UserInputAnswer, UserInputQuestion,
@@ -108,6 +110,14 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    /// Host-LOCAL messaging channel identity for child chats, keyed by child
+    /// chat id. The channel root is an absolute host-local path
+    /// (`/tmp/pi-subagents-messages/<session>`); it is NEVER persisted or
+    /// synced (stale after a reboot, outside the workspace sync boundary). An
+    /// entry lives only long enough for the initial queued run — registered
+    /// by `StartSubagent` and CONSUMED at first dispatch. Bounded: capped at
+    /// [`MAX_LOCAL_CHILD_CHANNELS`], and removed on child-chat delete/rollback.
+    child_channels: Mutex<HashMap<String, LocalChildChannel>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -123,6 +133,18 @@ struct Inner {
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
 }
+
+/// Host-local messaging channel for one child chat's INITIAL run (see
+/// [`Inner::child_channels`]). Not serialized, never synced.
+#[derive(Debug, Clone)]
+pub struct LocalChildChannel {
+    pub channel_root: String,
+    pub child_index: u32,
+}
+
+/// Cap on live local child-channel entries (bounded memory; a hostile flood
+/// of child starts can never grow the map unboundedly).
+const MAX_LOCAL_CHILD_CHANNELS: usize = 256;
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -153,6 +175,7 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                child_channels: Mutex::new(HashMap::new()),
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
@@ -220,6 +243,37 @@ impl SessionsEngine {
     /// inside the UI's 45s staleness window while only a subagent is active.
     pub fn set_subagents(&self, chat_id: &str, runs: Vec<SubagentRun>) {
         self.inner.set_subagents(chat_id, runs);
+    }
+
+    /// Register a child chat's host-local messaging channel (initial run
+    /// only). Never persisted/synced — see [`Inner::child_channels`].
+    pub fn register_child_channel(&self, chat_id: &str, channel_root: &str, child_index: u32) {
+        let mut map = lock(&self.inner.child_channels);
+        if map.len() >= MAX_LOCAL_CHILD_CHANNELS {
+            // Bounded cap: evict an arbitrary stale entry (the channel is
+            // short-lived and consumed at first dispatch; the eviction is a
+            // memory bound, not an LRU guarantee).
+            if let Some(oldest) = map.keys().next().cloned() {
+                map.remove(&oldest);
+            }
+        }
+        map.insert(
+            chat_id.to_string(),
+            LocalChildChannel {
+                channel_root: channel_root.to_string(),
+                child_index,
+            },
+        );
+    }
+
+    /// Consume (one-shot) a child chat's local channel at first dispatch.
+    pub fn take_child_channel(&self, chat_id: &str) -> Option<LocalChildChannel> {
+        lock(&self.inner.child_channels).remove(chat_id)
+    }
+
+    /// Drop a child chat's local channel (delete/rollback teardown).
+    pub fn remove_child_channel(&self, chat_id: &str) {
+        lock(&self.inner.child_channels).remove(chat_id);
     }
 
     /// Owner-death terminalization: the harness run for `chat_id` has truly
@@ -466,6 +520,7 @@ impl SessionsEngine {
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            host: self.inner.host_context(chat_id),
         };
 
         lock(&self.inner.runs).insert(
@@ -945,6 +1000,38 @@ impl Inner {
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
+    }
+
+    /// Host-side run context for one chat: its identity plus — for Zeron-hosted
+    /// child subagent chats — the persisted child env the pi harness applies
+    /// (system prompt/tools/model/thinking) and the host-LOCAL messaging
+    /// channel for the INITIAL run. A NON-serialized internal seam: the child
+    /// semantics come from the chat row, never from `RunRequest` (no arbitrary
+    /// persisted env maps on the wire), and the channel (an absolute host path)
+    /// is engine-local — consumed here so later child turns keep the profile
+    /// but have no channel (messaging tools then honestly report unavailable).
+    fn host_context(&self, chat_id: &str) -> RunHostContext {
+        let mut ctx = RunHostContext {
+            chat_id: Some(chat_id.to_string()),
+            child: None,
+        };
+        if let Some(ws) = self.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(child) = chat.child
+        {
+            let channel = lock(&self.child_channels).remove(chat_id);
+            ctx.child = Some(ChildRunEnv {
+                system_prompt: child.profile.system_prompt,
+                tools: child.profile.tools,
+                model: child.profile.model,
+                thinking: child.profile.thinking,
+                channel_root: channel.as_ref().map(|c| c.channel_root.clone()),
+                run_id: child.parent_run_id,
+                agent: child.agent,
+                child_index: channel.map(|c| c.child_index).unwrap_or(0),
+            });
+        }
+        ctx
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.

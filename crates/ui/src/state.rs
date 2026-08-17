@@ -875,9 +875,14 @@ impl AppState {
 
     // ---- queries ----
 
-    /// Non-archived chats in sidebar order.
+    /// Non-archived, NON-CHILD chats in sidebar order. Zeron child subagent
+    /// chats (engine-owned `child: Some(..)` rows) are hidden from the root
+    /// sidebar/session overview — they are reached only through the parent's
+    /// Subagents inspector. [`Self::selected_chat_row`] and transcript
+    /// subscriptions still work for a selected child (navigation selects it
+    /// directly).
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|c| !c.archived)
+        self.chats.iter().filter(|c| !c.archived && !c.is_child())
     }
 
     pub fn selected_space_row(&self) -> Option<&Space> {
@@ -2042,6 +2047,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            child: None,
         }
     }
 
@@ -2419,6 +2425,60 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    /// Zeron child subagent chats are hidden from the root sidebar/overview
+    /// (`visible_chats` / `overview_chats`), yet remain selectable: a selected
+    /// child still resolves through `selected_chat_row` (the Inspector
+    /// navigation path) and survives `apply_chats` (it stays in `self.chats`).
+    #[test]
+    fn child_chats_hidden_from_root_but_selected_row_works() {
+        let mut state = AppState::new();
+        let parent = chat("parent", 0, Some(10));
+        let mut child = chat("child-1", 1, Some(11));
+        child.child = Some(zeron_proto::ChildChat {
+            parent_chat_id: "parent".into(),
+            parent_run_id: "run-1".into(),
+            agent: "planner".into(),
+            task: "Plan the panel".into(),
+            mode: zeron_proto::SubagentRunMode::Async,
+            tool_call_id: None,
+            profile: zeron_proto::ChildAgentProfile {
+                system_prompt: "You are the planner.".into(),
+                tools: vec![],
+                model: None,
+                thinking: None,
+            },
+        });
+        let mut archived = chat("archived", 2, None);
+        archived.archived = true;
+        state.apply_chats(vec![parent, child, archived]);
+
+        // Root lists exclude both children and archived rows.
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["parent"], "child chat hidden from root");
+        let overview: Vec<&str> = state
+            .overview_chats(
+                DateTime::parse_from_rfc3339("2026-07-19T12:20:00Z")
+                    .unwrap()
+                    .to_utc(),
+            )
+            .into_iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(overview, ["parent"], "child chat hidden from overview");
+
+        // A selected child still resolves (Inspector navigation target).
+        state.selected_chat = Some("child-1".into());
+        assert_eq!(
+            state.selected_chat_row().map(|c| c.id.as_str()),
+            Some("child-1")
+        );
+        assert!(state.selected_chat_row().is_some_and(|c| c.is_child()));
+        // And a later chats frame keeps it (apply_chats only clears a
+        // selection whose row vanished from self.chats entirely).
+        state.apply_chats(state.chats.clone());
+        assert_eq!(state.selected_chat.as_deref(), Some("child-1"));
     }
 
     #[test]

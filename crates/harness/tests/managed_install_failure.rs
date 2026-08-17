@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zeron_harness::{AcpHarness, Harness, HarnessError, RunControls};
+use zeron_harness::{AcpHarness, Harness, HarnessError, RunControls, RunHostContext};
 use zeron_proto::{RunRequest, SandboxLevel};
 
 #[tokio::test]
@@ -41,6 +41,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: CancellationToken::new(),
+        host: RunHostContext::default(),
     };
     let request = RunRequest {
         prompt: "hi".into(),

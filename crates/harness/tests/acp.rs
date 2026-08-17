@@ -8,7 +8,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::{
-    AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
+    AcpHarness, CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, SteeringMode, TodoItem, ToolCall,
@@ -65,6 +65,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        host: RunHostContext::default(),
     };
     (controls, steer_tx, token)
 }
@@ -249,6 +250,7 @@ async fn question_shaped_requests_bridge_to_the_input_panel() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        host: RunHostContext::default(),
     };
     let _keep = (steer_tx, token);
     let events = run_to_end(&harness(), request("scenario:question"), controls).await;

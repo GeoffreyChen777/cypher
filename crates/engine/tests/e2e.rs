@@ -432,10 +432,14 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
-    assert_eq!(
-        command_status(&core, "cmd-int-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
+    // The interrupt command's Applied status lands in its own doc commit —
+    // wait for it (the aborted-stamp wait above can race it under parallel
+    // load) before the final journal/status checks.
+    wait_for(
+        || command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None)),
+        "interrupt command applied",
+    )
+    .await;
     // Journal closed with a Done — nothing left to recover.
     let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
     assert!(journal.stale_sessions().unwrap().is_empty());
@@ -444,7 +448,6 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         Some(SessionStatus::Idle)
     );
 }
-
 #[tokio::test]
 async fn steer_with_no_live_run_falls_back_to_new_turn() {
     let dir = tempfile::tempdir().unwrap();

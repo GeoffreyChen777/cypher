@@ -26,11 +26,38 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, Space};
+use zeron_proto::{
+    Chat, ChatConfig, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel, Session,
+    Space, SubagentRunMode,
+};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
 use crate::{EngineError, now_ms};
+
+/// Outcome of the idempotent [`WorkspaceHost::create_child_chat`] — lets the
+/// `StartSubagent` handler distinguish a NEW child (whose initial durable Run
+/// it must queue) from an idempotent retry of `(parent_chat_id, parent_run_id)`
+/// (whose run was already queued once — the caller must NOT queue a second).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildChatOutcome {
+    /// A fresh child row was created (its initial run still needs queuing).
+    Created(String),
+    /// The `(parent, run)` pair already had a child row; nothing was written.
+    Existing(String),
+}
+
+impl ChildChatOutcome {
+    pub fn id(&self) -> &str {
+        match self {
+            ChildChatOutcome::Created(id) | ChildChatOutcome::Existing(id) => id,
+        }
+    }
+
+    pub fn created(&self) -> bool {
+        matches!(self, ChildChatOutcome::Created(_))
+    }
+}
 
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
 /// source for the registry seed. Kept on disk for rollback.
@@ -739,6 +766,7 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
+                child: None,
             })
         })?;
         Ok(())
@@ -900,6 +928,89 @@ impl WorkspaceHost {
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.delete_chat(chat_id))?)
+    }
+
+    /// Create a Zeron-hosted child subagent chat (`StartSubagent` bridge): a
+    /// Pi-configured, titled chat row carrying the additive child metadata
+    /// (parent chat id + parent run id + agent/task/mode + persisted profile).
+    /// Inherits the parent's space/device/cwd/sandbox. Deterministic +
+    /// idempotent by `(parent_chat_id, parent_run_id)` — a repeat start
+    /// reports [`ChildChatOutcome::Existing`] with the existing child's id
+    /// instead of minting a twin (the caller must then NOT queue a second
+    /// run). The messaging channel is deliberately NOT persisted (host-local
+    /// absolute path — see [`ChildChat`]); the caller registers it in a local
+    /// runtime map for the initial run.
+    #[allow(clippy::too_many_arguments)] // child-start seam, not a public API
+    pub fn create_child_chat(
+        &self,
+        parent: &Chat,
+        parent_run_id: &str,
+        agent: &str,
+        task: &str,
+        mode: SubagentRunMode,
+        tool_call_id: Option<String>,
+        profile: ChildAgentProfile,
+        title: &str,
+    ) -> Result<ChildChatOutcome, EngineError> {
+        for chat in self.read_chats()? {
+            if let Some(child) = &chat.child
+                && child.parent_chat_id == parent.id
+                && child.parent_run_id == parent_run_id
+            {
+                return Ok(ChildChatOutcome::Existing(chat.id));
+            }
+        }
+        let chat_id = crate::new_id();
+        let sandbox = parent
+            .config
+            .as_ref()
+            .map(|c| c.sandbox)
+            .unwrap_or(SandboxLevel::WorkspaceWrite);
+        self.mutate(|doc| {
+            doc.upsert_chat(&Chat {
+                id: chat_id.clone(),
+                device_id: parent.device_id.clone(),
+                title: Some(title.to_string()),
+                archived: false,
+                cwd: parent.cwd.clone(),
+                branch: None,
+                checkout_id: None,
+                config: Some(ChatConfig {
+                    harness: HarnessId::Pi,
+                    model: profile.model.clone(),
+                    reasoning: None,
+                    model_options: Default::default(),
+                    sandbox,
+                }),
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: Utc::now(),
+                harness_session_id: None,
+                harness_session_cwd: None,
+                space_id: parent.space_id.clone(),
+                last_seen_at: None,
+                room_gen: Some(2),
+                child: Some(ChildChat {
+                    parent_chat_id: parent.id.clone(),
+                    parent_run_id: parent_run_id.to_string(),
+                    agent: agent.to_string(),
+                    task: task.to_string(),
+                    mode,
+                    tool_call_id,
+                    profile,
+                }),
+            })
+        })?;
+        Ok(ChildChatOutcome::Created(chat_id))
+    }
+
+    /// Child chat rows whose parent is `chat_id` (cascade-delete targets).
+    pub fn child_chats(&self, parent_chat_id: &str) -> Result<Vec<Chat>, EngineError> {
+        Ok(self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| c.parent_chat_id() == Some(parent_chat_id))
+            .collect())
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {

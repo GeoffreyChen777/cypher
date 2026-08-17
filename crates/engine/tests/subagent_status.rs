@@ -81,6 +81,7 @@ fn run_status(status: SubagentRunStatus, settled: bool) -> AgentEvent {
             started_at: 1000,
             updated_at: 2000,
             ended_at: if settled { Some(2000) } else { None },
+            child_chat_id: None,
         }],
     }
 }
@@ -586,6 +587,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         started_at: 1000,
         updated_at: 2000,
         ended_at: None,
+        child_chat_id: None,
     };
     let local = Session {
         chat_id: "chat-local".into(),

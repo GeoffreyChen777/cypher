@@ -237,6 +237,18 @@ impl HarnessRegistry {
         }
     }
 
+    /// Swap an existing lazy slot's factory in place, leaving its order entry
+    /// and descriptor untouched. Used by [`default_registry_with_bridge`] to
+    /// arm the Pi slot with the engine bridge URL — `remove` + `register_lazy`
+    /// would push a second order entry (Pi listed twice).
+    fn replace_lazy_factory(&self, id: HarnessId, factory: Factory) {
+        let mut slots = self.slots();
+        match slots.get_mut(&id) {
+            Some(Slot::Lazy { factory: slot, .. }) => *slot = factory,
+            _ => panic!("replace_lazy_factory: {id:?} has no lazy slot to replace"),
+        }
+    }
+
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
         let mut slots = self.slots();
         match slots.get(&id) {
@@ -283,6 +295,35 @@ impl HarnessRegistry {
 /// `pi_sessions_root` is the zeron-owned pi session store the pi harness points
 /// `pi --mode rpc --session-dir` at (callers pass
 /// `profile.store_root().join("agent-sessions")`).
+/// [`default_registry`] with the optional Zeron bridge: production assembly
+/// passes `ws://127.0.0.1:<ipc_port>` so pi children get `ZERON_ENGINE_WS_URL`
+/// and the subagents extension can reach the engine's `StartSubagent` /
+/// `WatchAgentEvents` bridge. Test-only assembly keeps `None` (no IPC server).
+pub fn default_registry_with_bridge(
+    pi_sessions_root: PathBuf,
+    engine_ws_url: Option<String>,
+) -> HarnessRegistry {
+    let registry = default_registry(pi_sessions_root.clone());
+    if let Some(url) = engine_ws_url {
+        // Re-arm the plain Pi slot IN PLACE with a bridge-aware PiHarness:
+        // every pi child gets the local engine IPC WebSocket as
+        // `ZERON_ENGINE_WS_URL` (the subagents extension's StartSubagent /
+        // WatchAgentEvents bridge). The slot's order entry is untouched, so
+        // Pi stays listed exactly once.
+        let pi_sessions = pi_sessions_root;
+        registry.replace_lazy_factory(
+            HarnessId::Pi,
+            Box::new(move || {
+                Ok(Arc::new(
+                    zeron_harness::pi::PiHarness::new(pi_sessions.clone())
+                        .with_engine_bridge(Some(url.clone())),
+                ) as Arc<dyn Harness>)
+            }),
+        );
+    }
+    registry
+}
+
 pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
@@ -575,6 +616,32 @@ mod tests {
                 ReasoningLevel::Max
             ]
         );
+    }
+
+    /// `default_registry_with_bridge` re-arms the Pi slot IN PLACE: Pi must be
+    /// listed exactly once, in the same position as the plain default registry
+    /// (no duplicate order entry from a remove + re-register), and the resolved
+    /// slot is still the native RPC PiHarness (bridge-armed).
+    #[test]
+    fn bridge_registry_lists_pi_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("agent-sessions");
+        let plain = default_registry(sessions.clone());
+        let bridge = default_registry_with_bridge(sessions, Some("ws://127.0.0.1:4242".into()));
+        let plain_ids: Vec<HarnessId> = plain.descriptors().iter().map(|d| d.id).collect();
+        let bridge_ids: Vec<HarnessId> = bridge.descriptors().iter().map(|d| d.id).collect();
+        assert_eq!(
+            bridge_ids, plain_ids,
+            "the bridge must not disturb the catalog order"
+        );
+        let pi_count = |ids: &[HarnessId]| ids.iter().filter(|id| **id == HarnessId::Pi).count();
+        assert_eq!(pi_count(&bridge_ids), 1, "Pi listed exactly once");
+        assert_eq!(pi_count(&bridge_ids), pi_count(&plain_ids));
+        // The resolved slot is the native RPC harness, still bridge-armed.
+        let pi = bridge.resolve(HarnessId::Pi).unwrap();
+        assert_eq!(pi.id(), HarnessId::Pi);
+        assert_eq!(pi.display_name(), "Pi");
+        assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
