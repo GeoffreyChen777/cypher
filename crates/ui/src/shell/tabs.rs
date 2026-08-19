@@ -36,25 +36,69 @@ impl Shell {
         cx.notify();
     }
 
-    /// `+` (sidebar header, or the titlebar while the sidebar is collapsed):
-    /// open the new-session canvas. A set sidebar filter re-homes the canvas
-    /// onto that project; under "All" the current pick (the last selected
-    /// project, restored from composer defaults) stands.
+    /// The global new-session action (shortcut, or the titlebar `+` while the
+    /// sidebar is collapsed): open the new-session canvas. A live project pick
+    /// stands — the sidebar never filters, so there is no filter to re-home
+    /// onto. A missing,
+    /// project-less, or dangling selection is replaced by the last remembered
+    /// live project, else the deterministic live-space fallback
+    /// (`AppState::first_space_on_picked_device`). With no spaces at all the
+    /// selection is left alone — the onboarding canvas blocks here anyway.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        let target = {
-            let state = self.state.read(cx);
-            self.settings
-                .space_filter
-                .clone()
-                .filter(|id| state.space_row(id).is_some())
-        };
         self.state.update(cx, |s, cx| {
-            if target.is_some() {
-                s.select_space(target, cx);
+            // A LIVE project pick stands: `selected_space_row` also reads
+            // `None` for the explicit no-project opt-out and dangling ids, so
+            // a project-less selection is repaired to the last remembered live
+            // project (else the deterministic live-space fallback).
+            let has_live_selection = s.selected_space_row().is_some();
+            if !has_live_selection && !s.spaces.is_empty() {
+                let target = self
+                    .settings
+                    .last_space_id
+                    .clone()
+                    .filter(|id| s.space_row(id).is_some())
+                    .or_else(|| s.first_space_on_picked_device());
+                if let Some(id) = target {
+                    s.select_space(Some(id), cx);
+                }
             }
             s.select_chat(None, cx);
         });
+        // The generic `+` is not a targeted checkout: clear any programmatic
+        // pin (sidebar hover add) so an already-pinned canvas reads generically
+        // again — the canvas falls back to its ordinary project defaults.
+        self.composer.update(cx, |composer, cx| {
+            composer.clear_checkout_target(cx);
+        });
+        // Routing to the canvas is a navigation (the titlebar Back returns
+        // to the session just left). `NavHistory::push` dedups against the
+        // current entry, so a `+` pressed while already on the canvas is a
+        // no-op and the `on_state_changed` canvas push after `select_chat`
+        // never double-stacks.
+        self.nav.push(NavEntry::Chat(String::new()));
+        cx.notify();
+    }
+
+    /// The sidebar's hover add buttons: open the new-session canvas explicitly
+    /// targeted at `space_id`'s checkout (`plan` — a worktree path or the
+    /// ordinary/current checkout). The pin rides the composer's pickers so the
+    /// target is authoritative without a ListRefs round-trip; the global
+    /// [`Self::open_new_session`] behavior is unchanged.
+    pub(super) fn open_new_session_for(
+        &mut self,
+        space_id: String,
+        plan: crate::pickers::CheckoutPlan,
+        cx: &mut Context<Self>,
+    ) {
+        self.route = Route::Chat;
+        self.settings.last_space_id = Some(space_id.clone());
+        self.composer.update(cx, |composer, cx| {
+            composer.target_checkout(space_id, plan, cx);
+        });
+        // Same deduped canvas navigation as `open_new_session` (see above).
+        self.nav.push(NavEntry::Chat(String::new()));
+        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -221,7 +265,10 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            // The conversation card starts 8px below the window edge. Give
+            // its title row matching internal air so the label and trailing
+            // controls do not hug the card's top hairline.
+            .pt(px(Theme::TITLEBAR_TOP_PAD + 8.0))
             .gap(px(8.0))
             .pl(px(row_left))
             .pr(px(titlebar_right_padding(
@@ -278,8 +325,8 @@ impl Shell {
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
-        // the inset card. No bottom border — the card's own hairline is the
-        // separation; the glass gutter shows between.
+        // the inset card. No bottom border — the card's tone and shadow are
+        // enough separation, and the glass gutter shows between.
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()

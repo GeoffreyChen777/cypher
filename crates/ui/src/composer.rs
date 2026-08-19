@@ -3368,6 +3368,32 @@ impl Composer {
         &self.pickers
     }
 
+    /// Target the new-session canvas at an existing checkout of `space_id`
+    /// (the sidebar's hover add buttons). Delegates to [`Pickers::target_checkout`],
+    /// which pins the plan space-scoped so it's authoritative without the refs
+    /// list ever loading.
+    pub fn target_checkout(
+        &mut self,
+        space_id: String,
+        plan: crate::pickers::CheckoutPlan,
+        cx: &mut Context<Self>,
+    ) {
+        self.pickers.update(cx, |pickers, cx| {
+            pickers.target_checkout(space_id, plan, cx);
+        });
+    }
+
+    /// Drop any programmatic checkout target (the sidebar's hover add buttons)
+    /// so the canvas reads generically again. The global "new session" action
+    /// calls this before routing to the canvas. Delegates to
+    /// [`Pickers::clear_checkout_target`].
+    pub fn clear_checkout_target(&mut self, cx: &mut Context<Self>) {
+        self.pickers.update(cx, |pickers, cx| {
+            pickers.clear_checkout_target();
+            cx.notify();
+        });
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Do anything…", cx);
@@ -3753,7 +3779,7 @@ impl Composer {
             cx.notify();
             return;
         };
-        let selected_worktree = match self.pickers.read(cx).checkout_plan() {
+        let selected_worktree = match self.pickers.read(cx).checkout_plan(cx) {
             crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
             _ => None,
         };
@@ -4432,7 +4458,7 @@ impl Composer {
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
         // the async block needs no picker access.
-        let plan = self.pickers.read(cx).checkout_plan();
+        let plan = self.pickers.read(cx).checkout_plan(cx);
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
@@ -4579,7 +4605,7 @@ impl Composer {
                         crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
                             cwd = path.clone();
                             worktree_cwd = Some(path.clone());
-                            chat_branch = Some(branch.clone());
+                            chat_branch = branch.clone();
                         }
                         crate::pickers::CheckoutPlan::NewWorktree { base } => {
                             chat_branch = base.clone();

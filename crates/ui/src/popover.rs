@@ -412,7 +412,7 @@ pub fn anchored_menu(
 }
 
 /// [`anchored_menu`] opening DOWNWARD from the trigger's bottom edge — a
-/// dropdown proper (the sidebar's space filter). The default variant pins to
+/// dropdown proper (the composer's picker chips). The default variant pins to
 /// the trigger's top-left, which reads fine for context-style menus but
 /// covers a button-shaped trigger.
 pub fn anchored_menu_below(

@@ -52,7 +52,7 @@ pub struct UiSettings {
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
     /// The last selected space — restored on boot when the row still exists;
-    /// also the new-tab default when the sidebar filter is "All".
+    /// also the new-session canvas's default target.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
     /// Open session tabs in visual order (drag-reorder edits in place).
@@ -62,9 +62,13 @@ pub struct UiSettings {
     /// written by a pre-tabs build; seeded once from the last space's sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_tabs: Option<Vec<String>>,
-    /// Sidebar session filter: a space id, or `None` for "All spaces".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub space_filter: Option<String>,
+    /// Legacy: the sidebar's project filter, from when a dropdown filtered
+    /// the session list. Serialized as `spaceFilter` for file compatibility
+    /// but ignored by current runtime behavior — the sidebar always shows
+    /// every project now, and the canvas target selectors are the only
+    /// switcher. It remains round-trippable for compatibility.
+    #[serde(rename = "spaceFilter", skip_serializing_if = "Option::is_none")]
+    pub legacy_space_filter: Option<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -104,7 +108,7 @@ impl Default for UiSettings {
             sidebar_grouped: false,
             last_space_id: None,
             open_tabs: None,
-            space_filter: None,
+            legacy_space_filter: None,
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
@@ -369,7 +373,7 @@ mod tests {
             sidebar_grouped: true,
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
-            space_filter: Some("space-1".into()),
+            legacy_space_filter: Some("space-1".into()),
             tab_order: std::collections::HashMap::from([(
                 "space-1".to_string(),
                 vec!["b".to_string(), "a".to_string()],
@@ -390,6 +394,24 @@ mod tests {
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
+    }
+
+    /// The retired sidebar filter keeps its old `spaceFilter` JSON key — an
+    /// explicitly legacy/unused compatibility field. Old files load it into
+    /// `legacy_space_filter`; runtime behavior never reads it.
+    #[test]
+    fn space_filter_serializes_under_its_legacy_key() {
+        let settings = UiSettings {
+            legacy_space_filter: Some("space-1".into()),
+            ..UiSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"spaceFilter\":\"space-1\""), "{json}");
+        assert!(!json.contains("legacySpaceFilter"), "{json}");
+        // And a pre-redesign file (with `spaceFilter`) still parses.
+        let loaded: UiSettings =
+            serde_json::from_str(r#"{"sidebarWidth": 280, "spaceFilter": "space-9"}"#).unwrap();
+        assert_eq!(loaded.legacy_space_filter.as_deref(), Some("space-9"));
     }
 
     /// A settings file written before light mode existed has no `appearance`

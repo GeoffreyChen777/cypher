@@ -17,7 +17,7 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -594,8 +594,8 @@ pub struct AppState {
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
-    /// prunes against the doc (open tabs, the sidebar space filter) must not
-    /// judge by the empty pre-sync lists.
+    /// prunes against the doc (open tabs) must not judge by the empty
+    /// pre-sync lists.
     pub chats_synced: bool,
     pub spaces_synced: bool,
     /// Joined transcript of the selected chat (continuations folded engine-side).
@@ -623,6 +623,43 @@ impl Default for AppState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What kind of sidebar card a group is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarGroupKind {
+    /// A live `Space` — has a project context menu; empty spaces included.
+    Space,
+    /// Project-less (`space_id = None`) chats of one device.
+    NoProject,
+    /// Chats whose `space_id` names a missing space.
+    Unavailable,
+}
+
+/// One card of the project-grouped sidebar, produced by
+/// [`AppState::sidebar_groups`]. Synthetic cards (No project / Unavailable
+/// project) carry no `space_id` and therefore no project context menu.
+#[derive(Debug)]
+pub struct SidebarGroup<'a> {
+    /// Stable key: `s:<space id>` live space, `np:<device id>` no-project,
+    /// `u:<missing space id>` unavailable. Status changes never re-key a
+    /// group, so cards keep their identity across renders.
+    pub key: String,
+    pub kind: SidebarGroupKind,
+    /// Card title: the project's display name, "No project", or
+    /// "Unavailable project".
+    pub title: String,
+    /// Folder path for live spaces (muted truncated in the header); `None`
+    /// for synthetic cards.
+    pub path: Option<String>,
+    /// Host device name.
+    pub device: String,
+    /// Host offline (live spaces only; synthetic cards read as online).
+    pub offline: bool,
+    /// The space id for live-space cards (the project context menu target).
+    pub space_id: Option<&'a str>,
+    /// The card's chats in overview recency order (empty for quiet spaces).
+    pub chats: Vec<(ChatIndicator, &'a Chat)>,
 }
 
 impl AppState {
@@ -723,7 +760,10 @@ impl AppState {
     /// First project on the composer's picked device (falling back through
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
-    fn first_space_on_picked_device(&self) -> Option<String> {
+    ///
+    /// Public: the deterministic live-space fallback for the new-session
+    /// canvas (and the healing of a vanished selection).
+    pub fn first_space_on_picked_device(&self) -> Option<String> {
         let device = self
             .selected_device
             .as_deref()
@@ -930,17 +970,24 @@ impl AppState {
         self.spaces.iter().find(|s| s.id == space_id)
     }
 
+    /// The selected space id, but only while it still resolves to a LIVE
+    /// Space — a dangling id (project deleted elsewhere) is `None`. Drives
+    /// `last_space_id` persistence and the new-session fallback: a dead
+    /// selection must never be remembered or re-aimed at.
+    pub fn selected_space_if_live(&self) -> Option<String> {
+        self.selected_space
+            .as_deref()
+            .filter(|id| self.space_row(id).is_some())
+            .map(str::to_string)
+    }
+
     /// Spaces in display order — case-insensitive alphabetical, the order
-    /// both space selectors (sidebar filter, composer picker) list rows in.
+    /// the space selectors (the canvas project picker, composer) list rows in.
     /// Ties break on id so the order is stable across renders.
     pub fn spaces_sorted(&self) -> Vec<&Space> {
         let mut spaces: Vec<&Space> = self.spaces.iter().collect();
         spaces.sort_by_key(|s| (s.display_name().to_lowercase(), s.id.clone()));
         spaces
-    }
-
-    pub fn space_for_chat(&self, chat: &Chat) -> Option<&Space> {
-        self.space_row(chat.space_id.as_deref()?)
     }
 
     /// Non-archived chats of a space in tab (creation) order. Chats with a
@@ -975,18 +1022,6 @@ impl AppState {
         }
     }
 
-    /// The "@ device" tag for a space — shared by the space pickers' rows,
-    /// the sidebar filter trigger, and the composer's space chip. Returns
-    /// `(tag, offline)`; staleness renders as a disconnected GLYPH at the
-    /// call sites (user request), never words in the tag.
-    pub fn space_device_tag(&self, space: &Space, now: DateTime<Utc>) -> (String, bool) {
-        let offline = !self.device_online(&space.device_id, now);
-        let device = self
-            .device_name(&space.device_id)
-            .unwrap_or("Unknown device");
-        (format!("@ {device}"), offline)
-    }
-
     /// Does the selected space's folder have git? Drives the branch picker and
     /// the diff sidebar (owner-stamped, synced — no RPC).
     pub fn selected_space_git(&self) -> bool {
@@ -1018,6 +1053,129 @@ impl AppState {
             .collect();
         sort_active(&mut rows);
         rows
+    }
+
+    /// The project-grouped sidebar: one card per live `Space` (empty spaces
+    /// included, so project management stays reachable), plus synthetic
+    /// cards for project-less chats ("No project", per device) and chats
+    /// whose `space_id` names a missing space ("Unavailable project", keyed
+    /// by the missing id). Groups with chats are ordered by their newest chat
+    /// (the overview recency order, preserved inside each group); empty
+    /// spaces are appended deterministically by display name / device / path
+    /// / id. Status changes never reorder. Archived and child chats stay
+    /// excluded. Pure — see the tests in [`mod tests`] for the exact rules.
+    pub fn sidebar_groups(&self, now: DateTime<Utc>) -> Vec<SidebarGroup<'_>> {
+        let mut all: Vec<(ChatIndicator, &Chat)> = self
+            .visible_chats()
+            .map(|c| (self.display_status_for(c, now), c))
+            .collect();
+        sort_active(&mut all);
+
+        // Fold chats into groups in overview order. A group is keyed by its
+        // live space (`s:<id>`), a missing space id (`u:<id>`), or a device
+        // (`np:<device id>` for project-less chats). First appearance orders
+        // the groups by their newest chat; within a group the overview order
+        // is preserved. Status changes leave the keys and order untouched.
+        let mut groups: Vec<SidebarGroup> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for (status, chat) in all {
+            let (key, kind) = match chat.space_id.as_deref() {
+                None => (
+                    format!("np:{}", chat.device_id),
+                    SidebarGroupKind::NoProject,
+                ),
+                Some(id) if self.space_row(id).is_some() => {
+                    (format!("s:{id}"), SidebarGroupKind::Space)
+                }
+                Some(id) => (format!("u:{id}"), SidebarGroupKind::Unavailable),
+            };
+            if let Some(&ix) = index.get(&key) {
+                groups[ix].chats.push((status, chat));
+                continue;
+            }
+            index.insert(key.clone(), groups.len());
+            let (space, title, path) = match kind {
+                SidebarGroupKind::Space => {
+                    let space = self
+                        .space_row(chat.space_id.as_deref().expect("space kind has an id"))
+                        .expect("space kind resolves");
+                    (
+                        Some(space),
+                        space.display_name().to_string(),
+                        Some(space.path.clone()),
+                    )
+                }
+                SidebarGroupKind::NoProject => (None, "No project".into(), None),
+                SidebarGroupKind::Unavailable => (None, "Unavailable project".into(), None),
+            };
+            let (device, offline) = match space {
+                Some(space) => (
+                    self.device_name(&space.device_id)
+                        .unwrap_or("Unknown device")
+                        .to_string(),
+                    !self.device_online(&space.device_id, now),
+                ),
+                None => (
+                    self.device_name(&chat.device_id)
+                        .unwrap_or("Unknown device")
+                        .to_string(),
+                    false,
+                ),
+            };
+            groups.push(SidebarGroup {
+                key,
+                kind,
+                title,
+                path,
+                device,
+                offline,
+                space_id: space.map(|s| s.id.as_str()),
+                chats: vec![(status, chat)],
+            });
+        }
+
+        // Append live spaces with no visible chats: project management must
+        // stay reachable even when a space is quiet. Deterministic order
+        // (display name / device / path / id) so an empty space never moves
+        // between renders.
+        let live: HashSet<&str> = groups
+            .iter()
+            .filter(|g| g.kind == SidebarGroupKind::Space)
+            .filter_map(|g| g.space_id)
+            .collect();
+        let mut empty: Vec<&Space> = self
+            .spaces
+            .iter()
+            .filter(|s| !live.contains(s.id.as_str()))
+            .collect();
+        empty.sort_by(|a, b| {
+            a.display_name()
+                .to_lowercase()
+                .cmp(&b.display_name().to_lowercase())
+                .then_with(|| {
+                    self.device_name(&a.device_id)
+                        .unwrap_or("")
+                        .cmp(self.device_name(&b.device_id).unwrap_or(""))
+                })
+                .then_with(|| a.path.cmp(&b.path))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        groups.extend(empty.into_iter().map(|space| {
+            SidebarGroup {
+                key: format!("s:{}", space.id),
+                kind: SidebarGroupKind::Space,
+                title: space.display_name().to_string(),
+                path: Some(space.path.clone()),
+                device: self
+                    .device_name(&space.device_id)
+                    .unwrap_or("Unknown device")
+                    .to_string(),
+                offline: !self.device_online(&space.device_id, now),
+                space_id: Some(space.id.as_str()),
+                chats: Vec::new(),
+            }
+        }));
+        groups
     }
 
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
@@ -2332,6 +2490,43 @@ mod tests {
     }
 
     #[test]
+    fn first_space_on_picked_device_is_deterministic() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![
+            space("z", "laptop", "/z", 3),
+            space("a", "phone", "/a", 1),
+            space("m", "laptop", "/m", 2),
+        ]);
+        // Picked device wins, in display order ("laptop" spaces: m, z).
+        state.selected_device = Some("laptop".into());
+        assert_eq!(state.first_space_on_picked_device().as_deref(), Some("m"));
+        // Unpicked device falls back to the local device.
+        state.selected_device = None;
+        state.local_device_id = Some("laptop".into());
+        assert_eq!(state.first_space_on_picked_device().as_deref(), Some("m"));
+        // Neither device matches: any space at all (display-first).
+        state.local_device_id = Some("server".into());
+        assert_eq!(state.first_space_on_picked_device().as_deref(), Some("a"));
+        // No spaces: nothing to fall back to.
+        state.apply_spaces(vec![]);
+        assert_eq!(state.first_space_on_picked_device(), None);
+    }
+
+    #[test]
+    fn selected_space_if_live_rejects_dangling_ids() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
+        assert_eq!(state.selected_space.as_deref(), Some("s1"));
+        assert_eq!(state.selected_space_if_live().as_deref(), Some("s1"));
+        // A dangling selection (project deleted elsewhere) is not "live".
+        state.selected_space = Some("ghost".into());
+        assert_eq!(state.selected_space_if_live(), None);
+        // No selection at all is not "live" either.
+        state.selected_space = None;
+        assert_eq!(state.selected_space_if_live(), None);
+    }
+
+    #[test]
     fn chats_in_space_filters_and_orders() {
         let mut state = AppState::new();
         state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
@@ -2363,6 +2558,147 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(overview, ["old", "new", "dangling"]);
+    }
+
+    #[test]
+    fn sidebar_groups_order_by_newest_chat_and_keep_overview_order() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![
+            space("s1", "dev-a", "/a", 1),
+            space("s2", "dev-b", "/b", 2),
+            space("s3", "dev-a", "/c", 3),
+        ]);
+        let mut a = chat("a", 0, Some(10)); // in s1
+        a.space_id = Some("s1".into());
+        let mut b = chat("b", 0, Some(20)); // in s2 (newest)
+        b.space_id = Some("s2".into());
+        let mut c = chat("c", 0, Some(5)); // in s3 (oldest)
+        c.space_id = Some("s3".into());
+        let mut d = chat("d", 1, Some(15)); // in s1, newer than a
+        d.space_id = Some("s1".into());
+        state.apply_chats(vec![a, b, c, d]);
+        let now = Utc::now();
+        let groups = state.sidebar_groups(now);
+        // Groups ordered by their newest chat: s2 (b=20), s1 (d=15), s3 (c=5).
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys, ["s:s2", "s:s1", "s:s3"]);
+        // Chats inside a group retain the overview (recency) order.
+        let s1: Vec<&str> = groups[1].chats.iter().map(|(_, c)| c.id.as_str()).collect();
+        assert_eq!(s1, ["d", "a"]);
+        // Stability: the same call yields the same keys.
+        let again_groups = state.sidebar_groups(now);
+        let again: Vec<&str> = again_groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(again, keys);
+    }
+
+    #[test]
+    fn sidebar_groups_status_changes_never_reorder_cards() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![
+            space("s1", "dev", "/a", 1),
+            space("s2", "dev", "/b", 2),
+        ]);
+        let mut a = chat("a", 0, Some(10));
+        a.space_id = Some("s1".into());
+        let mut b = chat("b", 0, Some(20));
+        b.space_id = Some("s2".into());
+        state.apply_chats(vec![a, b]);
+        let now = Utc::now();
+        let before: Vec<String> = state
+            .sidebar_groups(now)
+            .iter()
+            .map(|g| g.key.clone())
+            .collect();
+        assert_eq!(before, ["s:s2", "s:s1"]);
+        // s1's chat turns Working — status must never move the card.
+        state.apply_sessions(vec![session("a", SessionStatus::Working, 5, now)]);
+        let after: Vec<String> = state
+            .sidebar_groups(now)
+            .iter()
+            .map(|g| g.key.clone())
+            .collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn sidebar_groups_append_empty_spaces_deterministically() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![
+            space("active", "dev", "/z", 1),
+            space("empty-b", "dev-b", "/b", 2),
+            space("empty-a", "dev-a", "/a", 3),
+        ]);
+        let mut c = chat("c", 0, Some(5));
+        c.space_id = Some("active".into());
+        state.apply_chats(vec![c]);
+        let now = Utc::now();
+        let groups = state.sidebar_groups(now);
+        let summary: Vec<(&str, usize)> = groups
+            .iter()
+            .map(|g| (g.title.as_str(), g.chats.len()))
+            .collect();
+        // The active space leads; quiet spaces are appended deterministically
+        // (display name "a" < "b"), never by recency noise.
+        assert_eq!(summary, [("z", 1), ("a", 0), ("b", 0)]);
+        // Stable across renders.
+        let again_groups = state.sidebar_groups(now);
+        let again: Vec<&str> = again_groups.iter().map(|g| g.title.as_str()).collect();
+        let first: Vec<&str> = groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(again, first);
+    }
+
+    #[test]
+    fn sidebar_groups_show_every_host_together_with_device_labels() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-a", "MacBook"), device("dev-b", "Desktop")];
+        state.apply_spaces(vec![
+            space("s-a", "dev-a", "/a", 1),
+            space("s-b", "dev-b", "/b", 2),
+        ]);
+        let now = Utc::now();
+        let groups = state.sidebar_groups(now);
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys, ["s:s-a", "s:s-b"], "both hosts in the one sidebar");
+        assert_eq!(groups[0].device, "MacBook");
+        assert_eq!(groups[1].device, "Desktop");
+        // Quiet spaces are still cards (project management stays reachable).
+        assert!(groups.iter().all(|g| g.chats.is_empty()));
+    }
+
+    #[test]
+    fn sidebar_groups_synthetic_no_project_and_unavailable() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-b", "Laptop"), device("dev-c", "Tablet")];
+        state.apply_spaces(vec![space("s1", "dev-a", "/a", 1)]);
+        let mut in_space = chat("in", 0, Some(30));
+        in_space.space_id = Some("s1".into());
+        let mut no_project = chat("np", 0, Some(20));
+        no_project.space_id = None;
+        no_project.device_id = "dev-b".into();
+        let mut dangling = chat("dang", 0, Some(10));
+        dangling.space_id = Some("gone".into());
+        dangling.device_id = "dev-c".into();
+        state.apply_chats(vec![in_space, no_project, dangling]);
+        let now = Utc::now();
+        let groups = state.sidebar_groups(now);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].key, "s:s1");
+        assert_eq!(groups[0].kind, SidebarGroupKind::Space);
+        assert_eq!(groups[0].space_id, Some("s1"));
+        assert_eq!(groups[1].key, "np:dev-b");
+        assert_eq!(groups[1].kind, SidebarGroupKind::NoProject);
+        assert_eq!(groups[1].title, "No project");
+        assert_eq!(groups[1].device, "Laptop");
+        assert_eq!(groups[1].space_id, None, "synthetic cards have no menu");
+        assert_eq!(groups[2].key, "u:gone");
+        assert_eq!(groups[2].kind, SidebarGroupKind::Unavailable);
+        assert_eq!(groups[2].title, "Unavailable project");
+        assert_eq!(groups[2].device, "Tablet");
+        assert_eq!(groups[2].space_id, None);
+        // Dangling-id chats are included (not dropped like the old overview).
+        let dangling_chats: Vec<&str> =
+            groups[2].chats.iter().map(|(_, c)| c.id.as_str()).collect();
+        assert_eq!(dangling_chats, ["dang"]);
     }
 
     #[test]

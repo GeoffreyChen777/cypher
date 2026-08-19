@@ -1,40 +1,20 @@
-//! Spaces sidebar: the space-filter dropdown (searchable, with "All projects"),
-//! the filtered Sessions list, and the add-space palette (⌘K-style: device
-//! tabs + filtered folder browser).
+//! Spaces sidebar: the project-grouped session cards (one opaque floating
+//! card per Space — every host together, synthetic No-project / Unavailable-
+//! project cards), the fixed Cypher / Add project header, checkout-scoped
+//! hover actions for new sessions, and the add-space palette (⌘K-style:
+//! device tabs + filtered folder browser).
 //!
-//! A space = a synced (device, folder) pair. Spaces stopped being a
-//! navigation spine when tabs went device-local: the dropdown only FILTERS
-//! the sidebar's session list (never the tab strip) and hosts space
-//! management (add via the palette; rename/delete via row context menus).
+//! A space = a synced (device, folder) pair. The sidebar never filters and
+//! has no target dropdown: the new-session canvas's project/device selectors
+//! are the only target switcher. Space management lives on the real card
+//! headers (rename/delete via the context menu) and in the add-space palette.
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use gpui::FocusHandle;
-use zeron_proto::{ChatIndicator, Device, FolderListing, Space};
-
-/// The space-filter dropdown, `Some` while open. The same searchable-menu
-/// recipe as the composer's ref picker: filter input on top
-/// (`PaletteSearch` context so ↑↓/⏎ bubble to the card), ranked substring
-/// rows, keyboard highlight.
-pub(super) struct SpacesMenu {
-    search: Entity<ComposerInput>,
-    /// Keyboard highlight within [`Shell::spaces_menu_rows`].
-    active: usize,
-    /// Tracked on the card — puts it on the keyboard dispatch path while the
-    /// search input holds focus (the structure every working picker uses).
-    focus: FocusHandle,
-    list_scroll: gpui::ScrollHandle,
-    _search_events: Subscription,
-}
-
-/// One row of the open dropdown, in display order.
-#[derive(Clone, PartialEq)]
-pub(super) enum SpacesMenuRow {
-    All,
-    Space(String),
-    AddSpace,
-}
+use std::collections::HashMap;
+use zeron_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 
 /// The add-space palette (a command-K surface, summoned by ⌘K): search bar
 /// across the top, folder browser on the left, a Devices rail on the right,
@@ -82,267 +62,613 @@ pub(super) struct RenameSpaceDialog {
     pub _events: Subscription,
 }
 
-/// Dot color for a chat's display status (tab dots + Sessions rows).
-pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
-    match status {
-        // Pink, not amber — the harsh yellow read as a warning; running is
-        // routine (user request). Non-done statuses sit well below full
-        // strength: at full alpha the colored words shouted across the
-        // whole sidebar (user request) — only Done keeps its pop.
-        ChatIndicator::Working => {
-            theme.busy.opacity(0.55) // pink-400, muted
-        }
-        // Blue: "asking you a question" must read differently from "busy
-        // working" at a glance.
-        ChatIndicator::AwaitingInput => theme.accent.opacity(0.6),
-        ChatIndicator::Errored => theme.danger.opacity(0.65),
-        // Green: finished-but-unseen reads as "ready for you".
-        ChatIndicator::Completed => {
-            theme.success.opacity(0.9) // emerald-400
-        }
-        ChatIndicator::Idle => crate::theme::ink(0.14),
+/// One branch/worktree group inside a project card: chats sharing one
+/// checkout identity, rendered under a quiet branch/worktree header (icon +
+/// truncated label) above their session rows.
+struct ChatGroup {
+    /// Visible label: the branch name, or the stable "Current checkout"
+    /// fallback when the branch is missing/blank.
+    label: String,
+    /// Normalized ACTUAL branch (trimmed; blank → `None`): carried separately
+    /// from `label` so new sessions can be targeted at the checkout with the
+    /// real optional branch metadata (the plus button on this header).
+    branch: Option<String>,
+    /// Whether this checkout lives in a linked worktree (cwd off the Space
+    /// root). Half of the group's deterministic identity — the other half is
+    /// `label` + the exact path (below) — so a `main` branch and a `main`
+    /// worktree never share a collapse key.
+    worktree: bool,
+    /// The exact checkout cwd for worktree groups (the representative chat's
+    /// cwd) — the new-session target for this group, authoritative without
+    /// ListRefs. `None` for ordinary checkouts.
+    worktree_path: Option<String>,
+    /// `icons::FOLDER_WITH_FILES` for linked worktrees, `icons::GIT_BRANCH`
+    /// for ordinary checkouts/branches (and every synthetic card).
+    icon: &'static str,
+    chats: Vec<(ChatIndicator, Chat)>,
+}
+
+/// Owned snapshot of one project card for rendering. [`AppState::sidebar_groups`]
+/// returns refs into the state (they borrow `cx`, which the `&self` render
+/// helpers can't share), so [`Shell::render_active_rows`] materializes cards
+/// here — the same clone-per-row cost the pre-grouping sidebar paid.
+struct GroupCard {
+    key: String,
+    title: String,
+    device: String,
+    offline: bool,
+    space_id: Option<String>,
+    /// Chats folded into branch/worktree groups (`g.path` of the source
+    /// group seeds the worktree detection); empty for quiet spaces.
+    groups: Vec<ChatGroup>,
+}
+
+/// Fold a card's chats into branch/worktree groups in their existing order.
+/// A group is keyed by the checkout label plus whether the chat lives in a
+/// linked worktree; first appearance orders the groups, and each group keeps
+/// the chats' overview order (status changes never re-key). The branch name
+/// is the visible/key identity; a missing or blank branch falls back to the
+/// stable "Current checkout" label, so branch-less chats never disappear.
+/// A chat whose cwd differs from the Space root is operating in another
+/// checkout/worktree (the same rule used by the composer checkout summary).
+/// Synthetic cards carry no space path — nothing there reads as a worktree
+/// and the GIT_BRANCH icon is used throughout.
+/// One normalized identity for a worktree's checkout path: trailing `/` or
+/// `\\` removed, valid leading/trailing whitespace PRESERVED. Both the chat
+/// grouping identity and the disclosure key use this, so an equivalent `/wt`
+/// and `/wt/` fold into one group with one stable collapse key — while the
+/// exact raw cwd is kept separately as the actual checkout target.
+fn normalize_worktree_path(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+}
+
+fn group_chats(chats: Vec<(ChatIndicator, Chat)>, space_path: Option<&str>) -> Vec<ChatGroup> {
+    fn is_worktree(cwd: Option<&str>, space_path: Option<&str>) -> bool {
+        let (Some(cwd), Some(path)) = (cwd, space_path) else {
+            return false;
+        };
+        normalize_worktree_path(cwd) != normalize_worktree_path(path)
     }
+
+    let mut groups: Vec<ChatGroup> = Vec::new();
+    // (worktree, worktree path, label) — worktrees also key on their
+    // NORMALIZED checkout path so two same-label detached worktrees never
+    // merge, while `/wt` and `/wt/` (one checkout) do.
+    let mut index: HashMap<(bool, Option<String>, String), usize> = HashMap::new();
+    for (status, chat) in chats {
+        let worktree = is_worktree(chat.cwd.as_deref(), space_path);
+        // Normalized actual branch (trimmed, blank → None). The visible label
+        // keeps the stable "Current checkout" fallback; the actual branch is
+        // carried for targeting new sessions.
+        let branch = chat
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string);
+        let label = branch
+            .clone()
+            .unwrap_or_else(|| "Current checkout".to_string());
+        let path_key = worktree.then(|| {
+            chat.cwd
+                .as_deref()
+                .map(normalize_worktree_path)
+                .map(str::to_string)
+                .unwrap_or_default()
+        });
+        let key = (worktree, path_key, label.clone());
+        if let Some(&ix) = index.get(&key) {
+            groups[ix].chats.push((status, chat));
+            continue;
+        }
+        index.insert(key, groups.len());
+        groups.push(ChatGroup {
+            label,
+            branch,
+            worktree,
+            worktree_path: worktree.then(|| chat.cwd.clone()).flatten(),
+            icon: if worktree {
+                icons::FOLDER_WITH_FILES
+            } else {
+                icons::GIT_BRANCH
+            },
+            chats: vec![(status, chat)],
+        });
+    }
+    groups
+}
+
+/// Shared compact hover plus control (the project-card and branch-group
+/// trailing add buttons). Its width animates from zero while the owning row is
+/// hovered, so the hidden state leaves no empty slot. Both the left mouse-down
+/// and the click stop propagation: the project header's collapse toggle/context
+/// menu and the branch header's collapse toggle must not fire when the plus is
+/// pressed. The button carries the only hover wash — the branch row itself has
+/// none.
+fn hover_add_plus(
+    id: impl Into<SharedString>,
+    hover_key: &str,
+    row_gap: f32,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+    on_click: impl Fn(&mut Shell, &gpui::ClickEvent, &mut Window, &mut Context<Shell>) + 'static,
+) -> AnyElement {
+    let id: SharedString = id.into();
+    let hover_t = motion::hover_t(hover_key);
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(18.0 * hover_t))
+        .h(px(18.0))
+        // The parent flex gap would remain even at width zero. Cancel that
+        // gap while hidden, then release it with the same hover progress.
+        .mr(px(-row_gap * (1.0 - hover_t)))
+        .overflow_hidden()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .relative()
+        .left(px(2.0 * (1.0 - hover_t)))
+        .opacity(hover_t)
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::wash(0.10)))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(move |this, event, window, cx| {
+            cx.stop_propagation();
+            on_click(this, event, window, cx);
+        }))
+        .child(
+            icon(icons::PLUS)
+                .size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.75)),
+        )
+        .into_any_element()
 }
 
 impl Shell {
-    // ---- space filter ----
-
-    /// Set the sidebar's session filter (`None` = All spaces). On the
-    /// new-session canvas the space context follows the filter — the canvas
-    /// default is "the space you're looking at".
-    pub(super) fn set_space_filter(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
-        self.settings.space_filter = filter.clone();
-        if let Some(space_id) = filter
-            && self.state.read(cx).selected_chat.is_none()
-        {
-            self.state
-                .update(cx, |s, cx| s.select_space(Some(space_id), cx));
-        }
-        self.close_spaces_menu(cx);
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Close the space-filter dropdown through the exit animation (no-op when
-    /// it isn't open). Every close path funnels here so the menu always
-    /// animates out instead of vanishing.
-    fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
-        if self.spaces_menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
-            cx.notify();
-        }
-    }
-
-    /// Land in a just-added space: filter the sidebar to it and open the
-    /// new-session canvas there.
+    /// Land in a just-added space: select it for the new-session canvas and
+    /// open the canvas. The sidebar is never filtered — every project stays
+    /// visible; the canvas selectors are the only target switcher.
     pub(super) fn land_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
-        self.route = Route::Chat;
-        self.settings.space_filter = Some(space_id.clone());
-        self.settings.last_space_id = Some(space_id.clone());
-        self.state.update(cx, |s, cx| {
-            s.select_space(Some(space_id), cx);
-            s.select_chat(None, cx);
-        });
-        self.schedule_save(cx);
-        cx.notify();
+        // A just-added project's canvas targets its ordinary/current checkout
+        // (same as the project header's plus) — and the pin explicitly resets
+        // to `CurrentCheckout { branch: None }` so no stale worktree draft
+        // survives. Navigation, save, and notify all live in the helper.
+        self.open_new_session_for(
+            space_id,
+            crate::pickers::CheckoutPlan::CurrentCheckout { branch: None },
+            cx,
+        );
     }
 
     // ---- sidebar sections ----
 
-    /// The filter's display rows: "All projects", then spaces matching the
-    /// search (ranked — `popover::filter_indices`), then "New project…".
-    /// "All" only shows on an empty query (searching means hunting a space).
-    fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
-        let query = self
-            .spaces_menu
-            .get()
-            .map(|menu| menu.search.read(cx).text().to_string())
-            .unwrap_or_default();
-        let state = self.state.read(cx);
-        let spaces = state.spaces_sorted();
-        let names: Vec<String> = spaces
-            .iter()
-            .map(|s| s.display_name().to_string())
-            .collect();
-        let mut rows: Vec<SpacesMenuRow> = Vec::new();
-        if query.trim().is_empty() {
-            rows.push(SpacesMenuRow::All);
-        }
-        rows.extend(
-            popover::filter_indices(&query, &names)
-                .into_iter()
-                .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
-        );
-        rows.push(SpacesMenuRow::AddSpace);
-        rows
-    }
-
-    fn open_spaces_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
-        // to the card's key handler.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search projects…", "PaletteSearch", cx));
-        let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                if let Some(menu) = this.spaces_menu.open_mut() {
-                    menu.active = 0;
-                }
-                cx.notify();
-            }
-        });
-        // The highlight starts ON the current filter row.
-        let current = self.settings.space_filter.clone();
-        let handle = search.read(cx).focus_handle(cx);
-        self.spaces_menu.open(SpacesMenu {
-            search,
-            active: 0,
-            focus: cx.focus_handle(),
-            list_scroll: gpui::ScrollHandle::new(),
-            _search_events: search_events,
-        });
-        let rows = self.spaces_menu_rows(cx);
-        let start = match &current {
-            None => 0,
-            Some(id) => rows
-                .iter()
-                .position(|row| matches!(row, SpacesMenuRow::Space(s) if s == id))
-                .unwrap_or(0),
-        };
-        if let Some(menu) = self.spaces_menu.open_mut() {
-            menu.active = start;
-        }
-        // Focusable before first paint (the add-space palette's proven order).
-        window.focus(&handle, cx);
-        cx.notify();
-    }
-
-    fn activate_spaces_menu_row(&mut self, row: SpacesMenuRow, cx: &mut Context<Self>) {
-        match row {
-            SpacesMenuRow::All => self.set_space_filter(None, cx),
-            SpacesMenuRow::Space(id) => self.set_space_filter(Some(id), cx),
-            SpacesMenuRow::AddSpace => {
-                self.close_spaces_menu(cx);
-                self.open_add_space(cx);
-            }
-        }
-    }
-
-    /// Dropdown keys (bubbling from the focused search input): ↑↓ navigate,
-    /// ⏎ activates the highlighted row, esc closes.
-    fn spaces_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
-        // The card stays mounted (and focused) through the exit animation —
-        // keys must not drive a dying menu.
-        if !self.spaces_menu.is_open() {
-            return;
-        }
-        let key = popover::classify_key(
-            event.keystroke.key.as_str(),
-            event.keystroke.modifiers.platform,
-            event.keystroke.modifiers.control,
-        );
-        match key {
-            popover::MenuKey::Escape => {
-                self.close_spaces_menu(cx);
-            }
-            popover::MenuKey::Up | popover::MenuKey::Down => {
-                let count = self.spaces_menu_rows(cx).len();
-                let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
-                if let Some(menu) = self.spaces_menu.open_mut() {
-                    menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
-                    menu.list_scroll.scroll_to_item(menu.active);
-                    cx.notify();
-                }
-            }
-            popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let row = {
-                    let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
-                    self.spaces_menu_rows(cx).get(active).cloned()
-                };
-                if let Some(row) = row {
-                    self.activate_spaces_menu_row(row, cx);
-                }
-            }
-            popover::MenuKey::Backspace | popover::MenuKey::Other => {}
-        }
-    }
-
-    /// The sidebar's space-filter row: current filter ("All projects" or the
-    /// space's name) + chevron, the dropdown floating beneath while open.
-    /// Sits OUTSIDE the sidebar's scroll region so the float never clips.
-    pub(super) fn render_spaces_filter(
+    /// The fixed sidebar header above the project-card list: product identity
+    /// on the left and one compact Add project action on the right. New
+    /// sessions are created from project/checkout hover actions (or ⌘N).
+    pub(super) fn render_sidebar_header(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let filter = self.settings.space_filter.clone();
-        // Name + the dropdown rows' "@ device" tag on the trigger itself, so
-        // the filtered space's host reads without opening the picker.
-        let (label, device_tag): (SharedString, Option<(SharedString, bool)>) = {
-            let state = self.state.read(cx);
-            match filter.as_deref().and_then(|id| state.space_row(id)) {
-                Some(space) => {
-                    let (tag, offline) = state.space_device_tag(space, Utc::now());
-                    (
-                        space.display_name().to_string().into(),
-                        Some((tag.into(), offline)),
-                    )
-                }
-                None => (SharedString::from("All projects"), None),
-            }
-        };
-        let open = self.spaces_menu.is_open();
-
-        let trigger = div()
-            .id("spaces-filter")
-            .flex_1()
-            .min_w_0()
-            .h(px(29.0))
+        let add_project = div()
+            .id("sidebar-add-project")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_color(motion::hover_blend(
+                "sidebar-add-project",
+                theme.text_muted.opacity(0.8),
+                theme.text,
+            ))
+            .bg(motion::hover_blend(
+                "sidebar-add-project",
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener("sidebar-add-project"))
+            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+            .child(icon(icons::PLUS).size(px(14.0)).text_color(theme.text));
+        div()
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .text_size(px(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                "spaces-filter",
-                theme.text.opacity(0.8),
-                theme.text,
-            ))
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "spaces-filter",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("spaces-filter"))
-            .cursor_pointer()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                // A press that found the menu open closes it (the card's
-                // mouse-down-out already began the close) — never reopen.
-                if this.spaces_menu.take_press_was_open() {
-                    this.close_spaces_menu(cx);
-                } else {
-                    this.open_spaces_menu(window, cx);
-                }
-            }))
+            .justify_between()
+            // Align the brand with the project icons inside their inset cards.
+            .pl(px(18.0))
+            .pr(px(Theme::SPACE_SM))
+            .pt(px(8.0))
+            .pb(px(4.0))
             .child(
-                icon(icons::FOLDER)
-                    .size(px(16.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family("Oxanium")
+                    .text_size(px(16.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from("Cypher")),
             )
-            // flex_1 pushes the caret to the trigger's right edge and gives
-            // long space names a bound to truncate against; the "@ device"
-            // tag hugs the name inside it rather than sitting by the caret.
+            .child(add_project)
+            .into_any_element()
+    }
+
+    /// Deterministic disclosure identity for a project card — the same
+    /// `g:{key}` the FLIP resort diff keys cards by, so one key drives both
+    /// the collapse state and the resort baseline. Local Shell UI state only.
+    fn project_group_key(card_key: &str) -> String {
+        format!("g:{card_key}")
+    }
+
+    /// Deterministic disclosure identity for a branch/worktree group, scoped
+    /// under its project card. `worktree` + `label` + the worktree's NORMALIZED
+    /// path is the same identity [`group_chats`] keys groups by, so a group
+    /// that reappears after status churn or a reorder keeps its collapsed
+    /// state — and two same-label detached worktrees stay distinct. The
+    /// normalization makes an equivalent `/wt` and `/wt/` one stable key.
+    fn branch_group_key(
+        card_key: &str,
+        worktree: bool,
+        label: &str,
+        worktree_path: Option<&str>,
+    ) -> String {
+        format!(
+            "g:{card_key}/b:{worktree}:{label}:{}",
+            worktree_path.map(normalize_worktree_path).unwrap_or("")
+        )
+    }
+
+    /// Is this disclosure group (project card or branch/worktree group)
+    /// currently collapsed?
+    fn sidebar_group_collapsed(&self, key: &str) -> bool {
+        self.sidebar_collapsed.contains(key)
+    }
+
+    /// Toggle a disclosure group (project card or branch/worktree group).
+    /// Collapse state is local Shell UI state — never persisted or synced;
+    /// everything starts expanded.
+    fn toggle_sidebar_group(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.sidebar_collapsed.remove(&key) {
+            self.sidebar_collapsed.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// The sidebar's project-grouped card list: one opaque floating card per
+    /// `Space` (every host together, empty spaces included) plus synthetic
+    /// No-project / Unavailable-project cards. Ordering comes from
+    /// [`AppState::sidebar_groups`]; cards are keyed for the FLIP resort
+    /// glide (a group's height is an estimate — header + visible rows). The
+    /// state's refs borrow `cx`, so the cards are snapshotted into owned form
+    /// first (the same clone-per-row cost the pre-grouping sidebar paid).
+    pub(super) fn render_active_rows(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, f32, AnyElement)> {
+        let now = Utc::now();
+        let selected = self.state.read(cx).selected_chat.clone();
+        let cards: Vec<GroupCard> = {
+            let groups = self.state.read(cx).sidebar_groups(now);
+            groups
+                .into_iter()
+                .map(|g| GroupCard {
+                    key: g.key,
+                    title: g.title,
+                    device: g.device,
+                    offline: g.offline,
+                    space_id: g.space_id.map(str::to_string),
+                    groups: group_chats(
+                        g.chats
+                            .into_iter()
+                            .map(|(status, chat)| (status, chat.clone()))
+                            .collect(),
+                        g.path.as_deref(),
+                    ),
+                })
+                .collect()
+        };
+        cards
+            .into_iter()
+            .map(|card| {
+                let key = card.key.clone();
+                // A card's height is an estimate for the FLIP resort glide:
+                // header + one branch-group header per group + its rows — but
+                // only for what's currently visible. A collapsed project is
+                // header only; a collapsed branch group keeps its header and
+                // drops its rows.
+                let project_key = Self::project_group_key(&key);
+                let height = super::GROUP_CARD_HEADER_HEIGHT
+                    + if self.sidebar_group_collapsed(&project_key) {
+                        0.0
+                    } else {
+                        card.groups.iter().fold(0.0_f32, |acc, g| {
+                            let group_key = Self::branch_group_key(
+                                &key,
+                                g.worktree,
+                                &g.label,
+                                g.worktree_path.as_deref(),
+                            );
+                            acc + super::BRANCH_GROUP_HEADER_HEIGHT
+                                + if self.sidebar_group_collapsed(&group_key) {
+                                    0.0
+                                } else {
+                                    g.chats.len() as f32 * super::CHAT_ROW_HEIGHT
+                                }
+                        })
+                    };
+                let element = self.render_group_card(&card, &selected, now, theme, cx);
+                (format!("g:{key}"), height, element)
+            })
+            .collect()
+    }
+
+    /// One project card: an opaque floating surface (`theme.surface`, 12px
+    /// radius, subtle shadow, clipped) whose single-line header owns the
+    /// prominent project label and muted target machine with a presence dot.
+    /// Real space headers host the rename/remove context menu on right-click;
+    /// synthetic cards have no menu. Below the header, chats are
+    /// grouped by checkout: a quiet branch/worktree header introduces each
+    /// group, then the compact rows (agent + title, then time) with
+    /// selection and context menu behavior.
+    fn render_group_card(
+        &self,
+        group: &GroupCard,
+        selected: &Option<String>,
+        now: chrono::DateTime<Utc>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let project_key = Self::project_group_key(&group.key);
+        let project_collapsed = self.sidebar_group_collapsed(&project_key);
+        let header = self.render_group_header(group, theme, cx);
+        // Rows are the visible branch/worktree group headers and their session
+        // rows: a collapsed project hides every group, a collapsed branch
+        // group keeps its header and drops its rows.
+        let rows: Vec<AnyElement> = if project_collapsed {
+            Vec::new()
+        } else {
+            group
+                .groups
+                .iter()
+                .flat_map(|chat_group| {
+                    let group_key = Self::branch_group_key(
+                        &group.key,
+                        chat_group.worktree,
+                        &chat_group.label,
+                        chat_group.worktree_path.as_deref(),
+                    );
+                    let group_collapsed = self.sidebar_group_collapsed(&group_key);
+                    let mut elements: Vec<AnyElement> =
+                        Vec::with_capacity(chat_group.chats.len() + 1);
+                    elements.push(self.render_branch_group_header(
+                        &group_key,
+                        chat_group,
+                        group_collapsed,
+                        group.space_id.as_deref(),
+                        theme,
+                        cx,
+                    ));
+                    if !group_collapsed {
+                        elements.extend(chat_group.chats.iter().map(|(_, chat)| {
+                            let time_ago: SharedString = format_time_ago(
+                                chat.last_message_at.unwrap_or(chat.created_at),
+                                now,
+                            )
+                            .into();
+                            let is_selected = selected.as_deref() == Some(chat.id.as_str());
+                            let harness = chat.config.as_ref().map(|c| c.harness);
+                            self.render_chat_row(
+                                chat.id.clone(),
+                                transcript::single_line(
+                                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                                )
+                                .into(),
+                                time_ago,
+                                harness,
+                                is_selected,
+                                theme,
+                                cx,
+                            )
+                        }));
+                    }
+                    elements
+                })
+                .collect()
+        };
+        div()
+            .rounded(px(12.0))
+            .bg(theme.surface)
+            .shadow_sm()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(header)
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// One branch/worktree section label between the project and its sessions.
+    /// The icon aligns with the project icon, while a trailing hairline turns
+    /// the row into a clear section divider; session agent marks remain
+    /// indented beneath it. The label stays secondary but readable. A compact
+    /// disclosure chevron at the far right marks the whole row as a toggle —
+    /// clicking hides/shows the group's sessions.
+    fn render_branch_group_header(
+        &self,
+        key: &str,
+        group: &ChatGroup,
+        collapsed: bool,
+        space_id: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let toggle_key = key.to_string();
+        // The row's hover group: hovering anywhere on the header reveals its
+        // trailing plus (nothing moves — the button is always laid out).
+        let hover_key = format!("branch-add-hover-{key}");
+        let worktree = group.worktree;
+        let worktree_path = group.worktree_path.clone();
+        let branch = group.branch.clone();
+        // Quiet trailing disclosure marker (chevron-right closed,
+        // chevron-down open) kept smaller than the 13px branch icon.
+        let chevron = div().flex_none().size(px(10.0)).child(
+            icon(if collapsed {
+                icons::ALT_ARROW_RIGHT
+            } else {
+                icons::ALT_ARROW_DOWN
+            })
+            .size(px(9.0))
+            .text_color(theme.text_muted.opacity(0.5)),
+        );
+        let mut header = div()
+            .id(SharedString::from(format!("branch-hdr-{key}")))
+            .h(px(33.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(hover_key.clone()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_sidebar_group(toggle_key.clone(), cx);
+            }))
+            // Project and group icons share the 10px card column; sessions
+            // remain nested at 26px.
+            .mx(px(10.0))
+            // Match the project header's icon/type scale; hierarchy comes
+            // from muted color, the divider, and indented session rows rather
+            // than from slightly mismatched glyph and font sizes.
+            .text_size(px(12.5))
+            .line_height(px(14.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text_muted.opacity(0.68))
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(150.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        icon(group.icon)
+                            .size(px(13.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.72)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(group.label.clone())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(12.0))
+                    .h(px(1.0))
+                    .bg(crate::theme::hairline(0.06)),
+            )
+            .child(chevron);
+        // Real-space groups get the trailing add plus at the far tail (after
+        // the disclosure chevron), opening a canvas targeted at THIS checkout
+        // — the worktree's exact path (authoritative without ListRefs) or the
+        // project-root checkout with the real optional branch metadata.
+        if let Some(space_id) = space_id {
+            let space_id = space_id.to_string();
+            header = header.child(hover_add_plus(
+                format!("branch-add-{key}"),
+                &hover_key,
+                6.0,
+                theme,
+                cx,
+                move |this, _, _, cx| {
+                    let plan = if worktree {
+                        crate::pickers::CheckoutPlan::ReuseWorktree {
+                            path: worktree_path.clone().unwrap_or_default(),
+                            branch: branch.clone(),
+                        }
+                    } else {
+                        crate::pickers::CheckoutPlan::CurrentCheckout {
+                            branch: branch.clone(),
+                        }
+                    };
+                    this.open_new_session_for(space_id.clone(), plan, cx);
+                },
+            ));
+        }
+        header.into_any_element()
+    }
+
+    /// A project card's single-line header: folder icon + prominent project
+    /// name on the left, then the quiet right-aligned target-machine name and
+    /// a far-right presence dot (emerald online, faint offline). The header
+    /// toggles the whole card body (all branch/worktree groups + sessions) on
+    /// left-press; real-space headers open the rename/remove context menu on
+    /// right-click, while synthetic cards render no menu.
+    fn render_group_header(
+        &self,
+        group: &GroupCard,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let menu_space = group.space_id.clone();
+        // The header's hover group: hovering anywhere on the row reveals its
+        // trailing plus (the button is always laid out — nothing moves).
+        let hover_key = format!("space-add-hover-{}", group.key);
+        let toggle_key = Self::project_group_key(&group.key);
+        let title = group.title.clone();
+        let device: SharedString = group.device.clone().into();
+        let offline = group.offline;
+        let presence = div()
+            .size(px(6.0))
+            .flex_none()
+            .rounded_full()
+            .when(!offline, |el| {
+                let emerald = theme.success;
+                el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
+                    color: emerald.opacity(0.45),
+                    offset: gpui::point(px(0.0), px(0.0)),
+                    blur_radius: px(4.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+            })
+            .when(offline, |el| el.bg(crate::theme::ink(0.22)));
+        let mut header = div()
+            .id(SharedString::from(format!(
+                "space-card-{}-header",
+                group.key
+            )))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .px(px(10.0))
+            .pt(px(8.0))
+            .pb(px(6.0))
+            // The whole header toggles the card body on left-press.
+            // Right-click stays the project menu; see `menu_space` below.
+            .cursor_pointer()
+            .on_hover(motion::hover_listener(hover_key.clone()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.toggle_sidebar_group(toggle_key.clone(), cx);
+                }),
+            )
             .child(
                 div()
                     .flex_1()
@@ -351,539 +677,67 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().min_w_0().truncate().child(label))
-                    .when_some(device_tag, |el, (tag, offline)| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::NORMAL)
-                                .text_color(theme.text_muted.opacity(0.45))
-                                .child(tag),
-                        )
-                        // Disconnected glyph, not the word (user request).
-                        .when(offline, |el| {
-                            el.child(
-                                icon(icons::WIFI_OFF)
-                                    .size(px(12.0))
-                                    .flex_none()
-                                    .text_color(theme.warning.opacity(0.8)),
-                            )
-                        })
-                    }),
-            )
-            .child(
-                icon(icons::ALT_ARROW_DOWN)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.6)),
-            );
-        let trigger = if self.spaces_menu.get().is_some() {
-            let closing = self.spaces_menu.closing_since();
-            let menu = self.render_spaces_menu(theme, cx);
-            trigger.relative().child(popover::anchored_menu_below(
-                "spaces-filter-menu",
-                menu,
-                closing,
-            ))
-        } else {
-            trigger
-        };
-
-        // NEW SESSION beside the trigger (adding a project lives in the
-        // dropdown's "New project…" row now). While the sidebar is collapsed
-        // this same button fades into the titlebar instead
-        // (`render_session_title_bar`). A plain button — the canvas showing
-        // is not an "active" state worth a selected wash (user feedback).
-        let add = div()
-            .id("sidebar-new-session")
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                "sidebar-new-session",
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.14),
-            ))
-            .on_hover(motion::hover_listener("sidebar-new-session"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx)))
-            .child(
-                icon(icons::PLUS)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted.opacity(0.7)),
-            );
-
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .px(px(Theme::SPACE_SM))
-            .pt(px(8.0))
-            .pb(px(4.0))
-            .child(trigger)
-            .child(add)
-            .into_any_element()
-    }
-
-    /// The dropdown card: search on top, "All projects" + space rows (check on
-    /// the active filter; right-click for rename/remove) + "New project…".
-    fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (search, active, focus, list_scroll) = {
-            let Some(menu) = self.spaces_menu.get() else {
-                return div().into_any_element();
-            };
-            (
-                menu.search.clone(),
-                menu.active,
-                menu.focus.clone(),
-                menu.list_scroll.clone(),
-            )
-        };
-        let rows = self.spaces_menu_rows(cx);
-        let filter = self.settings.space_filter.clone();
-        let now = Utc::now();
-        // (name, device tag) per space row — presence reuses the session
-        // rows' heartbeat signal.
-        let details: Vec<(SpacesMenuRow, SharedString, Option<SharedString>, bool)> = {
-            let state = self.state.read(cx);
-            rows.iter()
-                .map(|row| match row {
-                    SpacesMenuRow::All => {
-                        (row.clone(), SharedString::from("All projects"), None, false)
-                    }
-                    SpacesMenuRow::Space(id) => match state.space_row(id) {
-                        Some(space) => {
-                            let (tag, offline) = state.space_device_tag(space, now);
-                            (
-                                row.clone(),
-                                space.display_name().to_string().into(),
-                                Some(tag.into()),
-                                offline,
-                            )
-                        }
-                        None => (row.clone(), SharedString::from("?"), None, false),
-                    },
-                    SpacesMenuRow::AddSpace => {
-                        (row.clone(), SharedString::from("New project…"), None, false)
-                    }
-                })
-                .collect()
-        };
-
-        let list =
-            div()
-                .id("spaces-menu-list")
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .max_h(px(224.0))
-                .overflow_y_scroll()
-                .track_scroll(&list_scroll)
-                .children(details.into_iter().enumerate().map(
-                    |(ix, (row, label, tag, offline))| {
-                        let is_selected = match &row {
-                            SpacesMenuRow::All => filter.is_none(),
-                            SpacesMenuRow::Space(id) => filter.as_deref() == Some(id.as_str()),
-                            SpacesMenuRow::AddSpace => false,
-                        };
-                        let leading = match &row {
-                            SpacesMenuRow::AddSpace => icons::PLUS,
-                            _ => icons::FOLDER,
-                        };
-                        let menu_space = match &row {
-                            SpacesMenuRow::Space(id) => Some(id.clone()),
-                            _ => None,
-                        };
-                        let activate = row.clone();
-                        popover::menu_row_nav(
-                            theme,
-                            is_selected,
-                            ix == active,
-                            format!("spaces-menu-row-{ix}"),
-                        )
-                        .id(("spaces-menu-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.activate_spaces_menu_row(activate.clone(), cx);
-                        }))
-                        .when_some(menu_space, |el, space_id| {
-                            el.on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.space_menu.open((space_id.clone(), event.position));
-                                    cx.notify();
-                                }),
-                            )
-                        })
-                        .child(
-                            icon(leading)
-                                .size(px(15.0))
-                                .flex_none()
-                                .text_color(theme.text_muted.opacity(0.8)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .when_some(tag, |el, tag| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text_muted.opacity(0.45))
-                                    .child(tag),
-                            )
-                            // Disconnected glyph, not the word (user request).
-                            .when(offline, |el| {
-                                el.child(
-                                    icon(icons::WIFI_OFF)
-                                        .size(px(12.0))
-                                        .flex_none()
-                                        .text_color(theme.warning.opacity(0.8)),
-                                )
-                            })
-                        })
-                        // No check glyph — the selected row's wash (menu_row's
-                        // active styling) is the selection signal.
-                    },
-                ));
-
-        popover::popover_card(theme)
-            .w(px(248.0))
-            .track_focus(&focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                this.spaces_menu_key(event, cx)
-            }))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_spaces_menu(cx);
-            }))
-            .flex()
-            .flex_col()
-            .child(popover::search_input_frame(
-                theme,
-                search.into_any_element(),
-            ))
-            .child(list)
-            .into_any_element()
-    }
-
-    /// The sidebar's Sessions list: every session (idle included) of the
-    /// filter space — or all spaces under "All" — attention-sorted. Rows are
-    /// keyed for the FLIP resort glide.
-    pub(super) fn render_active_rows(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<(String, f32, AnyElement)> {
-        let now = Utc::now();
-        let filter = self.settings.space_filter.clone();
-        let rows: Vec<(ChatIndicator, zeron_proto::Chat, String, Option<String>)> = {
-            let state = self.state.read(cx);
-            state
-                .overview_chats(now)
-                .into_iter()
-                .filter(|(_, chat)| match &filter {
-                    Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
-                    None => true,
-                })
-                .map(|(status, chat)| {
-                    // Line 1 is "project @ device" (t3code's project row);
-                    // project-less sessions read as their home-dir cwd `~`.
-                    let space = state.space_for_chat(chat);
-                    let mut folder = match (space, chat.space_id.as_deref()) {
-                        (Some(space), _) => space.display_name().to_string(),
-                        (None, None) => "~".to_string(),
-                        (None, Some(_)) => "?".to_string(),
-                    };
-                    // Unknown device → no fragment, same as the archived list.
-                    if let Some(device) = state.device_name(&chat.device_id) {
-                        folder = format!("{folder} @ {device}");
-                    }
-                    // The branch shows whenever the engine has stamped one —
-                    // main-checkout sessions included, not just worktrees.
-                    let branch = chat
-                        .branch
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|b| !b.is_empty())
-                        .map(str::to_string);
-                    (status, chat.clone(), folder, branch)
-                })
-                .collect()
-        };
-        let selected = self.state.read(cx).selected_chat.clone();
-        rows.into_iter()
-            .map(|(status, chat, folder, branch)| {
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let is_selected = selected.as_deref() == Some(chat.id.as_str());
-                let height = super::CHAT_ROW_HEIGHT;
-                let harness = chat.config.as_ref().map(|c| c.harness);
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                    .child(
+                        icon(icons::FOLDER)
+                            .size(px(13.0))
+                            .flex_none()
+                            .text_color(theme.text),
                     )
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    theme,
-                    cx,
-                );
-                (format!("c:{}", chat.id), height, element)
-            })
-            .collect()
-    }
-
-    /// The sidebar's archived shelf — a direct port of t3code's settled
-    /// shelf: header is label + hairline + chevron ("Archived (N)" closed,
-    /// "Archived" open), rows are 36px SLIM one-liners (dimmed harness mark,
-    /// title, time-ago right — the time yields to Unarchive on row hover),
-    /// and the tail pages behind an explicit "Show N more" row (initial 10,
-    /// +25 a click). `None` when nothing is archived under the current
-    /// project filter.
-    pub(super) fn render_archived_section(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        const INITIAL: usize = 10;
-        const PAGE: usize = 25;
-        let now = Utc::now();
-        let filter = self.settings.space_filter.clone();
-        let rows: Vec<zeron_proto::Chat> = {
-            let state = self.state.read(cx);
-            state
-                .chats
-                .iter()
-                .filter(|c| c.archived)
-                .filter(|chat| match &filter {
-                    Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
-                    None => true,
-                })
-                .cloned()
-                .collect()
-        };
-        if rows.is_empty() {
-            return None;
-        }
-        let total = rows.len();
-        let open = self.archived_open;
-        let shown = self.archived_shown.max(INITIAL);
-        // Header (t3code settled-shelf toggle): muted 12px label, a hairline
-        // filling the middle, chevron flipping open/closed. The count only
-        // shows while collapsed — expanded, the rows speak for themselves.
-        let label: SharedString = if open {
-            "Archived".into()
-        } else {
-            format!("Archived ({total})").into()
-        };
-        let header = div()
-            .id("archived-toggle")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .mt(px(12.0))
-            .mb(px(4.0))
-            .px(px(10.0))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.archived_open = !this.archived_open;
-                this.archived_shown = INITIAL;
-                cx.notify();
-            }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(title)),
+                    ),
+            )
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(label),
+                    .min_w_0()
+                    .max_w(px(96.0))
+                    .truncate()
+                    .text_right()
+                    .text_size(px(10.5))
+                    .text_color(theme.text_muted.opacity(0.62))
+                    .child(device),
             )
-            .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_DOWN
-                } else {
-                    crate::icons::ALT_ARROW_RIGHT
-                })
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_muted.opacity(0.5)),
+            .child(presence);
+        if let Some(space_id) = menu_space {
+            // Real-space headers also get the trailing add plus (after the
+            // presence dot): a canvas explicitly targeted at the project's
+            // ordinary/current checkout — pinned `CurrentCheckout { branch:
+            // None }` so no stale worktree draft survives. Synthetic cards
+            // get neither the plus nor the menu.
+            let plus_space = space_id.clone();
+            header = header.child(hover_add_plus(
+                format!("space-add-{}", group.key),
+                &hover_key,
+                7.0,
+                theme,
+                cx,
+                move |this, _, _, cx| {
+                    this.open_new_session_for(
+                        plus_space.clone(),
+                        crate::pickers::CheckoutPlan::CurrentCheckout { branch: None },
+                        cx,
+                    );
+                },
+            ));
+            // Right-click anywhere on the header opens the project menu.
+            let menu_id = space_id;
+            header = header.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.space_menu.open((menu_id.clone(), event.position));
+                    cx.notify();
+                }),
             );
-        let mut section = div().flex().flex_col().child(header);
-        if open {
-            let selected = self.state.read(cx).selected_chat.clone();
-            let selected_wash = crate::theme::glass_selected_bg();
-            let mut list = div().flex().flex_col().gap(px(2.0));
-            for chat in rows.into_iter().take(shown) {
-                let id = chat.id.clone();
-                let hovered = self.archived_hover.as_deref() == Some(id.as_str());
-                let is_selected = selected.as_deref() == Some(id.as_str());
-                let title: SharedString = transcript::single_line(
-                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                )
-                .into();
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let (mark, tint) = chat
-                    .config
-                    .as_ref()
-                    .map(|c| crate::pickers::harness_brand_icon(c.harness))
-                    .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
-                // Right slot: time at rest; the Unarchive affordance takes
-                // its place on row hover (t3code: "only the time/jump label
-                // yields to the settle affordance").
-                let right: AnyElement = if hovered {
-                    let restore_id = id.clone();
-                    // Metrics match the active rows' Archive pill exactly
-                    // (18px pill, 11px icon, 10px label, padding bled right)
-                    // — two sizes of the same affordance read as a mistake.
-                    div()
-                        .id(SharedString::from(format!("archived-restore-{id}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .h(px(18.0))
-                        .px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_chat_archived(restore_id.clone(), false, cx);
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(theme.text_muted),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("Unarchive")),
-                        )
-                        .into_any_element()
-                } else {
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.55))
-                        .child(time_ago)
-                        .into_any_element()
-                };
-                let hover_id = id.clone();
-                let open_id = id.clone();
-                let menu_id = id.clone();
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("archived-{id}")))
-                        .h(px(36.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .px(px(10.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .when(is_selected, |el| el.bg(selected_wash))
-                        .when(!is_selected, |el| el.hover(|s| s.bg(theme.glass_hover())))
-                        .on_hover(cx.listener(move |this, entered: &bool, _, cx| {
-                            if *entered {
-                                if this.archived_hover.as_deref() != Some(hover_id.as_str()) {
-                                    this.archived_hover = Some(hover_id.clone());
-                                    cx.notify();
-                                }
-                            } else if this.archived_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.archived_hover = None;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_chat(open_id.clone(), cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                this.chat_menu.open((menu_id.clone(), event.position));
-                                cx.notify();
-                            }),
-                        )
-                        // Archived history recedes: dimmed mark at rest,
-                        // restored on hover (t3code's grayscale favicon).
-                        .child(
-                            crate::icons::icon(mark)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(if hovered || is_selected {
-                                    tint.unwrap_or(theme.text_muted)
-                                } else {
-                                    tint.unwrap_or(theme.text_muted).opacity(0.4)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(13.0))
-                                .text_color(if hovered || is_selected {
-                                    theme.text
-                                } else {
-                                    theme.text.opacity(0.55)
-                                })
-                                .child(title),
-                        )
-                        .child(right),
-                );
-            }
-            // Mount fade: the shelf popping in whole read as jank — a quick
-            // fade on the expanded list softens the accordion.
-            section = section.child(motion::fade_quick("archived-list", list));
-            if total > shown {
-                let remaining = (total - shown).min(PAGE);
-                section = section.child(
-                    div()
-                        .id("archived-more")
-                        // Sits outside the rows' gapped column — match the
-                        // list's 2px row gap or it fuses with the last row.
-                        .mt(px(2.0))
-                        .h(px(36.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .px(px(10.0))
-                        .rounded(px(6.0))
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted.opacity(0.55))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archived_shown = this.archived_shown.max(INITIAL) + PAGE;
-                            cx.notify();
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::PLUS)
-                                .size(px(14.0))
-                                .flex_none(),
-                        )
-                        .child(SharedString::from(format!("Show {remaining} more"))),
-                );
-            }
         }
-        Some(section.pb(px(Theme::SPACE_SM)).into_any_element())
+        header.into_any_element()
     }
 
     // ---- add-space flow (the ⌘K palette) ----
@@ -2118,5 +1972,209 @@ impl Shell {
         }
 
         overlays
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chat(id: &str, branch: Option<&str>, cwd: Option<&str>) -> (ChatIndicator, Chat) {
+        (
+            ChatIndicator::Idle,
+            Chat {
+                id: id.into(),
+                device_id: "dev".into(),
+                title: None,
+                archived: false,
+                cwd: cwd.map(Into::into),
+                branch: branch.map(Into::into),
+                checkout_id: None,
+                config: None,
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: Utc::now(),
+                harness_session_id: None,
+                harness_session_cwd: None,
+                space_id: None,
+                last_seen_at: None,
+                room_gen: None,
+                child: None,
+            },
+        )
+    }
+
+    #[test]
+    fn group_chats_keeps_two_same_label_detached_worktrees_distinct() {
+        // Two worktrees whose chats carry the same branch label ("detached")
+        // but different paths are DIFFERENT checkouts — they must not merge
+        // into one group (each header gets its own add button and collapse).
+        let groups = group_chats(
+            vec![
+                chat("a", Some("detached"), Some("/repo/.worktrees/one")),
+                chat("b", Some("detached"), Some("/repo/.worktrees/two")),
+                chat("c", Some("detached"), Some("/repo/.worktrees/one")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].chats.len(), 2); // "one" merged
+        assert_eq!(
+            groups[0].worktree_path.as_deref(),
+            Some("/repo/.worktrees/one")
+        );
+        assert_eq!(groups[1].chats.len(), 1); // "two" distinct
+        assert_eq!(
+            groups[1].worktree_path.as_deref(),
+            Some("/repo/.worktrees/two")
+        );
+        // Both are worktrees with the same label.
+        assert!(groups[0].worktree && groups[1].worktree);
+        assert_eq!(groups[0].label, groups[1].label);
+        // Branch metadata is preserved for targeting new sessions.
+        assert_eq!(groups[0].branch.as_deref(), Some("detached"));
+    }
+
+    #[test]
+    fn group_chats_ordinary_vs_worktree_with_same_label_never_merge() {
+        // A `main` branch chat in the space root and a `main` worktree chat
+        // are different checkouts — distinct groups, distinct collapse keys.
+        let groups = group_chats(
+            vec![
+                chat("a", Some("main"), Some("/repo")),
+                chat("b", Some("main"), Some("/repo/.worktrees/main")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(!groups[0].worktree && groups[1].worktree);
+        assert_eq!(groups[0].worktree_path, None);
+        assert_eq!(
+            groups[1].worktree_path.as_deref(),
+            Some("/repo/.worktrees/main")
+        );
+        assert_eq!(groups[0].branch.as_deref(), Some("main"));
+        assert_eq!(groups[1].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn group_chats_normalizes_cwd_trailing_slashes_for_worktree_detection() {
+        // Worktree detection trims trailing slashes/backslashes: a cwd of
+        // "/repo/" is the space root, not a worktree — and the representative
+        // worktree path stays EXACT (not trimmed) for targeting new sessions.
+        let groups = group_chats(
+            vec![
+                chat("a", Some("main"), Some("/repo/")),
+                chat("b", Some("feat"), Some("/repo/.worktrees/feat/")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(
+            !groups[0].worktree,
+            "trailing slash on the root is NOT a worktree"
+        );
+        assert_eq!(groups[0].label, "main");
+        assert!(groups[1].worktree);
+        // The exact path is preserved as the add-button target.
+        assert_eq!(
+            groups[1].worktree_path.as_deref(),
+            Some("/repo/.worktrees/feat/")
+        );
+        assert_eq!(groups[1].label, "feat");
+    }
+
+    #[test]
+    fn group_chats_branch_blank_falls_back_to_current_checkout_label_with_none_branch() {
+        // A branch-less/blank chat is the ordinary current checkout: label
+        // falls back, but the carried branch metadata stays None (a new
+        // session targets the checkout with no branch to name).
+        let groups = group_chats(
+            vec![
+                chat("a", None, Some("/repo")),
+                chat("b", Some("  "), Some("/repo")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "Current checkout");
+        assert_eq!(groups[0].branch, None);
+        assert!(!groups[0].worktree);
+        assert_eq!(groups[0].worktree_path, None);
+    }
+
+    #[test]
+    fn group_chats_folds_trailing_slash_worktree_into_one_group() {
+        // `/repo/.worktrees/wt` and `/repo/.worktrees/wt/` are the SAME
+        // checkout — they must fold into ONE group (one identity, one collapse
+        // key), while the representative group's raw cwd stays exact as the
+        // add-button target (a trailing slash is kept there, not trimmed).
+        let groups = group_chats(
+            vec![
+                chat("a", Some("detached"), Some("/repo/.worktrees/wt")),
+                chat("b", Some("detached"), Some("/repo/.worktrees/wt/")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].chats.len(), 2);
+        assert!(groups[0].worktree);
+        // The first appearance's EXACT raw cwd is the target.
+        assert_eq!(
+            groups[0].worktree_path.as_deref(),
+            Some("/repo/.worktrees/wt")
+        );
+    }
+
+    #[test]
+    fn group_chats_preserves_trailing_space_in_worktree_identity() {
+        // A trailing SPACE is valid path content, not a separator: `/wt` and
+        // `/wt ` are distinct identities and must NOT fold together.
+        let groups = group_chats(
+            vec![
+                chat("a", Some("detached"), Some("/repo/.worktrees/wt")),
+                chat("b", Some("detached"), Some("/repo/.worktrees/wt ")),
+            ],
+            Some("/repo"),
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0].worktree_path.as_deref(),
+            Some("/repo/.worktrees/wt")
+        );
+        assert_eq!(
+            groups[1].worktree_path.as_deref(),
+            Some("/repo/.worktrees/wt ")
+        );
+    }
+
+    #[test]
+    fn branch_group_key_includes_worktree_path() {
+        // The collapse key must distinguish same-label detached worktrees,
+        // mirroring the grouping identity.
+        let a = Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/one"));
+        let b = Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/two"));
+        let root = Shell::branch_group_key("s:1", false, "main", None);
+        assert_ne!(a, b);
+        assert_ne!(a, root);
+        // Same identity → same key (stable across renders).
+        assert_eq!(
+            a,
+            Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/one"))
+        );
+    }
+
+    #[test]
+    fn branch_group_key_normalizes_trailing_slashes_for_a_stable_collapse_key() {
+        // `/wt` and `/wt/` are the same checkout: same disclosure key, so
+        // collapsing one collapses the other (status churn never re-opens it).
+        let a = Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/wt"));
+        let with_slash =
+            Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/wt/"));
+        assert_eq!(a, with_slash);
+        // A trailing SPACE is part of the identity — stays distinct from the
+        // bare path (whitespace is never trimmed).
+        let spaced = Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/wt "));
+        assert_ne!(a, spaced);
     }
 }

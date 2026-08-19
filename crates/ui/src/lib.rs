@@ -58,6 +58,10 @@ static FONT_GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono.ttf");
 static FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Geist-Medium.ttf");
 static FONT_GEIST_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Geist-SemiBold.ttf");
 static FONT_GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
+/// Oxanium SemiBold, © The Oxanium Project Authors, licensed under SIL OFL
+/// 1.1 (the bundled license is `assets/fonts/Oxanium-OFL.txt`). Used only for
+/// the compact Cypher product mark in the sidebar.
+static FONT_OXANIUM_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Oxanium-SemiBold.ttf");
 
 /// Register the embedded fonts with the gpui text system. Failure is non-fatal:
 /// the theme's system fallbacks take over (same families the CSS stack names).
@@ -68,8 +72,9 @@ fn register_fonts(cx: &App) {
         Cow::Borrowed(FONT_GEIST_MEDIUM),
         Cow::Borrowed(FONT_GEIST_SEMIBOLD),
         Cow::Borrowed(FONT_GEIST_BOLD),
+        Cow::Borrowed(FONT_OXANIUM_SEMIBOLD),
     ]) {
-        tracing::warn!(error = %err, "failed to register embedded Geist fonts");
+        tracing::warn!(error = %err, "failed to register embedded UI fonts");
     }
 }
 

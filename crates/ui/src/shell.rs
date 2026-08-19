@@ -378,11 +378,20 @@ pub fn resort_offsets(
 /// Estimated sidebar row height for the resort diff (title line 17px inside
 /// 6px vertical padding + the location subline's 14px line + 2px gap — Active
 /// rows always carry the folder · device subline).
-/// Session row height (FLIP estimate): space line + title + meta line
-/// (harness mark, plus branch for worktrees).
-const CHAT_ROW_HEIGHT: f32 = 61.0;
-/// Flex gap between sidebar list items.
-const SIDEBAR_LIST_GAP: f32 = 2.0;
+/// Session row height (FLIP estimate): one inset identity line plus the
+/// bottom breathing room between rows.
+const CHAT_ROW_HEIGHT: f32 = 33.0;
+
+/// Branch/worktree group header height (FLIP estimate): match the compact
+/// session-row rhythm while separating checkout sections.
+const BRANCH_GROUP_HEADER_HEIGHT: f32 = 33.0;
+
+/// Project card header height (FLIP estimate): one project + target-machine
+/// identity line, inside the card's vertical padding.
+const GROUP_CARD_HEADER_HEIGHT: f32 = 32.0;
+/// Gap between the opaque project cards (the rows inside a card keep a 2px
+/// rhythm; the cards themselves breathe like the main/right cards).
+const GROUP_CARD_GAP: f32 = 8.0;
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -763,15 +772,6 @@ pub struct Shell {
     /// the transcript's bottom clearance, and the jump pill's anchor (the
     /// same one-frame lag every fade here rides).
     bottom_stack: std::rc::Rc<std::cell::Cell<f32>>,
-    /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
-    /// (user request), session-transient. `archived_shown` pages the
-    /// expanded list ("Show more" reveals another page).
-    pub(super) archived_open: bool,
-    pub(super) archived_shown: usize,
-    /// Archived slim row under the pointer — swaps its time label for the
-    /// Unarchive affordance and restores the dimmed harness mark (t3code's
-    /// settled-row hover).
-    pub(super) archived_hover: Option<String>,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
@@ -820,12 +820,6 @@ pub struct Shell {
     /// The add-space palette (⌘K-style; device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
-    /// The sidebar's space-filter dropdown.
-    spaces_menu: popover::Popup<spaces::SpacesMenu>,
-    /// Chat id whose STATUS CORNER is under the pointer — just that corner
-    /// swaps to the archive button (t3code's settle-on-hover); hovering the
-    /// row body leaves the status readable.
-    chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// `settings.last_space_id` applied once after the first spaces frame.
@@ -875,6 +869,12 @@ pub struct Shell {
     /// Keys that just appeared in a live list (fade in, no glide).
     sidebar_new_keys: std::collections::HashSet<String>,
     resort_epoch: usize,
+    /// Collapsed sidebar disclosure groups — local Shell UI state, never
+    /// persisted or synced (see `spaces::project_group_key` /
+    /// `spaces::branch_group_key` for the deterministic key shapes). A
+    /// project key hides the whole card body; a branch/worktree key hides
+    /// that group's session rows. Everything defaults expanded.
+    sidebar_collapsed: std::collections::HashSet<String>,
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
@@ -1021,9 +1021,6 @@ impl Shell {
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
-            archived_open: true,
-            archived_shown: 0,
-            archived_hover: None,
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
@@ -1051,8 +1048,6 @@ impl Shell {
             rename_space_dialog: None,
             delete_space_confirm: None,
             add_space: None,
-            spaces_menu: popover::Popup::default(),
-            chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
@@ -1079,6 +1074,7 @@ impl Shell {
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
+            sidebar_collapsed: std::collections::HashSet::new(),
             was_window_active: false,
             debug_dialog,
             debug_gate,
@@ -1238,44 +1234,36 @@ impl Shell {
         if !self.space_boot_applied && !state.read(cx).spaces.is_empty() {
             self.space_boot_applied = true;
             if state.read(cx).selected_chat.is_none() {
-                // A set sidebar filter is an explicit standing choice — the
-                // canvas defaults (project AND its device) follow it, even
-                // over a remembered "no project" opt-out. Otherwise the last
-                // selected project stands, unless opted out.
+                // Restore the last selected project (unless the user opted
+                // out of projects); a still-existing row wins over the
+                // auto-selected first one. The sidebar never filters — the
+                // canvas defaults are the only target.
                 let exists = |id: &String| state.read(cx).space_row(id).is_some();
-                let filter = self.settings.space_filter.clone().filter(&exists);
-                let target = match filter {
-                    Some(filter) => Some(filter),
-                    None if !state.read(cx).no_project => {
-                        self.settings.last_space_id.clone().filter(&exists)
-                    }
-                    None => None,
+                let target = if !state.read(cx).no_project {
+                    self.settings.last_space_id.clone().filter(&exists)
+                } else {
+                    None
                 };
                 if target.is_some() {
                     state.update(cx, |s, cx| s.select_space(target, cx));
                 }
             }
         }
-        // Persist the selected space (the new-tab fallback under "All").
+        // Persist the selected space (the new-tab fallback) — only when it
+        // resolves to a LIVE Space. A dangling id (space deleted elsewhere)
+        // must never overwrite the remembered one, or the next boot would
+        // restore a dead project.
         {
-            let selected_space = state.read(cx).selected_space.clone();
-            if selected_space != self.settings.last_space_id && selected_space.is_some() {
-                self.settings.last_space_id = selected_space;
+            let state = state.read(cx);
+            let live = state.selected_space_if_live();
+            if live.is_some() && live != self.settings.last_space_id {
+                self.settings.last_space_id = live;
                 self.schedule_save(cx);
             }
         }
         // Boot landing: the most recent session once the first chats frame
         // syncs (manual selection wins).
         self.boot_select_chat(cx);
-        // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
-        // fall back to "All" rather than filtering everything out.
-        if state.read(cx).spaces_synced
-            && let Some(filter) = self.settings.space_filter.clone()
-            && state.read(cx).space_row(&filter).is_none()
-        {
-            self.settings.space_filter = None;
-            self.schedule_save(cx);
-        }
         // Chat switch: restore THAT chat's panel state (per-session open flags;
         // snap, no tween — the panels belong to the destination chat).
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
@@ -2868,9 +2856,9 @@ impl Shell {
         };
         let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
-        // card's own border provides the separation. The content row spans the
-        // full window height (the titlebar overlays it), so the column pads
-        // itself below the chrome.
+        // card's gutter, tone, and shadow provide the separation without a
+        // vertical divider. The content row spans the full window height (the
+        // titlebar overlays it), so the column pads itself below the chrome.
         self.pane_container(
             self.sidebar_tween,
             target,
@@ -2993,152 +2981,27 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One session row (zeron session-row.tsx): status rail on the left
-    /// (a live 2×3 mini spinner while working, a dot otherwise), title +
-    /// relative time on the first line, "folder · device" underneath aligned
-    /// to the title. Click selects; right-click opens the context menu.
+    /// One compact session row: agent mark + title on the left, relative time
+    /// on the right. The row is inset from the project-card edge; click
+    /// selects and right-click opens the context menu. The branch is NOT
+    /// repeated per row — it lives in the branch/worktree group header above
+    /// (see [`spaces`](crate::shell::spaces)).
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
         &self,
         id: String,
         title: SharedString,
         time_ago: SharedString,
-        space_name: SharedString,
-        branch: Option<SharedString>,
         harness: Option<zeron_proto::HarnessId>,
-        status: zeron_proto::ChatIndicator,
         selected: bool,
-        archived: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Activity, not position (t3code Sidebar): status is a small colored
-        // word + glyph in the row's top-right corner — Working animates the
-        // composer-strip spinner, Done wears a check; Idle rows show the
-        // relative time instead. Hovering the ROW swaps the corner for the
-        // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
-        // accordion), t3code's settle-on-hover.
-        let corner_hovered = self.chat_status_hover.as_deref() == Some(id.as_str());
-        let status_color = spaces::status_dot_color(status, theme);
-        let status_label: Option<&'static str> = match status {
-            zeron_proto::ChatIndicator::Working => Some("Working"),
-            zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-            zeron_proto::ChatIndicator::Errored => Some("Failed"),
-            zeron_proto::ChatIndicator::Completed => Some("Done"),
-            zeron_proto::ChatIndicator::Idle => None,
-        };
-        let corner_body: AnyElement = if corner_hovered {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                // The pill's padding bleeds right into the row's padding so
-                // its TEXT right-aligns exactly where the status word/time
-                // sits — the swap moves pixels around the label, not it.
-                // 4px: what's left of the row's 8px padding then equals the
-                // 4px of air above the pill (18px tall on the 14px line,
-                // 6px row padding minus the 2px overflow).
-                .px(px(4.0))
-                .mr(px(-4.0))
-                .rounded(px(5.0))
-                .bg(crate::theme::wash(0.10))
-                .hover(|s| s.bg(crate::theme::wash(0.18)))
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(11.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if archived {
-                            "Unarchive"
-                        } else {
-                            "Archive"
-                        })),
-                )
-                .into_any_element()
-        } else {
-            match status_label {
-                Some(label) => {
-                    // Glyph slot: Done wears the check; every other status a
-                    // dot in its color (the Working spinner lives at the
-                    // row's bottom-right, not up here).
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
-                        icon(icons::CHECK)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(status_color)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(status_color)
-                            .into_any_element()
-                    };
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(glyph)
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
-                        )
-                        .into_any_element()
-                }
-                None => div()
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(time_ago.clone())
-                    .into_any_element(),
-            }
-        };
-        // One stable wrapper across both states (identity keeps the hover
-        // from flickering as the content swaps); the swap is driven by the
-        // ROW's hover (user request — corner-only felt undiscoverable), but
-        // archiving only clicks on the corner itself, so the row's own click
-        // stays the selector.
-        let corner: AnyElement = {
-            let archive_id = id.clone();
-            div()
-                .id(SharedString::from(format!("chat-corner-{id}")))
-                .flex_none()
-                // Pin the corner to line 1's text height so the archive pill
-                // (taller, padded) overflows vertically instead of growing the
-                // row — the swap must not shift the card's content.
-                // NO occlude: the ROW's hover drives the swap, and an
-                // occluding corner un-hovered the row underneath it —
-                // pill mounts, steals the pointer, row un-hovers, pill
-                // unmounts, repeat (user-reported flicker). The pill's
-                // stop_propagation click is separation enough.
-                .h(px(14.0))
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .when(corner_hovered, |el| {
-                    el.on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.set_chat_archived(archive_id.clone(), !archived, cx);
-                    }))
-                })
-                .child(corner_body)
-                .into_any_element()
-        };
+        let corner = div()
+            .flex_none()
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(time_ago);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = theme.text_muted.opacity(0.5);
@@ -3161,34 +3024,23 @@ impl Shell {
         div()
             .id(SharedString::from(format!("chat-{id}")))
             .flex()
-            .flex_col()
-            .gap(px(2.0))
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
             .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
+            .mx(px(6.0))
+            .mb(px(4.0))
+            // Sessions are children of the project header: keep the selected
+            // wash inset 6px, then indent the content so the agent mark lands
+            // beneath the project title rather than at the card's left edge.
+            .pl(px(20.0))
+            .pr(px(8.0))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
             // No selection ring (user request) — the wash alone marks the
             // active row.
-            // Row hover drives BOTH the wash blend and the corner's
-            // status→Archive swap (one listener — gpui allows a single
-            // hover listener per element).
-            .on_hover({
-                let fade_hover = motion::hover_listener(fade_key.clone());
-                let hover_id = id.clone();
-                cx.listener(move |this, hovered: &bool, window, cx| {
-                    fade_hover(hovered, window, cx);
-                    if *hovered {
-                        if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
-                            this.chat_status_hover = Some(hover_id.clone());
-                            cx.notify();
-                        }
-                    } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
-                        this.chat_status_hover = None;
-                        cx.notify();
-                    }
-                })
-            })
+            .on_hover(motion::hover_listener(fade_key.clone()))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_chat(select_id.clone(), cx);
@@ -3200,90 +3052,45 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            // Line 1: "project @ device", status word / time-ago right.
+            // Agent identity + title. The project card already owns host and
+            // project identity, so sessions only repeat what distinguishes
+            // one run from another.
             .child(
                 div()
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(Theme::SPACE_SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .line_height(px(14.0))
-                            .text_color(subline)
-                            .child(space_name),
-                    )
-                    .child(div().text_color(subline).child(corner)),
-            )
-            // Line 2: the session title, flush left (t3code card line 2).
-            .child(
-                div()
-                    .w_full()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .line_height(px(17.0))
-                    .child(title),
-            )
-            // Line 3 (always): harness brand mark; worktree sessions append
-            // the branch icon + name.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
                             el.child(
                                 icon(path)
-                                    .size(px(11.0))
+                                    .size(px(15.0))
                                     .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.8)),
+                                    .text_color(tint.unwrap_or(subline).opacity(0.82)),
                             )
                         },
                     )
-                    .when_some(branch, |el, branch| {
-                        el.child(
-                            icon(icons::GIT_BRANCH)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(subline),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(branch),
-                        )
-                    })
-                    // Working rows animate the spinner at the row's
-                    // bottom-right (the status word keeps its dot up top).
-                    .when(status == zeron_proto::ChatIndicator::Working, |el| {
-                        el.child(div().flex_1())
-                            .child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                    }),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .line_height(px(17.0))
+                            .child(title),
+                    ),
             )
+            // The relative time stays fixed at the row's right edge.
+            .child(div().text_color(subline).child(corner))
             .into_any_element()
     }
 
-    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
-    /// section (folder + device rows, add-space), the global Active sessions
-    /// list, the notice strip, and the UserMenu (§1.6).
+    /// Chat-mode sidebar: Cypher / Add project header, project-grouped session
+    /// cards (every host together), the notice strip, and the UserMenu (§1.6).
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
@@ -3305,7 +3112,7 @@ impl Shell {
         let order: Vec<(String, f32)> = keyed.iter().map(|(k, h, _)| (k.clone(), *h)).collect();
         if self.sidebar_prev_order != order {
             if !self.sidebar_prev_order.is_empty() {
-                let offsets = resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP);
+                let offsets = resort_offsets(&self.sidebar_prev_order, &order, GROUP_CARD_GAP);
                 let prev_keys: std::collections::HashSet<&str> = self
                     .sidebar_prev_order
                     .iter()
@@ -3345,9 +3152,6 @@ impl Shell {
             })
             .collect();
 
-        // t3code's archived accordion, below the active list.
-        let archived_section = self.render_archived_section(theme, cx);
-
         let (user_line, trigger_subline, menu_identity): (
             SharedString,
             Option<SharedString>,
@@ -3381,9 +3185,9 @@ impl Shell {
         let user_menu =
             self.render_user_menu(user_line.clone(), trigger_subline, menu_identity, theme, cx);
 
-        // The space filter lives ABOVE the scroll region (fixed) so its
-        // dropdown can float without being clipped by the list's overflow.
-        let filter_row = self.render_spaces_filter(theme, cx);
+        // The fixed product header + Add project action lives ABOVE the scroll
+        // region (it must stay reachable no matter how long the card list gets).
+        let actions = self.render_sidebar_header(theme, cx);
 
         div()
             .w(px(self.settings.sidebar_width))
@@ -3392,8 +3196,8 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
-            .child(filter_row)
-            // The (filtered) Sessions list scrolls inside an EdgeFade scope —
+            .child(actions)
+            // The project-grouped card list scrolls inside an EdgeFade scope —
             // a true per-glyph gradient at active overflow edges. Glass-safe
             // (no painted overlay can fade content over see-through blur) and
             // equivalent on opaque themes: alpha→0 reveals the surface tone
@@ -3423,7 +3227,7 @@ impl Shell {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(2.0))
+                                    .gap(px(GROUP_CARD_GAP))
                                     .pb(px(Theme::SPACE_SM))
                                     .children(list_items)
                                     .into_any_element()
@@ -3433,10 +3237,9 @@ impl Shell {
                                     .pb(px(Theme::SPACE_SM))
                                     .text_size(px(12.0))
                                     .text_color(theme.text_faint)
-                                    .child(SharedString::from("No sessions yet"))
+                                    .child(SharedString::from("No projects yet"))
                                     .into_any_element()
-                            })
-                            .children(archived_section),
+                            }),
                     ),
                 )
                 .fade_overflow_y(&self.sidebar_scroll),
@@ -4425,7 +4228,6 @@ impl Shell {
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
-        let no_project = self.state.read(cx).no_project;
         let space_name: SharedString = self
             .state
             .read(cx)
@@ -4440,9 +4242,11 @@ impl Shell {
         // (new-chat mode mints the chat id on first send).
         let outlet: AnyElement = if has_selection {
             self.transcript.clone().into_any_element()
-        } else if !has_spaces && !no_project {
-            // Onboarding (first boot / after the destructive wipe): no folders
-            // to work in yet — one clear affordance.
+        } else if !has_spaces {
+            // Onboarding (first boot / after the destructive wipe / a
+            // project-less opt-out with nothing to work in): no folders to
+            // target yet — one clear affordance, regardless of `no_project`
+            // (an unselected canvas with zero spaces has nothing to send to).
             let _ = faint;
             div()
                 .size_full()
@@ -4636,7 +4440,15 @@ impl Shell {
                     // inspector it opens is a floating layer and never
                     // participates in this stack's measurement.
                     .child(status)
-                    .when(has_spaces, |el| el.child(self.composer.clone()))
+                    // A SELECTED chat keeps its composer even with zero live
+                    // spaces (a selected project-less / unavailable-project
+                    // chat still needs its input row); an unselected canvas
+                    // with no spaces shows onboarding instead, so the
+                    // composer only mounts where there is something to send
+                    // into.
+                    .when(has_selection || has_spaces, |el| {
+                        el.child(self.composer.clone())
+                    })
                     .child(self.render_terminal_container(cx))
             })
             .when(file_drag_active, |el| {
@@ -4906,7 +4718,6 @@ impl Shell {
     /// terminal, or the "Open a surface" picker when no tabs exist.
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let bg = theme.bg;
         let content: AnyElement = if self.right_pane_open(cx) {
             match self.resolved_right_active(cx) {
                 RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
@@ -4947,10 +4758,9 @@ impl Shell {
         } else {
             gpui::Empty.into_any_element()
         };
-        // Flush panel (user request — the inset card is gone): full window
-        // height with a left hairline, glass-friendly like the terminal dock
-        // (translucent over the frost; solid otherwise). The resize grabber
-        // floats over the border seam.
+        // The right sidebar mirrors the conversation surface as its own
+        // opaque floating card. The resize grabber stays in the narrow gutter
+        // between the two cards so the visual surface remains uninterrupted.
         let handle = self
             .resize_handle(
                 "right-pane-resize",
@@ -4959,31 +4769,22 @@ impl Shell {
                 cx,
             )
             .absolute()
-            .top_0()
-            .bottom_0()
+            .top(px(8.0))
+            .bottom(px(8.0))
             // INSIDE the width-clipped container (a negative inset was
             // clipped into unreachability — user-reported dead resize),
-            // overlapping the panel's left border.
+            // overlapping the card's left edge.
             .left(px(0.0));
-        let panel_bg = if theme.is_glass() {
-            bg.opacity(0.4)
-        } else {
-            bg
-        };
         let panel = div()
             .size_full()
             .flex()
             .flex_col()
-            // In takeover the panel's left edge IS the sidebar seam, which
-            // already carries the sidebar tone's right hairline — a second
-            // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
-                el.border_l_1().border_color(theme.border)
-            })
-            .bg(panel_bg)
+            .rounded(px(12.0))
+            .bg(theme.surface)
+            .shadow_sm()
             .overflow_hidden()
-            // The titlebar is a glass overlay over the full-height content
-            // row; the panel's own chrome starts below it.
+            // The global titlebar overlays this card; its own content starts
+            // below that shared header band.
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
         let target = self.right_target(cx);
@@ -4996,6 +4797,9 @@ impl Shell {
             div()
                 .h_full()
                 .relative()
+                .pt(px(8.0))
+                .pb(px(8.0))
+                .pr(px(8.0))
                 .child(panel)
                 .children(handle)
                 .into_any_element(),
@@ -5472,23 +5276,30 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-diff")
-                                .id("right-plus-diff-row")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_diff_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::GIT_BRANCH)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                // "Git", not "Git diff" — the surface hosts
-                                // history and per-commit views too (user
-                                // request; matches the picker card).
-                                .child(SharedString::from("Git")),
-                        ),
+                        // Git only where there IS git — a non-git project's
+                        // diff surface would open a dead pane (same gate as
+                        // the empty-surface picker card). Terminal is always
+                        // available (it hosts a shell, not the project's
+                        // repo).
+                        .when(self.space_git_detected(cx), |el| {
+                            el.child(
+                                popover::menu_row(&theme, false, "right-plus-diff")
+                                    .id("right-plus-diff-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.add_diff_surface(cx);
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::GIT_BRANCH)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    // "Git", not "Git diff" — the surface hosts
+                                    // history and per-commit views too (user
+                                    // request; matches the picker card).
+                                    .child(SharedString::from("Git")),
+                            )
+                        }),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
@@ -6345,12 +6156,22 @@ impl Render for Shell {
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let border_color = Theme::of(cx).border;
-                // No inset cards (user request): the conversation column sits
-                // flush and unbordered, the transcript directly on the frost
-                // glass; the changes pane is a flush left-bordered glass panel
-                // (built inside `render_right_pane`).
+                let card_bg = Theme::of(cx).surface;
+                // The main conversation area is a floating rounded card over
+                // the frost (user request): the slightly lifted `surface`
+                // neutral keeps dark mode from reading as pure black, while
+                // the soft shadow separates it from the shell without drawing
+                // another vertical hairline beside the sidebar. It is inset
+                // 8px on every outer edge; the right gap narrows to 4px while
+                // the right pane is open.
                 let card: AnyElement = div()
+                    .ml(px(8.0))
+                    .mt(px(8.0))
+                    .mb(px(8.0))
+                    .mr(px(if self.right_pane_open(cx) { 4.0 } else { 8.0 }))
+                    .rounded(px(12.0))
+                    .bg(card_bg)
+                    .shadow_sm()
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -6373,23 +6194,6 @@ impl Render for Shell {
                     .relative()
                     .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
                 let title_bar = self.render_title_bar(cx);
-                // Sidebar tone: a slightly lighter column behind the sidebar,
-                // spanning the FULL window height (under the traffic lights,
-                // through the titlebar, down to the bottom edge). Its width
-                // rides the same tween as the sidebar, so the tone melts away
-                // with the collapse instead of vanishing in a frame.
-                let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-                // Hairline on its right edge — full height like the tone,
-                // so the sidebar column reads as its own surface.
-                let sidebar_tone = div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(sidebar_now))
-                    .bg(crate::theme::wash(0.05))
-                    .border_r_1()
-                    .border_color(border_color);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -6411,8 +6215,7 @@ impl Render for Shell {
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
                     .children(overlays);
-                root.child(sidebar_tone)
-                    .child(motion::fade_in("phase-app", page))
+                root.child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::OrgGate => {
@@ -7043,6 +6846,27 @@ mod tests {
         nav.push(NavEntry::Settings(SettingsSection::Agents));
         nav.push(NavEntry::Settings(SettingsSection::Agents));
         assert_eq!(nav.len(), 2);
+    }
+
+    #[test]
+    fn nav_canvas_push_from_a_chat_is_one_entry_and_dedups_on_repeat() {
+        // `open_new_session` / `land_in_space` push the empty canvas route
+        // explicitly; `on_state_changed` follows with the same entry after
+        // the chat clears. Both must land as ONE entry (the push dedups),
+        // and a second `+` while already on the canvas must not stack either.
+        let mut nav = NavHistory::new(chat("a"));
+        nav.push(chat("")); // open_new_session: chat "a" → canvas
+        nav.push(chat("")); // on_state_changed after select_chat(None)
+        nav.push(chat("")); // another `+` on the canvas
+        assert_eq!(nav.len(), 2, "canvas push dedups against itself");
+        assert_eq!(*nav.current(), chat(""));
+        assert_eq!(nav.back(), Some(chat("a")), "Back returns to the session");
+
+        // Already on the canvas: pushing the canvas is a strict no-op.
+        let mut again = NavHistory::new(chat(""));
+        again.push(chat(""));
+        assert_eq!(again.len(), 1);
+        assert!(!again.can_back());
     }
 
     #[test]
