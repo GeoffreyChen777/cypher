@@ -385,9 +385,10 @@ pub fn has_send_content(has_text: bool, has_attachments: bool, has_comments: boo
     has_text || has_attachments || has_comments
 }
 
-/// One pending comment on the selected chat's transcript, in save order.
-/// Memory-only: comments die with the chat switch and ride the next Run/Steer
-/// as an augmented agent prompt.
+/// One pending comment on the selected chat (saved from the transcript, a Git
+/// diff, or a terminal selection), in save order. Memory-only: comments die
+/// with the chat switch and ride the next Run/Steer as an augmented agent
+/// prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftComment {
     pub id: String,
@@ -2148,8 +2149,9 @@ impl ComposerInput {
                 self.content[self.selected_range.clone()].to_string(),
             ));
         } else if let Some(text) = crate::markdown::selection::selected_text() {
-            // The composer keeps focus while the user reads the transcript —
-            // Cmd+C with no input selection copies the markdown selection.
+            // The composer keeps focus while the user reads a surface —
+            // Cmd+C with no input selection copies the LATEST markdown/
+            // diff selection (any surface).
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -3701,12 +3703,13 @@ impl Composer {
         self.attachments.remove(chat_id);
     }
 
-    // ---- transcript comments (round 19) ----
+    // ---- surface comments (round 20: transcript, Git diff, terminal) ----
 
-    /// Append a comment saved in the transcript's anchored editor. Ignores
-    /// comments whose chat no longer matches the selection (the shell forwards
-    /// async — a switch in between drops the comment).
-    pub fn add_transcript_comment(
+    /// Append a comment saved in a surface's anchored editor (transcript,
+    /// Git diff, terminal). Ignores comments whose chat no longer matches the
+    /// selection (the shell forwards — a switch in between drops the
+    /// comment).
+    pub fn add_comment(
         &mut self,
         chat_id: String,
         quote: String,

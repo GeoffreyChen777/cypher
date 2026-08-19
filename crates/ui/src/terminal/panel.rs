@@ -14,6 +14,7 @@
 //! `ResizeTerminal` (the emulator resizes immediately).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -134,6 +135,14 @@ pub fn active_after_close(active: usize, closed: usize, len_after: usize) -> usi
     } else {
         shifted.min(len_after - 1)
     }
+}
+
+/// Whether `key` is the ACTIVE tab of `tabs` — the only close that may
+/// dismiss/clear the active selection/comment (a background close must
+/// preserve the active tab's editor). Pure so the active/background close
+/// decision is testable without a gpui context.
+fn is_active_tab(tabs: &ChatTabs, key: u64) -> bool {
+    tabs.tabs.get(tabs.active).is_some_and(|t| t.key == key)
 }
 
 /// The `[process exited N]` trailer, dimmed (§1.10).
@@ -284,11 +293,22 @@ pub struct TerminalPanel {
     geometry: Option<GridGeometry>,
     /// Left-button gesture in flight, if any.
     selection_drag: Option<SelectionDrag>,
+    /// The shared shell-level Comment pill/editor (weak — the shell owns it):
+    /// a settled terminal selection offers its text; scroll/tab/close/chat/
+    /// resize/output dismiss it.
+    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    /// THIS panel's popup owner id — allocated per panel so the drawer and
+    /// the embedded right-pane panel never dismiss each other's pill.
+    comment_owner: crate::comments::CommentOwner,
     _observe: Subscription,
 }
 
 impl TerminalPanel {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         Self {
             state,
@@ -301,13 +321,19 @@ impl TerminalPanel {
             last_selected: None,
             geometry: None,
             selection_drag: None,
+            comment_popup,
+            comment_owner: crate::comments::CommentOwner::next_terminal(),
             _observe: observe,
         }
     }
 
     /// A panel in right-pane surface-host mode (see the `embedded` field).
-    pub fn new_embedded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let mut panel = Self::new(state, cx);
+    pub fn new_embedded(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut panel = Self::new(state, comment_popup, cx);
         panel.embedded = true;
         panel
     }
@@ -323,6 +349,12 @@ impl TerminalPanel {
         self.open = open;
         if open && !self.embedded {
             self.ensure_tab(cx);
+        }
+        if !open {
+            // Closing the drawer: its comment pill/selection would float over
+            // the wrong surface.
+            self.dismiss_popup(cx);
+            self.clear_active_selection(cx);
         }
         cx.notify();
     }
@@ -391,8 +423,14 @@ impl TerminalPanel {
         let selected = self.state.read(cx).selected_chat.clone();
         let switched = selected != self.last_selected;
         if switched {
+            let previous = self.last_selected.clone();
             self.last_selected = selected;
             self.drag = None;
+            // A chat switch invalidates the previous chat's selection.
+            self.dismiss_popup(cx);
+            if let Some(previous) = previous {
+                self.clear_chat_active_selection(&previous, cx);
+            }
         }
         if self.open && !self.embedded {
             // Returning to a chat with tabs restores them; a fresh chat (or an
@@ -456,6 +494,14 @@ impl TerminalPanel {
         let Some(engine) = self.engine(cx) else {
             return;
         };
+        // The new tab becomes ACTIVE: before the switch, dismiss/clear the
+        // outgoing active tab's comment/selection (scoped to THIS panel's
+        // owner — never another surface's pill). The first tab has no
+        // outgoing active tab, so opening it must not disturb anything.
+        if self.chats.get(&chat).is_some_and(|c| !c.tabs.is_empty()) {
+            self.dismiss_popup(cx);
+            self.clear_chat_active_selection(&chat, cx);
+        }
         self.tab_seq += 1;
         let key = self.tab_seq;
         let entry = self.chats.entry(chat.clone()).or_default();
@@ -630,6 +676,24 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) -> StreamDisposition {
         let target = self.chat_target(chat, cx);
+        // New output can shift/overwrite the selected text: the terminal pill
+        // would quote something that no longer matches the screen. Only for
+        // the selected chat's ACTIVE tab in this panel — a background tab's
+        // (or another chat's) output must never dismiss anything — and only
+        // the OFFER pill, never an open editor/draft. (Checked before the
+        // `tab` borrow below.)
+        if matches!(
+            event,
+            TerminalEvent::Data { .. } | TerminalEvent::Exit { .. }
+        ) && self.state.read(cx).selected_chat.as_deref() == Some(chat)
+            && self
+                .chats
+                .get(chat)
+                .and_then(|tabs| tabs.tabs.get(tabs.active))
+                .is_some_and(|t| t.key == key)
+        {
+            self.dismiss_offer_popup(cx);
+        }
         let Some(tab) = self.tab_mut(chat, key) else {
             return StreamDisposition::Stop;
         };
@@ -764,12 +828,14 @@ impl TerminalPanel {
         // Copy: Cmd+C (macOS) / Ctrl+Shift+C. Only swallowed when it actually
         // copied — so Ctrl+Shift+C with nothing selected still falls through
         // to the interrupt, and plain Ctrl+C (no shift) never reaches here.
-        if ks.key == "c"
-            && (mods.platform || (mods.control && mods.shift))
-            && self.copy_selection(cx)
-        {
-            cx.stop_propagation();
-            return;
+        if ks.key == "c" && (mods.platform || (mods.control && mods.shift)) {
+            // Terminal-native selection wins. If focus stayed in the terminal
+            // while the user selected transcript/diff text, fall back to the
+            // shared custom selection just like ComposerInput does.
+            if self.copy_selection(cx) || self.copy_surface_selection(cx) {
+                cx.stop_propagation();
+                return;
+            }
         }
         let app_cursor = self
             .active_tab(cx)
@@ -806,6 +872,11 @@ impl TerminalPanel {
         }
         tab.emulator.resize(cols, rows);
         let key = tab.key;
+        // A resize invalidates the grid geometry the selection was made in —
+        // drop the terminal pill and its selection wash. No notify: this runs
+        // during prepaint of the current frame (which paints the new grid).
+        self.dismiss_popup(cx);
+        self.with_active_emulator(cx, |emu| emu.clear_selection());
         let engine = self.engine(cx);
         let target = self.chat_target(&chat, cx);
         if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
@@ -893,6 +964,10 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        // Any new press invalidates the previous floating pill — a new
+        // selection gesture closes ANY surface's offer (only one floating UI
+        // may exist) without clearing the just-started selection.
+        self.dismiss_any_popup(cx);
         let Some((point, side)) = self.grid_point_at(event.position, cx) else {
             return;
         };
@@ -985,13 +1060,106 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    fn on_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.selection_drag = None;
+        // The chat selected at SETTLE time — captured so a switch before Save
+        // can't misroute the comment.
+        let Some(chat_id) = self.selected_chat(cx) else {
+            return;
+        };
+        let Some(tab_key) = self.active_tab(cx).map(|tab| tab.key) else {
+            return;
+        };
+        // A settled non-empty selection offers its text to the shared Comment
+        // pill (native `Emulator::selection_text()` — the emulator keeps the
+        // selection, so Cmd+C still copies exactly what was dragged).
+        if let Some(text) = self
+            .with_active_emulator(cx, |emu| emu.selection_text())
+            .flatten()
+            && !text.trim().is_empty()
+            && let Some(popup) = self.comment_popup.upgrade()
+        {
+            let clear = {
+                let panel = cx.weak_entity();
+                let clear_chat = chat_id.clone();
+                Rc::new(move |cx: &mut gpui::App| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.clear_tab_selection(&clear_chat, tab_key, cx)
+                        })
+                        .ok();
+                })
+            };
+            let owner = self.comment_owner;
+            popup.update(cx, |popup, cx| {
+                popup.offer(chat_id, text, event.position, owner, None, clear, cx);
+            });
+        }
+    }
+
+    /// Drop the active tab's selection wash (comment saved/cancelled, or a
+    /// lifecycle dismissal that invalidates the quote).
+    fn clear_active_selection(&mut self, cx: &mut Context<Self>) {
+        self.with_active_emulator(cx, |emu| emu.clear_selection());
+        cx.notify();
+    }
+
+    fn clear_chat_active_selection(&mut self, chat: &str, cx: &mut Context<Self>) {
+        let Some(tabs) = self.chats.get_mut(chat) else {
+            return;
+        };
+        let active = tabs.active;
+        if let Some(tab) = tabs.tabs.get_mut(active) {
+            tab.emulator.clear_selection();
+            cx.notify();
+        }
+    }
+
+    fn clear_tab_selection(&mut self, chat: &str, key: u64, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab.emulator.clear_selection();
+            cx.notify();
+        }
+    }
+
+    /// Lifecycle dismissal of the shared popup, scoped to THIS panel's
+    /// terminal offers only (scroll/tab/close/chat/resize/output never hide
+    /// the transcript's or a diff pane's pill). Public for the shell
+    /// (surface switches).
+    pub fn dismiss_popup(&mut self, cx: &mut Context<Self>) {
+        let owner = self.comment_owner;
+        if let Some(popup) = self.comment_popup.upgrade() {
+            // Terminal lifecycle methods already hold this panel's mutable
+            // entity lease. Invoking the popup's cleanup callback here would
+            // recursively update this same panel and double-lease it.
+            popup.update(cx, |popup, cx| popup.dismiss_if_owner(owner, cx));
+        }
+    }
+
+    /// Shell-driven surface detach: dismiss this panel's popup and clear the
+    /// currently visible terminal selection under the existing panel lease.
+    pub fn detach_comment_selection(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_popup(cx);
+        self.clear_active_selection(cx);
+    }
+
+    /// A new gesture in THIS panel closes ANY surface's floating pill — only
+    /// one floating UI may exist — without clearing the just-started
+    /// selection.
+    fn dismiss_any_popup(&mut self, cx: &mut Context<Self>) {
+        let owner = self.comment_owner;
+        if let Some(popup) = self.comment_popup.upgrade() {
+            popup.update(cx, |popup, cx| popup.selection_started(owner, cx));
+        }
+    }
+
+    /// Ongoing terminal output stales the quoted endpoint: dismiss THIS
+    /// panel's OFFER pill only — an open editor and its draft survive.
+    fn dismiss_offer_popup(&mut self, cx: &mut Context<Self>) {
+        let owner = self.comment_owner;
+        if let Some(popup) = self.comment_popup.upgrade() {
+            popup.update(cx, |popup, cx| popup.dismiss_offer_if_owner(owner, cx));
+        }
     }
 
     /// Copy the selection. Returns whether anything was copied, so the caller
@@ -1007,10 +1175,21 @@ impl TerminalPanel {
         true
     }
 
+    fn copy_surface_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = crate::markdown::selection::selected_text() else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
+    }
+
     fn scroll_active(&mut self, delta_lines: i32, cx: &mut Context<Self>) {
         if delta_lines == 0 {
             return;
         }
+        // Scrolling moves the grid under the pill's window anchor.
+        self.dismiss_popup(cx);
+        self.clear_active_selection(cx);
         let Some(chat) = self.selected_chat(cx) else {
             return;
         };
@@ -1027,6 +1206,16 @@ impl TerminalPanel {
     // ---- tab management ----
 
     fn select_tab(&mut self, chat: &str, ix: usize, cx: &mut Context<Self>) {
+        let active = self
+            .chats
+            .get(chat)
+            .map(|tabs| tabs.active)
+            .unwrap_or(usize::MAX);
+        if active != ix {
+            // The selection belongs to the tab being left.
+            self.dismiss_popup(cx);
+            self.clear_active_selection(cx);
+        }
         if let Some(tabs) = self.chats.get_mut(chat)
             && ix < tabs.tabs.len()
         {
@@ -1036,6 +1225,18 @@ impl TerminalPanel {
     }
 
     fn close_tab(&mut self, chat: &str, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // Only closing the ACTIVE tab invalidates its selection/comment — a
+        // background close must preserve the active tab's editor. If the
+        // active tab falls back to a sibling, stale UI is gone before the
+        // swap.
+        let closing_active = self
+            .chats
+            .get(chat)
+            .is_some_and(|tabs| is_active_tab(tabs, key));
+        if closing_active {
+            self.dismiss_popup(cx);
+            self.clear_active_selection(cx);
+        }
         let engine = self.engine(cx);
         let target = self.chat_target(chat, cx);
         let Some(tabs) = self.chats.get_mut(chat) else {
@@ -1505,6 +1706,55 @@ mod tests {
         assert_eq!(active_after_close(1, 1, 2), 1); // close active mid-list
         assert_eq!(active_after_close(2, 2, 2), 1); // close active at tail
         assert_eq!(active_after_close(0, 0, 0), 0); // last tab closed
+    }
+
+    /// Minimal [`ChatTabs`] with `count` tabs keyed `0..count`, tab 0 active.
+    fn test_tabs(count: usize) -> ChatTabs {
+        ChatTabs {
+            tabs: (0..count)
+                .map(|key| TerminalTab {
+                    key: key as u64,
+                    title: format!("Terminal {}", key + 1).into(),
+                    terminal_id: None,
+                    emulator: Emulator::new(80, 24),
+                    exited: None,
+                    last_seq: 0,
+                    coalescer: InputCoalescer::default(),
+                    flush_task: None,
+                    resize_task: None,
+                    _run: None,
+                })
+                .collect(),
+            active: 0,
+        }
+    }
+
+    #[test]
+    fn close_decision_targets_only_the_active_tab() {
+        // Tab 0 is active; background closes must not touch it.
+        let tabs = test_tabs(3);
+        assert!(is_active_tab(&tabs, 0), "active close dismisses/clears");
+        assert!(!is_active_tab(&tabs, 1), "background close preserves");
+        assert!(!is_active_tab(&tabs, 2), "background close preserves");
+        // An unknown key (already-closed tab) is never active.
+        assert!(!is_active_tab(&tabs, 99));
+        // An empty chat has no active tab to dismiss.
+        assert!(!is_active_tab(&ChatTabs::default(), 0));
+    }
+
+    #[test]
+    fn close_decision_follows_the_active_index() {
+        let mut tabs = test_tabs(3);
+        tabs.active = 2;
+        assert!(!is_active_tab(&tabs, 0));
+        assert!(!is_active_tab(&tabs, 1));
+        assert!(is_active_tab(&tabs, 2));
+        // A stale active index past the end (empty after close) matches nothing.
+        let empty = ChatTabs {
+            tabs: Vec::new(),
+            active: 1,
+        };
+        assert!(!is_active_tab(&empty, 0));
     }
 
     #[test]

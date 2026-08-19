@@ -79,9 +79,14 @@ pub struct RenderOptions {
     /// Code-block copy-button plumbing (round 9): `None` renders no button
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
-    /// Text-selection lifecycle callbacks (round 19): the transcript wires
+    /// Text-selection lifecycle callbacks (round 19): the surface wires
     /// these to show/clear the Comment pill. `None` renders inert (previews).
     pub selection: Option<SelectionUi>,
+    /// Which surface scope this tree belongs to — scopes the selection
+    /// registry/wash so the transcript and each diff pane select
+    /// independently (paint order cannot conflict). Only read when
+    /// [`Self::selection`] is `Some`.
+    pub scope: super::selection::SelectionScope,
 }
 
 /// Selection lifecycle callbacks fired from the frame-scoped selection mouse
@@ -125,6 +130,7 @@ impl RenderOptions {
             now: Instant::now(),
             copy: None,
             selection: None,
+            scope: super::selection::SelectionScope::Transcript,
         }
     }
 }
@@ -708,6 +714,7 @@ fn flat_text_element(
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let selection = opts.selection.clone();
+    let scope = opts.scope;
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -723,7 +730,7 @@ fn flat_text_element(
                     ));
                 }
             }
-            if let Some(range) = super::selection::wash_range(&sel_key) {
+            if let Some(range) = super::selection::wash_range(scope, &sel_key) {
                 for rect in range_rects(&layout, &range, 0.0, 0.0) {
                     window.paint_quad(quad(
                         rect,
@@ -739,13 +746,13 @@ fn flat_text_element(
             // registry (paint order IS document order), then the frame's
             // mouse listeners.
             REGISTRY.with(|r| {
-                r.borrow_mut().push(RegEntry {
+                r.borrow_mut().entry(scope).or_default().push(RegEntry {
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout, selection);
+            register_selection_listeners(window, scope, &sel_key, &flat_text, &layout, selection);
         },
     )
     .absolute()
@@ -769,13 +776,14 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// listeners. Call from a paint-phase canvas that sits UNDER the text.
 pub(crate) fn paint_text_selection(
     window: &mut Window,
+    scope: super::selection::SelectionScope,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
     theme: &Theme,
     selection: Option<SelectionUi>,
 ) {
-    if let Some(range) = super::selection::wash_range(key) {
+    if let Some(range) = super::selection::wash_range(scope, key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
                 rect,
@@ -788,13 +796,13 @@ pub(crate) fn paint_text_selection(
         }
     }
     REGISTRY.with(|r| {
-        r.borrow_mut().push(RegEntry {
+        r.borrow_mut().entry(scope).or_default().push(RegEntry {
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
         })
     });
-    register_selection_listeners(window, key, text, layout, selection);
+    register_selection_listeners(window, scope, key, text, layout, selection);
 }
 
 /// One painted text element, registered per frame in document order — the
@@ -807,16 +815,22 @@ struct RegEntry {
 }
 
 thread_local! {
-    static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
+    static REGISTRY: RefCell<
+        std::collections::HashMap<super::selection::SelectionScope, Vec<RegEntry>>
+    > = RefCell::new(std::collections::HashMap::new());
 }
 
-/// A zero-size canvas that clears the selection registry — paint it FIRST in
-/// the transcript root (before any markdown), so each frame's registry holds
-/// exactly that frame's visible text elements in paint order.
-pub fn selection_frame_reset() -> impl IntoElement {
+/// A zero-size canvas that clears `scope`'s selection registry — paint it
+/// FIRST in the surface's root (before any selectable text), so each frame's
+/// registry holds exactly that frame's visible text elements in paint order.
+pub fn selection_frame_reset(scope: super::selection::SelectionScope) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        |_, _, _, _| REGISTRY.with(|r| r.borrow_mut().clear()),
+        move |_, _, _, _| {
+            REGISTRY.with(|r| {
+                r.borrow_mut().remove(&scope);
+            });
+        },
     )
     .absolute()
     .w(px(0.0))
@@ -826,9 +840,13 @@ pub fn selection_frame_reset() -> impl IntoElement {
 /// `(element index, byte offset)` for a window position: prefer the registered
 /// element whose full 2-D bounds contain it, else the nearest bounds. The X
 /// dimension matters for tables, whose cells share the same vertical band.
-fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
+fn registry_point(
+    scope: super::selection::SelectionScope,
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
-        let reg = r.borrow();
+        let binding = r.borrow();
+        let reg = binding.get(&scope).map_or(&[][..], |v| v.as_slice());
         let mut best: Option<(usize, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
             let b = entry.layout.bounds();
@@ -865,10 +883,16 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
 /// Current window-space endpoint for a settled selection head. The transcript
 /// uses this to keep its floating Comment affordance attached while scrolling,
 /// streaming, or resize/reflow moves the underlying text.
-pub(crate) fn selection_anchor(key: &str, index: usize) -> Option<gpui::Point<gpui::Pixels>> {
+pub(crate) fn selection_anchor(
+    scope: super::selection::SelectionScope,
+    key: &str,
+    index: usize,
+) -> Option<gpui::Point<gpui::Pixels>> {
     REGISTRY.with(|registry| {
         let registry = registry.borrow();
-        let entry = registry.iter().find(|entry| entry.key.as_ref() == key)?;
+        let entry = registry
+            .get(&scope)
+            .and_then(|v| v.iter().find(|entry| entry.key.as_ref() == key))?;
         entry
             .layout
             .position_for_index(index)
@@ -878,9 +902,17 @@ pub(crate) fn selection_anchor(key: &str, index: usize) -> Option<gpui::Point<gp
 
 /// Resolve the anchor + head into document-ordered spans over the frame's
 /// registry and store them; true if the selection changed.
-fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> bool {
+fn resolve_drag(
+    scope: super::selection::SelectionScope,
+    anchor_key: &str,
+    anchor_ix: usize,
+    head: (usize, usize),
+) -> bool {
     REGISTRY.with(|r| {
         let reg = r.borrow();
+        let Some(reg) = reg.get(&scope) else {
+            return false;
+        };
         let Some(anchor_ei) = reg.iter().position(|e| e.key.as_ref() == anchor_key) else {
             return false; // anchor scrolled out of the frame — keep spans
         };
@@ -895,7 +927,7 @@ fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> boo
             .map(|e| e.key.to_string())
             .unwrap_or_else(|| anchor_key.to_string());
         let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
-        super::selection::update_drag(&head_key, head.1, spans)
+        super::selection::update_drag(scope, &head_key, head.1, spans)
     })
 }
 
@@ -905,6 +937,7 @@ fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> boo
 /// `selection` threads the surface's Comment-pill callbacks through.
 fn register_selection_listeners(
     window: &mut Window,
+    scope: super::selection::SelectionScope,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
@@ -925,18 +958,18 @@ fn register_selection_listeners(
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+                        super::selection::begin_with_span(scope, &key, &text, range);
                     }
                     n if n >= 3 => {
-                        super::selection::begin_with_span(&key, &text, 0..text.len());
+                        super::selection::begin_with_span(scope, &key, &text, 0..text.len());
                     }
-                    _ => super::selection::begin(&key, ix),
+                    _ => super::selection::begin(scope, &key, ix),
                 }
                 if let Some(sel) = &selection {
                     (sel.on_started)(window, cx);
                 }
                 window.refresh();
-            } else if super::selection::clear_if_owner(&key) {
+            } else if super::selection::clear_if_owner(scope, &key) {
                 if let Some(sel) = &selection {
                     (sel.on_cleared)(window, cx);
                 }
@@ -951,16 +984,16 @@ fn register_selection_listeners(
                 return;
             }
             // Only the anchor element's listener drives the drag.
-            let Some(anchor_ix) = super::selection::drag_anchor(&key) else {
+            let Some(anchor_ix) = super::selection::drag_anchor(scope, &key) else {
                 return;
             };
-            if super::selection::drag_is_fixed(&key) {
+            if super::selection::drag_is_fixed(scope, &key) {
                 return;
             }
-            let Some(head) = registry_point(e.position) else {
+            let Some(head) = registry_point(scope, e.position) else {
                 return;
             };
-            if resolve_drag(&key, anchor_ix, head) {
+            if resolve_drag(scope, &key, anchor_ix, head) {
                 window.refresh();
             }
         });
@@ -975,13 +1008,13 @@ fn register_selection_listeners(
             // Mouse-up can arrive without a final MouseMove. Resolve its exact
             // point once more for a simple drag so the release glyph/row is
             // included. Fixed double/triple-click spans stay intact.
-            if !super::selection::drag_is_fixed(&key)
-                && let Some(anchor_ix) = super::selection::drag_anchor(&key)
-                && let Some(head) = registry_point(e.position)
+            if !super::selection::drag_is_fixed(scope, &key)
+                && let Some(anchor_ix) = super::selection::drag_anchor(scope, &key)
+                && let Some(head) = registry_point(scope, e.position)
             {
-                resolve_drag(&key, anchor_ix, head);
+                resolve_drag(scope, &key, anchor_ix, head);
             }
-            if let Some(snapshot) = super::selection::end_drag(&key) {
+            if let Some(snapshot) = super::selection::end_drag(scope, &key) {
                 // X11 middle-click paste parity (Zed does the same).
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 cx.write_to_primary(gpui::ClipboardItem::new_string(snapshot.text.clone()));

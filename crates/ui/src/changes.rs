@@ -24,12 +24,13 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
-    SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListScrollEvent,
+    ListState, SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
 
 use zeron_proto::{Chat, CheckoutDiff, GitHistoryCommit};
@@ -999,6 +1000,16 @@ pub struct Changes {
     /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
     /// the fetch and the surface-tab title).
     commit: Option<GitHistoryCommit>,
+    /// Per-pane owner token prefixing every selectable diff-line key — two
+    /// diff tabs never collide, and a closed pane's keys can't be claimed by
+    /// a new one.
+    owner: String,
+    /// This pane's own selection scope (allocated per pane). The selection
+    /// registry, wash, listeners, clear and popup owner all ride it, so a
+    /// hidden or background pane never affects the active one.
+    sel_scope: crate::markdown::selection::SelectionScope,
+    /// The shared shell-level Comment pill/editor (weak — the shell owns it).
+    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
     _observe: Subscription,
 }
 
@@ -1011,8 +1022,32 @@ pub enum ChangesEvent {
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
 
 impl Changes {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        // Allocate THIS pane's selection scope before the scroll handler
+        // (which captures it) — per-pane so hidden panes never touch the
+        // active pane's selection/popup.
+        let sel_scope = crate::markdown::selection::next_change_scope();
+        // Rows are single lines now — a deep overdraw is cheap and keeps
+        // fast wheel flicks from outrunning measurement.
+        let list = ListState::new(0, ListAlignment::Top, px(1024.0));
+        // User input scrolled the diff: the pill would float over the wrong
+        // line — dismiss this pane's offer and drop its selection wash. Safe
+        // to call directly here (the popup is a different entity; the
+        // selection state is process-global — neither touches `self`).
+        let scroll_popup = comment_popup.clone();
+        list.set_scroll_handler(move |_event: &ListScrollEvent, _window, cx| {
+            if let Some(popup) = scroll_popup.upgrade() {
+                popup.update(cx, |popup, cx| {
+                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(sel_scope), cx)
+                });
+            }
+            crate::markdown::selection::clear(sel_scope);
+        });
         Self {
             state,
             diffs: Vec::new(),
@@ -1027,9 +1062,7 @@ impl Changes {
             rows: Vec::new(),
             row_ranges: Vec::new(),
             fold_settle: None,
-            // Rows are single lines now — a deep overdraw is cheap and keeps
-            // fast wheel flicks from outrunning measurement.
-            list: ListState::new(0, ListAlignment::Top, px(1024.0)),
+            list,
             scope: DiffScope::default(),
             base_ref: None,
             branches: Vec::new(),
@@ -1047,6 +1080,9 @@ impl Changes {
             history_fetch_button: None,
             history_events: None,
             commit: None,
+            owner: format!("changes-{}", cx.entity_id()),
+            sel_scope,
+            comment_popup,
             _observe: observe,
         }
     }
@@ -1055,10 +1091,11 @@ impl Changes {
     /// `parent vs commit` once and never offers the scope menu.
     pub fn for_commit(
         state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
         commit: GitHistoryCommit,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut changes = Self::new(state, cx);
+        let mut changes = Self::new(state, comment_popup, cx);
         changes.scope = DiffScope::Commit;
         changes.commit = Some(commit);
         changes
@@ -1075,6 +1112,109 @@ impl Changes {
             return commit.sha.chars().take(7).collect::<String>().into();
         }
         gpui::SharedString::from(self.scope.label())
+    }
+
+    // ---- diff text selection + comments (round 20) ----
+
+    /// Selection lifecycle callbacks for the diff's code text elements: a
+    /// settle shows the shared Comment pill at the selection endpoint, a new
+    /// drag or a clear hides it. Built once per frame; every visible line's
+    /// key rides the SAME [`render::SelectionUi`].
+    fn selection_ui_for(&self, cx: &mut Context<Self>) -> render::SelectionUi {
+        let popup = self.comment_popup.clone();
+        let entity = cx.weak_entity();
+        let scope = self.sel_scope;
+        // A fresh drag start closes ANY surface's pill — only one floating
+        // UI may exist — without touching the just-begun selection. A cleared
+        // selection hides only THIS pane's pill (scoped dismissal).
+        let dismiss_popup = popup.clone();
+        let started: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+            if let Some(popup) = dismiss_popup.upgrade() {
+                popup.update(cx, |popup, cx| {
+                    popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
+                });
+            }
+        });
+        let clear_popup = popup.clone();
+        let cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+            if let Some(popup) = clear_popup.upgrade() {
+                popup.update(cx, |popup, cx| {
+                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                });
+            }
+        });
+        let settled: Rc<
+            dyn Fn(
+                crate::markdown::selection::SelectionSnapshot,
+                gpui::Point<gpui::Pixels>,
+                &mut Window,
+                &mut gpui::App,
+            ),
+        > = {
+            let popup = popup.clone();
+            Rc::new(move |snapshot, anchor, _window, cx| {
+                // Capture the selected chat at SETTLE time — the saved
+                // comment routes to the chat the quote came from even if a
+                // switch happens before Save.
+                let Some(chat_id) = entity
+                    .update(cx, |this: &mut Self, cx| {
+                        this.state.read(cx).selected_chat.clone()
+                    })
+                    .ok()
+                    .flatten()
+                else {
+                    return;
+                };
+                let clear = {
+                    let entity = entity.clone();
+                    Rc::new(move |cx: &mut gpui::App| {
+                        crate::markdown::selection::clear(scope);
+                        entity.update(cx, |_, cx| cx.notify()).ok();
+                    })
+                };
+                if let Some(popup) = popup.upgrade() {
+                    popup.update(cx, |popup, cx| {
+                        popup.offer(
+                            chat_id,
+                            snapshot.text.clone(),
+                            anchor,
+                            crate::comments::CommentOwner::Markdown(scope),
+                            Some(crate::comments::CommentHead {
+                                key: snapshot.head_key.clone(),
+                                ix: snapshot.head_ix,
+                                scope,
+                            }),
+                            clear,
+                            cx,
+                        );
+                    });
+                }
+            })
+        };
+        render::SelectionUi {
+            on_started: started,
+            on_cleared: cleared,
+            on_settled: settled,
+        }
+    }
+
+    /// The pane's content was replaced or it closed: drop the Changes-scoped
+    /// selection wash and any popup offer that belongs to THIS pane (never
+    /// another surface's).
+    fn invalidate_selection(&mut self, cx: &mut Context<Self>) {
+        let scope = self.sel_scope;
+        crate::markdown::selection::clear(scope);
+        if let Some(popup) = self.comment_popup.upgrade() {
+            popup.update(cx, |popup, cx| {
+                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+            });
+        }
+    }
+
+    /// The shell calls this as the pane closes: a fresh pane with the same
+    /// scope must never inherit a stale selection or comment.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_selection(cx);
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -1499,6 +1639,8 @@ impl Changes {
                 self.list.reset(0);
                 self.folds.clear();
                 self.highlights.clear();
+                // Content gone: a selection anchored to it is stale too.
+                self.invalidate_selection(cx);
                 cx.notify();
             }
             return;
@@ -1538,6 +1680,9 @@ impl Changes {
                 changes
                     .list
                     .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
+                // New content: keys shift, so any selection/comment anchored
+                // to the previous diff is stale.
+                changes.invalidate_selection(cx);
                 changes.rows = rows;
                 changes.row_ranges = ranges;
                 changes.parsed = Some(ParsedDiff {
@@ -1604,6 +1749,15 @@ impl Changes {
                 file: file_ix as u32,
             }],
         );
+        // Folding hides the body's lines — a pill anchored to one would float
+        // over the wrong row. The selection wash stays (it reappears on
+        // unfold; folded lines simply don't paint it).
+        let scope = self.sel_scope;
+        if let Some(popup) = self.comment_popup.upgrade() {
+            popup.update(cx, |popup, cx| {
+                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+            });
+        }
         self.ensure_fold_settle(cx);
     }
 
@@ -1985,10 +2139,13 @@ impl Changes {
                     return gpui::Empty.into_any_element();
                 };
                 let highlight = self.request_highlight(file_diff, &parsed_key, cx);
+                // The row's line INDEX (stable while the diff is current) is
+                // the key; `line` below is shadowed by the &DiffLine body.
+                let line_ix = line;
                 let Some(line) = file_diff
                     .hunks
                     .get(hunk as usize)
-                    .and_then(|h| h.lines.get(line as usize))
+                    .and_then(|h| h.lines.get(line_ix as usize))
                 else {
                     return gpui::Empty.into_any_element();
                 };
@@ -1996,7 +2153,18 @@ impl Changes {
                     .as_deref()
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
-                diff_line_row(line, spans, &theme, gutter_width(file_diff))
+                // Stable per-line key (owner-scoped so multiple diff panes
+                // never collide) + the shared selection callbacks: ONLY the
+                // code text is selectable (gutters/markers stay inert).
+                let key = diff_line_key(&self.owner, file, hunk, line_ix);
+                let selection = self.selection_ui_for(cx);
+                diff_line_row(
+                    line,
+                    spans,
+                    &theme,
+                    gutter_width(file_diff),
+                    Some((self.sel_scope, &key, &selection)),
+                )
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -2655,14 +2823,29 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Stable selectable-element key for one diff line: owner-scoped (multiple
+/// diff panes never collide) and content-independent — file/hunk/line
+/// indices are stable while the diff is current.
+pub fn diff_line_key(owner: &str, file: u32, hunk: u32, line: u32) -> String {
+    format!("{owner}:f{file}:h{hunk}:l{line}")
+}
+
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
 /// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
-/// paint-only syntax runs.
+/// paint-only syntax runs. `select` (the Changes pane only) makes the CODE
+/// TEXT selectable with a stable per-line key + the shared selection
+/// callbacks — gutters, markers and headers stay inert; the transcript's
+/// tool-diff renders pass `None`.
 fn diff_line_row(
     line: &DiffLine,
     spans: &[zeron_syntax::HighlightSpan],
     theme: &Theme,
     gutter_px: f32,
+    select: Option<(
+        crate::markdown::selection::SelectionScope,
+        &str,
+        &render::SelectionUi,
+    )>,
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
         return div()
@@ -2783,8 +2966,58 @@ fn diff_line_row(
                 .font_family(theme.font_mono.clone())
                 .text_size(px(DIFF_TEXT_SIZE))
                 .whitespace_nowrap()
-                .child(gpui::StyledText::new(line.text.clone()).with_runs(runs)),
+                .child(diff_text_element(line, runs, theme, select)),
         )
+        .into_any_element()
+}
+
+/// The diff line's code text. With `select` the element registers into the
+/// Changes-scoped selection registry via a paint-phase underlay canvas
+/// (same wash/listeners as the transcript — `markdown::render::
+/// paint_text_selection`), so drags select across diff lines and Cmd+C joins
+/// the quote. Without it (transcript tool-diff, fold tweens) the text is
+/// plain.
+fn diff_text_element(
+    line: &DiffLine,
+    runs: Vec<gpui::TextRun>,
+    theme: &Theme,
+    select: Option<(
+        crate::markdown::selection::SelectionScope,
+        &str,
+        &render::SelectionUi,
+    )>,
+) -> AnyElement {
+    let Some((scope, key, selection)) = select else {
+        return gpui::StyledText::new(line.text.clone())
+            .with_runs(runs)
+            .into_any_element();
+    };
+    let styled = gpui::StyledText::new(line.text.clone()).with_runs(runs);
+    let layout = styled.layout().clone();
+    let sel_key: std::sync::Arc<str> = key.into();
+    let sel_text: SharedString = line.text.clone().into();
+    let theme = theme.clone();
+    let selection = selection.clone();
+    let underlay = gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            render::paint_text_selection(
+                window,
+                scope,
+                &sel_key,
+                &sel_text,
+                &layout,
+                &theme,
+                Some(selection),
+            );
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
         .into_any_element()
 }
 
@@ -2813,7 +3046,10 @@ pub(crate) fn render_file_body_with_syntax(
                 .as_deref()
                 .map(|highlights| highlights.spans(line))
                 .unwrap_or(&[]);
-            children.push(diff_line_row(line, spans, theme, gutter_px));
+            // Inert here: this stacked form serves the transcript's tool-diff
+            // and the fold tween — only the Changes pane's virtualized rows
+            // are selectable.
+            children.push(diff_line_row(line, spans, theme, gutter_px, None));
         }
     }
     div()
@@ -2858,7 +3094,7 @@ fn render_file_body_upto(
                     .as_deref()
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
-                children.push(diff_line_row(line, spans, theme, gutter_px));
+                children.push(diff_line_row(line, spans, theme, gutter_px, None));
                 y += DIFF_LINE_HEIGHT;
             }
         }
@@ -2975,10 +3211,25 @@ impl Render for Changes {
                             .flex()
                             .flex_col()
                             .children(self.render_header_strip(&theme))
+                            // The frame's CHANGES selection registry is
+                            // cleared FIRST (before any diff line registers) —
+                            // scoped so the transcript's own reset never
+                            // touches it (paint order cannot conflict).
                             .child(
-                                list(self.list.clone(), cx.processor(Self::render_row))
+                                div()
+                                    .relative()
                                     .flex_1()
-                                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(crate::markdown::render::selection_frame_reset(
+                                        self.sel_scope,
+                                    ))
+                                    .child(
+                                        list(self.list.clone(), cx.processor(Self::render_row))
+                                            .flex_1()
+                                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                                    ),
                             )
                             .into_any_element()
                     } else {
@@ -3065,6 +3316,29 @@ similarity index 90%
 rename from old_name.rs
 rename to new_name.rs
 ";
+
+    #[test]
+    fn diff_line_keys_are_owner_scoped_and_stable() {
+        // The same pane + line renders the same key every frame (selection
+        // continuity while scrolling/virtualizing), and two panes never
+        // collide even for identical file/hunk/line indices.
+        let key = diff_line_key("changes-1", 0, 0, 3);
+        assert_eq!(key, "changes-1:f0:h0:l3");
+        assert_eq!(diff_line_key("changes-1", 0, 0, 3), key, "stable");
+        assert_ne!(diff_line_key("changes-2", 0, 0, 3), key, "different pane");
+        assert_ne!(diff_line_key("changes-1", 1, 0, 3), key, "different file");
+        assert_ne!(diff_line_key("changes-1", 0, 2, 3), key, "different hunk");
+        assert_ne!(diff_line_key("changes-1", 0, 0, 4), key, "different line");
+        // The key survives the snapshot's head-row parser whole (no `-tN` /
+        // `:N` renderer suffix to strip) — liveness stays pane-scoped.
+        let snapshot = crate::markdown::selection::SelectionSnapshot {
+            head_key: key.clone(),
+            head_ix: 0,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(snapshot.head_row(), key);
+    }
 
     #[test]
     fn parses_files_hunks_and_lines() {

@@ -923,8 +923,12 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
-    /// Transcript → composer comment forwarding.
-    _transcript_events: Subscription,
+    /// Shared floating Comment pill/editor (round 20): rendered above every
+    /// clipped surface; surfaces (transcript, diff panes, terminals) drive
+    /// it through the weak handles they hold.
+    comment_popup: Entity<crate::comments::CommentPopup>,
+    /// CommentPopup → composer comment forwarding (subscribed ONCE).
+    _comment_popup_events: Subscription,
 }
 
 impl Shell {
@@ -933,7 +937,11 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
-        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        // The shared comment popup is created FIRST so every surface can
+        // hold a weak handle to it.
+        let comment_popup = cx.new(crate::comments::CommentPopup::new);
+        let transcript =
+            cx.new(|cx| Transcript::new(state.clone(), comment_popup.clone().downgrade(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // Every send glides the prompt to the viewport top and reserves the
@@ -951,23 +959,26 @@ impl Shell {
                 }
             }
         });
-        // Transcript → composer: a comment saved in the anchored editor lands
-        // in the composer's pending list (the status-strip indicator).
-        let transcript_events = cx.subscribe(&transcript, {
+        // CommentPopup → composer: a comment saved in any surface's anchored
+        // editor lands in the composer's pending list (the status-strip
+        // indicator). Subscribed ONCE — the event carries the chat id that
+        // was selected when the selection settled (each surface captured it);
+        // the composer's guard still drops a comment whose chat is no longer
+        // selected.
+        let comment_popup_events = cx.subscribe(&comment_popup, {
             let composer = composer.clone();
-            move |_this: &mut Shell, _, event: &transcript::TranscriptEvent, cx| match event {
-                transcript::TranscriptEvent::CommentAdded {
+            move |_this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event
+            {
+                crate::comments::CommentPopupEvent::CommentSaved {
                     chat_id,
                     quote,
                     comment,
                 } => {
+                    // The chat id was captured when the selection SETTLED —
+                    // forward it; the composer's guard still drops a comment
+                    // whose chat is no longer selected.
                     composer.update(cx, |composer, cx| {
-                        composer.add_transcript_comment(
-                            chat_id.clone(),
-                            quote.clone(),
-                            comment.clone(),
-                            cx,
-                        )
+                        composer.add_comment(chat_id.clone(), quote.clone(), comment.clone(), cx)
                     });
                 }
             }
@@ -1120,7 +1131,8 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
-            _transcript_events: transcript_events,
+            comment_popup,
+            _comment_popup_events: comment_popup_events,
         }
     }
 
@@ -1292,6 +1304,18 @@ impl Shell {
         // snap, no tween — the panels belong to the destination chat).
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
         if selected != self.active_chat {
+            // The outgoing chat's ACTIVE diff pane loses the surface on
+            // switch: detach its selection/comment BEFORE the panel key
+            // changes, even when the new chat resolves to the same checkout/
+            // checksum (its pane's `sync` would otherwise early-return and
+            // inherit a stale selection). Scoped to the outgoing ACTIVE diff
+            // only — hidden/background panes keep their state. (The terminal
+            // panels detach themselves through their own state observer.)
+            if let RightSurface::Diff(id) = self.resolved_right_active(cx)
+                && let Some(changes) = self.diffs.get(&id).cloned()
+            {
+                changes.update(cx, |changes, cx| changes.detach(cx));
+            }
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
             // selection off the untouched boot canvas REPLACES that entry —
@@ -1422,6 +1446,18 @@ impl Shell {
             // Closing always leaves takeover mode — reopening at full bleed
             // with the conversation gone read as a broken chat.
             self.right_pane_expanded = false;
+            // The pane is gone: the outgoing surface's floating comment must
+            // not linger — an embedded terminal's pill would float over the
+            // conversation card, and an outgoing diff's selection/comment
+            // must clear (symmetric with terminal).
+            if let Some(panel) = &self.right_terminal {
+                panel.update(cx, |panel, cx| panel.detach_comment_selection(cx));
+            }
+            if let RightSurface::Diff(id) = self.resolved_right_active(cx)
+                && let Some(changes) = self.diffs.get(&id).cloned()
+            {
+                changes.update(cx, |changes, cx| changes.detach(cx));
+            }
         }
         self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         if open
@@ -1438,7 +1474,8 @@ impl Shell {
         if let Some(terminal) = &self.right_terminal {
             return terminal.clone();
         }
-        let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
+        let popup = self.comment_popup.clone().downgrade();
+        let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), popup, cx));
         self.right_terminal = Some(terminal.clone());
         terminal
     }
@@ -1533,6 +1570,23 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        // The surface being replaced: an outgoing diff's selection/comment
+        // must clear (symmetric with terminal below) — but ONLY the outgoing
+        // ACTIVE one, never a hidden pane's.
+        let outgoing = self.resolved_right_active(cx);
+        if let RightSurface::Diff(id) = outgoing
+            && outgoing != surface
+            && let Some(changes) = self.diffs.get(&id).cloned()
+        {
+            changes.update(cx, |changes, cx| changes.detach(cx));
+        }
+        // Leaving a Terminal surface hides its comment pill — it would float
+        // over the pane that replaces it.
+        if !matches!(surface, RightSurface::Terminal(_))
+            && let Some(panel) = &self.right_terminal
+        {
+            panel.update(cx, |panel, cx| panel.detach_comment_selection(cx));
+        }
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.right_active = surface);
         match surface {
@@ -1554,7 +1608,8 @@ impl Shell {
     /// FRESH diff tab with its own scope/base selection (multiple diff
     /// panels, user request).
     fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
-        let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
+        let popup = self.comment_popup.clone().downgrade();
+        let changes = cx.new(|cx| Changes::new(self.state.clone(), popup, cx));
         self.register_diff_surface(changes, cx);
     }
 
@@ -1565,7 +1620,8 @@ impl Shell {
         commit: zeron_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
-        let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), commit, cx));
+        let popup = self.comment_popup.clone().downgrade();
+        let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), popup, commit, cx));
         self.register_diff_surface(changes, cx);
     }
 
@@ -1619,8 +1675,12 @@ impl Shell {
         }
         match surface {
             RightSurface::Diff(id) => {
-                // Dropping the entity tears down its diff watch.
-                self.diffs.remove(&id);
+                // Dropping the entity tears down its diff watch; detach first
+                // so a new pane with the same scope never inherits a stale
+                // selection/comment.
+                if let Some(changes) = self.diffs.remove(&id) {
+                    changes.update(cx, |changes, cx| changes.detach(cx));
+                }
                 self.diff_subs.remove(&id);
             }
             RightSurface::Terminal(tab) => {
@@ -1641,7 +1701,8 @@ impl Shell {
         if let Some(terminal) = &self.terminal {
             return terminal.clone();
         }
-        let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
+        let popup = self.comment_popup.clone().downgrade();
+        let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), popup, cx));
         self.terminal = Some(terminal.clone());
         terminal
     }
@@ -1791,12 +1852,18 @@ impl Shell {
         }
     }
 
+    fn dismiss_comment_popup(&mut self, cx: &mut Context<Self>) {
+        self.comment_popup
+            .update(cx, |popup, cx| popup.dismiss_and_clear(cx));
+    }
+
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        self.dismiss_comment_popup(cx);
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
         self.close_user_menu(cx);
@@ -1837,6 +1904,7 @@ impl Shell {
                 }
             }
             NavEntry::Settings(section) => {
+                self.dismiss_comment_popup(cx);
                 self.route = Route::Settings(section);
             }
         }
@@ -4190,6 +4258,14 @@ impl Shell {
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
         }
+
+        // The shared Comment pill/editor, LAST so it paints above every
+        // clipped surface (transcript, diff panes, terminal).
+        self.comment_popup.update(cx, |popup, cx| {
+            if let Some(ui) = popup.render(window, cx) {
+                overlays.push(ui);
+            }
+        });
 
         overlays
     }

@@ -10,11 +10,45 @@
 //! element between. The wash paints per element from its span; copy joins
 //! the spans in order.
 //!
+//! State is SCOPED per surface ([`SelectionScope`]): the transcript and each
+//! diff pane select independently, so a drag in one can never be claimed,
+//! resolved, or cleared by the other — paint order cannot conflict.
+//!
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// Which surface owns a selection. Every stateful call takes the scope so
+/// independent surfaces (the transcript, each diff pane) never collide in
+/// the shared registry/wash/popup — each surface clears its registry and its
+/// selection separately, in its own paint order.
+///
+/// The SELECTION STATE is single-active: beginning a drag in any scope
+/// clears every other scope (see [`begin`]), so copy (`[`selected_text`]`)
+/// always returns exactly one quote — the latest gesture — while the paint
+/// geometry stays per-scope (a hidden pane can never hijack the active
+/// pane's listeners).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SelectionScope {
+    /// The conversation transcript (markdown rows + user bubbles).
+    Transcript,
+    /// A Git diff pane, allocated a fresh id per pane ([`next_change_scope`])
+    /// so two diff tabs never share a scope and a closed pane's scope is
+    /// never reused.
+    Changes(u64),
+}
+
+/// Allocate a fresh per-pane diff selection scope. Each [`Changes`](crate::changes::Changes)
+/// pane allocates its own so hidden/background panes never collide with the
+/// active one, and a closed pane's scope can't be claimed by a new pane.
+pub fn next_change_scope() -> SelectionScope {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    SelectionScope::Changes(NEXT.fetch_add(1, Ordering::Relaxed))
+}
 
 /// One element's slice of the selection, in document order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,25 +78,30 @@ pub struct SelectionSnapshot {
     pub text: String,
 }
 
+/// The row id an element key belongs to (`{row_key}:{element ix}`) — the
+/// anchor for dismissing a comment offer when that row is replaced.
+/// Assistant Markdown's production keys append `-t{element_ix}`; user
+/// bubbles append `:u`. Strip only recognized renderer suffixes so
+/// punctuation inside a real row id remains untouched.
+pub fn row_of_key(key: &str) -> &str {
+    if let Some((row, suffix)) = key.rsplit_once("-t")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return row;
+    }
+    if let Some((row, suffix)) = key.rsplit_once(':')
+        && (suffix == "u" || (!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())))
+    {
+        return row;
+    }
+    key
+}
+
 impl SelectionSnapshot {
-    /// The row id the head element belongs to (`{row_key}:{element ix}`) —
-    /// the anchor for dismissing the offer when that row is replaced.
+    /// The row id the head element belongs to ([`row_of_key`]).
     pub fn head_row(&self) -> &str {
-        // Assistant Markdown's production keys append `-t{element_ix}`;
-        // user bubbles append `:u`. Strip only recognized renderer suffixes
-        // so punctuation inside a real row id remains untouched.
-        if let Some((row, suffix)) = self.head_key.rsplit_once("-t")
-            && !suffix.is_empty()
-            && suffix.bytes().all(|b| b.is_ascii_digit())
-        {
-            return row;
-        }
-        if let Some((row, suffix)) = self.head_key.rsplit_once(':')
-            && (suffix == "u" || (!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())))
-        {
-            return row;
-        }
-        &self.head_key
+        row_of_key(&self.head_key)
     }
 }
 
@@ -84,9 +123,9 @@ struct MdSelection {
     head_ix: usize,
 }
 
-fn state() -> &'static Mutex<Option<MdSelection>> {
-    static STATE: OnceLock<Mutex<Option<MdSelection>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
+fn state() -> &'static Mutex<HashMap<SelectionScope, Option<MdSelection>>> {
+    static STATE: OnceLock<Mutex<HashMap<SelectionScope, Option<MdSelection>>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Resolve the spans for a selection between `a` and `b`, each an
@@ -114,53 +153,67 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
     spans
 }
 
-/// Begin a drag anchored at `(key, ix)`; claims the global selection.
-pub fn begin(key: &str, ix: usize) {
-    *state().lock().unwrap() = Some(MdSelection {
-        anchor_key: key.to_string(),
-        anchor_ix: ix,
-        dragging: true,
-        fixed_span: false,
-        spans: Vec::new(),
-        head_key: key.to_string(),
-        head_ix: ix,
-    });
+/// Begin a drag anchored at `(key, ix)`; claims the selection of `scope`.
+/// Because copy is single-active, beginning a drag in ANY scope clears every
+/// other scope's selection — only the newest gesture stays selected.
+pub fn begin(scope: SelectionScope, key: &str, ix: usize) {
+    let mut guard = state().lock().unwrap();
+    guard.retain(|s, _| *s == scope);
+    guard.insert(
+        scope,
+        Some(MdSelection {
+            anchor_key: key.to_string(),
+            anchor_ix: ix,
+            dragging: true,
+            fixed_span: false,
+            spans: Vec::new(),
+            head_key: key.to_string(),
+            head_ix: ix,
+        }),
+    );
 }
 
-/// Begin with an immediate span (double/triple click inside one element).
-pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
+/// Begin with an immediate span (double/triple click inside one element);
+/// same single-active semantics as [`begin`].
+pub fn begin_with_span(scope: SelectionScope, key: &str, text: &str, range: Range<usize>) {
     let head_ix = range.end;
-    *state().lock().unwrap() = Some(MdSelection {
-        anchor_key: key.to_string(),
-        anchor_ix: range.start,
-        dragging: true,
-        fixed_span: true,
-        spans: vec![Span {
-            key: key.to_string(),
-            range,
-            text: text.to_string(),
-        }],
-        // The head lands at the span's right edge — the natural "endpoint"
-        // of a word/paragraph selection with no drag to track.
-        head_key: key.to_string(),
-        head_ix,
-    });
+    let mut guard = state().lock().unwrap();
+    guard.retain(|s, _| *s == scope);
+    guard.insert(
+        scope,
+        Some(MdSelection {
+            anchor_key: key.to_string(),
+            anchor_ix: range.start,
+            dragging: true,
+            fixed_span: true,
+            spans: vec![Span {
+                key: key.to_string(),
+                range,
+                text: text.to_string(),
+            }],
+            // The head lands at the span's right edge — the natural "endpoint"
+            // of a word/paragraph selection with no drag to track.
+            head_key: key.to_string(),
+            head_ix,
+        }),
+    );
 }
 
 /// The live drag's anchor, if `key` owns it: `(anchor byte offset)`.
-pub fn drag_anchor(key: &str) -> Option<usize> {
+pub fn drag_anchor(scope: SelectionScope, key: &str) -> Option<usize> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
+    let sel = guard.get(&scope)?.as_ref()?;
     (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
 }
 
 /// Whether `key` owns a fixed double/triple-click span. Fixed spans settle as
 /// selected, without a final character-level drag update.
-pub fn drag_is_fixed(key: &str) -> bool {
+pub fn drag_is_fixed(scope: SelectionScope, key: &str) -> bool {
     state()
         .lock()
         .unwrap()
-        .as_ref()
+        .get(&scope)
+        .and_then(|s| s.as_ref())
         .is_some_and(|sel| sel.dragging && sel.anchor_key == key && sel.fixed_span)
 }
 
@@ -170,9 +223,14 @@ pub fn drag_is_fixed(key: &str) -> bool {
 /// double/triple-click span is never replaced here — the renderer skips
 /// drag updates for it ([`Self::drag_is_fixed`]), and this guard makes the
 /// invariant hold even if a stray caller resolves against its position.
-pub fn update_drag(head_key: &str, head_ix: usize, spans: Vec<Span>) -> bool {
+pub fn update_drag(
+    scope: SelectionScope,
+    head_key: &str,
+    head_ix: usize,
+    spans: Vec<Span>,
+) -> bool {
     let mut guard = state().lock().unwrap();
-    let Some(sel) = guard.as_mut() else {
+    let Some(sel) = guard.get_mut(&scope).and_then(|s| s.as_mut()) else {
         return false;
     };
     if sel.fixed_span {
@@ -190,15 +248,15 @@ pub fn update_drag(head_key: &str, head_ix: usize, spans: Vec<Span>) -> bool {
 /// End the drag for `key`'s claim; returns the settled snapshot if the
 /// selection is non-empty. The state stays (settled) so copy + the wash
 /// keep working; [`SelectionSnapshot::text`] is the joined visible quote.
-pub fn end_drag(key: &str) -> Option<SelectionSnapshot> {
+pub fn end_drag(scope: SelectionScope, key: &str) -> Option<SelectionSnapshot> {
     let mut guard = state().lock().unwrap();
-    let sel = guard.as_mut()?;
+    let sel = guard.get_mut(&scope).and_then(|s| s.as_mut())?;
     if sel.anchor_key != key || !sel.dragging {
         return None;
     }
     sel.dragging = false;
     if sel.spans.iter().all(|s| s.range.is_empty()) {
-        *guard = None;
+        guard.remove(&scope);
         return None;
     }
     Some(SelectionSnapshot {
@@ -209,39 +267,43 @@ pub fn end_drag(key: &str) -> Option<SelectionSnapshot> {
     })
 }
 
-/// Unconditionally drop the selection (chat switch, row replacement).
-pub fn clear() {
-    *state().lock().unwrap() = None;
+/// Unconditionally drop `scope`'s selection (chat switch, row replacement).
+pub fn clear(scope: SelectionScope) {
+    state().lock().unwrap().remove(&scope);
 }
 
 /// Clear if `key` owns a settled selection (a mouse-down landed outside the
 /// owner; the element the down landed IN claims right after). True if cleared.
-pub fn clear_if_owner(key: &str) -> bool {
+pub fn clear_if_owner(scope: SelectionScope, key: &str) -> bool {
     let mut guard = state().lock().unwrap();
     if guard
-        .as_ref()
+        .get(&scope)
+        .and_then(|s| s.as_ref())
         .is_some_and(|s| s.anchor_key == key && !s.dragging)
     {
-        *guard = None;
+        guard.remove(&scope);
         return true;
     }
     false
 }
 
 /// The wash range for `key` this frame (empty ⇒ nothing to paint).
-pub fn wash_range(key: &str) -> Option<Range<usize>> {
+pub fn wash_range(scope: SelectionScope, key: &str) -> Option<Range<usize>> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
+    let sel = guard.get(&scope)?.as_ref()?;
     sel.spans
         .iter()
         .find(|s| s.key == key && !s.range.is_empty())
         .map(|s| s.range.clone())
 }
 
-/// The full selected text (Cmd+C), spans joined in document order.
+/// The full selected text (Cmd+C), spans joined in document order. There is
+/// exactly ONE active selection at any time — [`begin`]/[`begin_with_span`]
+/// clear every other scope, so this returns the LATEST selection no matter
+/// which surface (transcript, any diff pane) it came from.
 pub fn selected_text() -> Option<String> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
+    let sel = guard.values().find_map(|s| s.as_ref())?;
     if sel.spans.iter().all(|s| s.range.is_empty()) {
         return None;
     }
@@ -296,6 +358,11 @@ pub fn word_range(text: &str, ix: usize) -> Range<usize> {
 mod tests {
     use super::*;
 
+    const S: SelectionScope = SelectionScope::Transcript;
+    // A fixed pane id — real panes allocate via `next_change_scope`, but the
+    // pure state tests just need two distinct scopes.
+    const C: SelectionScope = SelectionScope::Changes(999);
+
     fn elems<'a>() -> Vec<(&'a str, &'a str)> {
         vec![
             ("p1", "first paragraph"),
@@ -337,16 +404,16 @@ mod tests {
     #[test]
     fn drag_lifecycle_and_copy_joins() {
         let _state = state_lock();
-        begin("p1", 6);
-        assert_eq!(drag_anchor("p1"), Some(6));
-        assert_eq!(drag_anchor("p2"), None);
+        begin(S, "p1", 6);
+        assert_eq!(drag_anchor(S, "p1"), Some(6));
+        assert_eq!(drag_anchor(S, "p2"), None);
         let spans = resolve_spans(&elems(), (0, 6), (1, 6));
-        assert!(update_drag("p2", 6, spans.clone()));
-        assert!(!update_drag("p2", 6, spans)); // unchanged ⇒ no repaint
-        assert_eq!(wash_range("p1"), Some(6..15));
-        assert_eq!(wash_range("p2"), Some(0..6));
-        assert_eq!(wash_range("p3"), None);
-        let snapshot = end_drag("p1").expect("settled snapshot");
+        assert!(update_drag(S, "p2", 6, spans.clone()));
+        assert!(!update_drag(S, "p2", 6, spans)); // unchanged ⇒ no repaint
+        assert_eq!(wash_range(S, "p1"), Some(6..15));
+        assert_eq!(wash_range(S, "p2"), Some(0..6));
+        assert_eq!(wash_range(S, "p3"), None);
+        let snapshot = end_drag(S, "p1").expect("settled snapshot");
         // Head tracks the drag's last position (element p2, offset 6).
         assert_eq!(snapshot.head_key, "p2");
         assert_eq!(snapshot.head_ix, 6);
@@ -354,9 +421,70 @@ mod tests {
         assert_eq!(snapshot.text, "paragraph\nsecond");
         assert_eq!(selected_text().as_deref(), Some("paragraph\nsecond"));
         // Settled: a down elsewhere clears via the owner's listener.
-        assert!(!clear_if_owner("p2"));
-        assert!(clear_if_owner("p1"));
+        assert!(!clear_if_owner(S, "p2"));
+        assert!(clear_if_owner(S, "p1"));
         assert_eq!(selected_text(), None);
+    }
+
+    #[test]
+    fn begin_in_any_scope_clears_others_and_becomes_latest() {
+        // Copy is single-active: beginning a drag in another scope clears the
+        // earlier one entirely, and `selected_text()` returns the latest.
+        let _state = state_lock();
+        begin(S, "p1", 6);
+        assert!(update_drag(
+            S,
+            "p2",
+            6,
+            resolve_spans(&elems(), (0, 6), (1, 6))
+        ));
+        assert_eq!(selected_text().as_deref(), Some("paragraph\nsecond"));
+        // A new drag in the diff scope clears the transcript selection.
+        begin(C, "d1", 0);
+        assert_eq!(drag_anchor(S, "p1"), None, "transcript selection cleared");
+        assert_eq!(drag_anchor(C, "d1"), Some(0));
+        let spans = resolve_spans(&[("d1", "line one"), ("d2", "line two")], (0, 0), (1, 4));
+        assert!(update_drag(C, "d2", 4, spans.clone()));
+        assert_eq!(wash_range(S, "p1"), None, "no transcript wash");
+        assert_eq!(wash_range(C, "d2"), Some(0..4));
+        let snapshot = end_drag(C, "d1").expect("diff snapshot");
+        assert_eq!(snapshot.text, "line one\nline");
+        assert_eq!(
+            selected_text().as_deref(),
+            Some("line one\nline"),
+            "latest scope wins"
+        );
+        clear(C);
+        assert_eq!(selected_text(), None);
+    }
+
+    #[test]
+    fn per_pane_change_scopes_are_isolated() {
+        // Two distinct diff panes (different allocated ids) behave like the
+        // transcript vs a pane: the newest begin owns copy, the older pane's
+        // selection is gone, and per-scope geometry never leaks.
+        let _state = state_lock();
+        let c1 = SelectionScope::Changes(1);
+        let c2 = SelectionScope::Changes(2);
+        begin(c1, "a1", 0);
+        assert_eq!(drag_anchor(c1, "a1"), Some(0));
+        begin(c2, "b1", 0);
+        assert_eq!(drag_anchor(c1, "a1"), None, "older pane cleared");
+        assert_eq!(drag_anchor(c2, "b1"), Some(0));
+        let spans = resolve_spans(&[("b1", "x"), ("b2", "y")], (0, 0), (1, 1));
+        assert!(update_drag(c2, "b2", 1, spans));
+        assert_eq!(wash_range(c2, "b2"), Some(0..1));
+        assert_eq!(wash_range(c1, "a1"), None);
+        clear(c2);
+        assert_eq!(selected_text(), None);
+    }
+
+    #[test]
+    fn next_change_scope_allocates_unique_ids() {
+        let a = next_change_scope();
+        let b = next_change_scope();
+        assert_ne!(a, b);
+        assert!(matches!(a, SelectionScope::Changes(_)));
     }
 
     #[test]
@@ -389,23 +517,32 @@ mod tests {
             text: String::new(),
         };
         assert_eq!(bare.head_row(), "row:with-punctuation");
+        // Diff keys (`{owner}:f{file}:h{hunk}:l{line}`) stay whole — the
+        // suffix is not a recognized renderer marker.
+        let diff = SelectionSnapshot {
+            head_key: "changes-1:f0:h2:l7".into(),
+            head_ix: 3,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(diff.head_row(), "changes-1:f0:h2:l7");
     }
 
     #[test]
     fn empty_click_clears_on_release() {
         let _state = state_lock();
-        begin("p1", 3);
-        assert_eq!(end_drag("p1"), None);
+        begin(S, "p1", 3);
+        assert_eq!(end_drag(S, "p1"), None);
         assert_eq!(selected_text(), None);
     }
 
     #[test]
     fn double_click_span_heads_the_range_end() {
         let _state = state_lock();
-        begin_with_span("p1", "hello world", 6..11);
-        assert!(drag_is_fixed("p1"));
-        assert_eq!(wash_range("p1"), Some(6..11));
-        let snapshot = end_drag("p1").expect("settled");
+        begin_with_span(S, "p1", "hello world", 6..11);
+        assert!(drag_is_fixed(S, "p1"));
+        assert_eq!(wash_range(S, "p1"), Some(6..11));
+        let snapshot = end_drag(S, "p1").expect("settled");
         assert_eq!(snapshot.text, "world");
         assert_eq!(snapshot.head_ix, 11);
     }
@@ -415,28 +552,30 @@ mod tests {
         // A double/triple-click span is complete at mouse-down: an incidental
         // MouseMove or the mouse-up character resolution must not overwrite it.
         let _state = state_lock();
-        begin_with_span("p1", "hello world", 6..11);
+        begin_with_span(S, "p1", "hello world", 6..11);
         // A stray drag update at a different element/offset changes nothing.
         assert!(!update_drag(
+            S,
             "p2",
             0,
             resolve_spans(&elems(), (0, 0), (0, 5))
         ));
-        assert!(drag_is_fixed("p1"));
-        assert_eq!(wash_range("p1"), Some(6..11));
+        assert!(drag_is_fixed(S, "p1"));
+        assert_eq!(wash_range(S, "p1"), Some(6..11));
         // The head stays at the span's right edge, not at the stray point.
-        let snapshot = end_drag("p1").expect("settled");
+        let snapshot = end_drag(S, "p1").expect("settled");
         assert_eq!(snapshot.head_key, "p1");
         assert_eq!(snapshot.head_ix, 11);
         assert_eq!(snapshot.text, "world");
         // A simple drag (non-fixed) still accepts updates normally.
-        begin("p1", 0);
+        begin(S, "p1", 0);
         assert!(update_drag(
+            S,
             "p2",
             6,
             resolve_spans(&elems(), (0, 0), (1, 6))
         ));
-        assert!(!drag_is_fixed("p1"));
+        assert!(!drag_is_fixed(S, "p1"));
     }
 
     #[test]
@@ -447,7 +586,7 @@ mod tests {
         let u = [("é1", "héllo wörld"), ("é2", "café")];
         let spans = resolve_spans(&u, (1, 3), (0, 7)); // reversed, char-safe
         let mut guard = state().lock().unwrap();
-        *guard = Some(MdSelection {
+        *guard.entry(S).or_default() = Some(MdSelection {
             anchor_key: "é1".into(),
             anchor_ix: 7,
             dragging: true,
@@ -457,8 +596,8 @@ mod tests {
             head_ix: 3,
         });
         drop(guard);
-        assert_eq!(wash_range("é1"), Some(7..13));
-        let snapshot = end_drag("é1").expect("settled");
+        assert_eq!(wash_range(S, "é1"), Some(7..13));
+        let snapshot = end_drag(S, "é1").expect("settled");
         assert_eq!(snapshot.text, "wörld\ncaf");
         assert_eq!(snapshot.head_key, "é2");
         assert_eq!(snapshot.spans[0].text, "héllo wörld");
@@ -467,11 +606,11 @@ mod tests {
     #[test]
     fn clear_drops_everything() {
         let _state = state_lock();
-        begin_with_span("p1", "hello world", 6..11);
+        begin_with_span(S, "p1", "hello world", 6..11);
         assert!(selected_text().is_some());
-        clear();
+        clear(S);
         assert_eq!(selected_text(), None);
-        assert_eq!(end_drag("p1"), None);
+        assert_eq!(end_drag(S, "p1"), None);
     }
 
     #[test]
