@@ -146,6 +146,8 @@ fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
             SessionCommandPayload::Run {
                 request: run_request(prompt, cwd),
                 message_id: message_id.into(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue run command");
@@ -870,6 +872,8 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
                     "Remember the codeword: PINEAPPLE. Reply with exactly: stored",
                 ),
                 message_id: "msg-user-1".into(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue first real run");
@@ -896,6 +900,8 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
                     "What was the codeword I told you earlier? Reply with just the codeword.",
                 ),
                 message_id: "msg-user-2".into(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue second real run");
@@ -951,6 +957,8 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
             SessionCommandPayload::Steer {
                 prompt: "actually, also add tests".into(),
                 message_id: Some("msg-user-2".into()),
+
+                agent_prompt: None,
             },
         )
         .expect("queue steer command");

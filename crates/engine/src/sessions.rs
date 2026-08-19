@@ -90,9 +90,12 @@ struct RunHandle {
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
+/// `prompt` is the VISIBLE prompt (the doc user entry); `agent_prompt` the
+/// optional EFFECTIVE override the harness should receive.
 #[derive(Debug, Clone)]
 struct RoutedSteer {
     prompt: String,
+    agent_prompt: Option<String>,
     message_id: String,
 }
 
@@ -369,8 +372,30 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, false)
+        self.dispatch_augmented(chat_id, harness_id, request, None, message_id)
             .await
+    }
+
+    /// [`Self::dispatch`] with an EFFECTIVE harness prompt override (the
+    /// Comment feature): the doc user entry keeps `request.prompt` (visible
+    /// truth) while the agent receives `agent_prompt` when present.
+    pub async fn dispatch_augmented(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        request: RunRequest,
+        agent_prompt: Option<String>,
+        message_id: Option<String>,
+    ) -> Result<String, EngineError> {
+        self.dispatch_with(
+            chat_id,
+            harness_id,
+            request,
+            agent_prompt,
+            message_id,
+            false,
+        )
+        .await
     }
 
     /// [`Self::dispatch`] with the startup-crash retry marker: the retry
@@ -383,10 +408,18 @@ impl SessionsEngine {
         chat_id: &'a str,
         harness_id: HarnessId,
         request: RunRequest,
+        agent_prompt: Option<String>,
         message_id: Option<String>,
         startup_retry: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry))
+        Box::pin(self.dispatch_inner(
+            chat_id,
+            harness_id,
+            request,
+            agent_prompt,
+            message_id,
+            startup_retry,
+        ))
     }
 
     async fn dispatch_inner(
@@ -394,12 +427,19 @@ impl SessionsEngine {
         chat_id: &str,
         harness_id: HarnessId,
         mut request: RunRequest,
+        agent_prompt: Option<String>,
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
+        // Visible prompt = the doc/user entry truth; the harness gets the
+        // augmented effective prompt when `agent_prompt` is present.
+        let visible_prompt = request.prompt.clone();
+        let effective = agent_prompt
+            .clone()
+            .unwrap_or_else(|| visible_prompt.clone());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -423,10 +463,11 @@ impl SessionsEngine {
                 let mut ledger = lock(&ledger);
                 ledger.push_back(RoutedSteer {
                     prompt: request.prompt.clone(),
+                    agent_prompt: agent_prompt.clone(),
                     message_id: user_id.clone(),
                 });
                 let message = SteerMessage {
-                    prompt: request.prompt.clone(),
+                    prompt: effective.clone(),
                     message_id: message_id.clone(),
                 };
                 let ok = steer_tx.try_send(message).is_ok();
@@ -441,7 +482,7 @@ impl SessionsEngine {
             };
             if sent {
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                handle.write_user_message(&user_id, &visible_prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
                     // Working BEFORE the lastMessageAt bump: both ride the
                     // workspace doc from this one peer, so causal order makes it
@@ -449,7 +490,7 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_message(chat_id, &visible_prompt);
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -462,7 +503,7 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_message(chat_id, &visible_prompt);
                     return Ok(run_id);
                 }
                 // Keep the already-written doc entry's id for the fresh run
@@ -477,7 +518,7 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
-        handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        handle.write_user_message(&user_id, &visible_prompt, now_ms())?;
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -539,7 +580,7 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        self.inner.note_message(chat_id, &visible_prompt);
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
@@ -547,7 +588,7 @@ impl SessionsEngine {
         // the Done-time call below stays as the retry for a failed
         // generation).
         if let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+            titles.maybe_generate(chat_id, harness_id, &visible_prompt, &request.cwd);
         }
 
         tokio::spawn(drive_run(
@@ -564,6 +605,7 @@ impl SessionsEngine {
                 user_message_id: user_id,
                 resume_injected,
                 startup_retry,
+                agent_prompt,
             },
         ));
         Ok(run_id)
@@ -575,6 +617,20 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         prompt: &str,
+        message_id: Option<String>,
+    ) -> Result<SteerOutcome, EngineError> {
+        self.steer_augmented(chat_id, prompt, None, message_id)
+            .await
+    }
+
+    /// [`Self::steer`] with an EFFECTIVE harness prompt override (the Comment
+    /// feature): the doc entry keeps `prompt` while the harness mailbox
+    /// receives `agent_prompt` when present.
+    pub async fn steer_augmented(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        agent_prompt: Option<String>,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
@@ -602,14 +658,16 @@ impl SessionsEngine {
         // invariant as the dispatch route (an observer must never hold [new
         // message, settled status]: the phantom "completed" flash,
         // 2026-07-31).
+        let effective = agent_prompt.clone().unwrap_or_else(|| prompt.to_string());
         let sent = {
             let mut ledger = lock(&ledger);
             ledger.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
+                agent_prompt: agent_prompt.clone(),
                 message_id: user_id.clone(),
             });
             let message = SteerMessage {
-                prompt: prompt.to_string(),
+                prompt: effective,
                 message_id: message_id.clone(),
             };
             let ok = steer_tx.try_send(message).is_ok();
@@ -1302,11 +1360,13 @@ fn expand_home(cwd: &str) -> String {
 /// the startup-crash retry re-dispatches idempotently against the same doc
 /// entry), whether `dispatch` injected the resume id itself (only
 /// engine-injected resumes retry — a caller-specified resume fails loudly),
-/// and whether this run already IS the retry (one attempt only).
+/// whether this run already IS the retry (one attempt only), and the
+/// EFFECTIVE prompt override (the Comment feature) the retry must re-deliver.
 struct RunResumeState {
     user_message_id: String,
     resume_injected: bool,
     startup_retry: bool,
+    agent_prompt: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1329,12 +1389,21 @@ async fn drive_run(
     let run_cwd = request.cwd.clone();
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
-    // the event loop) can take ownership.
+    // the event loop) can take ownership. Carries the VISIBLE prompt — the
+    // retry re-derives the effective override from `resume_state.agent_prompt`.
     let mut retry_request = Some(RunRequest {
         resume: None,
         ..request.clone()
     });
-    let mut stream = match harness.run(request, controls).await {
+    // The harness receives the EFFECTIVE prompt (visible unless an override
+    // rides the command). `request` itself stays the visible truth.
+    let effective = resume_state
+        .agent_prompt
+        .clone()
+        .unwrap_or_else(|| request.prompt.clone());
+    let mut harness_request = request.clone();
+    harness_request.prompt = effective;
+    let mut stream = match harness.run(harness_request, controls).await {
         Ok(stream) => stream,
         Err(err) => {
             let message = err.to_string();
@@ -1792,7 +1861,14 @@ async fn drive_run(
                 // The user entry write inside dispatch is idempotent by
                 // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
-                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true)
+                    .dispatch_with(
+                        &chat,
+                        harness_id,
+                        retry,
+                        resume_state.agent_prompt.clone(),
+                        Some(message_id),
+                        true,
+                    )
                     .await
                 {
                     tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
@@ -2020,7 +2096,13 @@ async fn drive_run(
                 request.attachments = Vec::new();
                 tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
                 if let Err(err) = engine
-                    .dispatch(&chat, harness_id, request, Some(steer.message_id.clone()))
+                    .dispatch_augmented(
+                        &chat,
+                        harness_id,
+                        request,
+                        steer.agent_prompt.clone(),
+                        Some(steer.message_id.clone()),
+                    )
                     .await
                 {
                     tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");

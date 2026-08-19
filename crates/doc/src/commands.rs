@@ -42,11 +42,21 @@ pub enum SessionCommandPayload {
         request: RunRequest,
         /// Client-minted message id for the optimistic user entry (dedup key).
         message_id: String,
+        /// Optional EFFECTIVE harness prompt override (the Comment feature):
+        /// the doc user entry keeps `request.prompt` (the visible truth)
+        /// while the agent receives this augmented prompt when present.
+        /// Additive + serde-defaulted for wire compat (old payloads stay
+        /// byte-identical).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_prompt: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Steer {
         prompt: String,
         message_id: Option<String>,
+        /// See [`SessionCommandPayload::Run::agent_prompt`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_prompt: Option<String>,
     },
     Interrupt {},
     #[serde(rename_all = "camelCase")]
@@ -197,6 +207,7 @@ mod tests {
             SessionCommandPayload::Steer {
                 prompt: "go".into(),
                 message_id: None,
+                agent_prompt: None,
             },
             issued_at,
         )
@@ -274,6 +285,7 @@ mod tests {
             SessionCommandPayload::Run {
                 request: run_request(),
                 message_id: "m1".into(),
+                agent_prompt: None,
             },
             1_000,
         );
@@ -282,6 +294,7 @@ mod tests {
             SessionCommandPayload::Run {
                 request: run_request(),
                 message_id: "m2".into(),
+                agent_prompt: None,
             },
             2_000,
         );
@@ -299,6 +312,72 @@ mod tests {
         let mut applied = e.clone();
         applied.status = SessionCommandStatus::Applied;
         assert!(!can_composer_cancel(&applied, "device-a"));
+    }
+
+    #[test]
+    fn agent_prompt_absent_serializes_unchanged() {
+        // Old payloads with no `agentPrompt` deserialize to None and re-
+        // serialize byte-identically (no field leaks into the JSON).
+        let json = r#"{"kind":"run","request":{"prompt":"hello","harness":null,"model":null,"reasoning":null,"modelOptions":{},"cwd":"/tmp","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":[]},"messageId":"m1"}"#;
+        let run: SessionCommandPayload = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            &run,
+            SessionCommandPayload::Run {
+                agent_prompt: None,
+                ..
+            }
+        ));
+        // Canonical re-serialization: no agentPrompt key, and the additive
+        // defaults (`harness`, `attachments`) stay omitted.
+        let out = serde_json::to_string(&run).unwrap();
+        assert!(!out.contains("agentPrompt"));
+        assert!(!out.contains("\"harness\""));
+        assert!(!out.contains("\"attachments\""));
+        // Round-trip is stable: serialize→deserialize→serialize is a fixpoint.
+        let again: SessionCommandPayload = serde_json::from_str(&out).unwrap();
+        assert_eq!(serde_json::to_string(&again).unwrap(), out);
+
+        let steer_json = r#"{"kind":"steer","prompt":"focus","messageId":null}"#;
+        let steer: SessionCommandPayload = serde_json::from_str(steer_json).unwrap();
+        assert!(matches!(
+            &steer,
+            SessionCommandPayload::Steer {
+                agent_prompt: None,
+                ..
+            }
+        ));
+        let out = serde_json::to_string(&steer).unwrap();
+        assert_eq!(out, steer_json);
+    }
+
+    #[test]
+    fn agent_prompt_some_round_trips() {
+        let payload = SessionCommandPayload::Run {
+            request: run_request(),
+            message_id: "m1".into(),
+            agent_prompt: Some("Conversation annotations (JSON): {}".into()),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains(r#""agentPrompt":"Conversation annotations (JSON): {}""#));
+        let back: SessionCommandPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert!(matches!(
+            &back,
+            SessionCommandPayload::Run {
+                agent_prompt: Some(p),
+                ..
+            } if p.starts_with("Conversation annotations")
+        ));
+
+        let steer = SessionCommandPayload::Steer {
+            prompt: "focus".into(),
+            message_id: Some("m2".into()),
+            agent_prompt: Some("annotated".into()),
+        };
+        let json = serde_json::to_string(&steer).unwrap();
+        assert!(json.contains(r#""agentPrompt":"annotated""#));
+        let back: SessionCommandPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, steer);
     }
 
     fn run_request() -> RunRequest {

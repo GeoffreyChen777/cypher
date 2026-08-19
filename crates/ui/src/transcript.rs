@@ -33,14 +33,16 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
-    ListScrollEvent, ListState, ObjectFit, SharedString, StyledImage as _, StyledText,
-    Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
+    AnyElement, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, Focusable,
+    ListAlignment, ListOffset, ListScrollEvent, ListState, ObjectFit, Point, SharedString,
+    StyledImage as _, StyledText, Subscription, Task, TextRun, Window, canvas, div, img, list,
+    point, prelude::*, px, quad,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_proto::ToolCall;
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
@@ -1350,6 +1352,49 @@ struct OwnTurnAnchor {
     positioned: bool,
 }
 
+/// Transcript-facing events (round 19, the Comment feature): the anchored
+/// editor saves a comment and the shell forwards it to the composer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptEvent {
+    /// A comment was saved in the anchored editor.
+    CommentAdded {
+        chat_id: String,
+        quote: String,
+        comment: String,
+    },
+}
+
+impl EventEmitter<TranscriptEvent> for Transcript {}
+
+/// A settled selection offer — the small `Comment` pill shown at the
+/// selection endpoint while it waits for the click that turns it into an
+/// editor. The anchor is in WINDOW coordinates (from the mouse-up event).
+#[derive(Clone)]
+struct CommentOffer {
+    snapshot: crate::markdown::selection::SelectionSnapshot,
+    anchor: Point<gpui::Pixels>,
+}
+
+/// The anchored comment editor replacing the pill once clicked: the
+/// normalized quote being commented on, the head row (dismissal validation),
+/// and the window-space anchor. The draft text lives in the transcript's
+/// reusable [`ComposerInput`].
+#[derive(Clone)]
+struct CommentEditor {
+    quote: String,
+    row_id: SharedString,
+    head_key: String,
+    head_ix: usize,
+    anchor: Point<gpui::Pixels>,
+}
+
+/// Normalize a selected quote for storage: trim outer whitespace and fold
+/// NBSPs to plain spaces (a NBSP selection boundary must not become a
+/// literal NBSP in the persisted quote).
+pub fn normalize_quote(raw: &str) -> String {
+    raw.trim().replace('\u{a0}', " ")
+}
+
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
@@ -1451,6 +1496,14 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
+    /// Reusable multiline input for the anchored comment editor.
+    comment_input: Entity<ComposerInput>,
+    /// A settled selection waiting to become a comment (the `Comment` pill).
+    selection_offer: Option<CommentOffer>,
+    /// The anchored editor (replaces the pill once clicked).
+    comment_editor: Option<CommentEditor>,
+    /// Input events for the comment editor: Enter saves.
+    _comment_input_events: Subscription,
     _observe: Subscription,
 }
 
@@ -1475,6 +1528,12 @@ impl Transcript {
             .ok();
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let comment_input = cx.new(|cx| ComposerInput::new("Add a comment…", cx));
+        let comment_events = cx.subscribe(&comment_input, |this: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.save_comment(cx);
+            }
+        });
         let mut this = Self {
             state,
             list,
@@ -1516,6 +1575,10 @@ impl Transcript {
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
+            comment_input,
+            selection_offer: None,
+            comment_editor: None,
+            _comment_input_events: comment_events,
             _observe: observe,
         };
         this.sync(cx);
@@ -1618,6 +1681,11 @@ impl Transcript {
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
+                // User input scrolled: the anchored Comment pill/editor would
+                // float over the wrong text — dismiss it (transient UI).
+                if this.selection_offer.is_some() || this.comment_editor.is_some() {
+                    this.dismiss_comment_ui_and_selection();
+                }
                 // Wheel/touch while a runway lives: input owns the viewport,
                 // and the BOTTOM PIN must stay out of it entirely. Escaping
                 // releases the hold (the reservation stays behind as plain
@@ -2197,6 +2265,8 @@ impl Transcript {
                 self.own_turn = None;
                 self.own_turn_kick = false;
             }
+            // Switching chats discards the transient selection offer/editor.
+            self.dismiss_comment_ui_and_selection();
             self.chat_id = selected;
             self.rows.clear();
             self.row_cache.clear();
@@ -2267,6 +2337,22 @@ impl Transcript {
                 return;
             }
             Some((old_range, count)) => {
+                // A doc commit replaced rows: the offer/editor anchored to a
+                // replaced row's text is stale — dismiss it (its quote may
+                // have streamed/changed under the selection).
+                if self.selection_offer.is_some() || self.comment_editor.is_some() {
+                    let replaced = &self.rows[old_range.clone()];
+                    let stale = self.selection_offer.as_ref().is_some_and(|o| {
+                        replaced
+                            .iter()
+                            .any(|r| r.id.as_ref() == o.snapshot.head_row())
+                    }) || self.comment_editor.as_ref().is_some_and(|e| {
+                        replaced.iter().any(|r| r.id.as_ref() == e.row_id.as_ref())
+                    });
+                    if stale {
+                        self.dismiss_comment_ui_and_selection();
+                    }
+                }
                 // Any replaced row's cached flatten results are stale — and
                 // because live replies splice only the rows whose content hash
                 // changed (the tail), this is O(changed rows) per commit, never
@@ -2777,7 +2863,13 @@ impl Transcript {
                                 .line_height(px(22.0))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
-                                .child(user_bubble_text(&row.id, text, mentions, &theme)),
+                                .child(user_bubble_text(
+                                    &row.id,
+                                    text,
+                                    mentions,
+                                    &theme,
+                                    Some(self.selection_ui_for(&row.id, cx)),
+                                )),
                         ),
                     );
                 }
@@ -2790,6 +2882,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    selection: Some(self.selection_ui_for(&row.id, cx)),
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
@@ -2832,6 +2925,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    selection: Some(self.selection_ui_for(&row.id, cx)),
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
@@ -3000,6 +3094,314 @@ impl Transcript {
                     .ok();
             });
         render::CopyUi { handler, copied_ix }
+    }
+
+    // ---- transcript comments (round 19) ----
+
+    /// Selection lifecycle callbacks for one row's text elements: a settle
+    /// shows the Comment pill at the selection endpoint, a new drag or a
+    /// clear hides it. Built per-row (each row's elements carry their own
+    /// key) but target the transcript entity as a whole.
+    fn selection_ui_for(
+        &self,
+        _row_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> render::SelectionUi {
+        let entity = cx.weak_entity();
+        let started: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+            entity
+                .update(cx, |this, cx| {
+                    if this.selection_offer.is_some() || this.comment_editor.is_some() {
+                        this.dismiss_comment_ui();
+                        cx.notify();
+                    }
+                })
+                .ok();
+        });
+        let cleared = started.clone();
+        let entity = cx.weak_entity();
+        let settled: Rc<
+            dyn Fn(
+                crate::markdown::selection::SelectionSnapshot,
+                Point<gpui::Pixels>,
+                &mut Window,
+                &mut gpui::App,
+            ),
+        > = Rc::new(move |snapshot, anchor, _window, cx| {
+            entity
+                .update(cx, |this, cx| {
+                    // A new settle replaces any prior offer/editor.
+                    if this.selection_offer.is_some() || this.comment_editor.is_some() {
+                        this.dismiss_comment_ui();
+                    }
+                    this.selection_offer = Some(CommentOffer { snapshot, anchor });
+                    cx.notify();
+                })
+                .ok();
+        });
+        render::SelectionUi {
+            on_started: started,
+            on_cleared: cleared,
+            on_settled: settled,
+        }
+    }
+
+    fn dismiss_comment_ui(&mut self) {
+        self.selection_offer = None;
+        self.comment_editor = None;
+    }
+
+    /// Close the floating affordance and remove the transcript selection wash.
+    /// A fresh selection's `Started` callback uses [`Self::dismiss_comment_ui`]
+    /// instead so it never clears the selection that was just begun.
+    fn dismiss_comment_ui_and_selection(&mut self) {
+        self.dismiss_comment_ui();
+        crate::markdown::selection::clear();
+    }
+
+    /// Whether `row_id` is still a live row — the offer/editor's head row;
+    /// false means it was replaced by a doc commit.
+    fn row_live(&self, row_id: &str) -> bool {
+        self.rows.iter().any(|r| r.id.as_ref() == row_id)
+    }
+
+    /// Turn the pill into the anchored editor (quote preview + input).
+    fn open_comment_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(offer) = self.selection_offer.take() else {
+            return;
+        };
+        let quote = normalize_quote(&offer.snapshot.text);
+        if quote.is_empty() {
+            return;
+        }
+        self.comment_editor = Some(CommentEditor {
+            quote,
+            row_id: offer.snapshot.head_row().to_string().into(),
+            head_key: offer.snapshot.head_key,
+            head_ix: offer.snapshot.head_ix,
+            anchor: offer.anchor,
+        });
+        self.comment_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        window.focus(&self.comment_input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Save the open editor: emits [`TranscriptEvent::CommentAdded`] and
+    /// closes. A blank body is a no-op (the editor stays open).
+    fn save_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.comment_editor.take() else {
+            return;
+        };
+        let comment = self.comment_input.read(cx).text().trim().to_string();
+        if comment.is_empty() {
+            self.comment_editor = Some(editor);
+            return;
+        }
+        self.comment_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        if let Some(chat_id) = self.chat_id.clone() {
+            cx.emit(TranscriptEvent::CommentAdded {
+                chat_id,
+                quote: editor.quote,
+                comment,
+            });
+        }
+        crate::markdown::selection::clear();
+        cx.notify();
+    }
+
+    fn cancel_comment_editor(&mut self, cx: &mut Context<Self>) {
+        if self.comment_editor.take().is_some() {
+            self.comment_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            crate::markdown::selection::clear();
+            cx.notify();
+        }
+    }
+
+    /// One-line quote preview for the editor card.
+    fn quote_preview(quote: &str) -> String {
+        let single = quote.replace('\n', " ");
+        if single.chars().count() > 120 {
+            let mut out: String = single.chars().take(120).collect();
+            out.push('…');
+            out
+        } else {
+            single
+        }
+    }
+
+    /// The floating Comment pill / editor, anchored at the settled selection
+    /// endpoint (window coordinates via gpui `anchored().position`). A
+    /// `deferred` layer paints above transcript rows and snaps inside the
+    /// window. The editor takes precedence over the pill.
+    fn render_comment_floating(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if let Some(editor) = self.comment_editor.clone() {
+            if !self.row_live(&editor.row_id) {
+                self.dismiss_comment_ui_and_selection();
+                cx.notify();
+                return None;
+            }
+            return Some(self.render_comment_editor(editor, cx));
+        }
+        let offer = self.selection_offer.clone()?;
+        if !self.row_live(offer.snapshot.head_row()) {
+            self.dismiss_comment_ui_and_selection();
+            cx.notify();
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let anchor = render::selection_anchor(&offer.snapshot.head_key, offer.snapshot.head_ix)
+            .unwrap_or(offer.anchor);
+        let weak = cx.weak_entity();
+        let pill = div()
+            .id("comment-pill")
+            .h(px(24.0))
+            .px(px(10.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .child(crate::icons::icon(crate::icons::CHAT_ROUND_LINE).size(px(13.0)))
+            .child(SharedString::from("Comment"))
+            // A click here must NOT land in the text-selection listener of the
+            // row underneath (its mouse-down would dismiss this very pill).
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                weak.update(cx, |this, cx| this.open_comment_editor(window, cx))
+                    .ok();
+            });
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    .position(anchor + point(px(8.0), px(-10.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(pill),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The anchored comment editor card: normalized quote preview + a
+    /// reusable multiline input + Save/Cancel. Enter saves (via the input's
+    /// Submit event), Shift+Enter newlines, Escape / outside click cancels.
+    fn render_comment_editor(
+        &mut self,
+        editor: CommentEditor,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let anchor =
+            render::selection_anchor(&editor.head_key, editor.head_ix).unwrap_or(editor.anchor);
+        let has_text = !self.comment_input.read(cx).text().trim().is_empty();
+        let save = div()
+            .id("comment-save")
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(8.0))
+            .bg(theme.text)
+            .text_size(px(11.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(if has_text {
+                theme.on_solid
+            } else {
+                theme.text_faint
+            })
+            .cursor_pointer()
+            .child(SharedString::from("Save"))
+            .when(has_text, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| this.save_comment(cx)))
+            });
+        let cancel = div()
+            .id("comment-cancel")
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(8.0))
+            .text_size(px(11.0))
+            .text_color(motion::hover_blend(
+                "comment-cancel",
+                theme.text_muted,
+                theme.text,
+            ))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.cancel_comment_editor(cx)))
+            .child(SharedString::from("Cancel"));
+        let mut cancel_btn = cancel;
+        cancel_btn
+            .interactivity()
+            .on_hover(motion::hover_listener("comment-cancel"));
+        let card = div()
+            .id("comment-editor")
+            .w(px(320.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_overlay)
+            .shadow_lg()
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .occlude()
+            .child(
+                div()
+                    .max_h(px(64.0))
+                    .overflow_hidden()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::ink(0.03))
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(Self::quote_preview(&editor.quote))),
+            )
+            .child(self.comment_input.clone())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(cancel_btn)
+                    .child(save),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_comment_editor(cx)))
+            // Keep the editor alive while interacting with it: without this,
+            // the mouse-down on the input/buttons would reach the text-
+            // selection listener of the row underneath and dismiss us.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.cancel_comment_editor(cx);
+                    cx.stop_propagation();
+                }
+            }));
+        gpui::deferred(
+            gpui::anchored()
+                .anchor(gpui::Anchor::TopLeft)
+                .position(anchor + point(px(8.0), px(-8.0)))
+                .snap_to_window_with_margin(px(8.0))
+                .child(card),
+        )
+        .into_any_element()
     }
 
     /// Request highlights for the code blocks of a tree. `only` limits to one
@@ -3478,6 +3880,7 @@ fn user_bubble_text(
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
+    selection: Option<render::SelectionUi>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -3530,7 +3933,7 @@ fn user_bubble_text(
                     ));
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme, selection);
         },
     )
     .absolute()
@@ -3976,6 +4379,12 @@ impl Render for Transcript {
                     .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
             )
             .child(rail);
+        // The Comment pill / editor layer (deferred → paints above rows).
+        let root = if let Some(comment_ui) = self.render_comment_floating(window, cx) {
+            root.child(comment_ui)
+        } else {
+            root
+        };
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -4001,6 +4410,27 @@ impl Render for Transcript {
 mod tests {
     use super::*;
     use zeron_doc::MessagePart;
+
+    // ---- transcript comments (round 19) ----
+
+    #[test]
+    fn quote_normalization_trims_and_folds_nbsp() {
+        assert_eq!(normalize_quote("  plain  "), "plain");
+        assert_eq!(
+            normalize_quote("\n  leading and trailing  \n"),
+            "leading and trailing"
+        );
+        // NBSP bearings fold to plain spaces (never a literal NBSP quote).
+        assert_eq!(normalize_quote("a\u{a0}b"), "a b");
+        assert_eq!(normalize_quote("\u{a0}\u{a0}edge\u{a0}"), "edge");
+        assert_eq!(normalize_quote("\t tabbed "), "tabbed");
+        assert_eq!(normalize_quote(""), "");
+    }
+
+    #[test]
+    fn comment_editor_quote_preview_collapses_newlines() {
+        assert_eq!(Transcript::quote_preview("one\ntwo"), "one two");
+    }
 
     // ---- streaming parse wiring (the transcript side, not the parser) ----
 

@@ -28,6 +28,44 @@ pub struct Span {
     pub text: String,
 }
 
+/// A settled selection snapshot, captured at mouse-up: the ordered spans
+/// (copy source), the joined visible text, and the drag's HEAD — the element
+/// key + byte offset where the mouse last was. The head anchors the
+/// transcript's Comment pill at the selection endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionSnapshot {
+    /// Element key (`{row_key}:{element ix}`) under the head.
+    pub head_key: String,
+    /// Byte offset of the head within its element.
+    pub head_ix: usize,
+    /// Resolved spans, document order (empty only for a degenerate selection).
+    pub spans: Vec<Span>,
+    /// Spans joined in document order — the exact visible selected quote.
+    pub text: String,
+}
+
+impl SelectionSnapshot {
+    /// The row id the head element belongs to (`{row_key}:{element ix}`) —
+    /// the anchor for dismissing the offer when that row is replaced.
+    pub fn head_row(&self) -> &str {
+        // Assistant Markdown's production keys append `-t{element_ix}`;
+        // user bubbles append `:u`. Strip only recognized renderer suffixes
+        // so punctuation inside a real row id remains untouched.
+        if let Some((row, suffix)) = self.head_key.rsplit_once("-t")
+            && !suffix.is_empty()
+            && suffix.bytes().all(|b| b.is_ascii_digit())
+        {
+            return row;
+        }
+        if let Some((row, suffix)) = self.head_key.rsplit_once(':')
+            && (suffix == "u" || (!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())))
+        {
+            return row;
+        }
+        &self.head_key
+    }
+}
+
 #[derive(Clone, Default)]
 struct MdSelection {
     /// Element that owns the drag (where the mouse went down).
@@ -35,8 +73,15 @@ struct MdSelection {
     /// Byte offset of the anchor within its element.
     anchor_ix: usize,
     dragging: bool,
+    /// Double/triple-click selections are already complete spans and must not
+    /// be replaced by incidental pointer movement before mouse-up.
+    fixed_span: bool,
     /// Resolved spans, document order. Empty while a click hasn't moved.
     spans: Vec<Span>,
+    /// Element key under the drag's head (the mouse's last position).
+    head_key: String,
+    /// Byte offset of the head within its element.
+    head_ix: usize,
 }
 
 fn state() -> &'static Mutex<Option<MdSelection>> {
@@ -75,21 +120,30 @@ pub fn begin(key: &str, ix: usize) {
         anchor_key: key.to_string(),
         anchor_ix: ix,
         dragging: true,
+        fixed_span: false,
         spans: Vec::new(),
+        head_key: key.to_string(),
+        head_ix: ix,
     });
 }
 
 /// Begin with an immediate span (double/triple click inside one element).
 pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
+    let head_ix = range.end;
     *state().lock().unwrap() = Some(MdSelection {
         anchor_key: key.to_string(),
         anchor_ix: range.start,
         dragging: true,
+        fixed_span: true,
         spans: vec![Span {
             key: key.to_string(),
             range,
             text: text.to_string(),
         }],
+        // The head lands at the span's right edge — the natural "endpoint"
+        // of a word/paragraph selection with no drag to track.
+        head_key: key.to_string(),
+        head_ix,
     });
 }
 
@@ -100,21 +154,43 @@ pub fn drag_anchor(key: &str) -> Option<usize> {
     (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
 }
 
-/// Replace the resolved spans (drag update). Returns true if they changed.
-pub fn update_spans(spans: Vec<Span>) -> bool {
+/// Whether `key` owns a fixed double/triple-click span. Fixed spans settle as
+/// selected, without a final character-level drag update.
+pub fn drag_is_fixed(key: &str) -> bool {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|sel| sel.dragging && sel.anchor_key == key && sel.fixed_span)
+}
+
+/// Replace the resolved spans + drag head (drag update). Returns true if
+/// anything changed (repaint gate). `head_key` is the element under the
+/// mouse; it always trails the span resolution in the same frame. A FIXED
+/// double/triple-click span is never replaced here — the renderer skips
+/// drag updates for it ([`Self::drag_is_fixed`]), and this guard makes the
+/// invariant hold even if a stray caller resolves against its position.
+pub fn update_drag(head_key: &str, head_ix: usize, spans: Vec<Span>) -> bool {
     let mut guard = state().lock().unwrap();
     let Some(sel) = guard.as_mut() else {
         return false;
     };
-    if sel.spans == spans {
+    if sel.fixed_span {
         return false;
     }
+    if sel.spans == spans && sel.head_key == head_key && sel.head_ix == head_ix {
+        return false;
+    }
+    sel.head_key = head_key.to_string();
+    sel.head_ix = head_ix;
     sel.spans = spans;
     true
 }
 
-/// End the drag for `key`'s claim; returns the joined text if non-empty.
-pub fn end_drag(key: &str) -> Option<String> {
+/// End the drag for `key`'s claim; returns the settled snapshot if the
+/// selection is non-empty. The state stays (settled) so copy + the wash
+/// keep working; [`SelectionSnapshot::text`] is the joined visible quote.
+pub fn end_drag(key: &str) -> Option<SelectionSnapshot> {
     let mut guard = state().lock().unwrap();
     let sel = guard.as_mut()?;
     if sel.anchor_key != key || !sel.dragging {
@@ -125,7 +201,17 @@ pub fn end_drag(key: &str) -> Option<String> {
         *guard = None;
         return None;
     }
-    Some(join_spans(&sel.spans))
+    Some(SelectionSnapshot {
+        head_key: sel.head_key.clone(),
+        head_ix: sel.head_ix,
+        spans: sel.spans.clone(),
+        text: join_spans(&sel.spans),
+    })
+}
+
+/// Unconditionally drop the selection (chat switch, row replacement).
+pub fn clear() {
+    *state().lock().unwrap() = None;
 }
 
 /// Clear if `key` owns a settled selection (a mouse-down landed outside the
@@ -255,17 +341,54 @@ mod tests {
         assert_eq!(drag_anchor("p1"), Some(6));
         assert_eq!(drag_anchor("p2"), None);
         let spans = resolve_spans(&elems(), (0, 6), (1, 6));
-        assert!(update_spans(spans.clone()));
-        assert!(!update_spans(spans)); // unchanged ⇒ no repaint
+        assert!(update_drag("p2", 6, spans.clone()));
+        assert!(!update_drag("p2", 6, spans)); // unchanged ⇒ no repaint
         assert_eq!(wash_range("p1"), Some(6..15));
         assert_eq!(wash_range("p2"), Some(0..6));
         assert_eq!(wash_range("p3"), None);
-        assert_eq!(end_drag("p1").as_deref(), Some("paragraph\nsecond"));
+        let snapshot = end_drag("p1").expect("settled snapshot");
+        // Head tracks the drag's last position (element p2, offset 6).
+        assert_eq!(snapshot.head_key, "p2");
+        assert_eq!(snapshot.head_ix, 6);
+        assert_eq!(snapshot.head_row(), "p2");
+        assert_eq!(snapshot.text, "paragraph\nsecond");
         assert_eq!(selected_text().as_deref(), Some("paragraph\nsecond"));
         // Settled: a down elsewhere clears via the owner's listener.
         assert!(!clear_if_owner("p2"));
         assert!(clear_if_owner("p1"));
         assert_eq!(selected_text(), None);
+    }
+
+    #[test]
+    fn snapshot_head_row_splits_element_suffix() {
+        let assistant = SelectionSnapshot {
+            head_key: "m1#t0.0-t3".into(),
+            head_ix: 12,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(assistant.head_row(), "m1#t0.0");
+        let user = SelectionSnapshot {
+            head_key: "m2:u".into(),
+            head_ix: 12,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(user.head_row(), "m2");
+        let legacy = SelectionSnapshot {
+            head_key: "e1#p1:3".into(),
+            head_ix: 12,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(legacy.head_row(), "e1#p1");
+        let bare = SelectionSnapshot {
+            head_key: "row:with-punctuation".into(),
+            head_ix: 0,
+            spans: Vec::new(),
+            text: String::new(),
+        };
+        assert_eq!(bare.head_row(), "row:with-punctuation");
     }
 
     #[test]
@@ -277,11 +400,78 @@ mod tests {
     }
 
     #[test]
-    fn double_click_span() {
+    fn double_click_span_heads_the_range_end() {
         let _state = state_lock();
         begin_with_span("p1", "hello world", 6..11);
+        assert!(drag_is_fixed("p1"));
         assert_eq!(wash_range("p1"), Some(6..11));
-        assert_eq!(end_drag("p1").as_deref(), Some("world"));
+        let snapshot = end_drag("p1").expect("settled");
+        assert_eq!(snapshot.text, "world");
+        assert_eq!(snapshot.head_ix, 11);
+    }
+
+    #[test]
+    fn fixed_span_survives_incidental_updates() {
+        // A double/triple-click span is complete at mouse-down: an incidental
+        // MouseMove or the mouse-up character resolution must not overwrite it.
+        let _state = state_lock();
+        begin_with_span("p1", "hello world", 6..11);
+        // A stray drag update at a different element/offset changes nothing.
+        assert!(!update_drag(
+            "p2",
+            0,
+            resolve_spans(&elems(), (0, 0), (0, 5))
+        ));
+        assert!(drag_is_fixed("p1"));
+        assert_eq!(wash_range("p1"), Some(6..11));
+        // The head stays at the span's right edge, not at the stray point.
+        let snapshot = end_drag("p1").expect("settled");
+        assert_eq!(snapshot.head_key, "p1");
+        assert_eq!(snapshot.head_ix, 11);
+        assert_eq!(snapshot.text, "world");
+        // A simple drag (non-fixed) still accepts updates normally.
+        begin("p1", 0);
+        assert!(update_drag(
+            "p2",
+            6,
+            resolve_spans(&elems(), (0, 0), (1, 6))
+        ));
+        assert!(!drag_is_fixed("p1"));
+    }
+
+    #[test]
+    fn unicode_reversed_cross_element_snapshot() {
+        // A bottom-up drag across two elements normalizes to document order
+        // in the snapshot while the head stays at the drag's final position.
+        let _state = state_lock();
+        let u = [("é1", "héllo wörld"), ("é2", "café")];
+        let spans = resolve_spans(&u, (1, 3), (0, 7)); // reversed, char-safe
+        let mut guard = state().lock().unwrap();
+        *guard = Some(MdSelection {
+            anchor_key: "é1".into(),
+            anchor_ix: 7,
+            dragging: true,
+            fixed_span: false,
+            spans: spans.clone(),
+            head_key: "é2".into(),
+            head_ix: 3,
+        });
+        drop(guard);
+        assert_eq!(wash_range("é1"), Some(7..13));
+        let snapshot = end_drag("é1").expect("settled");
+        assert_eq!(snapshot.text, "wörld\ncaf");
+        assert_eq!(snapshot.head_key, "é2");
+        assert_eq!(snapshot.spans[0].text, "héllo wörld");
+    }
+
+    #[test]
+    fn clear_drops_everything() {
+        let _state = state_lock();
+        begin_with_span("p1", "hello world", 6..11);
+        assert!(selected_text().is_some());
+        clear();
+        assert_eq!(selected_text(), None);
+        assert_eq!(end_drag("p1"), None);
     }
 
     #[test]

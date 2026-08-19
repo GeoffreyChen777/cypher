@@ -112,6 +112,8 @@ fn run_payload(message_id: &str) -> SessionCommandPayload {
             resume: None,
         },
         message_id: message_id.into(),
+
+        agent_prompt: None,
     }
 }
 

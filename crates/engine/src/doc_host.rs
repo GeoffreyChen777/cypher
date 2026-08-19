@@ -2018,6 +2018,7 @@ impl DocHost {
             SessionCommandPayload::Run {
                 request,
                 message_id,
+                agent_prompt,
             } => {
                 // Claim-on-first-command: a run for a chat with no workspace row
                 // creates the row under our device id (we are about to host it).
@@ -2045,12 +2046,25 @@ impl DocHost {
                     }
                 }
                 sessions
-                    .dispatch(chat_id, harness, request.clone(), Some(message_id.clone()))
+                    .dispatch_augmented(
+                        chat_id,
+                        harness,
+                        request.clone(),
+                        agent_prompt.clone(),
+                        Some(message_id.clone()),
+                    )
                     .await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
-            SessionCommandPayload::Steer { prompt, message_id } => {
-                match sessions.steer(chat_id, prompt, message_id.clone()).await? {
+            SessionCommandPayload::Steer {
+                prompt,
+                message_id,
+                agent_prompt,
+            } => {
+                match sessions
+                    .steer_augmented(chat_id, prompt, agent_prompt.clone(), message_id.clone())
+                    .await?
+                {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
                     SteerOutcome::NotSteerable => {
                         // No live steerable run: the durable command still delivers —
@@ -2077,7 +2091,13 @@ impl DocHost {
                         request.attachments = Vec::new();
                         let harness = self.harness_for_request(chat_id, &request);
                         sessions
-                            .dispatch(chat_id, harness, request, message_id.clone())
+                            .dispatch_augmented(
+                                chat_id,
+                                harness,
+                                request,
+                                agent_prompt.clone(),
+                                message_id.clone(),
+                            )
                             .await?;
                         Ok((
                             SessionCommandStatus::Applied,
@@ -2150,7 +2170,9 @@ impl DocHost {
                         "orphaned input resolve failed");
                 }
                 let harness = self.harness_for_request(chat_id, &request);
-                sessions.dispatch(chat_id, harness, request, None).await?;
+                sessions
+                    .dispatch_augmented(chat_id, harness, request, None, None)
+                    .await?;
                 Ok((
                     SessionCommandStatus::Applied,
                     Some("answered as new turn".into()),

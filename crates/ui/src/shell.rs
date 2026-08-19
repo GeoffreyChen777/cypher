@@ -923,6 +923,8 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
+    /// Transcript → composer comment forwarding.
+    _transcript_events: Subscription,
 }
 
 impl Shell {
@@ -945,6 +947,27 @@ impl Shell {
                 } => {
                     transcript.update(cx, |t, cx| {
                         t.on_own_send(chat_id.clone(), message_id.clone(), cx)
+                    });
+                }
+            }
+        });
+        // Transcript → composer: a comment saved in the anchored editor lands
+        // in the composer's pending list (the status-strip indicator).
+        let transcript_events = cx.subscribe(&transcript, {
+            let composer = composer.clone();
+            move |_this: &mut Shell, _, event: &transcript::TranscriptEvent, cx| match event {
+                transcript::TranscriptEvent::CommentAdded {
+                    chat_id,
+                    quote,
+                    comment,
+                } => {
+                    composer.update(cx, |composer, cx| {
+                        composer.add_transcript_comment(
+                            chat_id.clone(),
+                            quote.clone(),
+                            comment.clone(),
+                            cx,
+                        )
                     });
                 }
             }
@@ -1097,6 +1120,7 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
+            _transcript_events: transcript_events,
         }
     }
 
@@ -4701,9 +4725,16 @@ impl Shell {
             }
         };
 
+        // Pending-comments indicator pinned to the strip's upper-left; the
+        // session status sits centered; the Subagents trigger stays right.
+        let comments_trigger = self
+            .composer
+            .update(cx, |composer, cx| composer.render_comments_trigger(cx));
         strip
+            .child(comments_trigger)
+            .child(div().flex_1())
             .child(left)
-            // Flex spacer keeps the left status left-aligned and the subagents
+            // Flex spacer keeps the center status centered and the subagents
             // trigger pinned to the composer-aligned right edge; when the
             // trigger renders Empty (no records) the strip is just the left
             // content.

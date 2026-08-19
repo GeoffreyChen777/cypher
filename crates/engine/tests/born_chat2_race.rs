@@ -164,6 +164,8 @@ async fn transcript_survives_open_racing_create_chat() {
                         resume: None,
                     },
                     message_id: "msg-race-1".into(),
+
+                    agent_prompt: None,
                 },
             )
             .expect("queue run command");

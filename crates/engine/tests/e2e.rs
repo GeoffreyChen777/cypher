@@ -239,6 +239,8 @@ async fn queued_run_command_executes_end_to_end() {
         SessionCommandPayload::Run {
             request: run_request("do the thing"),
             message_id: "msg-user-1".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -349,6 +351,8 @@ async fn session_status_transitions_idle_working_idle() {
         SessionCommandPayload::Run {
             request: run_request("go"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -392,6 +396,8 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         SessionCommandPayload::Run {
             request: run_request("hang"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -465,6 +471,8 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
         SessionCommandPayload::Run {
             request: run_request("first"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -491,6 +499,8 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
         SessionCommandPayload::Steer {
             prompt: "also do this".into(),
             message_id: Some("m-2".into()),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -552,6 +562,8 @@ async fn processed_commands_are_skipped_on_redelivery() {
         SessionCommandPayload::Run {
             request: run_request("never again"),
             message_id: "m-x".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -724,6 +736,8 @@ async fn rpc_surface_over_in_memory_transport() {
     let command = serde_json::to_value(SessionCommandPayload::Run {
         request: run_request("via rpc"),
         message_id: "m-rpc-1".into(),
+
+        agent_prompt: None,
     })
     .unwrap();
     let queued = client
@@ -839,6 +853,8 @@ async fn respond_input_resolves_pending_question() {
         SessionCommandPayload::Run {
             request: run_request("ask me"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -992,6 +1008,8 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
         SessionCommandPayload::Run {
             request: run_request("ask me"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -1175,6 +1193,8 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
         SessionCommandPayload::Run {
             request: run_request("ask and block"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -1240,6 +1260,8 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
         SessionCommandPayload::Run {
             request: run_request("second run"),
             message_id: "m-2".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -1339,6 +1361,8 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
         SessionCommandPayload::Run {
             request: run_request("ask me twice"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -1543,6 +1567,8 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
         SessionCommandPayload::Run {
             request,
             message_id: "msg-att-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -1669,6 +1695,8 @@ async fn real_claude_sees_uploaded_image_inline() {
             SessionCommandPayload::Run {
                 request,
                 message_id: "msg-img-1".into(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue real image run");
@@ -1758,6 +1786,8 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
         SessionCommandPayload::Run {
             request: run_request("hb"),
             message_id: "msg-hb-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -1814,6 +1844,8 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
         SessionCommandPayload::Run {
             request: run_request("go"),
             message_id: "m-parked".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -1901,6 +1933,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
         SessionCommandPayload::Run {
             request: run_request("go"),
             message_id: "m-echo".into(),
+
+            agent_prompt: None,
         },
     );
 
@@ -2003,6 +2037,8 @@ async fn parked_steer_restamps_started_at_and_idle_clears_it() {
         SessionCommandPayload::Run {
             request: run_request("first"),
             message_id: "m-1".into(),
+
+            agent_prompt: None,
         },
     );
     wait_for(
@@ -2023,6 +2059,8 @@ async fn parked_steer_restamps_started_at_and_idle_clears_it() {
         SessionCommandPayload::Steer {
             prompt: "next".into(),
             message_id: Some("m-2".into()),
+
+            agent_prompt: None,
         },
     );
     wait_for(

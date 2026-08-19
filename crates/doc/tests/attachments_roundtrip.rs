@@ -23,6 +23,7 @@ fn run_request_attachments_survive_command_round_trip() {
         payload: SessionCommandPayload::Run {
             request,
             message_id: "m1".into(),
+            agent_prompt: None,
         },
         issued_by: "d".into(),
         issued_at: 1,

@@ -804,6 +804,7 @@ impl EngineRpc {
                 SessionCommandPayload::Run {
                     request,
                     message_id: crate::new_id(),
+                    agent_prompt: None,
                 },
             ) {
                 // Rollback: no bogus navigable row — the queue is what makes the

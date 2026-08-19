@@ -79,6 +79,31 @@ pub struct RenderOptions {
     /// Code-block copy-button plumbing (round 9): `None` renders no button
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
+    /// Text-selection lifecycle callbacks (round 19): the transcript wires
+    /// these to show/clear the Comment pill. `None` renders inert (previews).
+    pub selection: Option<SelectionUi>,
+}
+
+/// Selection lifecycle callbacks fired from the frame-scoped selection mouse
+/// listeners ([`register_selection_listeners`]) so the owning surface can
+/// show and clear the Comment pill. Cloneable `Rc` closures — one instance
+/// rides every `RenderOptions` of a transcript.
+#[derive(Clone)]
+pub struct SelectionUi {
+    /// A new drag / double / triple-click selection began (mouse-down).
+    pub on_started: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    /// The settled selection was cleared by a mouse-down outside it.
+    pub on_cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    /// A non-empty selection settled on mouse-up, with the mouse-up position
+    /// in WINDOW coordinates (the pill's anchor).
+    pub on_settled: Rc<
+        dyn Fn(
+            super::selection::SelectionSnapshot,
+            gpui::Point<gpui::Pixels>,
+            &mut Window,
+            &mut gpui::App,
+        ),
+    >,
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -99,6 +124,7 @@ impl RenderOptions {
             cache: None,
             now: Instant::now(),
             copy: None,
+            selection: None,
         }
     }
 }
@@ -676,11 +702,12 @@ fn flat_text_element(
     // from the text's own layout handle. Pure paint — never in layout. The
     // same paint pass re-registers the frame-scoped window mouse listeners
     // that drive text selection (round 18; see markdown/selection.rs).
-    let sel_key: std::sync::Arc<str> = format!("{}:{ix}", opts.row_key).into();
+    let sel_key: std::sync::Arc<str> = format!("{}-t{ix}", opts.row_key).into();
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
+    let selection = opts.selection.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -718,7 +745,7 @@ fn flat_text_element(
                     layout: layout.clone(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout);
+            register_selection_listeners(window, &sel_key, &flat_text, &layout, selection);
         },
     )
     .absolute()
@@ -746,6 +773,7 @@ pub(crate) fn paint_text_selection(
     text: &SharedString,
     layout: &gpui::TextLayout,
     theme: &Theme,
+    selection: Option<SelectionUi>,
 ) {
     if let Some(range) = super::selection::wash_range(key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
@@ -766,7 +794,7 @@ pub(crate) fn paint_text_selection(
             layout: layout.clone(),
         })
     });
-    register_selection_listeners(window, key, text, layout);
+    register_selection_listeners(window, key, text, layout, selection);
 }
 
 /// One painted text element, registered per frame in document order — the
@@ -795,15 +823,22 @@ pub fn selection_frame_reset() -> impl IntoElement {
     .h(px(0.0))
 }
 
-/// `(element index, byte offset)` for a window position: the registered
-/// element whose vertical band contains it, else the nearest by vertical
-/// distance (a drag past the gutter or between blocks clamps sensibly).
+/// `(element index, byte offset)` for a window position: prefer the registered
+/// element whose full 2-D bounds contain it, else the nearest bounds. The X
+/// dimension matters for tables, whose cells share the same vertical band.
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let mut best: Option<(usize, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
             let b = entry.layout.bounds();
+            let dx = if position.x < b.left() {
+                f32::from(b.left() - position.x)
+            } else if position.x > b.right() {
+                f32::from(position.x - b.right())
+            } else {
+                0.0
+            };
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
             } else if position.y > b.bottom() {
@@ -811,10 +846,11 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             } else {
                 0.0
             };
-            if best.is_none_or(|(_, d)| dy < d) {
-                best = Some((ei, dy));
+            let distance_sq = dx * dx + dy * dy;
+            if best.is_none_or(|(_, d)| distance_sq < d) {
+                best = Some((ei, distance_sq));
             }
-            if dy == 0.0 {
+            if distance_sq == 0.0 {
                 break;
             }
         }
@@ -823,6 +859,20 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             Ok(ix) | Err(ix) => ix,
         };
         Some((ei, ix))
+    })
+}
+
+/// Current window-space endpoint for a settled selection head. The transcript
+/// uses this to keep its floating Comment affordance attached while scrolling,
+/// streaming, or resize/reflow moves the underlying text.
+pub(crate) fn selection_anchor(key: &str, index: usize) -> Option<gpui::Point<gpui::Pixels>> {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let entry = registry.iter().find(|entry| entry.key.as_ref() == key)?;
+        entry
+            .layout
+            .position_for_index(index)
+            .map(|position| position + point(px(0.0), entry.layout.line_height()))
     })
 }
 
@@ -838,24 +888,33 @@ fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> boo
             .iter()
             .map(|e| (e.key.as_ref(), e.text.as_ref()))
             .collect();
+        // The head element under the mouse (falls back to the anchor if the
+        // pointer ran past the registry edge — the spans stay valid).
+        let head_key: String = reg
+            .get(head.0)
+            .map(|e| e.key.to_string())
+            .unwrap_or_else(|| anchor_key.to_string());
         let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
-        super::selection::update_spans(spans)
+        super::selection::update_drag(&head_key, head.1, spans)
     })
 }
 
 /// Register this frame's window-level mouse listeners for one text element's
 /// selection (Zed-markdown mechanics: window-level so a drag keeps tracking
 /// outside the element's bounds; frame-scoped, so paint re-registers).
+/// `selection` threads the surface's Comment-pill callbacks through.
 fn register_selection_listeners(
     window: &mut Window,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
+    selection: Option<SelectionUi>,
 ) {
     use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
     {
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
-        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _cx| {
+        let selection = selection.clone();
+        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
@@ -873,8 +932,14 @@ fn register_selection_listeners(
                     }
                     _ => super::selection::begin(&key, ix),
                 }
+                if let Some(sel) = &selection {
+                    (sel.on_started)(window, cx);
+                }
                 window.refresh();
             } else if super::selection::clear_if_owner(&key) {
+                if let Some(sel) = &selection {
+                    (sel.on_cleared)(window, cx);
+                }
                 window.refresh();
             }
         });
@@ -889,6 +954,9 @@ fn register_selection_listeners(
             let Some(anchor_ix) = super::selection::drag_anchor(&key) else {
                 return;
             };
+            if super::selection::drag_is_fixed(&key) {
+                return;
+            }
             let Some(head) = registry_point(e.position) else {
                 return;
             };
@@ -899,14 +967,27 @@ fn register_selection_listeners(
     }
     {
         let key = key.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, _cx| {
+        let selection = selection.clone();
+        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
             }
-            if let Some(_text) = super::selection::end_drag(&key) {
+            // Mouse-up can arrive without a final MouseMove. Resolve its exact
+            // point once more for a simple drag so the release glyph/row is
+            // included. Fixed double/triple-click spans stay intact.
+            if !super::selection::drag_is_fixed(&key)
+                && let Some(anchor_ix) = super::selection::drag_anchor(&key)
+                && let Some(head) = registry_point(e.position)
+            {
+                resolve_drag(&key, anchor_ix, head);
+            }
+            if let Some(snapshot) = super::selection::end_drag(&key) {
                 // X11 middle-click paste parity (Zed does the same).
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                _cx.write_to_primary(gpui::ClipboardItem::new_string(_text));
+                cx.write_to_primary(gpui::ClipboardItem::new_string(snapshot.text.clone()));
+                if let Some(sel) = &selection {
+                    (sel.on_settled)(snapshot, e.position, window, cx);
+                }
             }
         });
     }

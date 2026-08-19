@@ -170,6 +170,8 @@ async fn projectless_chat_runs_from_home_and_mints_no_space() {
                     resume: None,
                 },
                 message_id: "msg-np-1".into(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue run command");

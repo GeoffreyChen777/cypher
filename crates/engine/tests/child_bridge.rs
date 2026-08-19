@@ -824,6 +824,8 @@ async fn later_child_turn_has_no_messaging_channel() {
                     attachments: Vec::new(),
                 },
                 message_id: String::new(),
+
+                agent_prompt: None,
             },
         )
         .expect("queue follow-up");

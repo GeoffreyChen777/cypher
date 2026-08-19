@@ -310,6 +310,8 @@ async fn target_device_id_routes_over_the_relay() {
             resume: None,
         },
         message_id: "m-a-1".into(),
+
+        agent_prompt: None,
     })
     .expect("serialize command");
     let queued = client

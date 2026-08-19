@@ -185,6 +185,8 @@ fn queue_run_with(
             payload: SessionCommandPayload::Run {
                 request,
                 message_id: message_id.into(),
+
+                agent_prompt: None,
             },
             issued_by: VIEWER.into(),
             issued_at: now,
