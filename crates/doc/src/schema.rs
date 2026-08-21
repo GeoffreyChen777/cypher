@@ -989,7 +989,7 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
-    use zeron_proto::{AgentEvent, ToolCall};
+    use cypher_proto::{AgentEvent, ToolCall};
 
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -1244,7 +1244,7 @@ mod tests {
                 id: "t1".into(),
                 is_error: false,
                 output: Some("total 0\nmore lines".into()),
-                diff: Some(zeron_proto::ToolDiff {
+                diff: Some(cypher_proto::ToolDiff {
                     path: "/w/a.rs".into(),
                     old_text: Some("old\n".into()),
                     new_text: "new\n".into(),
@@ -1301,7 +1301,7 @@ mod tests {
                 resolved: true,
                 output: Some("full inline output\nline 2".into()),
                 progress: None,
-                diff: Some(zeron_proto::ToolDiff {
+                diff: Some(cypher_proto::ToolDiff {
                     path: "/w/a.rs".into(),
                     old_text: Some("old".into()),
                     new_text: "new".into(),

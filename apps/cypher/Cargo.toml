@@ -1,0 +1,28 @@
+[package]
+name = "cypher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cypher"
+path = "src/main.rs"
+
+[dependencies]
+cypher-env.workspace = true
+cypher-engine.workspace = true
+cypher-rpc.workspace = true
+cypher-ui.workspace = true
+cypher-update.workspace = true
+tokio.workspace = true
+clap.workspace = true
+mimalloc.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

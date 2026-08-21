@@ -2,7 +2,7 @@
 //! turn settle exactly once, at the end, and how close do its silent gaps
 //! come to the 30s blanket quiet-settle window? Run explicitly:
 //!
-//!   SURVEY_RUNS=3 cargo test -p zeron-harness --test real_quiet_survey -- --ignored --nocapture
+//!   SURVEY_RUNS=3 cargo test -p cypher-harness --test real_quiet_survey -- --ignored --nocapture
 //!
 //! No env knob is set here — this binary runs the DEFAULTS the app ships:
 //! Claude exempt from the blanket settle, every other adapter on the 30s
@@ -16,10 +16,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{
+use cypher_harness::{
     AcpHarness, CancellationToken, Harness, RunControls, RunHostContext, SteerMessage,
 };
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
 };
 

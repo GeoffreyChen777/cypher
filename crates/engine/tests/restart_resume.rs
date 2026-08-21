@@ -20,16 +20,16 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use zeron_doc::{
+use cypher_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
 };
-use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
+use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
-use zeron_sync::DocsStore;
+use cypher_sync::DocsStore;
 
 const CHAT: &str = "chat-restart";
 
@@ -830,7 +830,7 @@ async fn persistent_startup_crash_keeps_stored_session_id() {
 /// the codeword back — the reply can only contain it if the second run resumed
 /// the first run's harness session. Ignored by default: needs an installed,
 /// authenticated `claude` CLI and spends real tokens (haiku, two tiny turns).
-/// Run with: `cargo test -p zeron-engine --test restart_resume -- --ignored`
+/// Run with: `cargo test -p cypher-engine --test restart_resume -- --ignored`
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires installed+authenticated claude CLI; spends tokens"]
 async fn real_claude_remembers_codeword_across_engine_restart() {
@@ -855,7 +855,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
     let assemble_real = || {
         EngineCore::assemble(
             &dir,
-            Arc::new(zeron_engine::default_registry(dir.join("agent-sessions"))),
+            Arc::new(cypher_engine::default_registry(dir.join("agent-sessions"))),
             HarnessId::ClaudeCode,
             None,
         )

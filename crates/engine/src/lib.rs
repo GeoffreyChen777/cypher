@@ -1,4 +1,4 @@
-//! zeron-engine — the headless backend: sessions engine, doc host + command executor,
+//! cypher-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
 //! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use zeron_proto::{EngineInfo, HarnessId, WorkspaceScope};
-use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
+pub use cypher_proto::{EngineInfo, HarnessId, WorkspaceScope};
+use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
-use zeron_sync::DocsStore;
+use cypher_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
@@ -64,13 +64,13 @@ pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("doc: {0}")]
-    Doc(#[from] zeron_doc::DocError),
+    Doc(#[from] cypher_doc::DocError),
     #[error("journal: {0}")]
     Journal(#[from] run_journal::JournalError),
     #[error("store: {0}")]
-    Store(#[from] zeron_sync::StoreError),
+    Store(#[from] cypher_sync::StoreError),
     #[error("harness: {0}")]
-    Harness(#[from] zeron_harness::HarnessError),
+    Harness(#[from] cypher_harness::HarnessError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -88,7 +88,7 @@ pub(crate) fn new_id() -> String {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Data directory (default `~/.zeron`, dev `~/.zeron-dev`).
+    /// Data directory (default `~/.cypher`).
     pub data_dir: PathBuf,
     /// Edge base URL.
     pub edge_url: String,
@@ -99,8 +99,8 @@ pub struct EngineConfig {
     pub ipc_port: u16,
     /// Harness for doc-command runs on chats without a workspace `config` row.
     pub default_harness: HarnessId,
-    /// Workspace-doc org (`ws/{orgId}` room). `None` = `$ZERON_ORG_ID` or the dev default.
-    /// In WorkOS mode the signed-in session's org wins.
+    /// Workspace-doc org (`ws/{orgId}` room). `None` = `$CYPHER_ORG_ID` or the
+    /// dev default. In WorkOS mode the signed-in session's org wins.
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
@@ -126,10 +126,10 @@ pub struct EngineCore {
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
-    links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
+    links: std::sync::Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
-    updater: std::sync::Mutex<Option<zeron_update::Updater>>,
+    updater: std::sync::Mutex<Option<cypher_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
@@ -139,16 +139,16 @@ pub struct EngineCore {
 impl EngineCore {
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
-    /// `$ZERON_ORG_ID` / `$ZERON_USER_ID` (dev defaults `dev-org` / `dev-user`);
-    /// use [`Self::assemble_with_identity`] to pass one explicitly.
+    /// `$CYPHER_ORG_ID` / `$CYPHER_USER_ID` (dev defaults `dev-org` /
+    /// `dev-user`); use [`Self::assemble_with_identity`] to pass one explicitly.
     pub fn assemble(
         data_dir: &Path,
         registry: Arc<HarnessRegistry>,
         default_harness: HarnessId,
         edge: Option<EdgeConfig>,
     ) -> Result<Self, EngineError> {
-        let org_id = env_or("ZERON_ORG_ID", DEFAULT_ORG_ID);
-        let user_id = env_or("ZERON_USER_ID", DEFAULT_USER_ID);
+        let org_id = env_or("ORG_ID", DEFAULT_ORG_ID);
+        let user_id = env_or("USER_ID", DEFAULT_USER_ID);
         let profile = EngineProfile::development(data_dir, &org_id, &user_id);
         Self::assemble_with_profile(profile, registry, default_harness, edge)
     }
@@ -318,8 +318,7 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         slot.get_or_insert_with(|| {
-            let dev_user = std::env::var("ZERON_EDGE_TOKEN")
-                .ok()
+            let dev_user = cypher_env::var("EDGE_TOKEN")
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "dev-user".into());
             let mut config = AuthConfig::new("http://localhost:27640", std::env::temp_dir());
@@ -330,14 +329,14 @@ impl EngineCore {
     }
 
     /// Attach the peer link cache — enables `targetDeviceId` routing and [`Self::dial_device`].
-    pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
+    pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
         *self
             .links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(links);
     }
 
-    pub fn links(&self) -> Option<Arc<zeron_rpc::LinkCache>> {
+    pub fn links(&self) -> Option<Arc<cypher_rpc::LinkCache>> {
         self.links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -352,14 +351,14 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
     }
 
-    pub fn set_updater(&self, updater: zeron_update::Updater) {
+    pub fn set_updater(&self, updater: cypher_update::Updater) {
         *self
             .updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
     }
 
-    pub fn updater(&self) -> Option<zeron_update::Updater> {
+    pub fn updater(&self) -> Option<cypher_update::Updater> {
         self.updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -371,7 +370,7 @@ impl EngineCore {
     pub async fn dial_device(
         &self,
         device_id: &str,
-    ) -> Result<Arc<zeron_rpc::RpcClient>, EngineError> {
+    ) -> Result<Arc<cypher_rpc::RpcClient>, EngineError> {
         let links = self
             .links()
             .ok_or_else(|| EngineError::Other("peer links unavailable (offline)".into()))?;
@@ -384,12 +383,12 @@ impl EngineCore {
     /// Start hosting our device room: serve the full RPC surface to relay clients and
     /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
-    pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
+    pub fn start_host_relay(&self, edge_url: &str) -> cypher_rpc::HostRelay {
         let auth = self.auth();
         let config =
-            zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+            cypher_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
         let doc_host = self.doc_host.clone();
-        let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
+        let on_nudge: cypher_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
             // subscription — the command executes with no standing per-chat socket.
             match doc_host.open(&chat_id) {
@@ -399,7 +398,7 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        cypher_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -486,10 +485,10 @@ pub struct Engine {
 /// in-process engine so their production authentication paths cannot diverge.
 pub struct EngineRuntime {
     core: EngineCore,
-    host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    host_relay: std::sync::Mutex<Option<cypher_rpc::HostRelay>>,
 }
 
-/// IPC-only lifecycle control owned by `zeron headless`. The regular
+/// IPC-only lifecycle control owned by `cypher headless`. The regular
 /// [`EngineRpc`] deliberately does not expose this method, so a viewport
 /// attached to another headed process cannot shut down that process's engine.
 struct HeadlessRpc {
@@ -561,14 +560,13 @@ impl Engine {
     pub async fn build_auth(config: &EngineConfig) -> Auth {
         let mut auth_config = AuthConfig::new(config.edge_url.clone(), config.data_dir.clone());
         auth_config.workos_client_id = config.workos_client_id.clone();
-        if let Ok(base) = std::env::var("ZERON_WORKOS_API_BASE")
+        if let Some(base) = cypher_env::var("WORKOS_API_BASE")
             && !base.trim().is_empty()
         {
             auth_config.workos_api_base = base;
         }
         auth_config.callback_port = Some(
-            std::env::var("ZERON_CALLBACK_PORT")
-                .ok()
+            cypher_env::var("CALLBACK_PORT")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(27641),
         );
@@ -608,10 +606,10 @@ impl Engine {
                     .filter(|org| !org.is_empty());
                 let org_id = dev_token_org
                     .or(config.org_id.clone())
-                    .unwrap_or_else(|| env_or("ZERON_ORG_ID", DEFAULT_ORG_ID));
+                    .unwrap_or_else(|| env_or("ORG_ID", DEFAULT_ORG_ID));
                 let user_id = auth
                     .user_id()
-                    .unwrap_or_else(|| env_or("ZERON_USER_ID", DEFAULT_USER_ID));
+                    .unwrap_or_else(|| env_or("USER_ID", DEFAULT_USER_ID));
                 Ok(Some(EngineProfile::development(
                     &config.data_dir,
                     &org_id,
@@ -695,7 +693,7 @@ impl Engine {
             }
             // Dev Auth always exposes `dev_user_id` as its synthetic access
             // token, including when WorkOS was merely disabled with
-            // ZERON_WORKOS_CLIENT_ID="". Only an explicitly configured,
+            // CYPHER_WORKOS_CLIENT_ID="". Only an explicitly configured,
             // non-empty bearer opts this runtime into Edge rooms and relays.
             WorkspaceScope::Development => config
                 .edge_token
@@ -707,9 +705,9 @@ impl Engine {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
 
-        // The zeron-owned pi session store (`pi --mode rpc --session-dir`).
+        // The cypher-owned pi session store (`pi --mode rpc --session-dir`).
         let pi_sessions_root = profile.store_root().join("agent-sessions");
-        // The Zeron bridge URL every pi child gets as `ZERON_ENGINE_WS_URL`:
+        // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_WS_URL`:
         // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
         // headless and headed modes). Test-only `EngineCore::assemble` keeps
         // `None` — it never serves IPC.
@@ -738,14 +736,15 @@ impl Engine {
         core.set_auth(auth.clone());
         if edge_enabled {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
-            // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
+            // installs with CYPHER_AUTO_UPDATE=1 apply + restart themselves —
+            // gated
             // on quiescence so a restart never lands under a live run or open PTY.
-            let quiescent: zeron_update::QuiescentCheck = {
+            let quiescent: cypher_update::QuiescentCheck = {
                 let sessions = core.sessions.clone();
                 let terminals = core.terminals.clone();
                 Arc::new(move || !sessions.any_active() && !terminals.any_open())
             };
-            let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+            let updater = cypher_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
             if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
                 let updater_for_tokens = updater.clone();
                 let wake = tokio::spawn(async move {
@@ -761,10 +760,10 @@ impl Engine {
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
-        zeron_harness::acp::prewarm_managed_adapters();
+        cypher_harness::acp::prewarm_managed_adapters();
 
         let host_relay = edge.as_ref().map(|edge| {
-            let links = zeron_rpc::LinkCache::new(zeron_rpc::LinkCacheConfig::new(
+            let links = cypher_rpc::LinkCache::new(cypher_rpc::LinkCacheConfig::new(
                 edge.url.clone(),
                 Arc::new(auth.clone()),
             ));
@@ -884,11 +883,11 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// port, not who can reach it.
 pub async fn serve_ipc(
     port: u16,
-    service: std::sync::Arc<dyn zeron_rpc::RpcService>,
+    service: std::sync::Arc<dyn cypher_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
+    Ok(tokio::spawn(cypher_rpc::serve_ws_listener(
         listener, service,
     )))
 }
@@ -897,7 +896,7 @@ pub async fn serve_ipc(
 /// headless (paste-code) sign-in URL, read the pasted `state.code` from stdin, and
 /// run workspace onboarding (create / auto-join / numbered picker). Off a TTY this
 /// errors immediately — a daemon under systemd/launchd must load the session that
-/// `zeron login` persisted, never wait on a prompt nobody can see.
+/// `cypher login` persisted, never wait on a prompt nobody can see.
 pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal();
@@ -917,7 +916,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     // No reader tasks have been spawned on this path (both spawns
                     // are TTY-gated), so an early return leaks nothing.
                     return Err(EngineError::Other(format!(
-                        "signed in as {} but no workspace is selected — run `zeron login` on this machine to pick one",
+                        "signed in as {} but no workspace is selected — run `cypher login` on this machine to pick one",
                         user.email
                     )));
                 }
@@ -932,12 +931,12 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
             AuthState::SignedOut => {
                 if !interactive {
                     return Err(EngineError::Other(
-                        "not signed in — run `zeron login` on this machine first".into(),
+                        "not signed in — run `cypher login` on this machine first".into(),
                     ));
                 }
                 if stdin_reader.is_none() {
                     let url = auth.start_headless_sign_in();
-                    println!("Sign in to Zeron:\n\n  {url}\n");
+                    println!("Sign in to Cypher:\n\n  {url}\n");
                     println!("Then paste the code shown in the browser here and press enter.");
                     let auth = auth.clone();
                     stdin_reader = Some(tokio::spawn(async move {
@@ -994,7 +993,7 @@ async fn run_org_onboarding(auth: Auth) {
         Ok(orgs) => orgs,
         Err(err) => {
             println!(
-                "Could not list workspaces ({err}) — create or select one from the Zeron UI to continue."
+                "Could not list workspaces ({err}) — create or select one from the Cypher UI to continue."
             );
             return;
         }
@@ -1056,7 +1055,7 @@ async fn run_org_onboarding(auth: Auth) {
 fn local_device_name(device_id: &str) -> String {
     select_local_device_name(
         [
-            std::env::var("ZERON_DEVICE_NAME").ok(),
+            cypher_env::var("DEVICE_NAME"),
             native_friendly_device_name(),
             std::env::var("HOSTNAME").ok(),
             gethostname::gethostname().into_string().ok(),
@@ -1188,11 +1187,7 @@ mod device_name_tests {
 
 /// Trimmed env var or the given default.
 fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default.to_string())
+    cypher_env::var(key).unwrap_or_else(|| default.to_string())
 }
 
 /// Stable per-installation device id, persisted at `{data_dir}/device-id`.

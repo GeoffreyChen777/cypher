@@ -434,7 +434,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
 /// async. `None` for any other call, or a subagent call with no agent.
 ///
 /// Shared by the transcript chip (`tool_chip_content`) and the session-level
-/// subagent panel (`zeron-ui::subagents`), so both surfaces read the same
+/// subagent panel (`cypher-ui::subagents`), so both surfaces read the same
 /// fields from the same source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentCallInfo {
@@ -547,7 +547,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
 ///
 /// Colors live here rather than in the viewport because the *meaning* of a
 /// dot is part of the protocol, not the presentation — a given status must
-/// read the same on every surface. `zeron-ui` has the oklch→sRGB math.
+/// read the same on every surface. `cypher-ui` has the oklch→sRGB math.
 pub mod dot {
     /// Running. Pink, not amber: the harsh yellow read as a warning, and running
     /// is routine (user request).
@@ -588,7 +588,7 @@ pub enum CheckoutPlan {
     CurrentCheckout { branch: Option<String> },
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (the engine mints a `zeron/<name>`
+    /// `CreateWorktree` off `base` on send (the engine mints a `cypher/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the space
     /// folder rather than failing.
     NewWorktree { base: Option<String> },

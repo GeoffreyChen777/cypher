@@ -1,4 +1,4 @@
-//! zeron-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
+//! cypher-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
 //! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
@@ -45,7 +45,7 @@ pub mod methods {
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
     pub const PROBE_SYNC: &str = "ProbeSync";
-    /// Live sync introspection (`zeron sync` / debug surfaces): per-room
+    /// Live sync introspection (`cypher sync` / debug surfaces): per-room
     /// connection state, last pushed-frame/ack ages, rejoin/probe/resync
     /// counters for the workspace room and every open chat doc. No params;
     /// IPC-only.
@@ -132,12 +132,12 @@ pub mod methods {
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
-    /// Zeron child-subagent bridge (IPC-only, unary): idempotently create the
+    /// Cypher child-subagent bridge (IPC-only, unary): idempotently create the
     /// same-device child Chat for `(parentChatId, runId)` and queue its initial
     /// durable Pi run; replies `{childChatId}`. See `StartSubagent` in the
     /// engine RPC + docs/research/pi-rpc.md.
     pub const START_SUBAGENT: &str = "StartSubagent";
-    /// Zeron child-subagent bridge (IPC-only, stream): replayable agent events
+    /// Cypher child-subagent bridge (IPC-only, stream): replayable agent events
     /// for a chat (journal replay after `afterSeq`, then live) — the parent
     /// extension observes the child's terminal `Done`/result through this.
     pub const WATCH_AGENT_EVENTS: &str = "WatchAgentEvents";

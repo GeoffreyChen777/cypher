@@ -1,4 +1,4 @@
-//! zeron-harness — one interface over coding agents, all driven through the
+//! cypher-harness — one interface over coding agents, all driven through the
 //! Agent Client Protocol (and a mock for tests).
 //!
 //! Every production harness is the shared [`AcpHarness`] with a per-agent
@@ -15,7 +15,7 @@ use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -41,25 +41,25 @@ pub struct SteerMessage {
 }
 
 /// Host-side run context: which chat this run belongs to and whether the
-/// engine hosts it as a Zeron child subagent. A NON-SERIALIZED internal seam
+/// engine hosts it as a Cypher child subagent. A NON-SERIALIZED internal seam
 /// (never rides the wire — `RunRequest` stays clean); the engine builds it
 /// from the chat row at dispatch time. Discovery processes never see it (they
 /// have no `RunControls`), so a parent id can never leak into a probe.
 #[derive(Debug, Clone, Default)]
 pub struct RunHostContext {
-    /// The chat id this run belongs to (injected as `ZERON_CHAT_ID` into the
-    /// child pi process — the subagents extension publishes it in its
-    /// `zeron.subagents.v1` projection as `childChatId`). Discovery processes
+    /// The chat id this run belongs to (injected as `CYPHER_CHAT_ID` into the
+    /// child pi process; the subagents extension publishes it in its
+    /// `cypher.subagents.v1` projection as `childChatId`). Discovery processes
     /// never see it (they have no `RunControls`), so a parent id can never
     /// leak into a probe.
     pub chat_id: Option<String>,
-    /// Zeron child-subagent env (present only for child chats): the persisted
+    /// Cypher child-subagent env (present only for child chats): the persisted
     /// agent profile plus the messaging-channel identity for the initial run.
     pub child: Option<ChildRunEnv>,
 }
 
 /// The child-subagent runtime env the engine derives from the chat row's
-/// persisted [`zeron_proto::ChildChat`] metadata + the engine-local channel
+/// persisted [`cypher_proto::ChildChat`] metadata + the engine-local channel
 /// info. Bounded struct (never an arbitrary env map); the pi harness injects
 /// it as env + CLI flags into the child pi process so the extension loads in
 /// child mode (`PI_SUBAGENT_ROLE=child`) and registers the messaging tools.
@@ -80,7 +80,7 @@ pub struct ChildRunEnv {
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
-    /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
+    /// The run sends questions and awaits answers (blocks the agent, mirrors cypher).
     pub request_input: Box<
         dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
     >,
@@ -198,7 +198,7 @@ pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::p
 /// Rolling tail of a child's stderr, shared between the reader task and the
 /// crash-message composer: an unexpected exit surfaces "<name> exited
 /// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
-/// the proper background-crash message old zeron showed (user requirement).
+/// the proper background-crash message old cypher showed (user requirement).
 #[derive(Clone, Default)]
 pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 

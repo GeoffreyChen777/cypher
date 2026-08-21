@@ -5,7 +5,7 @@
   (`crates/harness/src/pi/`) that speaks pi's OWN RPC protocol
   (`pi --mode rpc`, strict JSONL over stdio) directly. The pi-acp spec,
   managed-install arm, and `AcpHarness::pi()` are deleted; the registry's Pi
-  slot resolves `zeron_harness::pi::PiHarness` instead.
+  slot resolves `cypher_harness::pi::PiHarness` instead.
 - **Motivation — the ACP adapter's expression ceiling**: pi's RPC mode carries
   capabilities the ACP surface (via pi-acp 0.0.33) could not reach:
   - **extension UI dialogs** — `select`/`confirm`/`input`/`editor` arrive as
@@ -19,7 +19,7 @@
     providers/models with reasoning + context-window metadata (the adapter
     advertised a single pass-through `default`).
 - Wire is hand-rolled tolerant serde against raw `Value`s (house style, like
-  ACP) — NOT the official SDK — so zeron keeps its child-lifecycle hardening
+  ACP) — NOT the official SDK — so cypher keeps its child-lifecycle hardening
   (StderrTail, SIGTERM→SIGKILL, PATH composition) and shell-script test
   fixtures. **Not JSON-RPC 2.0**: a small line transport
   (`pi/client.rs`) frames on `\n` only (strip trailing `\r`), never on
@@ -27,10 +27,10 @@
   valid inside JSON strings.
 
 ## Session truth division
-- **zeron doc = display/sync truth** — the harness never touches it.
+- **cypher doc = display/sync truth** — the harness never touches it.
 - **pi session file = LLM-context truth.** `pi --mode rpc --session-dir
-  <zeron-owned-dir>` (the profile store's `agent-sessions/`) keeps pi's
-  sessions in a zeron-owned directory.
+  <cypher-owned-dir>` (the profile store's `agent-sessions/`) keeps pi's
+  sessions in a cypher-owned directory.
 - `RunRequest.resume` (engine-injected) carries the pi session file's
   **absolute path**: a present value first sends `switch_session`; a failure
   is a LOUD error — `Done{Errored}` whose message names the failure and the
@@ -87,7 +87,7 @@
 pi's `get_commands` advertises extension / prompt / skill commands ONLY —
 official behavior: built-in TUI commands (`/compact`, `/export-html`, …) are
 not listed and, sent as prompt text, would not execute (pi only executes
-`get_commands` results via `prompt`). zeron synthesizes the built-ins that
+`get_commands` results via `prompt`). cypher synthesizes the built-ins that
 have RPC equivalents so they stay usable from the composer:
 
 - `compact` — `{"type":"compact"}` (+ `customInstructions`), advertised as
@@ -107,13 +107,13 @@ populated discovery cache listing a same-name command disables interception
 (pi handles its own extension); an unpopulated cache still intercepts — the
 popup's selections already passed through `commands()` dedup.
 
-`/model`, `/new`, `/resume` and the rest are NOT synthesized: zeron already
+`/model`, `/new`, `/resume` and the rest are NOT synthesized: cypher already
 has equivalent UI for `/model` (the model picker), and `/new`/`/resume` are
 session lifecycle owned by the engine's resume bookkeeping — TUI-exclusive
 with no RPC equivalent worth dispatching.
 
 ## Event mapping
-| pi event | zeron event |
+| pi event | cypher event |
 |---|---|
 | `message_update.assistantMessageEvent` `text_delta` | `TextDelta` |
 | `…` `thinking_delta` | `ReasoningDelta` |
@@ -132,21 +132,21 @@ with no RPC equivalent worth dispatching.
 pi's `extension_ui_request` methods sort into four classes (a run with NO
 agent events at all still terminates — see below):
 
-| class | methods | zeron behavior |
+| class | methods | cypher behavior |
 |---|---|---|
 | blocking dialogs | `select` / `confirm` / `input` / `editor` | **bridged** — correctness requires the answer (see the UI bridge above) |
 | output channel | `notify` | `notifyType: "error"` → `Error` event; `info`/`warning` → `TextDelta` (message fed into Done's `result`; multi-line `\n`-escaped text passes through as-is) |
-| structured status | `setStatus` with `statusKey: "zeron.subagents.v1"` | **parsed** — see the Subagent status protocol below |
-| transient TUI furniture | `setStatus` (any other key) / `setWidget` / `setTitle` / `set_editor_text` | **deliberately ignored** — transient TUI staging, zeron has its own state surface |
+| structured status | `setStatus` with `statusKey: "cypher.subagents.v1"` | **parsed** — see the Subagent status protocol below |
+| transient TUI furniture | `setStatus` (any other key) / `setWidget` / `setTitle` / `set_editor_text` | **deliberately ignored** — transient TUI staging, cypher has its own state surface |
 | TUI-only | `custom()` / `setFooter` and friends | no-op in RPC mode (pi itself does nothing with them) |
 
-## Subagent status protocol (`zeron.subagents.v1`)
+## Subagent status protocol (`cypher.subagents.v1`)
 
 The pi subagents extension (`extensions/subagents`) publishes a **structured**
 live projection through `setStatus`, the one exception to the
 TUI-furniture rule above:
 
-- key `zeron.subagents.v1`; value = `JSON.stringify({version: 1, runs: […]})`
+- key `cypher.subagents.v1`; value = `JSON.stringify({version: 1, runs: […]})`
   where each run is `{runId, toolCallId?, agent, model?, task, mode, status,
   progress?, startedAt, updatedAt, endedAt?}` (camelCase). `mode` ∈
   `sync|async|message`, `status` ∈ `running|done|error`. Timestamps are epoch
@@ -171,18 +171,18 @@ TUI-furniture rule above:
   background child finishes), and subagent-to-subagent message activity
   (`mode: "message"`, no `toolCallId`).
 
-## Zeron-hosted child chats (`StartSubagent` bridge, 2026-08)
+## Cypher-hosted child chats (`StartSubagent` bridge, 2026-08)
 
-In Zeron RPC mode the ENGINE can host a subagent's child chat as a **first-class
+In Cypher RPC mode the ENGINE can host a subagent's child chat as a **first-class
 navigable session**, instead of the extension owning an ephemeral child pi
 process. This is the “native pi RPC only” path: a standalone pi TUI keeps the
 extension's own `spawnInteractiveSubagent` fallback untouched.
 
 ### Ownership & data model
 
-- The parent/child relation is **stored by Zeron** (never assumed from pi): the
+- The parent/child relation is **stored by Cypher** (never assumed from pi): the
   synced `Chat` row carries an additive `child` metadata block — `parentChatId`,
-  `parentRunId` (the `zeron.subagents.v1` run id), `toolCallId` (the durable
+  `parentRunId` (the `cypher.subagents.v1` run id), `toolCallId` (the durable
   link to the parent's transcript part), `agent`, `task`, `mode`, and a
   persisted child agent profile (`systemPrompt` / `tools` / `model` /
   `thinking`). The profile is what later direct turns in the child chat
@@ -196,7 +196,7 @@ extension's own `spawnInteractiveSubagent` fallback untouched.
   child turns launch `PI_SUBAGENT_ROLE=child` with the persisted profile but
   have NO message channel; the messaging tools then honestly report
   unavailable.
-- The `zeron.subagents.v1` projection's per-run `childChatId` (a `SubagentRun`
+- The `cypher.subagents.v1` projection's per-run `childChatId` (a `SubagentRun`
   field) links a snapshot run to its navigable child chat.
 - Child chats are **hidden from the root sidebar/session overview**; they are
   reached only through the parent's Subagents inspector and remain reopenable
@@ -213,8 +213,8 @@ extension's own `spawnInteractiveSubagent` fallback untouched.
 
 ### Bridge surface (local engine IPC, `ws://127.0.0.1:<ipc_port>`)
 
-The harness injects `ZERON_ENGINE_WS_URL` (production `Engine::assemble_runtime`
-knows `ipc_port`) and `ZERON_CHAT_ID` into every pi child; discovery processes
+The harness injects `CYPHER_ENGINE_WS_URL` (production `Engine::assemble_runtime`
+knows `ipc_port`) and `CYPHER_CHAT_ID` into every pi child; discovery processes
 never receive a parent id (they have no `RunControls`).
 
 - **`StartSubagent`** (unary, strict bounded params): validates the parent exists

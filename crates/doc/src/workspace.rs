@@ -22,13 +22,13 @@
 //! zeron's 15s heartbeat writes so liveness never grows the oplog.
 //!
 //! Timestamps are stored as epoch millis (the session-doc convention) and surface as
-//! `chrono::DateTime<Utc>` through the `zeron_proto` entity types.
+//! `chrono::DateTime<Utc>` through the `cypher_proto` entity types.
 
 use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{
+use cypher_proto::{
     Chat, ChatConfig, ChildChat, Device, Session, SessionStatus, Space, SubagentRun,
 };
 
@@ -703,7 +703,7 @@ pub(crate) struct RawSession {
     started_at: Option<i64>,
     #[serde(default)]
     updated_at: i64,
-    /// Live subagent runs (pi `zeron.subagents.v1` projection); absent on old
+    /// Live subagent runs (pi `cypher.subagents.v1` projection); absent on old
     /// rows and old writers → empty.
     #[serde(default)]
     subagents: Option<Vec<SubagentRun>>,
@@ -725,7 +725,7 @@ impl From<RawSession> for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{HarnessId, SandboxLevel};
+    use cypher_proto::{HarnessId, SandboxLevel};
 
     fn ts(ms: i64) -> DateTime<Utc> {
         dt(ms)
@@ -807,13 +807,13 @@ mod tests {
         a.doc().import(&b_update).expect("import into a");
     }
 
-    /// The additive Zeron-owned child metadata rides the synced chat row: a
+    /// The additive Cypher-owned child metadata rides the synced chat row: a
     /// child chat round-trips through the Loro doc and reads back as a child
     /// (hidden from the root sidebar by the UI), while an absent field on old
     /// rows reads `None` (compatibility default).
     #[test]
     fn child_chat_metadata_round_trips_and_defaults_absent() {
-        use zeron_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
+        use cypher_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
         let ws = WorkspaceDoc::new();
         let mut child = chat("child-1", "dev-a");
         child.child = Some(ChildChat {
@@ -869,7 +869,7 @@ mod tests {
         let config = ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
-            reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
+            reasoning: Some(cypher_proto::ReasoningLevel::XHigh),
             model_options: options,
             sandbox: SandboxLevel::WorkspaceWrite,
         };
@@ -926,7 +926,7 @@ mod tests {
     /// non-empty writes the JSON field, empty deletes it, absent reads empty.
     #[test]
     fn session_subagents_round_trip_and_clear_in_loro_doc() {
-        use zeron_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus};
+        use cypher_proto::{SubagentRun, SubagentRunMode, SubagentRunStatus};
         let ws = WorkspaceDoc::new();
         let mut live = session("chat-1", "dev-a", SessionStatus::Working);
         live.subagents = vec![SubagentRun {

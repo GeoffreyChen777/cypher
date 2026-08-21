@@ -117,7 +117,7 @@ icon_assets![
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
     (VOLUME_LOUD, "volume-loud"),
-    // Hand-drawn zeron glyphs (terminal-panel.tsx / composer-actions.tsx /
+    // Hand-drawn cypher glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
@@ -130,7 +130,7 @@ icon_assets![
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
-    (ZERON_LOGO, "zeron-logo"),
+    (CYPHER_LOGO, "cypher-logo"),
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
@@ -140,7 +140,7 @@ icon_assets![
     (PI_MARK, "pi-mark"),
 ];
 
-/// The Claude mark's brand orange (`#D97757`) — zeron keeps it even on the
+/// The Claude mark's brand orange (`#D97757`) — cypher keeps it even on the
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()

@@ -7,11 +7,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::pi::PiHarness;
-use zeron_harness::{
+use cypher_harness::pi::PiHarness;
+use cypher_harness::{
     CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
 };
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
     ToolCall, UserInputAnswer,
 };
@@ -34,7 +34,7 @@ fn fixture_path() -> PathBuf {
 fn harness() -> PiHarness {
     // The fake pi ignores --session-dir; a shared scratch path is fine
     // (PiHarness::run create_dir_all's it idempotently).
-    PiHarness::new(std::env::temp_dir().join("zeron-pi-test-sessions"))
+    PiHarness::new(std::env::temp_dir().join("cypher-pi-test-sessions"))
         .with_executable(fixture_path())
 }
 
@@ -101,15 +101,15 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
         .collect()
 }
 
-/// The engine bridge (`ZERON_ENGINE_WS_URL`) must be injected into every pi
+/// The engine bridge (`CYPHER_ENGINE_WS_URL`) must be injected into every pi
 /// child when `with_engine_bridge` is set — and absent otherwise. The spawn
 /// seam builds the exact command a run would spawn, so no child is needed.
 #[test]
 fn engine_bridge_url_is_injected_into_children() {
     let url = std::ffi::OsStr::new("ws://127.0.0.1:4242");
-    let key = std::ffi::OsStr::new("ZERON_ENGINE_WS_URL");
+    let key = std::ffi::OsStr::new("CYPHER_ENGINE_WS_URL");
 
-    let bridged = PiHarness::new(std::env::temp_dir().join("zeron-pi-bridge-sessions"))
+    let bridged = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path())
         .with_engine_bridge(Some("ws://127.0.0.1:4242".into()));
     let cmd = bridged
@@ -119,10 +119,10 @@ fn engine_bridge_url_is_injected_into_children() {
     assert_eq!(
         envs.get(key),
         Some(&Some(url)),
-        "bridged children receive the engine WS URL"
+        "bridged children receive CYPHER_ENGINE_WS_URL"
     );
 
-    let plain = PiHarness::new(std::env::temp_dir().join("zeron-pi-bridge-sessions"))
+    let plain = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path());
     let cmd = plain
         .spawn_command(None, &RunHostContext::default(), None)
@@ -277,7 +277,7 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
     assert!(events.contains(&AgentEvent::ToolCall {
         id: "t1".into(),
         call: ToolCall::Exec {
-            command: "cargo test -p zeron-harness".into()
+            command: "cargo test -p cypher-harness".into()
         },
     }));
     let output = events
@@ -293,7 +293,7 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
         })
         .expect("tool output present");
     assert!(
-        output.starts_with("   Compiling zeron-harness"),
+        output.starts_with("   Compiling cypher-harness"),
         "{output:?}"
     );
 
@@ -834,7 +834,7 @@ async fn wedged_pi_escalates_to_signals_and_still_ends_interrupted() {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
     }
-    let harness = PiHarness::new(std::env::temp_dir().join("zeron-pi-wedge-sessions"))
+    let harness = PiHarness::new(std::env::temp_dir().join("cypher-pi-wedge-sessions"))
         .with_executable(&script)
         .with_graces(Duration::from_millis(100), Duration::from_millis(200));
     let (controls, _steer, token) = controls();
@@ -876,7 +876,7 @@ async fn extension_select_round_trips_through_the_input_bridge() {
 
 #[tokio::test]
 async fn missing_binary_surfaces_not_installed() {
-    let harness = PiHarness::new(std::env::temp_dir().join("zeron-pi-missing-sessions"))
+    let harness = PiHarness::new(std::env::temp_dir().join("cypher-pi-missing-sessions"))
         .with_executable("/nonexistent/definitely-not-pi");
     let err = harness
         .run(request("x"), controls().0)
@@ -897,7 +897,7 @@ async fn hung_handshake_errors_instead_of_spinning_forever() {
     std::fs::write(&script, "#!/bin/sh\nexec sleep 1000\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let harness = PiHarness::new(std::env::temp_dir().join("zeron-pi-hung-sessions"))
+    let harness = PiHarness::new(std::env::temp_dir().join("cypher-pi-hung-sessions"))
         .with_executable(&script)
         .with_handshake_timeout(Duration::from_millis(300));
     let (controls, _steer, _token) = controls();

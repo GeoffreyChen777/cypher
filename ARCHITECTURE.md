@@ -1,6 +1,11 @@
-# zeron — Architecture
+# Cypher — Architecture
 
-A ground-up native rewrite of [zeron](../zeron) — a multi-device controller for coding agents
+> "zeron" in this document refers to the original upstream implementation this
+> product is a ground-up native rewrite and rebrand of; the current product is
+> **Cypher** (binary `cypher`, crates `cypher-*`, Edge at
+> edge.letscypher.app).
+
+A ground-up native rewrite of the original [zeron](../zeron) web app — a multi-device controller for coding agents
 (Claude Code / Codex) — in Rust, with a gpui UI. Fresh app; no backwards compatibility required.
 
 **Pillars (from the goal):**
@@ -22,7 +27,7 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
                                           └─ Workspace registry room ────┘
 ```
 
-- **Engine = backend** (was `@zeron/backend`): runs agents, owns auth, terminals, repos/worktrees,
+- **Engine = backend** (was `@cypher/backend`): runs agents, owns auth, terminals, repos/worktrees,
   diff sync, doc hosting. Pure Rust daemon, fully functional headless.
 - **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. The sidebar is the data: an attention-sorted Sessions list, filtered by a searchable spaces dropdown ("All spaces" included) that also hosts space management. The horizontal tabs are a **device-local viewport** onto that list (`ui-settings.json` `openTabs`, cross-space): closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click (re)opens a session as a tab. The new-session canvas carries a space picker (defaulting to the sidebar filter, else the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
 - **Edge (TypeScript, ported from zeron `apps/edge`)**: Worker + ChatRoom DO (per chat, the
@@ -32,14 +37,14 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
 
 ### Headed / headless
-Single binary `zeron`:
-- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
+Single binary `cypher`:
+- `cypher` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
   otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
   serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
   port**. The embedded engine is not private: any other viewport can attach to the running app
   without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
   window still opens, having lost only the ability to host peers.
-- `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
+- `cypher headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles
 
@@ -57,7 +62,7 @@ The engine never re-resolves an open store because `AuthState` changed. This pre
 | WorkOS disabled without a dev bearer | `Development` | Disabled |
 | Explicit non-empty dev bearer | `Development` | Enabled |
 
-`zeron login` and `zeron logout` operate on `session.json` while the engine is stopped. Login selects `Synced` for the next start; logout selects `Local` for the next start. The UI may update live authentication status, but the active `WorkspaceScope` still changes only after restart.
+`cypher login` and `cypher logout` operate on `session.json` while the engine is stopped. Login selects `Synced` for the next start; logout selects `Local` for the next start. The UI may update live authentication status, but the active `WorkspaceScope` still changes only after restart.
 
 The resolved profile selects the session snapshots, registry snapshot, run journals, and attachment cache that may contain workspace data:
 
@@ -102,7 +107,7 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
 
    *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
 
-3. **Mirror layer** (`zeron-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
+3. **Mirror layer** (`cypher-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
    schema, **incremental** application of `doc.subscribe` diffs into cached state (no full
    re-hydration per change — this is also what fixes zeron's known O(transcript) re-projection
    inefficiency, remaining-work item 1a), and a diff-reconcile write path (evaluate `lorosurgeon`
@@ -119,34 +124,34 @@ This is zeron's proven design, kept verbatim.
 ## 3. Cargo workspace
 
 ```
-zeron/
+cypher/
   Cargo.toml                 # workspace
   crates/
-    proto/        zeron-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
+    proto/        cypher-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
                                  # entities, RPC envelopes (serde; ndjson framing);
                                  # `view` = the pure derivations both frontends share
                                  # (sort orders, staleness gating, grouping, boot gate)
-    doc/          zeron-doc      # session-doc + workspace-registry schemas, mirror layer,
+    doc/          cypher-doc      # session-doc + workspace-registry schemas, mirror layer,
                                  # parts fold, continuations, command ledger, sidecars
-    sync/         zeron-sync     # loro room client (join/VV backfill/fragments/backoff),
+    sync/         cypher-sync     # loro room client (join/VV backfill/fragments/backoff),
                                  # ephemeral presence, DocsStore (SQLite snapshots +
                                  # processed-command ledger)
-    harness/      zeron-harness  # Harness trait + claude-code (stream-json subprocess),
+    harness/      cypher-harness  # Harness trait + claude-code (stream-json subprocess),
                                  # codex (app-server JSON-RPC), mock; steering mailbox,
                                  # requestInput, models/reasoning/options catalogs
-    engine/       zeron-engine   # sessions engine (pub/sub, run journal, recovery, stall
+    engine/       cypher-engine   # sessions engine (pub/sub, run journal, recovery, stall
                                  # watchdog), doc host + command executor, repos/worktrees,
                                  # checkout-diff sync, terminals (portable-pty), uploads,
                                  # agent accounts (cred swap), auth (WorkOS via edge),
                                  # device-room host/peers, identity
-    rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
+    rpc/          cypher-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)
-    ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
+    ui/           cypher-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
-    zeron/                       # the binary (headed default, `headless` subcommand)
-  edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
+    cypher/                       # the binary (headed default, `headless` subcommand)
+  edge/                          # TypeScript Worker + DOs (ported from cypher/apps/edge,
                                  # + auth-exchange routes absorbed from apps/server)
   docs/                          # this file + research reports
 ```
@@ -173,7 +178,7 @@ feature spec `docs/research/feature-inventory.md` §1.
   - row height memoization keyed by (row id, content length, width) so a streamed token
     re-measures one row;
   - scroll-anchor absorption for above-viewport height changes.
-- **Markdown** (`zeron-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
+- **Markdown** (`cypher-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
   coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
   (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
@@ -192,9 +197,9 @@ feature spec `docs/research/feature-inventory.md` §1.
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
-- **Animation kit** (`zeron-ui::motion`): small helpers over gpui `Animation` reproducing the
+- **Animation kit** (`cypher-ui::motion`): small helpers over gpui `Animation` reproducing the
   zeron catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
-  `zeron-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
+  `cypher-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
   spinner (WorkingIndicator + rotating flavour word), `menu-in`/`dialog-in` scale-fades, 200ms
   ease-out width/height transitions for sidebar/panes, sidebar-resort **slide animation**
   (we own the list, so animate row positions directly — the View Transitions equivalent, 260ms
@@ -217,7 +222,7 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or
   `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
 - **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
-  cases); worktrees under `~/.zeron/worktrees`; fs watchers (`notify`) + 2min repair; diff
+  cases); worktrees under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff
   capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
   sidecar.
 - **Agent accounts**: credential-slot swap (macOS Keychain via `security-framework`, files
@@ -227,7 +232,7 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
 
 ## 6. Edge plan (TypeScript, `edge/`)
 
-Port `zeron/apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
+Port `cypher/apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
 w/ hibernation + two-level compaction + daily alarm backups, device room byte relay + nudges +
 sidecar slots, R2 attachments, JWKS auth). Additions:
 1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
@@ -253,10 +258,10 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
 
 - ✅ **M0 Scaffold** — workspace builds; `proto`/`doc` crates with ledger + parts + continuation
   unit tests; gpui hello-window runs.
-- ✅ **M1 Doc + sync core** — `zeron-doc` mirror over loro 1.13; room client syncs with the edge
+- ✅ **M1 Doc + sync core** — `cypher-doc` mirror over loro 1.13; room client syncs with the edge
   running under `wrangler dev`; Rust⇄edge⇄Rust convergence test (M1 exit: two Rust peers converge
   through a real SessionRoom DO, tail endpoint serves).
-- ✅ **M2 Engine core** — Claude harness end-to-end headless: `zeron headless` + dev auth runs a
+- ✅ **M2 Engine core** — Claude harness end-to-end headless: `cypher headless` + dev auth runs a
   turn, journal + doc writes, recovery test.
 - ✅ **M3 UI core** — shell (sidebar/panes/header), transcript (virtualized, markdown, streaming,
   stick-to-bottom), composer (send/steer/stop, question panel); local chat fully usable headed.

@@ -33,8 +33,8 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
 
-use zeron_proto::{Chat, CheckoutDiff, GitHistoryCommit};
-use zeron_rpc::methods;
+use cypher_proto::{Chat, CheckoutDiff, GitHistoryCommit};
+use cypher_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
@@ -43,7 +43,7 @@ use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
-use zeron_syntax::LanguageId as Lang;
+use cypher_syntax::LanguageId as Lang;
 
 // ---------------------------------------------------------------------------
 // Layout numbers (analytic — they drive the fold tween)
@@ -98,8 +98,8 @@ pub struct SourceLineRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DiffHighlights {
-    pub old: Option<Arc<zeron_syntax::HighlightedDocument>>,
-    pub new: Option<Arc<zeron_syntax::HighlightedDocument>>,
+    pub old: Option<Arc<cypher_syntax::HighlightedDocument>>,
+    pub new: Option<Arc<cypher_syntax::HighlightedDocument>>,
 }
 
 impl DiffHighlights {
@@ -130,7 +130,7 @@ impl DiffHighlights {
         }
     }
 
-    pub fn spans(&self, line: &DiffLine) -> &[zeron_syntax::HighlightSpan] {
+    pub fn spans(&self, line: &DiffLine) -> &[cypher_syntax::HighlightSpan] {
         let Some(source_ref) = self.source_ref(line) else {
             return &[];
         };
@@ -639,7 +639,7 @@ fn excerpt_side(
     side: SourceSide,
     language: Lang,
     path: &str,
-) -> Option<Arc<zeron_syntax::HighlightedDocument>> {
+) -> Option<Arc<cypher_syntax::HighlightedDocument>> {
     let max_line = file
         .hunks
         .iter()
@@ -674,7 +674,7 @@ fn excerpt_side(
             .map(|(_, text)| *text)
             .collect::<Vec<_>>()
             .join("\n");
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        let document = cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source: &source,
             path: Some(path),
             fence_tag: None,
@@ -684,14 +684,14 @@ fn excerpt_side(
             lines[number as usize - 1] = spans;
         }
     }
-    Some(Arc::new(zeron_syntax::HighlightedDocument {
+    Some(Arc::new(cypher_syntax::HighlightedDocument {
         language,
         lines,
     }))
 }
 
 fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
-    if !zeron_syntax::supports_language(language) {
+    if !cypher_syntax::supports_language(language) {
         return None;
     }
     let old = if file.status == FileStatus::Added {
@@ -712,7 +712,7 @@ fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights>
     Some(DiffHighlights { old, new })
 }
 
-fn sources_match_patch(file: &FileDiff, response: &zeron_proto::CheckoutFileDiffText) -> bool {
+fn sources_match_patch(file: &FileDiff, response: &cypher_proto::CheckoutFileDiffText) -> bool {
     let old = response
         .old_text
         .as_deref()
@@ -745,7 +745,7 @@ fn sources_match_patch(file: &FileDiff, response: &zeron_proto::CheckoutFileDiff
 fn full_highlights(
     file: &FileDiff,
     language: Lang,
-    response: &zeron_proto::CheckoutFileDiffText,
+    response: &cypher_proto::CheckoutFileDiffText,
 ) -> Option<DiffHighlights> {
     if response.stale
         || response.binary
@@ -755,7 +755,7 @@ fn full_highlights(
         return None;
     }
     let parse = |source: &str, path: &str| {
-        zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source,
             path: Some(path),
             fence_tag: None,
@@ -774,7 +774,7 @@ fn full_highlights(
         Some(source) => Some(parse(source, &file.path)?),
         None => None,
     };
-    if old.is_none() && new.is_none() && zeron_syntax::supports_language(language) {
+    if old.is_none() && new.is_none() && cypher_syntax::supports_language(language) {
         return None;
     }
     Some(DiffHighlights { old, new })
@@ -1520,7 +1520,7 @@ impl Changes {
                 changes.scoped_inflight = None;
                 match result.and_then(|value| {
                     serde_json::from_value::<CheckoutDiff>(value)
-                        .map_err(|e| zeron_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| cypher_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(diff) => {
                         changes.scoped = Some(diff);
@@ -1967,7 +1967,7 @@ impl Changes {
         parsed_key: &str,
         cx: &mut Context<Self>,
     ) -> Option<Arc<DiffHighlights>> {
-        let lang = zeron_syntax::language_for_path(&file.path)?;
+        let lang = cypher_syntax::language_for_path(&file.path)?;
         let fingerprint = hash64(&[parsed_key, &file.path]);
         if let Some(slot) = self.highlights.get(&file.path)
             && slot.fingerprint == fingerprint
@@ -1979,7 +1979,7 @@ impl Changes {
                 DiffHighlightState::Pending | DiffHighlightState::Plain => None,
             };
         }
-        if !zeron_syntax::supports_language(lang) {
+        if !cypher_syntax::supports_language(lang) {
             self.highlights.insert(
                 file.path.clone(),
                 HighlightSlot {
@@ -2031,7 +2031,7 @@ impl Changes {
         let fetch_path = path.clone();
         let fetch_task = match (active, engine) {
             (Some(diff), Some(engine)) => Some(cx.spawn(async move |this, cx| {
-                let request = zeron_proto::GetCheckoutFileDiffTextRequest {
+                let request = cypher_proto::GetCheckoutFileDiffTextRequest {
                     checkout_id: diff.checkout_id,
                     cwd: diff.cwd,
                     path: fetch_path.clone(),
@@ -2057,7 +2057,7 @@ impl Changes {
                     .await
                     .ok()
                     .and_then(|value| {
-                        serde_json::from_value::<zeron_proto::CheckoutFileDiffText>(value).ok()
+                        serde_json::from_value::<cypher_proto::CheckoutFileDiffText>(value).ok()
                     });
                 let highlights = match response {
                     Some(response) => {
@@ -2838,7 +2838,7 @@ pub fn diff_line_key(owner: &str, file: u32, hunk: u32, line: u32) -> String {
 /// tool-diff renders pass `None`.
 fn diff_line_row(
     line: &DiffLine,
-    spans: &[zeron_syntax::HighlightSpan],
+    spans: &[cypher_syntax::HighlightSpan],
     theme: &Theme,
     gutter_px: f32,
     select: Option<(
@@ -3147,7 +3147,7 @@ impl Render for Changes {
                 } else if message.contains("unknown method") {
                     (
                         SharedString::from(
-                            "This chat's device is running an older Zeron — update it to view branch and turn diffs",
+                            "This chat's device is running an older Cypher — update it to view branch and turn diffs",
                         ),
                         false,
                     )
@@ -3628,7 +3628,7 @@ rename to new_name.rs
         assert_eq!(diff_phase(Some(&full)), DiffPhase::List);
         // Engine may report files without patch text (truncation edge).
         let mut summarized = diff("co", "d", "/w", "");
-        summarized.files.push(zeron_proto::DiffFileSummary {
+        summarized.files.push(cypher_proto::DiffFileSummary {
             path: "x".into(),
             old_path: None,
             status: "modified".into(),
@@ -3769,7 +3769,7 @@ rename to new_name.rs
         let new_source = "fn new() {\n    let value = 2;\n}\n";
         let parse = |source| {
             Arc::new(
-                zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+                cypher_syntax::highlight(cypher_syntax::HighlightRequest {
                     source,
                     path: Some("src/lib.rs"),
                     fence_tag: None,
@@ -3824,13 +3824,13 @@ rename to new_name.rs
             highlights
                 .spans(&deleted)
                 .iter()
-                .any(|span| span.kind == zeron_syntax::HighlightKind::Function)
+                .any(|span| span.kind == cypher_syntax::HighlightKind::Function)
         );
         assert!(
             highlights
                 .spans(&added)
                 .iter()
-                .any(|span| span.kind == zeron_syntax::HighlightKind::Function)
+                .any(|span| span.kind == cypher_syntax::HighlightKind::Function)
         );
     }
 
@@ -3882,13 +3882,13 @@ rename to new_name.rs
             highlights
                 .spans(deleted)
                 .iter()
-                .any(|span| span.kind == zeron_syntax::HighlightKind::Comment)
+                .any(|span| span.kind == cypher_syntax::HighlightKind::Comment)
         );
         assert!(
             highlights
                 .spans(added)
                 .iter()
-                .any(|span| span.kind == zeron_syntax::HighlightKind::Comment)
+                .any(|span| span.kind == cypher_syntax::HighlightKind::Comment)
         );
     }
 
@@ -3921,7 +3921,7 @@ rename to new_name.rs
             deletions: 1,
             max_line: 1,
         };
-        let response = zeron_proto::CheckoutFileDiffText {
+        let response = cypher_proto::CheckoutFileDiffText {
             diff_checksum: "sum".into(),
             old_text: Some("let old = 1;\n".into()),
             new_text: Some("different snapshot\n".into()),

@@ -12,10 +12,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
-use zeron_doc::{MessagePart, MessageRole};
-use zeron_engine::{EngineCore, HarnessRegistry, SteerOutcome};
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use cypher_doc::{MessagePart, MessageRole};
+use cypher_engine::{EngineCore, HarnessRegistry, SteerOutcome};
+use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
@@ -185,7 +185,7 @@ fn status(core: &EngineCore) -> Option<SessionStatus> {
 
 /// Tolerant read (see e2e.rs): a snapshot mid-segment-write deserializes with
 /// fields missing — treat that instant as "not yet".
-fn entries(core: &EngineCore) -> Vec<zeron_doc::SessionMessageEntry> {
+fn entries(core: &EngineCore) -> Vec<cypher_doc::SessionMessageEntry> {
     core.doc_host
         .open(CHAT)
         .ok()

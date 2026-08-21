@@ -1,4 +1,4 @@
-//! Animation kit — the zeron motion catalog as reusable helpers over gpui
+//! Animation kit — the cypher motion catalog as reusable helpers over gpui
 //! [`Animation`]/[`AnimationExt`].
 //!
 //! Catalog (docs/research/feature-inventory.md §1.12):
@@ -7,7 +7,7 @@
 //! - `menu-in`   0.14s scale 0.96 + translateY −2 (popovers)
 //! - `dialog-in` 0.18s scale 0.96→1
 //! - `splash-out` 0.5s opacity + translateY −6, 0.15s delay
-//! - `zeron-pulse` 2.4s staggered cell opacity 0.08→1, scale 0.9→1 (loaders)
+//! - `cypher-pulse` 2.4s staggered cell opacity 0.08→1, scale 0.9→1 (loaders)
 //! - `gradient-spin-pulse` 750ms per-cell phase wave (working indicator)
 //! - 200ms ease-out width/height transitions (sidebar/panes)
 //!
@@ -311,8 +311,8 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
-/// Zeron loader pulse period: 2.4s.
-pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
+/// Cypher loader pulse period: 2.4s.
+pub const CYPHER_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
 pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
 
@@ -391,10 +391,10 @@ where
 // Loader math (pure; rendered by crate::loaders)
 // ---------------------------------------------------------------------------
 
-/// Zeron-pulse floor opacity.
-// The loader constants and math live in `zeron_proto::motion` (pure phase
+/// Cypher-pulse floor opacity.
+// The loader constants and math live in `cypher_proto::motion` (pure phase
 // functions); this crate animates them with gpui.
-pub use zeron_proto::motion::{
+pub use cypher_proto::motion::{
     PULSE_MIN_OPACITY, PULSE_MIN_SCALE, PULSE_STAGGER, gspin_opacity, pulse_opacity, pulse_scale,
     pulse_wave, staggered_phase,
 };
@@ -613,15 +613,14 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 // Reduced motion
 // ---------------------------------------------------------------------------
 
-/// Dev/measurement knob (`ZERON_MOTION_SCALE`, default 1): stretches every
-/// catalog timeline by this factor — e.g. `ZERON_MOTION_SCALE=10` slows the
+/// Dev/measurement knob (`CYPHER_MOTION_SCALE`, default 1): stretches every
+/// catalog timeline by this factor — e.g. `CYPHER_MOTION_SCALE=10` slows the
 /// 200ms pane tweens to 2s so screenshot bursts can sample the geometry
 /// per frame. Read once; never set in production.
 pub fn speed_scale() -> f32 {
     static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *SCALE.get_or_init(|| {
-        std::env::var("ZERON_MOTION_SCALE")
-            .ok()
+        cypher_env::var("MOTION_SCALE")
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|s| s.is_finite())
             .map(|s| s.clamp(0.01, 100.0))
@@ -760,7 +759,7 @@ mod tests {
         assert_eq!(TAB_SLIDE.duration_ms, 150);
         assert_eq!(COLLAPSE.duration_ms, 180);
         assert_eq!(CHEVRON.duration_ms, 200);
-        assert_eq!(ZERON_PULSE.duration_ms, 2400);
+        assert_eq!(CYPHER_PULSE.duration_ms, 2400);
         assert_eq!(GRADIENT_SPIN.duration_ms, 750);
         assert_eq!(EASE_OUT_EXPO, CubicBezier::new(0.16, 1.0, 0.3, 1.0));
     }

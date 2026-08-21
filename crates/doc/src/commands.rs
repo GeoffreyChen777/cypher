@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{RunRequest, UserInputAnswer};
+use cypher_proto::{RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
@@ -388,7 +388,7 @@ mod tests {
             reasoning: None,
             model_options: Default::default(),
             cwd: "/tmp".into(),
-            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,

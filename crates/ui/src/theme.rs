@@ -34,8 +34,8 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use cypher_syntax::HighlightKind;
 use gpui::{App, Global, Hsla, SharedString, hsla};
-use zeron_syntax::HighlightKind;
 
 /// Which appearance the app is painting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

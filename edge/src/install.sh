@@ -1,19 +1,22 @@
 #!/bin/sh
-# Zeron (native) headless installer.
+# Cypher (native) headless installer.
 #
-#   curl -fsSL https://zeron.sh/install.sh | sh
+#   curl -fsSL https://edge.letscypher.app/install.sh | sh
 #
 # Installs the self-contained native binary (no runtime deps) to
-# ~/.zeron/app, puts `zeron` on PATH, and runs it as a local-only
-# systemd user service that survives reboots. Signing in is optional and
-# enables sync after a restart. Re-running
-# upgrades in place; ~/.zeron state is preserved.
+# ~/.cypher/app, puts `cypher` on PATH, and runs it as a local-only systemd
+# user service that survives reboots. Signing in is optional and enables sync
+# after a restart. Re-running upgrades in place; existing state is preserved.
 #
-# The binary ships with production endpoints baked in: no ZERON_EDGE_URL or
-# client-id configuration needed. Overrides (if any) go in ~/.zeron/env.
+# The binary ships with production endpoints baked in: no CYPHER_EDGE_URL or
+# client-id configuration needed. Overrides (if any) go in $data_root/env.
 set -eu
 
-BASE="${ZERON_BASE_URL:-https://zeron.sh}"
+# CYPHER_BASE_URL overrides the production edge.
+BASE="${CYPHER_BASE_URL:-https://edge.letscypher.app}"
+
+# --- data root ---------------------------------------------------------------
+data_root="$HOME/.cypher"
 
 # --- platform ---------------------------------------------------------------
 os="$(uname -s)"
@@ -21,12 +24,12 @@ arch="$(uname -m)"
 case "$os" in
   Linux) plat=linux ;;
   Darwin)
-    echo "zeron install: on macOS, download the desktop app instead:" >&2
-    echo "  $BASE/releases/latest.txt → $BASE/releases/zeron-<version>-macos-arm64.dmg" >&2
+    echo "cypher install: on macOS, download the desktop app instead:" >&2
+    echo "  $BASE/releases/latest.txt → $BASE/releases/cypher-<version>-macos-arm64.dmg" >&2
     exit 1
     ;;
   *)
-    echo "zeron install: unsupported OS '$os' — only Linux for now." >&2
+    echo "cypher install: unsupported OS '$os' — only Linux for now." >&2
     exit 1
     ;;
 esac
@@ -34,25 +37,24 @@ case "$arch" in
   x86_64 | amd64) arch=x86_64 ;;
   aarch64 | arm64) arch=aarch64 ;;
   *)
-    echo "zeron install: unsupported architecture '$arch'." >&2
+    echo "cypher install: unsupported architecture '$arch'." >&2
     exit 1
     ;;
 esac
 
 # --- download ----------------------------------------------------------------
 ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
-[ -n "$ver" ] || { echo "zeron install: could not resolve latest version" >&2; exit 1; }
-file="zeron-$ver-$plat-$arch.tar.gz"
-data_root="$HOME/.zeron"
+[ -n "$ver" ] || { echo "cypher install: could not resolve latest version" >&2; exit 1; }
+file="cypher-$ver-$plat-$arch.tar.gz"
 app_root="$data_root/app"
 dest="$app_root/$ver"
 
-if [ -x "$dest/zeron" ]; then
-  echo "zeron $ver already downloaded — relinking."
+if [ -x "$dest/cypher" ]; then
+  echo "cypher $ver already downloaded — relinking."
 else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  echo "downloading zeron $ver ($plat-$arch)…"
+  echo "downloading cypher $ver ($plat-$arch)…"
   curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
   mkdir -p "$dest"
   tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
@@ -60,7 +62,7 @@ fi
 
 ln -sfn "$dest" "$app_root/current"
 mkdir -p "$HOME/.local/bin"
-ln -sf "$app_root/current/zeron" "$HOME/.local/bin/zeron"
+ln -sf "$app_root/current/cypher" "$HOME/.local/bin/cypher"
 
 # --- service -----------------------------------------------------------------
 # The daemon is useful before auth: without a saved session it serves the local
@@ -69,32 +71,32 @@ ln -sf "$app_root/current/zeron" "$HOME/.local/bin/zeron"
 service=manual
 if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
   mkdir -p "$HOME/.config/systemd/user"
-  cat >"$HOME/.config/systemd/user/zeron.service" <<'UNIT'
+  cat >"$HOME/.config/systemd/user/cypher.service" <<UNIT
 [Unit]
-Description=Zeron native headless engine
+Description=Cypher native headless engine
 After=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-ExecStart=%h/.zeron/app/current/zeron headless
+ExecStart=$app_root/current/cypher headless
 Restart=on-failure
 RestartSec=5
-EnvironmentFile=-%h/.zeron/env
+EnvironmentFile=-$data_root/env
 
 [Install]
 WantedBy=default.target
 UNIT
   systemctl --user daemon-reload
-  systemctl --user enable zeron
-  systemctl --user restart zeron
+  systemctl --user enable cypher
+  systemctl --user restart cypher
   service=running
   # Keep the user manager (and the engine) running without an active login.
   loginctl enable-linger "$USER" 2>/dev/null \
     || sudo -n loginctl enable-linger "$USER" 2>/dev/null \
     || echo "warn: could not enable linger — the engine stops when you log out (run: sudo loginctl enable-linger $USER)"
 else
-  echo "warn: systemd user session not available — run the engine manually with: zeron headless"
+  echo "warn: systemd user session not available — run the engine manually with: cypher headless"
 fi
 
 # --- agent CLIs ---------------------------------------------------------------
@@ -107,20 +109,20 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "✓ zeron $ver installed$path_hint"
+echo "✓ cypher $ver installed$path_hint"
 echo ""
 case "$service" in
   running)
     echo "the engine is running with the new version (local-only unless sync is enabled)."
-    echo "  systemctl --user status zeron    check the service"
+    echo "  systemctl --user status cypher    check the service"
     echo ""
     echo "optional sync (local sessions stay local):"
-    echo "  systemctl --user stop zeron"
-    echo "  zeron login"
-    echo "  systemctl --user restart zeron"
+    echo "  systemctl --user stop cypher"
+    echo "  cypher login"
+    echo "  systemctl --user restart cypher"
     ;;
   manual)
-    echo "next: run the local-only engine with \`zeron headless\`."
-    echo "optional sync: run \`zeron login\` before starting the engine."
+    echo "next: run the local-only engine with \`cypher headless\`."
+    echo "optional sync: run \`cypher login\` before starting the engine."
     ;;
 esac

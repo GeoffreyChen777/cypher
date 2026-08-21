@@ -19,11 +19,11 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{
+use cypher_engine::registry::HarnessDescriptor;
+use cypher_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
-use zeron_rpc::methods;
+use cypher_rpc::methods;
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
@@ -105,7 +105,7 @@ pub enum CheckoutPlan {
         path: String,
         branch: Option<String>,
     },
-    /// `CreateWorktree` off `base` on send (zeron mints a `zeron/<name>`
+    /// `CreateWorktree` off `base` on send (cypher mints a `cypher/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the
     /// space folder rather than failing.
     NewWorktree { base: Option<String> },
@@ -343,7 +343,7 @@ pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
 }
 
 /// Directory rows of a listing (files never render in the browser).
-pub fn browser_rows(listing: &FolderListing) -> Vec<&zeron_proto::FolderEntry> {
+pub fn browser_rows(listing: &FolderListing) -> Vec<&cypher_proto::FolderEntry> {
     listing.entries.iter().filter(|e| e.is_dir).collect()
 }
 
@@ -432,7 +432,7 @@ pub struct Pickers {
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
     focus: FocusHandle,
-    /// `ZERON_OPEN_PICKER` boot: keep claiming focus until it sticks, so
+    /// `CYPHER_OPEN_PICKER` boot: keep claiming focus until it sticks, so
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
     boot_focus_pending: bool,
@@ -512,10 +512,10 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
-        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch` boots
+        // Dev/testing knob: `CYPHER_OPEN_PICKER=model|traits|repo|branch` boots
         // with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
-        let boot_open = match std::env::var("ZERON_OPEN_PICKER").ok().as_deref() {
+        let boot_open = match cypher_env::var("OPEN_PICKER").as_deref() {
             Some("model") => Some(PickerKind::HarnessModel),
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
@@ -647,7 +647,7 @@ impl Pickers {
         // Fall back to the first OFFERED harness: the registry lists the mock
         // harness first, and resolving chips against it would boot the
         // new-chat canvas onto "Mock" instead of Claude Code + its default
-        // model (it stays available under `ZERON_HARNESS=mock`).
+        // model (it stays available under `CYPHER_HARNESS=mock`).
         self.harnesses
             .ready()
             .and_then(|list| offered_harnesses(list).first().map(|d| d.id))
@@ -720,7 +720,7 @@ impl Pickers {
     /// The resolved harness's steering mode, from the loaded descriptor list.
     /// `None` while the catalog is loading (callers should assume the common
     /// StepBoundary case and show nothing).
-    pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
+    pub fn resolved_steering_mode(&self, cx: &App) -> Option<cypher_proto::SteeringMode> {
         let harness = self.effective_harness(cx)?;
         self.harnesses
             .ready()
@@ -765,7 +765,7 @@ impl Pickers {
         cx.notify();
     }
 
-    /// Capture knob (`ZERON_OPEN_DIALOG=model`): open the combined
+    /// Capture knob (`CYPHER_OPEN_DIALOG=model`): open the combined
     /// harness/model menu programmatically.
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
@@ -1962,10 +1962,10 @@ impl Pickers {
     }
 
     /// Devices in picker order: this device first, then by name.
-    fn device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    fn device_rows(&self, cx: &App) -> Vec<cypher_proto::Device> {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        let mut devices: Vec<cypher_proto::Device> = state.devices.clone();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),
@@ -1978,7 +1978,7 @@ impl Pickers {
 
     /// [`Self::device_rows`] filtered by the search box (same ranked
     /// substring match as the project rows).
-    fn filtered_device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    fn filtered_device_rows(&self, cx: &App) -> Vec<cypher_proto::Device> {
         let query = self.search.read(cx).text().to_string();
         let rows = self.device_rows(cx);
         let names: Vec<String> = rows.iter().map(|d| d.name.clone()).collect();
@@ -3520,7 +3520,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
             .to_ascii_lowercase()
     }
     let catalog = match harness {
-        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
+        HarnessId::ClaudeCode => cypher_harness::claude::catalog::static_models(),
         _ => Vec::new(),
     };
     // Curated label for an id: exact normalized match, else — for bare
@@ -3561,15 +3561,15 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                     }
                 }
                 if !model.options.iter().any(|o| o.id == "contextWindow") {
-                    model.options.push(zeron_proto::ModelOption {
+                    model.options.push(cypher_proto::ModelOption {
                         id: "contextWindow".into(),
                         label: "Context Window".into(),
                         choices: vec![
-                            zeron_proto::ModelOptionChoice {
+                            cypher_proto::ModelOptionChoice {
                                 id: "200k".into(),
                                 label: "200K".into(),
                             },
-                            zeron_proto::ModelOptionChoice {
+                            cypher_proto::ModelOptionChoice {
                                 id: "1m".into(),
                                 label: "1M".into(),
                             },
@@ -3602,20 +3602,16 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
     }
 }
 
-/// `ZERON_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
+/// `CYPHER_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
 /// production launches never set it, so the mock never surfaces there.
 fn mock_harness_enabled() -> bool {
-    std::env::var("ZERON_HARNESS")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        == Some("mock")
+    cypher_env::var("HARNESS").as_deref().map(str::trim) == Some("mock")
 }
 
 /// Production pickers AND chip resolution hide the mock harness — the
 /// registry always lists it, but it must never surface in real UI (neither in
 /// the picker rail nor as the eager default the chips resolve against).
-/// `ZERON_HARNESS=mock` shows it; otherwise it only remains when it's
+/// `CYPHER_HARNESS=mock` shows it; otherwise it only remains when it's
 /// literally all there is (a dev build with no real harness registered).
 pub fn visible_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     visible_harnesses_impl(list, mock_harness_enabled())
@@ -3648,7 +3644,8 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
     let offered: Vec<HarnessDescriptor> = visible
         .iter()
         .filter(|d| {
-            zeron_engine::registry::descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock)
+            cypher_engine::registry::descriptor_enabled(d)
+                || (allow_mock && d.id == HarnessId::Mock)
         })
         .cloned()
         .collect();
@@ -3710,7 +3707,7 @@ fn attach_overlay_end(
 impl Render for Pickers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // A ZERON_OPEN_PICKER popover never went through `toggle`, so claim
+        // A CYPHER_OPEN_PICKER popover never went through `toggle`, so claim
         // its keyboard focus here (re-claim until it sticks — the shell's
         // first-paint fallback focuses the composer after our first render).
         if self.boot_focus_pending {
@@ -3742,7 +3739,7 @@ impl Render for Pickers {
         // opens, and rail switches inside the picker are instant.
         self.ensure_harnesses(false, cx);
         self.prefetch_models(cx);
-        // A popover opened data-side (ZERON_OPEN_PICKER) never went through
+        // A popover opened data-side (CYPHER_OPEN_PICKER) never went through
         // `toggle`, so kick its loads here (all ensure_* are idempotent).
         if matches!(
             self.open_kind(),
@@ -3911,7 +3908,7 @@ impl Render for Pickers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+    use cypher_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     fn bare_model(id: &str, label: &str) -> Model {
         Model {
@@ -4135,9 +4132,9 @@ mod tests {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
         assert_eq!(&"Documents"[3..], "uments");
-        assert_eq!(completion_prefix_len("zeron", "zeron"), Some(5));
-        assert_eq!(completion_prefix_len("zeron", ""), Some(0));
-        assert_eq!(completion_prefix_len("zeron", "dev"), None);
+        assert_eq!(completion_prefix_len("cypher", "cypher"), Some(6));
+        assert_eq!(completion_prefix_len("cypher", ""), Some(0));
+        assert_eq!(completion_prefix_len("cypher", "dev"), None);
         // Longer than the name → not a prefix.
         assert_eq!(completion_prefix_len("dev", "devel"), None);
         // Multibyte names slice on a char boundary.
@@ -4175,7 +4172,7 @@ mod tests {
                     is_repo: false,
                 },
                 FolderEntry {
-                    name: "zeron".into(),
+                    name: "cypher".into(),
                     is_dir: true,
                     is_repo: true,
                 },
@@ -4184,7 +4181,7 @@ mod tests {
         };
         // Files never show as rows.
         assert_eq!(browser_rows(&listing).len(), 2);
-        assert_eq!(browser_rows(&listing)[1].name, "zeron");
+        assert_eq!(browser_rows(&listing)[1].name, "cypher");
     }
 
     #[test]
@@ -4258,7 +4255,7 @@ mod tests {
             id,
             name: name.into(),
             supports_steering: true,
-            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            steering_mode: cypher_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
             enabled: None,
@@ -4273,7 +4270,7 @@ mod tests {
         assert_eq!(visible[0].id, HarnessId::ClaudeCode);
         let only_mock = vec![descriptor(HarnessId::Mock, "Mock")];
         assert_eq!(visible_harnesses_impl(&only_mock, false).len(), 1);
-        // …and opted back in by ZERON_HARNESS=mock (the e2e rig).
+        // …and opted back in by CYPHER_HARNESS=mock (the e2e rig).
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);
     }
@@ -4284,7 +4281,7 @@ mod tests {
             id,
             name: name.into(),
             supports_steering: true,
-            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            steering_mode: cypher_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
             enabled,

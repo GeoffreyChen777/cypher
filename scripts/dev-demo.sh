@@ -5,23 +5,23 @@
 #   scripts/dev-demo.sh            # build, seed demo data, open the app
 #   scripts/dev-demo.sh --slow     # pace mock streams (~10s) to watch streaming
 #
-# Everything lives under /tmp/zeron-demo-*; re-runs reuse it. Ctrl-C cleans up.
+# Everything lives under /tmp/cypher-demo-*; re-runs reuse it. Ctrl-C cleans up.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DAEMON_DIR=/tmp/zeron-demo-daemon
-UI_DIR=/tmp/zeron-demo-ui
+DAEMON_DIR=/tmp/cypher-demo-daemon
+UI_DIR=/tmp/cypher-demo-ui
 IPC=27921
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
 
 echo "▸ building (first run takes a few minutes)…"
-cargo build -p zeron -q
+cargo build -p cypher -q
 
 echo "▸ starting engine daemon on :$IPC"
-env ZERON_DATA_DIR="$DAEMON_DIR" ZERON_IPC_PORT=$IPC ZERON_HARNESS=mock \
-  ${DELAY:+ZERON_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
-  ./target/debug/zeron headless &
+env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_IPC_PORT=$IPC CYPHER_HARNESS=mock \
+  ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
+  ./target/debug/cypher headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
 for _ in $(seq 1 40); do
@@ -29,14 +29,14 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-probe() { cargo run -q -p zeron-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
+probe() { cargo run -q -p cypher-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo chats"
   DEV=$(probe LocalDevice '{}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["deviceId"])')
   # One space per demo folder, created up-front (chats join by space id).
   declare -A SPACES=()
-  for project in zeron soccertcg zeron aether; do
+  for project in cypher soccertcg cypher aether; do
     sid=$(uuidgen | tr 'A-Z' 'a-z')
     probe Mutate "{\"op\":\"createSpace\",\"spaceId\":\"$sid\",\"deviceId\":\"$DEV\",\"path\":\"$HOME/github/$project\"}" >/dev/null
     SPACES[$project]="$sid"
@@ -53,13 +53,13 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     fi
     probe Mutate "{\"op\":\"setChatActivity\",\"chatId\":\"$id\",\"lastMessageAt\":$(( ($(date +%s) - $4*3600) * 1000 ))}" >/dev/null
   }
-  seed "Native Zeron Rust Rewrite"    zeron zeron/main                 0  run
-  seed "Rebalance Player Stats Caps"  soccertcg    zeron/rebalance-player-stat-caps  2  run
-  seed "Craft Premium TCG Experience" soccertcg    zeron/craft-premium-tcg-exp       26 skip
-  seed "Initial Context Exploration"  zeron        zeron/initial-context-exploration 14 skip
+  seed "Native Cypher Rust Rewrite"    cypher cypher/main                 0  run
+  seed "Rebalance Player Stats Caps"  soccertcg    cypher/rebalance-player-stat-caps  2  run
+  seed "Craft Premium TCG Experience" soccertcg    cypher/craft-premium-tcg-exp       26 skip
+  seed "Initial Context Exploration"  cypher        cypher/initial-context-exploration 14 skip
   seed "Soccer TCG Repo Creation"     aether       aether/main                       48 skip
   touch "$DAEMON_DIR/.demo-seeded"
 fi
 
-echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
-ZERON_DATA_DIR="$UI_DIR" ZERON_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/zeron
+echo "▸ opening cypher (composer is live — type into it; --slow shows streaming)"
+CYPHER_DATA_DIR="$UI_DIR" CYPHER_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/cypher

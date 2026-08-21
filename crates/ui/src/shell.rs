@@ -21,10 +21,10 @@ use gpui::{
     Task, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
+use cypher_engine::InstanceLock;
+use cypher_proto::{AuthState, WorkspaceScope};
+use cypher_rpc::methods;
 use gpui_tokio::Tokio;
-use zeron_engine::InstanceLock;
-use zeron_proto::{AuthState, WorkspaceScope};
-use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
@@ -826,7 +826,7 @@ pub struct Shell {
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, zeron_proto::SessionStatus>,
+    sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -840,7 +840,7 @@ pub struct Shell {
     update_dismissed: Option<String>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    install: cypher_update::InstallKind,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -878,7 +878,7 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
-    /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`) — see
+    /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
     /// [`Shell::new`].
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
@@ -1008,10 +1008,10 @@ impl Shell {
         let settings = UiSettings::load(&data_dir);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
-        // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
+        // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
-        let route = match std::env::var("ZERON_OPEN_ROUTE").ok().as_deref() {
+        let route = match cypher_env::var("OPEN_ROUTE").as_deref() {
             Some("settings") | Some("settings/devices") => {
                 Route::Settings(SettingsSection::Devices)
             }
@@ -1028,17 +1028,17 @@ impl Shell {
             }
             _ => Route::Chat,
         };
-        // More capture knobs of the same kind: `ZERON_OPEN_DIALOG=rename|delete`
+        // More capture knobs of the same kind: `CYPHER_OPEN_DIALOG=rename|delete`
         // opens that dialog for the first chat once chats land; `=model` pops
         // the combined harness/model menu once the shell is Ready;
-        // `ZERON_FORCE_GATE=signin|org|failed` renders that gate regardless of
+        // `CYPHER_FORCE_GATE=signin|org|failed` renders that gate regardless of
         // real auth state (display-only — for styling passes).
-        let debug_dialog = std::env::var("ZERON_OPEN_DIALOG").ok();
-        let debug_gate = match std::env::var("ZERON_FORCE_GATE").ok().as_deref() {
+        let debug_dialog = cypher_env::var("OPEN_DIALOG");
+        let debug_gate = match cypher_env::var("FORCE_GATE").as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the zeron engine on port 27901".into(),
+                "Could not reach the cypher engine on port 27901".into(),
             )),
             _ => None,
         };
@@ -1090,7 +1090,7 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
-            install: zeron_update::detect_install(),
+            install: cypher_update::detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -1212,19 +1212,19 @@ impl Shell {
         // still ring.
         {
             let now = Utc::now();
-            type Ping = (String, zeron_proto::SessionStatus, bool, Option<String>);
+            type Ping = (String, cypher_proto::SessionStatus, bool, Option<String>);
             let sessions: Vec<Ping> = {
                 let state = state.read(cx);
                 state
                     .sessions
                     .iter()
                     .map(|s| {
-                        use zeron_proto::view::Indicator;
-                        let status = match zeron_proto::view::effective_indicator(Some(s), now) {
-                            Indicator::Working => zeron_proto::SessionStatus::Working,
-                            Indicator::AwaitingInput => zeron_proto::SessionStatus::AwaitingInput,
-                            Indicator::Errored => zeron_proto::SessionStatus::Errored,
-                            Indicator::None => zeron_proto::SessionStatus::Idle,
+                        use cypher_proto::view::Indicator;
+                        let status = match cypher_proto::view::effective_indicator(Some(s), now) {
+                            Indicator::Working => cypher_proto::SessionStatus::Working,
+                            Indicator::AwaitingInput => cypher_proto::SessionStatus::AwaitingInput,
+                            Indicator::Errored => cypher_proto::SessionStatus::Errored,
+                            Indicator::None => cypher_proto::SessionStatus::Idle,
                         };
                         let send_pending = state.send_pending(&s.chat_id, now);
                         let title = state
@@ -1237,9 +1237,9 @@ impl Shell {
                     .collect()
             };
             // Background-only banners: `active_window()` is app-level (any
-            // Zeron window being key), so a ping for a *background chat* in a
+            // Cypher window being key), so a ping for a *background chat* in a
             // focused app still stays a chime — you're already looking at
-            // Zeron; the sidebar dot carries the rest.
+            // Cypher; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
             for (chat_id, status, send_pending, title) in sessions {
                 let prev = self.sound_prev.insert(chat_id, status);
@@ -1617,7 +1617,7 @@ impl Shell {
     /// (user request).
     fn add_commit_diff_surface(
         &mut self,
-        commit: zeron_proto::GitHistoryCommit,
+        commit: cypher_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
         let popup = self.comment_popup.clone().downgrade();
@@ -2503,7 +2503,7 @@ impl Shell {
                     Ok(_) => cx.quit(),
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
+                            "Could not stop the remote engine: {err}. Run `cypher daemon stop`, then quit and reopen Cypher."
                         ).into());
                         cx.notify();
                     }
@@ -2671,7 +2671,7 @@ impl Shell {
     /// Evaluate a width tween at "now" (manual drive — see [`WidthTween`]).
     /// Mid-flight: eased 200ms lerp, and `motion_active` is flagged so render
     /// schedules the next animation frame. Finished, stale, absent, or under
-    /// reduced motion: exactly `target`. Honors `ZERON_MOTION_SCALE`.
+    /// reduced motion: exactly `target`. Honors `CYPHER_MOTION_SCALE`.
     fn eval_tween(&self, tween: Option<WidthTween>, target: f32) -> f32 {
         let Some(WidthTween { from, to, started }) = tween else {
             return target;
@@ -2890,7 +2890,7 @@ impl Shell {
         (1.0 - sidebar_now / open_width).clamp(0.0, 1.0)
     }
 
-    /// Native Windows caption controls integrated into Zeron's unified
+    /// Native Windows caption controls integrated into Cypher's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
     /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
@@ -3084,7 +3084,7 @@ impl Shell {
         id: String,
         title: SharedString,
         time_ago: SharedString,
-        harness: Option<zeron_proto::HarnessId>,
+        harness: Option<cypher_proto::HarnessId>,
         selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -3370,7 +3370,7 @@ impl Shell {
     /// UpdateStatus stream reports a newer release. On a macOS bundle install
     /// it drives the whole flow — click to download, then click to restart into
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
-    /// (`zeron update`); click dismisses it for that version.
+    /// (`cypher update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
@@ -3380,7 +3380,7 @@ impl Shell {
         if self.update_dismissed.as_deref() == Some(latest.as_str()) {
             return None;
         }
-        let mac_app = matches!(self.install, zeron_update::InstallKind::MacApp { .. });
+        let mac_app = matches!(self.install, cypher_update::InstallKind::MacApp { .. });
 
         let (label, clickable): (SharedString, bool) = if mac_app {
             match &self.update_flow {
@@ -3391,7 +3391,7 @@ impl Shell {
             }
         } else {
             (
-                format!("Update available — v{latest} · run `zeron update`").into(),
+                format!("Update available — v{latest} · run `cypher update`").into(),
                 true,
             )
         };
@@ -3444,7 +3444,7 @@ impl Shell {
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.install, zeron_update::InstallKind::MacApp { .. }) {
+        if !matches!(self.install, cypher_update::InstallKind::MacApp { .. }) {
             self.update_dismissed = self
                 .state
                 .read(cx)
@@ -3461,15 +3461,15 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
+    /// Fetch the manifest and stage the new Cypher desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
         let data_dir = self.data_dir.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            zeron_update::stage_mac_app(&edge_url, &manifest, &data_dir).await
+            let manifest = cypher_update::fetch_latest(&edge_url).await?;
+            cypher_update::stage_mac_app(&edge_url, &manifest, &data_dir).await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
@@ -3496,12 +3496,12 @@ impl Shell {
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC port) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
-        let zeron_update::InstallKind::MacApp { bundle } = self.install.clone() else {
+        let cypher_update::InstallKind::MacApp { bundle } = self.install.clone() else {
             return;
         };
-        match zeron_update::apply_mac_app(&staged, &bundle) {
+        match cypher_update::apply_mac_app(&staged, &bundle) {
             Ok(()) => {
-                zeron_update::relaunch_app_after_exit(&bundle);
+                cypher_update::relaunch_app_after_exit(&bundle);
                 cx.quit();
             }
             Err(err) => {
@@ -3573,7 +3573,7 @@ impl Shell {
             .child(
                 // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
                 div()
-                    .size(px(28.0))
+                    .size(px(26.0))
                     .flex_none()
                     .rounded_full()
                     .bg(theme.text)
@@ -3732,7 +3732,7 @@ impl Shell {
         } else if remote_engine {
             "Stop daemon and quit"
         } else {
-            "Quit Zeron"
+            "Quit Cypher"
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -3757,7 +3757,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
+                        "Finish signing in in your browser. Cypher will keep using this local workspace until you quit and reopen.",
                     )),
                 )
                 .child(
@@ -3801,14 +3801,14 @@ impl Shell {
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
+                        "You're signed in as {email}. Cypher can switch to your synced workspace now."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
                         "Bring {phrase} from this device into your synced workspace, or start it fresh."
                     )
                     .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
+                    (None, None) => "Cypher can switch to your synced workspace now.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -3997,9 +3997,9 @@ impl Shell {
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
                         if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Cypher is using a background daemon. Stop it and quit Cypher, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Quit and reopen Cypher to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         },
                     )),
                 )
@@ -4044,7 +4044,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Zeron will remove your credentials, close the synced workspace, and continue in local mode.",
+                        "Cypher will remove your credentials, close the synced workspace, and continue in local mode.",
                     )),
                 )
                 .child(
@@ -4361,10 +4361,12 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                .text_color(theme.text.opacity(0.09)),
+                            div()
+                                .font_family(theme.font_sans.clone())
+                                .text_size(px(21.0))
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(theme.text.opacity(0.18))
+                                .child(SharedString::from("Let's Cypher")),
                         )
                         .child(
                             div()
@@ -4392,9 +4394,9 @@ impl Shell {
                 ))
                 .into_any_element()
         } else {
-            // New-chat canvas (zeron index.tsx): the zeron mark over the
-            // TARGET selectors (device + project — moved up from the
-            // composer footer, user request) and the helper line.
+            // New-chat canvas: the Cypher wordmark over the target selectors
+            // (device + project — moved up from the composer footer) and the
+            // helper line.
             let helper: SharedString = if space_name.is_empty() {
                 "Send a message to start a new session.".into()
             } else {
@@ -4415,12 +4417,12 @@ impl Shell {
                         .flex_col()
                         .items_center()
                         .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                // 0.09 read as barely-there on the glass
-                                // backdrop (user report).
-                                .text_color(theme.text.opacity(0.2)),
+                            div()
+                                .font_family(theme.font_sans.clone())
+                                .text_size(px(21.0))
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(theme.text.opacity(0.32))
+                                .child(SharedString::from("Let's Cypher")),
                         )
                         .child(div().mt(px(16.0)).child(selectors))
                         .child(
@@ -5030,7 +5032,7 @@ impl Shell {
             .items_center()
             .text_center()
             .child(
-                icon(icons::ZERON_LOGO)
+                icon(icons::CYPHER_LOGO)
                     .w(px(31.4))
                     .h(px(36.0))
                     .text_color(theme.text),
@@ -5051,7 +5053,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Zeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "Cypher removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.runtime_change_error.clone(), |card, error| {
@@ -5513,7 +5515,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (zeron App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Zeron", copy, full-width white Log in button.
+            // logo, "Log in to Cypher", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -5528,7 +5530,7 @@ impl Shell {
                 .items_center()
                 .text_center()
                 .child(
-                    icon(icons::ZERON_LOGO)
+                    icon(icons::CYPHER_LOGO)
                         .w(px(31.4))
                         .h(px(36.0))
                         .text_color(theme.text),
@@ -5539,7 +5541,7 @@ impl Shell {
                         .text_size(px(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
+                        .child(SharedString::from("Log in to Cypher")),
                 )
                 .child(
                     div()
@@ -5694,11 +5696,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Cypher is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
+                "Cypher is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };
@@ -5714,7 +5716,7 @@ impl Shell {
             .flex()
             .flex_col()
             .child(
-                icon(icons::ZERON_LOGO)
+                icon(icons::CYPHER_LOGO)
                     .w(px(24.4))
                     .h(px(28.0))
                     .text_color(theme.text),
@@ -6218,7 +6220,7 @@ impl Render for Shell {
                             .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
                     }
                 }
-                // Capture knob: `ZERON_OPEN_DIALOG=model` pops the combined
+                // Capture knob: `CYPHER_OPEN_DIALOG=model` pops the combined
                 // harness/model menu (needs `window`, so it fires here rather
                 // than in `on_state_changed`).
                 if self.debug_dialog.as_deref() == Some("model") {
@@ -6423,7 +6425,7 @@ mod tests {
             edge_token: None,
             org_id: None,
             workos_client_id: Some("client_test".into()),
-            default_harness: zeron_proto::HarnessId::Mock,
+            default_harness: cypher_proto::HarnessId::Mock,
         };
         let synced = crate::state::EngineHandle::bootstrap(boot.clone())
             .await
@@ -6503,7 +6505,7 @@ mod tests {
     #[test]
     fn local_sign_in_offers_the_in_place_switch() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: cypher_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -6615,7 +6617,7 @@ mod tests {
     #[test]
     fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: cypher_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -6658,7 +6660,7 @@ mod tests {
     #[test]
     fn switch_lifecycle_survives_the_runtime_replacement_window() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: cypher_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -6693,7 +6695,7 @@ mod tests {
     #[test]
     fn synced_sign_out_blocks_every_viewport_and_cannot_switch_accounts() {
         let signed_in_as_another_user = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: cypher_proto::UserProfile {
                 id: "user-2".into(),
                 email: "other@example.com".into(),
                 name: None,
@@ -6731,7 +6733,7 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_cluster_matches_zeron_window_controls() {
+    fn titlebar_cluster_matches_cypher_window_controls() {
         // zeron window-controls.tsx: `left: fullscreen ? 12 : 88` — the
         // cluster clears the {14,15} traffic lights, and reclaims the inset
         // when fullscreen hides them.

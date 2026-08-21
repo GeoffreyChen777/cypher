@@ -14,12 +14,12 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
 
+use cypher_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 use gpui::{
     AnyElement, BorderStyle, Bounds, FontStyle, FontWeight, Hsla, InteractiveText, SharedString,
     StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
     size,
 };
-use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
 use crate::theme::Theme;
 
@@ -1329,7 +1329,7 @@ mod tests {
         let theme = Theme::dark();
         let mono = font(theme.font_mono.clone());
         let line = r#"let x = "hi"; // done"#;
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        let document = cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source: line,
             path: None,
             fence_tag: Some("rust"),
@@ -1351,7 +1351,7 @@ mod tests {
         let theme = Theme::dark();
         let mono = font(theme.font_mono.clone());
         let line = "let widget = build!(42);";
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        let document = cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source: line,
             path: None,
             fence_tag: Some("rust"),

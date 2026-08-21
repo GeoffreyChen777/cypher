@@ -140,7 +140,7 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
             stdin.flush().await
         };
         if let Err(e) = write.await {
-            tracing::debug!(target: "zeron_harness::pi", "stdin write failed (tolerated): {e}");
+            tracing::debug!(target: "cypher_harness::pi", "stdin write failed (tolerated): {e}");
             return;
         }
     }
@@ -171,7 +171,7 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(target: "zeron_harness::pi", "non-JSON stdout line (skipped)");
+            tracing::debug!(target: "cypher_harness::pi", "non-JSON stdout line (skipped)");
             continue;
         };
         match msg.get("type").and_then(Value::as_str) {

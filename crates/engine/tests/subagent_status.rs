@@ -1,4 +1,4 @@
-//! Subagent live projection (pi `zeron.subagents.v1`): `AgentEvent::SubagentStatus`
+//! Subagent live projection (pi `cypher.subagents.v1`): `AgentEvent::SubagentStatus`
 //! must update the chat's SESSION projection — subagents + updated_at — without
 //! touching the transcript doc, the run status, `started_at`, or the parked-session
 //! lifecycle. A background subagent finishing must never re-arm a parked session
@@ -12,10 +12,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
-use zeron_doc::{MessageRole, SessionMessageEntry};
-use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use cypher_doc::{MessageRole, SessionMessageEntry};
+use cypher_engine::{EngineCore, HarnessRegistry};
+use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel, Session,
     SessionStatus, SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall,
 };
@@ -377,7 +377,7 @@ async fn subagent_status_mid_turn_does_not_fold() {
         .iter()
         .flat_map(|e| e.parts.iter())
         .filter_map(|p| match p {
-            zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
+            cypher_doc::MessagePart::Text { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();

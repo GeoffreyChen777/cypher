@@ -46,7 +46,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
@@ -170,7 +170,7 @@ fn claude_spec() -> AcpAgentSpec {
             dirs
         },
         install_hint: "claude-agent-acp (searched PATH, the login shell's PATH, npm \
-             global bins, and fnm/nvm/volta/pnpm/bun install dirs; zeron installs \
+             global bins, and fnm/nvm/volta/pnpm/bun install dirs; cypher installs \
              the pinned @agentclientprotocol/claude-agent-acp automatically when \
              npm is available; install npm/node, or \
              `npm install -g @agentclientprotocol/claude-agent-acp`, or set \
@@ -210,7 +210,7 @@ fn codex_spec() -> AcpAgentSpec {
         cli_executable: "codex",
         cli_extra_paths: || npm_global_bins("codex"),
         install_hint: "codex-acp (searched PATH, the login shell's PATH, npm global \
-             bins, and fnm/nvm/volta/pnpm/bun install dirs; zeron installs the \
+             bins, and fnm/nvm/volta/pnpm/bun install dirs; cypher installs the \
              pinned @agentclientprotocol/codex-acp automatically when npm is \
              available; install npm/node, or \
              `npm install -g @agentclientprotocol/codex-acp`, or set \
@@ -456,12 +456,12 @@ pub fn prewarm_managed_adapters() {
         handle.spawn(async move {
             match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
                 Ok(entry) => tracing::info!(
-                    target: "zeron_harness::adapter_install",
+                    target: "cypher_harness::adapter_install",
                     adapter = %entry.display(),
                     "prewarmed {display_name} ACP adapter"
                 ),
                 Err(e) => tracing::warn!(
-                    target: "zeron_harness::adapter_install",
+                    target: "cypher_harness::adapter_install",
                     "prewarm of the {display_name} ACP adapter failed: {e}"
                 ),
             }
@@ -646,7 +646,7 @@ impl AcpHarness {
                             .await
                             {
                                 tracing::warn!(
-                                    target: "zeron_harness::adapter_install",
+                                    target: "cypher_harness::adapter_install",
                                     "background adapter install failed: {e}"
                                 );
                             }
@@ -693,7 +693,7 @@ impl AcpHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
+                    tracing::debug!(target: "cypher_harness::acp", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -815,7 +815,7 @@ impl AcpHarness {
     }
 }
 
-/// Map an advertised `thought_level` value id onto zeron's ladder.
+/// Map an advertised `thought_level` value id onto cypher's ladder.
 fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     match norm_id(value).as_str() {
         "minimal" => Some(ReasoningLevel::Minimal),
@@ -990,12 +990,12 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
 }
 
 /// A session config option surfaced as a Traits-dropdown section. Mode is
-/// zeron's own (forced to the no-prompts choice), model rides the model rows,
+/// cypher's own (forced to the no-prompts choice), model rides the model rows,
 /// and thought_level is the Reasoning ladder — everything else the agent
 /// advertises (fast mode, collaboration mode, agent persona, …) passes
 /// through. `currentValue` doubles as the default: it is the state the
 /// session opens in. Booleans render as an off/on select, mirroring the
-/// catalogs (zeron never declares the boolean config capability, so adapters
+/// catalogs (cypher never declares the boolean config capability, so adapters
 /// send selects, but handle the shape defensively).
 fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     if matches!(
@@ -1191,12 +1191,12 @@ fn initialize_params(harness: HarnessId) -> Value {
     json!({
         "protocolVersion": 1,
         "clientInfo": {
-            "name": "zeron",
-            "title": "Zeron",
+            "name": "cypher",
+            "title": "Cypher",
             "version": env!("CARGO_PKG_VERSION"),
         },
         // Declined: agents fall back to their own fs/terminal access, which
-        // is what zeron wants — the working tree is the source of truth for
+        // is what cypher wants — the working tree is the source of truth for
         // the diff pane, and commands belong to the agent's own sandbox.
         "clientCapabilities": capabilities,
     })
@@ -1541,7 +1541,7 @@ fn handle_server_request(
             cursor_todo_events(params, CURSOR_TODOS_CHIP)
         }
         // Subagent tasks run inside cursor-agent; this only reports one
-        // finished. Image generation has nowhere to land in a zeron session.
+        // finished. Image generation has nowhere to land in a cypher session.
         CURSOR_TASK => {
             client.respond(&id, json!({ "outcome": { "outcome": "completed" } }));
             Vec::new()
@@ -1549,12 +1549,12 @@ fn handle_server_request(
         CURSOR_GENERATE_IMAGE => {
             client.respond(
                 &id,
-                json!({ "outcome": { "outcome": "rejected", "reason": "zeron cannot render generated images" } }),
+                json!({ "outcome": { "outcome": "rejected", "reason": "cypher cannot render generated images" } }),
             );
             Vec::new()
         }
         _ => {
-            tracing::debug!(target: "zeron_harness::acp", "unhandled server request: {method}");
+            tracing::debug!(target: "cypher_harness::acp", "unhandled server request: {method}");
             client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
             Vec::new()
         }
@@ -1723,7 +1723,7 @@ fn ask_cursor_questions(
     });
 }
 
-/// One `cursor/ask_question` entry: the zeron-side question plus what is
+/// One `cursor/ask_question` entry: the cypher-side question plus what is
 /// needed to answer it — the wire id, and the label→optionId table (zeron's
 /// input bridge speaks labels, cursor expects option ids).
 struct CursorQuestion {
@@ -1757,14 +1757,14 @@ fn cursor_questions(params: &Value) -> Vec<CursorQuestion> {
                     Some((label.to_owned(), oid.to_owned()))
                 })
                 .collect();
-            // An option-less question has no answer zeron could send back.
+            // An option-less question has no answer cypher could send back.
             if choices.is_empty() {
                 return None;
             }
             Some(CursorQuestion {
                 wire_id,
                 question: UserInputQuestion {
-                    // Zeron-minted: cursor's ids ("q1") repeat across turns.
+                    // Cypher-minted: cursor's ids ("q1") repeat across turns.
                     id: new_message_id(),
                     header: header.to_owned(),
                     question: q
@@ -1786,7 +1786,7 @@ fn cursor_questions(params: &Value) -> Vec<CursorQuestion> {
 
 /// Chosen labels → the `answered` outcome. Nothing recognisable coming back
 /// (dropped resolver, unknown labels) degrades to `cancelled` so the agent
-/// unblocks without zeron inventing a pick.
+/// unblocks without cypher inventing a pick.
 fn cursor_answer_outcome(asked: &[CursorQuestion], answers: &[UserInputAnswer]) -> Value {
     let picked: Vec<Value> = asked
         .iter()
@@ -1955,7 +1955,7 @@ async fn run_session(session: Session) {
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
                     tracing::debug!(
-                        target: "zeron_harness::acp",
+                        target: "cypher_harness::acp",
                         "session/load failed (starting fresh): {e}"
                     );
                     let new = request_draining(
@@ -2030,7 +2030,7 @@ async fn run_session(session: Session) {
                     }
                     Err(e) => {
                         tracing::debug!(
-                            target: "zeron_harness::acp",
+                            target: "cypher_harness::acp",
                             "session/set_config_option model rejected (agent default runs): {e}"
                         );
                     }
@@ -2064,7 +2064,7 @@ async fn run_session(session: Session) {
             .await
             {
                 tracing::debug!(
-                    target: "zeron_harness::acp",
+                    target: "cypher_harness::acp",
                     "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
                 );
             }
@@ -2113,7 +2113,7 @@ async fn run_session(session: Session) {
                             None => e.to_string(),
                         },
                     };
-                    tracing::warn!(target: "zeron_harness::acp", %error, "agent setup failed");
+                    tracing::warn!(target: "cypher_harness::acp", %error, "agent setup failed");
                     let _ = event_tx
                         .send(Ok(AgentEvent::Done {
                             status: DoneStatus::Errored,
@@ -2242,14 +2242,11 @@ async fn run_session(session: Session) {
     // genuinely dropped replies already settle deterministically (the
     // cost-frame hint above, `noRunningTurn` steering evidence); the
     // engine watchdog backstops anything left.
-    // `ZERON_ACP_QUIET_SETTLE_MS` overrides; 0 disables.
+    // `CYPHER_ACP_QUIET_SETTLE_MS` overrides; 0 disables.
     let quiet_settle: Option<Duration> = if cost_hint_enabled {
         None
     } else {
-        match std::env::var("ZERON_ACP_QUIET_SETTLE_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        match cypher_env::var("ACP_QUIET_SETTLE_MS").and_then(|v| v.parse::<u64>().ok()) {
             Some(0) => None,
             Some(ms) => Some(Duration::from_millis(ms)),
             None => Some(Duration::from_secs(30)),
@@ -2461,7 +2458,7 @@ async fn run_session(session: Session) {
                         && is_turn_end_cost_update(&params, &session_id)
                     {
                         tracing::debug!(
-                            target: "zeron_harness::acp",
+                            target: "cypher_harness::acp",
                             "turn-end cost update observed with the prompt \
                              unsettled; arming fast settle"
                         );
@@ -2574,7 +2571,7 @@ async fn run_session(session: Session) {
                         .to_owned(),
                     Err(e) => {
                         tracing::debug!(
-                            target: "zeron_harness::acp",
+                            target: "cypher_harness::acp",
                             "_session/steering failed (redelivering): {e}"
                         );
                         // Failed calls redeliver like a lost turn-end race.
@@ -2673,7 +2670,7 @@ async fn run_session(session: Session) {
                         == Some("noRunningTurn")
                     {
                         tracing::warn!(
-                            target: "zeron_harness::acp",
+                            target: "cypher_harness::acp",
                             "steering answered noRunningTurn with a prompt \
                              outstanding; arming starved-turn recovery"
                         );
@@ -2766,7 +2763,7 @@ async fn run_session(session: Session) {
                 && open_questions.load(std::sync::atomic::Ordering::SeqCst) == 0 =>
             {
                 tracing::warn!(
-                    target: "zeron_harness::acp",
+                    target: "cypher_harness::acp",
                     quiet_ms = quiet_settle.unwrap_or_default().as_millis() as u64,
                     "turn quiet past the settle window with completed output; \
                      treating the prompt response as dropped"
@@ -2789,7 +2786,7 @@ async fn run_session(session: Session) {
             ), if starve_deadline.is_some() && turn.is_some() && !interrupted => {
                 starve_deadline = None;
                 tracing::warn!(
-                    target: "zeron_harness::acp",
+                    target: "cypher_harness::acp",
                     "prompt response missing past turn-end evidence; settling \
                      the dead turn (and promoting any queued steer)"
                 );
@@ -2871,7 +2868,7 @@ async fn run_session(session: Session) {
                         // merged turn really ends. Only adapters with no
                         // verified turn-end frame pay the cancel.
                         tracing::info!(
-                            target: "zeron_harness::acp",
+                            target: "cypher_harness::acp",
                             "steer into a self-continuing session; cancelling \
                              the unowned turn before prompting"
                         );
@@ -2990,7 +2987,7 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{TodoItem, ToolCall};
+    use cypher_proto::{TodoItem, ToolCall};
 
     #[test]
     fn steering_capability_reads_initialize_meta() {
@@ -3317,7 +3314,7 @@ mod tests {
 
     /// `cursor/ask_question` carries several questions at once, each with its
     /// own labelled options — the round trip must answer with OPTION IDS,
-    /// keyed by cursor's wire ids, not the labels zeron showed the user.
+    /// keyed by cursor's wire ids, not the labels cypher showed the user.
     #[test]
     fn cursor_questions_round_trip_labels_back_to_option_ids() {
         let asked = cursor_questions(&json!({

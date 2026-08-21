@@ -1,7 +1,7 @@
 //! A/B evidence probe for the Claude quiet-settle exemption, against the
 //! REAL stack (claude-agent-acp + claude CLI + live model). Run explicitly:
 //!
-//!   ZERON_AB=1 cargo test -p zeron-harness --test real_quiet_ab -- --ignored --nocapture
+//!   CYPHER_AB=1 cargo test -p cypher-harness --test real_quiet_ab -- --ignored --nocapture
 //!
 //! The knob is set to 800ms — far below routine inference-gap silence
 //! (tool result → next API roundtrip), the same structural ratio as the
@@ -21,10 +21,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{
+use cypher_harness::{
     AcpHarness, CancellationToken, Harness, RunControls, RunHostContext, SteerMessage,
 };
-use zeron_proto::{AgentEvent, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion};
+use cypher_proto::{AgentEvent, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion};
 
 const QUIET_MS: u64 = 800;
 /// How long to keep observing after the FIRST Done — on unfixed code the
@@ -35,7 +35,7 @@ fn init_env() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         // SAFETY: set before any harness runs in this test process.
-        unsafe { std::env::set_var("ZERON_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
+        unsafe { std::env::set_var("CYPHER_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
     });
 }
 

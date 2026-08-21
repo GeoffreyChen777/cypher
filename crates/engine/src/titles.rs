@@ -9,19 +9,19 @@
 //!    last listed model — zeron's `cheapestModel`);
 //! 3. run a one-shot, non-streaming-collected titling prompt through the
 //!    [`Harness`] trait (read-only sandbox, minimal reasoning, auto-approve),
-//!    retrying on zeron's short backoff ladder; fall back to the prompt's first
+//!    retrying on cypher's short backoff ladder; fall back to the prompt's first
 //!    words when every attempt produces nothing;
 //! 4. re-check the title (a user rename during generation wins);
-//! 5. when the chat sits in a zeron worktree (`zeron/<name>` branch), rename the
-//!    branch from the title and update the chat's branch row;
+//! 5. when the chat sits in a cypher worktree (`cypher/<name>` branch), rename
+//!    the branch from the title and update the chat's branch row;
 //! 6. `rename_chat` in the workspace doc.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 
-use zeron_harness::{CancellationToken, RunControls, SteerMessage};
-use zeron_proto::{
+use cypher_harness::{CancellationToken, RunControls, SteerMessage};
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     UserInputAnswer, UserInputQuestion,
 };
@@ -114,9 +114,9 @@ impl TitleGenerator {
         }
 
         // Rename the worktree branch when the chat still sits on its original
-        // zeron/<name> branch (guards live inside rename_worktree_branch).
+        // cypher/<name> branch (guards live inside rename_worktree_branch).
         if let (Some(chat_cwd), Some(branch)) = (&latest.cwd, &latest.branch)
-            && branch.starts_with("zeron/")
+            && branch.starts_with("cypher/")
         {
             match self
                 .inner
@@ -223,7 +223,7 @@ fn clean_title(raw: &str) -> String {
 /// Drive one titling run through the harness: no steering, questions resolved
 /// empty immediately (a titling prompt must never block on input).
 async fn collect_text(
-    harness: &dyn zeron_harness::Harness,
+    harness: &dyn cypher_harness::Harness,
     request: RunRequest,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
@@ -235,7 +235,7 @@ async fn collect_text(
         }),
         steering: steer_rx,
         interrupt: CancellationToken::new(),
-        host: zeron_harness::RunHostContext::default(),
+        host: cypher_harness::RunHostContext::default(),
     };
     let mut stream = harness.run(request, controls).await?;
     let mut text = String::new();
@@ -264,7 +264,7 @@ async fn collect_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::Model;
+    use cypher_proto::Model;
 
     fn model(id: &str, label: &str) -> Model {
         Model {

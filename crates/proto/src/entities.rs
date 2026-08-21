@@ -25,13 +25,13 @@ pub struct Device {
     pub version: Option<String>,
 }
 
-/// Zeron-owned child-chat metadata (navigable Zeron child subagent chats).
+/// Cypher-owned child-chat metadata (navigable Cypher child subagent chats).
 /// Stored ADDITIVELY on the synced `Chat` row by the engine's `StartSubagent`
 /// bridge — never assumed from pi. A row with `child: Some(..)` is a child
 /// chat: hidden from the root sidebar/overview, reachable only through the
 /// parent's Subagents inspector, and re-openable after the run completes
 /// (the durable row is what keeps a completed child navigable even after the
-/// parent's live `zeron.subagents.v1` snapshot goes empty or the parent
+/// parent's live `cypher.subagents.v1` snapshot goes empty or the parent
 /// restarts). The persisted profile (system prompt / tools / model /
 /// thinking) is what later direct turns in the child chat re-apply.
 ///
@@ -44,7 +44,7 @@ pub struct Device {
 pub struct ChildChat {
     /// The parent chat whose Inspector spawned this child.
     pub parent_chat_id: String,
-    /// The parent's `zeron.subagents.v1` run id this child answers to
+    /// The parent's `cypher.subagents.v1` run id this child answers to
     /// (extension-local uuid; the deterministic idempotence key with
     /// `parent_chat_id`).
     pub parent_run_id: String,
@@ -57,7 +57,7 @@ pub struct ChildChat {
     /// The parent tool call id this run answers to (sync/async) — the durable
     /// link to the parent's transcript part. Persisted so the Inspector can
     /// match the parent's doc-only row to this child even after the parent's
-    /// live `zeron.subagents.v1` snapshot is gone or the parent restarted
+    /// live `cypher.subagents.v1` snapshot is gone or the parent restarted
     /// (the panel matches by `parent_run_id` first, `tool_call_id` second).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -181,14 +181,14 @@ pub struct Chat {
     /// dials the room the registry names. Per-chat and instantly revertible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_gen: Option<u32>,
-    /// Zeron-owned child-chat metadata. `Some` ⇒ this chat is a navigable
-    /// Zeron child subagent chat (hidden from the root sidebar/overview).
+    /// Cypher-owned child-chat metadata. `Some` ⇒ this chat is a navigable
+    /// Cypher child subagent chat (hidden from the root sidebar/overview).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child: Option<ChildChat>,
 }
 
 impl Chat {
-    /// True for a Zeron-hosted child subagent chat (engine-owned child
+    /// True for a Cypher-hosted child subagent chat (engine-owned child
     /// relation — see [`ChildChat`]). Child chats are hidden from the root
     /// sidebar/overview and reached only through the parent's Inspector.
     pub fn is_child(&self) -> bool {
@@ -264,7 +264,7 @@ pub struct Session {
     pub status: SessionStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
-    /// Live subagent runs for this chat (pi `zeron.subagents.v1` projection —
+    /// Live subagent runs for this chat (pi `cypher.subagents.v1` projection —
     /// the extension publishes snapshots, the engine mirrors them here).
     /// Transient run state: never transcript content, never a status driver
     /// (the UI merges it with the doc's own tool parts).
@@ -344,7 +344,7 @@ pub struct Worktree {
     pub repo_path: String,
     pub path: String,
     pub branch: String,
-    /// Generated worktree folder name (`zeron/<name>` is its branch).
+    /// Generated worktree folder name (`cypher/<name>` is its branch).
     #[serde(default)]
     pub name: String,
     /// Canonical checkout identity (device-scoped hash of the git dir).

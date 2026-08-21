@@ -57,12 +57,12 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
-use zeron_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
-use zeron_proto::{
+use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
+use cypher_proto::{
     ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SubagentRunMode, ToolCall,
     WorkspaceScope,
 };
-use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
+use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
@@ -277,14 +277,14 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
-/// `StartSubagent` params — the Zeron bridge's bounded start request. All
+/// `StartSubagent` params — the Cypher bridge's bounded start request. All
 /// string fields are length-checked at the handler (see the bounds below) so
 /// a misbehaving publisher can never mint an unbounded persisted row.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartSubagentParams {
     parent_chat_id: String,
-    /// Parent `zeron.subagents.v1` run id — the idempotence key with
+    /// Parent `cypher.subagents.v1` run id — the idempotence key with
     /// `parent_chat_id`.
     run_id: String,
     agent: String,
@@ -419,7 +419,7 @@ pub struct EngineRpc {
     agent_accounts: AgentAccounts,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
-    updater: Option<zeron_update::Updater>,
+    updater: Option<cypher_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -478,7 +478,7 @@ impl EngineRpc {
     }
 
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
-    pub fn with_updater(mut self, updater: zeron_update::Updater) -> Self {
+    pub fn with_updater(mut self, updater: cypher_update::Updater) -> Self {
         self.updater = Some(updater);
         self
     }
@@ -495,7 +495,7 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("auth unavailable".into()))
     }
 
-    fn updater(&self) -> Result<&zeron_update::Updater, RpcError> {
+    fn updater(&self) -> Result<&cypher_update::Updater, RpcError> {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
@@ -641,7 +641,7 @@ impl EngineRpc {
     }
 
     /// `StartSubagent` handler: validate the parent (exists + hosted locally),
-    /// idempotently create the same-device child Chat with additive Zeron-owned
+    /// idempotently create the same-device child Chat with additive Cypher-owned
     /// metadata, and queue its initial durable Pi run. Strict bounded params — a
     /// bad frame is rejected before any row is written. On queue failure the
     /// child row is removed so no bogus navigable row survives. Serialized by
@@ -794,7 +794,7 @@ impl EngineRpc {
                     .config
                     .as_ref()
                     .map(|c| c.sandbox)
-                    .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
+                    .unwrap_or(cypher_proto::SandboxLevel::WorkspaceWrite),
                 auto_approve: false,
                 resume: None,
                 attachments: Vec::new(),
@@ -1042,7 +1042,7 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
-                // Parent delete CASCADES to its Zeron child chats (rows + docs +
+                // Parent delete CASCADES to its Cypher child chats (rows + docs +
                 // session interruption): a deleted parent must not leave orphaned
                 // navigable child rows behind (no dangling navigation). Child rows
                 // are tombstoned in the same mutation, then torn down async.
@@ -1175,15 +1175,15 @@ where
     .boxed()
 }
 
-/// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
+/// The transcript watch as delta frames (`cypher_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
 fn doc_messages_stream(
-    rx: watch::Receiver<Vec<zeron_doc::SessionMessageEntry>>,
+    rx: watch::Receiver<Vec<cypher_doc::SessionMessageEntry>>,
 ) -> BoxStream<'static, serde_json::Value> {
-    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    use cypher_doc::transcript_delta::{TranscriptFrame, diff_transcript};
     futures::stream::unfold(
-        (rx, None::<Vec<zeron_doc::SessionMessageEntry>>),
+        (rx, None::<Vec<cypher_doc::SessionMessageEntry>>),
         |(mut rx, mut prev)| async move {
             loop {
                 if prev.is_some() {
@@ -1389,7 +1389,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::SYNC_STATUS => {
-                fn room_json(s: &zeron_sync::RoomStatsSnapshot) -> serde_json::Value {
+                fn room_json(s: &cypher_sync::RoomStatsSnapshot) -> serde_json::Value {
                     serde_json::json!({
                         "connected": s.connected,
                         "lastPushedMs": s.last_pushed_ms,
@@ -1401,7 +1401,7 @@ impl RpcService for EngineRpc {
                         "rejected": s.rejected,
                     })
                 }
-                fn chat2_json(s: &zeron_sync::ChatStatsSnapshot) -> serde_json::Value {
+                fn chat2_json(s: &cypher_sync::ChatStatsSnapshot) -> serde_json::Value {
                     serde_json::json!({
                         "connected": s.connected,
                         "cursor": s.cursor,
@@ -1571,7 +1571,7 @@ impl RpcService for EngineRpc {
                         _ => crate::diff_sync::capture_diff(&self.repos, root).await,
                     }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    RpcReply::value(&zeron_proto::CheckoutDiff {
+                    RpcReply::value(&cypher_proto::CheckoutDiff {
                         checkout_id: identity.id,
                         device_id: self.doc_host.device_id().to_string(),
                         cwd: identity.root.to_string_lossy().to_string(),
@@ -1591,7 +1591,7 @@ impl RpcService for EngineRpc {
                 // behind an allocation so every unrelated RPC does not carry that
                 // state in `EngineRpc::handle`'s stack frame.
                 Box::pin(async move {
-                    let p: zeron_proto::GetCheckoutFileDiffTextRequest = parse_params(params)?;
+                    let p: cypher_proto::GetCheckoutFileDiffTextRequest = parse_params(params)?;
                     let identity =
                         Box::pin(self.repos.checkout_identity(std::path::Path::new(&p.cwd)))
                             .await
@@ -1664,7 +1664,7 @@ impl RpcService for EngineRpc {
                             (snapshot, base, None)
                         }
                     };
-                    let stale = || zeron_proto::CheckoutFileDiffText {
+                    let stale = || cypher_proto::CheckoutFileDiffText {
                         diff_checksum: p.diff_checksum.clone(),
                         old_text: None,
                         new_text: None,
@@ -1727,7 +1727,7 @@ impl RpcService for EngineRpc {
                     if current.checksum != p.diff_checksum {
                         return RpcReply::value(&stale());
                     }
-                    RpcReply::value(&zeron_proto::CheckoutFileDiffText {
+                    RpcReply::value(&cypher_proto::CheckoutFileDiffText {
                         diff_checksum: p.diff_checksum,
                         old_text: pair.old_text,
                         new_text: pair.new_text,

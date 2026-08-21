@@ -1,6 +1,6 @@
-//! Zeron child-subagent bridge (`StartSubagent` + `WatchAgentEvents`):
+//! Cypher child-subagent bridge (`StartSubagent` + `WatchAgentEvents`):
 //! - `StartSubagent` idempotently creates the same-device child Chat with
-//!   additive Zeron-owned metadata (parent chat id + parent run id + agent /
+//!   additive Cypher-owned metadata (parent chat id + parent run id + agent /
 //!   task / mode + persisted profile + channel), Pi config, and a titled row;
 //!   queues the normal durable Run command; returns `childChatId`.
 //! - strict bounded params reject oversized frames before any row is written;
@@ -16,13 +16,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use cypher_engine::{EngineCore, HarnessRegistry};
+use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_proto::{
     AgentEvent, ChildAgentProfile, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
     SandboxLevel, SessionStatus, SteeringMode, SubagentRunMode,
 };
-use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
+use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
 const PARENT: &str = "chat-parent";
 
@@ -145,7 +145,7 @@ async fn start_subagent_creates_child_and_queues_run() {
             PARENT,
             None,
             Some(rig.core.device_id.as_str()),
-            Some(zeron_proto::ChatConfig {
+            Some(cypher_proto::ChatConfig {
                 harness: HarnessId::Pi,
                 model: Some("parent-model".into()),
                 reasoning: None,
@@ -206,9 +206,9 @@ async fn start_subagent_creates_child_and_queues_run() {
                 .and_then(|h| h.doc().read_entries().ok())
                 .is_some_and(|entries| {
                     entries.iter().any(|e| {
-                        e.role == zeron_doc::MessageRole::Assistant
+                        e.role == cypher_doc::MessageRole::Assistant
                             && e.parts.iter().any(|p| {
-                                matches!(p, zeron_doc::MessagePart::Text { text, .. } if text.contains("planner result text"))
+                                matches!(p, cypher_doc::MessagePart::Text { text, .. } if text.contains("planner result text"))
                             })
                     })
                 })
@@ -306,7 +306,7 @@ async fn start_subagent_retry_queues_exactly_one_run() {
         .expect("entries");
     let user_entries = entries
         .iter()
-        .filter(|e| e.role == zeron_doc::MessageRole::User)
+        .filter(|e| e.role == cypher_doc::MessageRole::User)
         .count();
     assert_eq!(
         user_entries, 1,
@@ -375,7 +375,7 @@ async fn start_subagent_concurrent_calls_make_one_child_one_run() {
         .expect("entries");
     let user_entries = entries
         .iter()
-        .filter(|e| e.role == zeron_doc::MessageRole::User)
+        .filter(|e| e.role == cypher_doc::MessageRole::User)
         .count();
     assert_eq!(
         user_entries, 1,
@@ -539,7 +539,7 @@ async fn watch_agent_events_replays_terminal_done() {
 /// child-env seam) so a test can assert the child run got the persisted
 /// profile + chat identity, while the harness itself streams a quick Done.
 struct CapturingHarness {
-    host: Arc<Mutex<Option<zeron_harness::RunHostContext>>>,
+    host: Arc<Mutex<Option<cypher_harness::RunHostContext>>>,
 }
 
 #[async_trait]
@@ -725,7 +725,7 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
         .expect("entries");
     let user_entries = entries
         .iter()
-        .filter(|e| e.role == zeron_doc::MessageRole::User)
+        .filter(|e| e.role == cypher_doc::MessageRole::User)
         .count();
     assert_eq!(
         user_entries, 1,
@@ -742,7 +742,7 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
 async fn later_child_turn_has_no_messaging_channel() {
     // A harness that records EVERY run's host context (so the follow-up turn's
     // channel absence is asserted) and streams a quick Done per run.
-    struct RecordingHarness(Arc<Mutex<Vec<zeron_harness::RunHostContext>>>);
+    struct RecordingHarness(Arc<Mutex<Vec<cypher_harness::RunHostContext>>>);
     #[async_trait]
     impl Harness for RecordingHarness {
         fn id(&self) -> HarnessId {
@@ -810,8 +810,8 @@ async fn later_child_turn_has_no_messaging_channel() {
     core.doc_host
         .queue_command(
             &child_id,
-            zeron_doc::SessionCommandPayload::Run {
-                request: zeron_proto::RunRequest {
+            cypher_doc::SessionCommandPayload::Run {
+                request: cypher_proto::RunRequest {
                     prompt: "Follow-up turn".into(),
                     harness: Some(HarnessId::Pi),
                     model: None,

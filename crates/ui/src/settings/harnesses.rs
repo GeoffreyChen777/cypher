@@ -19,9 +19,9 @@ use gpui::{
     px,
 };
 
-use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
-use zeron_proto::HarnessId;
-use zeron_rpc::methods;
+use cypher_engine::registry::{HarnessDescriptor, descriptor_enabled};
+use cypher_proto::HarnessId;
+use cypher_rpc::methods;
 
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};

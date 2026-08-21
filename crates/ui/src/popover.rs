@@ -15,7 +15,7 @@ use gpui::{
     Anchor, AnyElement, ElementId, IntoElement, Pixels, Point, SharedString, div, prelude::*, px,
 };
 
-use crate::motion::{self, ZERON_PULSE};
+use crate::motion::{self, CYPHER_PULSE};
 use crate::theme::{Theme, hairline, ink};
 
 // ---------------------------------------------------------------------------
@@ -979,7 +979,7 @@ pub fn skeleton_rows(
     cx: &mut gpui::App,
 ) -> AnyElement {
     let wash = ink(0.04);
-    let delta = motion::pulse_delta(&ZERON_PULSE, view, cx);
+    let delta = motion::pulse_delta(&CYPHER_PULSE, view, cx);
     div()
         .flex()
         .flex_col()

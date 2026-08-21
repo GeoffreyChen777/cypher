@@ -1,10 +1,10 @@
-//! Native pi harness: spawns `pi --mode rpc --session-dir <zeron-owned-dir>`
+//! Native pi harness: spawns `pi --mode rpc --session-dir <cypher-owned-dir>`
 //! and speaks pi's OWN RPC protocol (strict JSONL over stdio) directly — no
 //! community `pi-acp` adapter in between.
 //!
-//! Session truth division: the zeron doc is the display/sync truth (the
+//! Session truth division: the cypher doc is the display/sync truth (the
 //! harness never touches it); the pi session file is the LLM-context truth.
-//! `--session-dir` points at a zeron-owned directory, and
+//! `--session-dir` points at a cypher-owned directory, and
 //! `RunRequest.resume` (engine-injected) carries the pi session file's
 //! ABSOLUTE path: a present value first sends `switch_session`, whose failure
 //! is a LOUD error (Done Errored naming the path — never a silent fresh
@@ -52,7 +52,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, UserInputQuestion,
 };
@@ -74,11 +74,12 @@ pub(crate) const ENV_RUN_ID: &str = "PI_SUBAGENT_RUN_ID";
 pub(crate) const ENV_AGENT: &str = "PI_SUBAGENT_AGENT";
 pub(crate) const ENV_CHILD_INDEX: &str = "PI_SUBAGENT_CHILD_INDEX";
 /// The chat id this pi process belongs to (parent or child) — injected by the
-/// harness, consumed by the extension for the Zeron bridge.
-pub(crate) const ENV_ZERON_CHAT_ID: &str = "ZERON_CHAT_ID";
-/// Local engine IPC WebSocket URL the extension's Zeron bridge helper dials
-/// (`StartSubagent` / `WatchAgentEvents`). Injected by the harness.
-pub(crate) const ENV_ZERON_ENGINE_WS_URL: &str = "ZERON_ENGINE_WS_URL";
+/// harness as `CYPHER_CHAT_ID`, consumed by the subagents extension for the
+/// Cypher bridge.
+pub(crate) const ENV_CYPHER_CHAT_ID: &str = "CYPHER_CHAT_ID";
+/// Local engine IPC WebSocket URL the extension's Cypher bridge helper dials
+/// (`StartSubagent` / `WatchAgentEvents`).
+pub(crate) const ENV_CYPHER_ENGINE_WS_URL: &str = "CYPHER_ENGINE_WS_URL";
 
 /// The messaging tools every child gets regardless of its allowlist (the
 /// extension's `spawn.ts` appends the same trio).
@@ -103,7 +104,7 @@ fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-/// pi's thinking ladder in zeron terms (its extra "off" tier has no zeron
+/// pi's thinking ladder in cypher terms (its extra "off" tier has no cypher
 /// equivalent and stays the agent default).
 const FULL_LADDER: [ReasoningLevel; 6] = [
     ReasoningLevel::Minimal,
@@ -114,7 +115,7 @@ const FULL_LADDER: [ReasoningLevel; 6] = [
     ReasoningLevel::Max,
 ];
 
-/// Map zeron's reasoning level onto pi's `set_thinking_level` value.
+/// Map cypher's reasoning level onto pi's `set_thinking_level` value.
 /// Ultra-family modes collapse to max (pi has no ultra tiers).
 fn thinking_level(level: ReasoningLevel) -> &'static str {
     match level {
@@ -140,11 +141,10 @@ fn thinking_level(level: ReasoningLevel) -> &'static str {
 /// without the churn.
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(500);
 
-/// Status key of the zeron subagent status protocol: `extensions/subagents`
-/// publishes `setStatus("zeron.subagents.v1", JSON.stringify({version:1,
-/// runs:[…]}))`. The ONE status key the harness parses; every other key stays
-/// ignored transient TUI furniture.
-pub(crate) const SUBAGENTS_STATUS_KEY: &str = "zeron.subagents.v1";
+/// Status key of the cypher subagent status protocol: `extensions/subagents`
+/// publishes `setStatus("cypher.subagents.v1", JSON.stringify({version:1,
+/// runs:[…]}))`. Every other key stays ignored transient TUI furniture.
+pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
 /// Whole-snapshot byte cap (the extension caps at 64KiB; the harness
 /// re-checks so a misbehaving publisher can't smuggle an unbounded blob).
 const SUBAGENTS_STATUS_MAX_BYTES: usize = 64 * 1024;
@@ -155,12 +155,12 @@ const SUBAGENTS_TASK_MAX_CHARS: usize = 500;
 /// Max progress lines / bytes per run.
 const SUBAGENTS_PROGRESS_MAX_LINES: usize = 8;
 const SUBAGENTS_PROGRESS_MAX_BYTES: usize = 4096;
-/// Max chars for the Zeron child chat id a run may carry (a child chat id is
+/// Max chars for the Cypher child chat id a run may carry (a child chat id is
 /// an engine-minted uuid string; a longer value is a publisher bug and is
 /// rejected with the rest of the strict per-run parse).
 const SUBAGENTS_CHILD_CHAT_ID_MAX_CHARS: usize = 256;
 
-/// Parse a `zeron.subagents.v1` `statusText` into runs.
+/// Parse a `cypher.subagents.v1` `statusText` into runs.
 ///
 /// - missing/blank text → `Some(vec![])` (a clear snapshot).
 /// - anything failing strict validation (not version 1, invalid JSON, an
@@ -174,7 +174,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     }
     if text.len() > SUBAGENTS_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "zeron_harness::pi",
+            target: "cypher_harness::pi",
             bytes = text.len(),
             "subagent status snapshot over 64KiB; ignoring"
         );
@@ -184,7 +184,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(
-                target: "zeron_harness::pi",
+                target: "cypher_harness::pi",
                 error = %err,
                 "subagent status: invalid JSON; ignoring"
             );
@@ -193,7 +193,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     };
     if value.get("version").and_then(Value::as_u64) != Some(1) {
         tracing::warn!(
-            target: "zeron_harness::pi",
+            target: "cypher_harness::pi",
             "subagent status: unsupported snapshot version; ignoring"
         );
         return None;
@@ -201,7 +201,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     let runs = value.get("runs").and_then(Value::as_array)?;
     if runs.len() > SUBAGENTS_MAX_RUNS {
         tracing::warn!(
-            target: "zeron_harness::pi",
+            target: "cypher_harness::pi",
             count = runs.len(),
             "subagent status: too many runs; ignoring"
         );
@@ -213,7 +213,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
             Some(parsed) => out.push(parsed),
             None => {
                 tracing::warn!(
-                    target: "zeron_harness::pi",
+                    target: "cypher_harness::pi",
                     "subagent status: malformed run; ignoring snapshot"
                 );
                 return None;
@@ -223,7 +223,7 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     Some(out)
 }
 
-/// Strict per-run parse of one `zeron.subagents.v1` run object. `None` on
+/// Strict per-run parse of one `cypher.subagents.v1` run object. `None` on
 /// any malformed field (missing runId/agent, unknown mode/status enum, or an
 /// over-cap task/progress).
 fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
@@ -274,7 +274,7 @@ fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
         started_at: v.get("startedAt").and_then(Value::as_i64)?,
         updated_at: v.get("updatedAt").and_then(Value::as_i64)?,
         ended_at: v.get("endedAt").and_then(Value::as_i64),
-        // The extension publishes the Zeron child chat id when the engine
+        // The extension publishes the Cypher child chat id when the engine
         // hosts the run (`StartSubagent` bridge). Absent on standalone runs
         // and on old publishers.
         child_chat_id,
@@ -282,7 +282,7 @@ fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
 }
 
 /// pi's built-in tool set (`read`/`bash`/`write`/`edit`/`grep`/`find`/`ls`)
-/// maps onto the typed [`ToolCall`] zeron renders, extracting the known arg
+/// maps onto the typed [`ToolCall`] cypher renders, extracting the known arg
 /// names. Extension/MCP tools fall through to [`ToolCall::Unknown`] with the
 /// raw args. This is the pi-flavored counterpart of `acp/normalize.rs`'s
 /// `typed_call` (ACP keys by `kind`, pi by tool name).
@@ -466,7 +466,7 @@ fn resolve_executable() -> Option<PathBuf> {
 /// a fake pi with [`PiHarness::with_executable`].
 pub struct PiHarness {
     executable: Option<PathBuf>,
-    /// zeron-owned pi session store (`<profile store>/agent-sessions`),
+    /// cypher-owned pi session store (`<profile store>/agent-sessions`),
     /// passed through as `--session-dir`.
     session_dir: PathBuf,
     interrupt_grace: Duration,
@@ -478,10 +478,10 @@ pub struct PiHarness {
     /// only notifies) must never sit "Working" forever.
     no_activity_grace: Duration,
     /// Local engine IPC WebSocket URL (`ws://127.0.0.1:<ipc_port>`) — injected
-    /// into every pi child as `ZERON_ENGINE_WS_URL` so the subagents extension
-    /// can reach the engine's `StartSubagent`/`WatchAgentEvents` bridge.
-    /// Set by `default_registry_with_bridge` (production assembly knows
-    /// `ipc_port`); `None` in bare tests and edge-less engines.
+    /// into every pi child as `CYPHER_ENGINE_WS_URL` so the subagents
+    /// extension can reach the engine's `StartSubagent`/`WatchAgentEvents`
+    /// bridge. Set by `default_registry_with_bridge` (production assembly
+    /// knows `ipc_port`); `None` in bare tests and edge-less engines.
     engine_ws_url: Option<String>,
     /// Discovery result cache: the RAW `get_commands` probe result (extension /
     /// prompt / skill commands) survives across calls. It stays the
@@ -572,7 +572,7 @@ impl PiHarness {
 
     /// Test seam: the `std::process::Command` a run would spawn — CLI args,
     /// PATH composition, cwd, and the bridge env — without spawning a child.
-    /// Lets tests assert `ZERON_ENGINE_WS_URL` (and child-env) injection
+    /// Lets tests assert `CYPHER_ENGINE_WS_URL` (and child-env) injection
     /// deterministically.
     #[doc(hidden)]
     pub fn spawn_command(
@@ -582,7 +582,7 @@ impl PiHarness {
         append_prompt: Option<&PathBuf>,
     ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
-        // Child-subagent semantics (Zeron-hosted child chats): restrict tools
+        // Child-subagent semantics (Cypher-hosted child chats): restrict tools
         // to the persisted agent allowlist plus the messaging tools, append
         // the persisted system prompt, preserve model/thinking.
         if let Some(child) = &host.child {
@@ -617,15 +617,15 @@ impl PiHarness {
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
-        // Zeron bridge identity: the chat this run belongs to plus the local
+        // Cypher bridge identity: the chat this run belongs to plus the local
         // engine IPC WebSocket URL (so the extension can StartSubagent +
-        // WatchAgentEvents). Discovery processes pass an empty host context and
-        // therefore never receive a parent chat id.
+        // WatchAgentEvents). Discovery processes pass an empty host context
+        // and therefore never receive a parent chat id.
         if let Some(chat_id) = host.chat_id.as_deref().filter(|s| !s.is_empty()) {
-            cmd.env(ENV_ZERON_CHAT_ID, chat_id);
+            cmd.env(ENV_CYPHER_CHAT_ID, chat_id);
         }
         if let Some(url) = self.engine_ws_url.as_deref().filter(|s| !s.is_empty()) {
-            cmd.env(ENV_ZERON_ENGINE_WS_URL, url);
+            cmd.env(ENV_CYPHER_ENGINE_WS_URL, url);
         }
         if let Some(child) = &host.child {
             cmd.env(ENV_ROLE, ROLE_CHILD);
@@ -667,7 +667,7 @@ impl PiHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::pi", "stderr: {line}");
+                    tracing::debug!(target: "cypher_harness::pi", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -1043,7 +1043,7 @@ async fn intercept_builtin(
 type RequestInputFn = Box<
     dyn Fn(
             Vec<UserInputQuestion>,
-        ) -> tokio::sync::oneshot::Receiver<Vec<zeron_proto::UserInputAnswer>>
+        ) -> tokio::sync::oneshot::Receiver<Vec<cypher_proto::UserInputAnswer>>
         + Send
         + Sync,
 >;
@@ -1094,7 +1094,7 @@ fn bridge_ui_request(
                 })
                 .unwrap_or_default(),
             "confirm" => vec!["Confirm".into(), "Cancel".into()],
-            // input/editor: free text. `prefill` is ignored — zeron's input
+            // input/editor: free text. `prefill` is ignored — cypher's input
             // bridge has no prefilled-text slot.
             _ => Vec::new(),
         },
@@ -1208,7 +1208,7 @@ async fn run_session(session: Session) {
             params.insert("modelId".into(), Value::String(model_id.into()));
             if let Err(e) = client.request("set_model", params).await {
                 tracing::debug!(
-                    target: "zeron_harness::pi",
+                    target: "cypher_harness::pi",
                     "set_model rejected (agent default runs): {e}"
                 );
             }
@@ -1218,7 +1218,7 @@ async fn run_session(session: Session) {
             params.insert("level".into(), Value::String(thinking_level(level).into()));
             if let Err(e) = client.request("set_thinking_level", params).await {
                 tracing::debug!(
-                    target: "zeron_harness::pi",
+                    target: "cypher_harness::pi",
                     "set_thinking_level rejected (agent default runs): {e}"
                 );
             }
@@ -1257,7 +1257,7 @@ async fn run_session(session: Session) {
                             None => e.to_string(),
                         },
                     };
-                    tracing::warn!(target: "zeron_harness::pi", %error, "pi setup failed");
+                    tracing::warn!(target: "cypher_harness::pi", %error, "pi setup failed");
                     let _ = event_tx
                         .send(Ok(AgentEvent::Done {
                             status: DoneStatus::Errored,
@@ -1498,7 +1498,7 @@ async fn run_session(session: Session) {
                         }
                         (_text, Err(e)) => {
                             tracing::debug!(
-                                target: "zeron_harness::pi",
+                                target: "cypher_harness::pi",
                                 "steer rejected (dropped): {e}"
                             );
                         }
@@ -1811,7 +1811,7 @@ async fn run_session(session: Session) {
                             }
                         }
                         // agent_end/turn_*/queue_update/compaction_*/auto_retry_*/
-                        // summarization_*/bash_execution_update: nothing zeron
+                        // summarization_*/bash_execution_update: nothing cypher
                         // renders — ignored.
                         _ => {}
                     }
@@ -1850,9 +1850,9 @@ async fn run_session(session: Session) {
                                 }
                             }
                         }
-                        // setStatus with the zeron subagent status key is the
+                        // setStatus with the cypher subagent status key is the
                         // one exception to the transient-TUI-furniture rule:
-                        // a STRUCTURED live projection (`zeron.subagents.v1`
+                        // a STRUCTURED live projection (`cypher.subagents.v1`
                         // snapshot JSON in `statusText`) that the engine
                         // consumes. Strictly validated; any other key — or an
                         // invalid snapshot — stays ignored and can never
@@ -1877,8 +1877,8 @@ async fn run_session(session: Session) {
                             // Any other key stays TUI furniture (ignored).
                         }
                         // Deliberate: setWidget/setTitle/set_editor_text (and
-                        // any non-zeron setStatus) are transient TUI furniture
-                        // — zeron has its own state surface (see the
+                        // any non-cypher setStatus) are transient TUI furniture
+                        // — cypher has its own state surface (see the
                         // classification table in docs/research/pi-rpc.md).
                         _ => {}
                     }
@@ -2045,7 +2045,7 @@ fn inline_images(paths: &[String]) -> Option<Value> {
             continue;
         }
         let Ok(bytes) = std::fs::read(path) else {
-            tracing::debug!(target: "zeron_harness::pi", "attachment unreadable: {path}");
+            tracing::debug!(target: "cypher_harness::pi", "attachment unreadable: {path}");
             continue;
         };
         images.push(json!({
@@ -2294,6 +2294,11 @@ mod tests {
         assert_eq!(images[0]["type"], "image");
         // Nothing image-shaped → None.
         assert!(inline_images(&[txt.display().to_string()]).is_none());
+    }
+
+    #[test]
+    fn subagent_status_key_is_cypher() {
+        assert_eq!(SUBAGENTS_STATUS_KEY, "cypher.subagents.v1");
     }
 
     #[test]

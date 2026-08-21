@@ -5,8 +5,8 @@ use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_proto::Chat;
-use zeron_rpc::methods;
+use cypher_proto::Chat;
+use cypher_rpc::methods;
 
 use crate::state::AppState;
 use crate::theme::Theme;

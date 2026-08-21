@@ -1,5 +1,5 @@
 /**
- * Zeron-native edge Worker (design §2, ARCHITECTURE §6): JWT auth at the
+ * Cypher-native edge Worker (design §2, ARCHITECTURE §6): JWT auth at the
  * edge, then forwarding into per-session, per-workspace, and per-device
  * Durable Objects. Also serves content-addressed R2 attachments (§1.2) and
  * the absorbed WorkOS auth routes (formerly apps/server).
@@ -117,8 +117,9 @@ export default {
       return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
     }
 
-    // ── public install surface (also routed from zeron.sh): the
-    //    `curl | sh` installer and the release artifacts it downloads ───────
+    // ── public install surface (served on the edge.letscypher.app custom
+    //    domain and the workers.dev host cypher-edge.<account>.workers.dev):
+    //    the `curl | sh` installer and release artifacts ────────────────────
     if (url.pathname === "/install.sh" && (request.method === "GET" || request.method === "HEAD")) {
       return new Response(request.method === "HEAD" ? null : installSh, {
         headers: {
@@ -146,7 +147,9 @@ export default {
             : "application/octet-stream",
         "content-length": String(object.size),
         "cache-control": mutable ? "public, max-age=60" : "public, max-age=86400, immutable",
-        etag: object.httpEtag
+        etag: object.httpEtag,
+        // The landing page fetches release metadata cross-origin.
+        "access-control-allow-origin": "*"
       });
       return new Response(request.method === "HEAD" ? null : object.body, { headers });
     }

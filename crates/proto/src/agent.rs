@@ -202,7 +202,7 @@ pub struct SlashCommand {
     pub input_hint: Option<String>,
 }
 
-/// How a subagent run was launched (pi `zeron.subagents.v1` status protocol,
+/// How a subagent run was launched (pi `cypher.subagents.v1` status protocol,
 /// `extensions/subagents`). `Sync` = the parent tool call waited for the
 /// result; `Async` = background launch (the parent tool call is just a launch
 /// ack); `Message` = subagent-to-subagent message activity with no parent
@@ -224,7 +224,7 @@ pub enum SubagentRunStatus {
     Error,
 }
 
-/// One subagent run's live status snapshot (pi `zeron.subagents.v1`).
+/// One subagent run's live status snapshot (pi `cypher.subagents.v1`).
 ///
 /// Published by the pi extension's status publisher (bounded: ≤32 runs, task
 /// ≤500 chars, progress tail ≤8 lines/4KiB, whole snapshot ≤64KiB); parsed by
@@ -256,7 +256,7 @@ pub struct SubagentRun {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
-    /// The Zeron child chat id backing this run, when the engine hosts it
+    /// The Cypher child chat id backing this run, when the engine hosts it
     /// (`StartSubagent` bridge): the Inspector row becomes clickable and
     /// navigation selects the child's real live session. Additive + serde
     /// defaulted so older publishers/writers keep working.
@@ -397,7 +397,7 @@ pub enum AgentEvent {
         error: Option<String>,
         session_id: Option<String>,
     },
-    /// Live subagent status projection (pi `zeron.subagents.v1`). The engine
+    /// Live subagent status projection (pi `cypher.subagents.v1`). The engine
     /// consumes this as run-state only: it updates the chat's session
     /// projection and neither folds it into the transcript doc nor journals
     /// it (no transcript row, no workspace last-message bump, no

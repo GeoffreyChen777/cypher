@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use zeron_engine::{Auth, AuthConfig, AuthState};
-use zeron_rpc::TokenSource;
+use cypher_engine::{Auth, AuthConfig, AuthState};
+use cypher_rpc::TokenSource;
 
 // ---------------------------------------------------------------------------
 // Fake JWTs

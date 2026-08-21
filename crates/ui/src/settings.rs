@@ -77,13 +77,13 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
-    /// Session notification chimes (done / awaiting-input). `ZERON_DISABLE_SOUND`
+    /// Session notification chimes (done / awaiting-input). `CYPHER_DISABLE_SOUND`
     /// overrides.
     pub sound_enabled: bool,
     /// Desktop banner notifications on the same transitions.
-    /// `ZERON_DISABLE_NOTIFICATIONS` overrides.
+    /// `CYPHER_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
-    /// Suppress the banner while a Zeron window is focused (the chime covers
+    /// Suppress the banner while a Cypher window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
     pub right_pane_width: f32,

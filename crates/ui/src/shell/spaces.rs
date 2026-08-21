@@ -12,9 +12,9 @@
 
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
+use cypher_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
 use std::collections::HashMap;
-use zeron_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 
 /// The add-space palette (a command-K surface, summoned by ⌘K): search bar
 /// across the top, folder browser on the left, a Devices rail on the right,
@@ -818,7 +818,7 @@ impl Shell {
 
     /// The current listing's folder rows filtered by the search query
     /// (prefix matches first — `popover::filter_indices`).
-    fn add_space_filtered(&self, cx: &App) -> Vec<zeron_proto::FolderEntry> {
+    fn add_space_filtered(&self, cx: &App) -> Vec<cypher_proto::FolderEntry> {
         let Some(flow) = self.add_space.as_ref() else {
             return Vec::new();
         };
@@ -1339,7 +1339,7 @@ impl Shell {
                     .child(SharedString::from("esc")),
             );
 
-        // ── breadcrumbs ("MacBook Pro / Projects / zeron"): the quiet mono
+        // ── breadcrumbs ("MacBook Pro / Projects / cypher"): the quiet mono
         //    path voice, `/` separators. The device crumb stands in for home —
         //    everything up to the resolved home path folds into it; below
         //    home the full path shows. Ancestors (device crumb included) are

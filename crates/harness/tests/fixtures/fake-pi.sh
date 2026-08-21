@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake pi CLI for zeron-harness tests.
+# Fake pi CLI for cypher-harness tests.
 #
 # Speaks pi's RPC protocol (strict JSONL over stdio) scripted per command:
 # get_state / get_available_models / get_commands answer the discovery
@@ -104,8 +104,8 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}'
       # The message ends to call a tool; the tool executes after message_end.
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"Hello world"}],"stopReason":"toolUse"}}'
-      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cargo test -p zeron-harness"}}'
-      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{"content":[{"type":"text","text":"   Compiling zeron-harness v0.1.21\n    Finished `dev` profile"}]},"isError":false}'
+      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cargo test -p cypher-harness"}}'
+      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{"content":[{"type":"text","text":"   Compiling cypher-harness v0.1.21\n    Finished `dev` profile"}]},"isError":false}'
       # A toolResult message is not an assistant message: internal only.
       emit '{"type":"message_start","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'
       emit '{"type":"message_end","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'

@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use cypher_harness::{Harness, HarnessError, mock::MockHarness};
+use cypher_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,14 +289,14 @@ impl HarnessRegistry {
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus lazy
-/// slots resolved through `zeron_harness` on first use (subprocess discovery only
+/// slots resolved through `cypher_harness` on first use (subprocess discovery only
 /// happens when a run/model call actually needs it).
 ///
-/// `pi_sessions_root` is the zeron-owned pi session store the pi harness points
+/// `pi_sessions_root` is the cypher-owned pi session store the pi harness points
 /// `pi --mode rpc --session-dir` at (callers pass
 /// `profile.store_root().join("agent-sessions")`).
-/// [`default_registry`] with the optional Zeron bridge: production assembly
-/// passes `ws://127.0.0.1:<ipc_port>` so pi children get `ZERON_ENGINE_WS_URL`
+/// [`default_registry`] with the optional Cypher bridge: production assembly
+/// passes `ws://127.0.0.1:<ipc_port>` so pi children get `CYPHER_ENGINE_WS_URL`
 /// and the subagents extension can reach the engine's `StartSubagent` /
 /// `WatchAgentEvents` bridge. Test-only assembly keeps `None` (no IPC server).
 pub fn default_registry_with_bridge(
@@ -307,7 +307,7 @@ pub fn default_registry_with_bridge(
     if let Some(url) = engine_ws_url {
         // Re-arm the plain Pi slot IN PLACE with a bridge-aware PiHarness:
         // every pi child gets the local engine IPC WebSocket as
-        // `ZERON_ENGINE_WS_URL` (the subagents extension's StartSubagent /
+        // `CYPHER_ENGINE_WS_URL` (the subagents extension's StartSubagent /
         // WatchAgentEvents bridge). The slot's order entry is untouched, so
         // Pi stays listed exactly once.
         let pi_sessions = pi_sessions_root;
@@ -315,7 +315,7 @@ pub fn default_registry_with_bridge(
             HarnessId::Pi,
             Box::new(move || {
                 Ok(Arc::new(
-                    zeron_harness::pi::PiHarness::new(pi_sessions.clone())
+                    cypher_harness::pi::PiHarness::new(pi_sessions.clone())
                         .with_engine_bridge(Some(url.clone())),
                 ) as Arc<dyn Harness>)
             }),
@@ -327,7 +327,7 @@ pub fn default_registry_with_bridge(
 pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
-    zeron_harness::shell_env::prewarm();
+    cypher_harness::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness {
         script: vec![
@@ -339,7 +339,7 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-1".into(),
-                call: zeron_proto::ToolCall::Exec {
+                call: cypher_proto::ToolCall::Exec {
                     command: "cargo test --workspace".into(),
                 },
             },
@@ -351,7 +351,7 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
-                call: zeron_proto::ToolCall::Exec {
+                call: cypher_proto::ToolCall::Exec {
                     command: "git log -5 --oneline --decorate && git merge-base HEAD origin/main"
                         .into(),
                 },
@@ -391,14 +391,14 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::claude().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::claude()) as Arc<dyn Harness>)),
+        Box::new(|| cypher_harness::AcpHarness::claude().installed()),
+        Box::new(|| Ok(Arc::new(cypher_harness::AcpHarness::claude()) as Arc<dyn Harness>)),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
     // catalog entry) — "Codex" per the original HARNESS_LABEL, StepBoundary
     // steering via native `turn/steer`, and the unified reasoning ladder from
-    // zeron_harness::codex::catalog. CLI discovery only happens when a
+    // cypher_harness::codex::catalog. CLI discovery only happens when a
     // run/model call actually resolves the slot.
     registry.register_lazy(
         HarnessDescriptor {
@@ -418,8 +418,8 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::codex().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::codex()) as Arc<dyn Harness>)),
+        Box::new(|| cypher_harness::AcpHarness::codex().installed()),
+        Box::new(|| Ok(Arc::new(cypher_harness::AcpHarness::codex()) as Arc<dyn Harness>)),
     );
     // Cursor Agent over ACP (`cursor-agent acp`), same lazy pattern: the
     // static descriptor mirrors AcpHarness::cursor() exactly. No steering
@@ -435,8 +435,8 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::cursor().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::cursor()) as Arc<dyn Harness>)),
+        Box::new(|| cypher_harness::AcpHarness::cursor().installed()),
+        Box::new(|| Ok(Arc::new(cypher_harness::AcpHarness::cursor()) as Arc<dyn Harness>)),
     );
     // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
     // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
@@ -456,8 +456,8 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::grok().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
+        Box::new(|| cypher_harness::AcpHarness::grok().installed()),
+        Box::new(|| Ok(Arc::new(cypher_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
     );
     // Hermes Agent over ACP (`hermes acp`), same lazy pattern: the static
     // descriptor mirrors AcpHarness::hermes() exactly. No steering extension
@@ -473,15 +473,15 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
+        Box::new(|| cypher_harness::AcpHarness::hermes().installed()),
+        Box::new(|| Ok(Arc::new(cypher_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
     // pi over its native RPC (`pi --mode rpc`, the `crates/harness/src/pi`
     // harness — no pi-acp adapter), same lazy pattern: the static descriptor
     // mirrors PiHarness exactly — step-boundary steering (pi delivers a steer
     // after the current assistant message's tool calls, before the next LLM
     // call), pi's thinking ladder minus its "off" tier. The lazy closure
-    // captures the zeron-owned session root for `--session-dir`.
+    // captures the cypher-owned session root for `--session-dir`.
     let pi_sessions = pi_sessions_root.clone();
     registry.register_lazy(
         HarnessDescriptor {
@@ -500,10 +500,10 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(move || zeron_harness::pi::PiHarness::new(pi_sessions_root.clone()).installed()),
+        Box::new(move || cypher_harness::pi::PiHarness::new(pi_sessions_root.clone()).installed()),
         Box::new(move || {
             Ok(
-                Arc::new(zeron_harness::pi::PiHarness::new(pi_sessions.clone()))
+                Arc::new(cypher_harness::pi::PiHarness::new(pi_sessions.clone()))
                     as Arc<dyn Harness>,
             )
         }),

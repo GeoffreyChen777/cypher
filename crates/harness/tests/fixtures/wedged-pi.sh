@@ -1,5 +1,5 @@
 #!/bin/sh
-# Wedged pi for zeron-harness tests: answers setup + prompt, streams one
+# Wedged pi for cypher-harness tests: answers setup + prompt, streams one
 # delta, then hangs (ignores abort entirely) — the SIGTERM/SIGKILL escalation
 # path. Driven by crates/harness/tests/pi.rs.
 

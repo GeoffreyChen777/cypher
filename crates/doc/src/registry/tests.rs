@@ -4,7 +4,7 @@
 //! tested, not asserted.
 
 use super::*;
-use zeron_proto::{
+use cypher_proto::{
     HarnessId, SandboxLevel, SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus,
 };
 
@@ -513,13 +513,13 @@ fn spaces_round_trip_and_mutate() {
     assert!(!ws.set_space_git("nope", true, None, ts(1)).unwrap());
 }
 
-/// The additive Zeron-owned child metadata rides the registry chat row too
+/// The additive Cypher-owned child metadata rides the registry chat row too
 /// (the workspace mirror is the Loro doc; the registry is the synced row
 /// store): a child chat round-trips through the registry and survives a
 /// peer sync, while old rows read `child: None`.
 #[test]
 fn child_chat_metadata_round_trips_through_registry() {
-    use zeron_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
+    use cypher_proto::{ChildAgentProfile, ChildChat, SubagentRunMode};
     let mut ws = RegistryDoc::new("dev-a");
     let mut child = chat("child-1", "dev-a");
     child.child = Some(ChildChat {

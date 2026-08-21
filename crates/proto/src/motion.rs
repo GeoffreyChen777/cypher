@@ -1,7 +1,7 @@
 //! Loader motion — the pure math behind zeron's loading indicators.
 //!
 //! These are the curves and constants the gpui viewport animates with
-//! (`zeron-ui/src/motion.rs`, `zeron-ui/src/loaders.rs`), lifted here so any
+//! (`cypher-ui/src/motion.rs`, `cypher-ui/src/loaders.rs`), lifted here so any
 //! surface animates the *same* loaders rather than inventing its own spinner.
 //! A loading indicator is a brand surface; two of them that disagree read as
 //! two products.
@@ -10,17 +10,17 @@
 //! it from a frame delta or from wall-clock elapsed time and get identical
 //! output.
 
-/// Zeron loader pulse period.
-pub const ZERON_PULSE_MS: u64 = 2_400;
+/// Cypher loader pulse period.
+pub const CYPHER_PULSE_MS: u64 = 2_400;
 /// Gradient matrix spinner wave period.
 pub const GRADIENT_SPIN_MS: u64 = 750;
 
-/// Cells in the zeron wave loader.
-pub const ZERON_CELLS: usize = 5;
+/// Cells in the cypher wave loader.
+pub const CYPHER_CELLS: usize = 5;
 /// Side length of the gradient spinner matrix.
 pub const MATRIX_SIDE: usize = 3;
 
-/// Zeron loader cells rest at this opacity between pulses.
+/// Cypher loader cells rest at this opacity between pulses.
 pub const PULSE_MIN_OPACITY: f32 = 0.08;
 /// …and at this scale.
 pub const PULSE_MIN_SCALE: f32 = 0.9;
@@ -55,12 +55,12 @@ pub fn pulse_wave(phase: f32) -> f32 {
     0.5 - 0.5 * (phase * std::f32::consts::TAU).cos()
 }
 
-/// Zeron loader cell opacity for a phase: 0.08 → 1 → 0.08.
+/// Cypher loader cell opacity for a phase: 0.08 → 1 → 0.08.
 pub fn pulse_opacity(phase: f32) -> f32 {
     PULSE_MIN_OPACITY + (1.0 - PULSE_MIN_OPACITY) * pulse_wave(phase)
 }
 
-/// Zeron loader cell scale for a phase: 0.9 → 1 → 0.9.
+/// Cypher loader cell scale for a phase: 0.9 → 1 → 0.9.
 pub fn pulse_scale(phase: f32) -> f32 {
     PULSE_MIN_SCALE + (1.0 - PULSE_MIN_SCALE) * pulse_wave(phase)
 }
@@ -90,7 +90,7 @@ pub fn gspin_cell_phase(row: usize, col: usize) -> f32 {
     if max == 0.0 { 0.0 } else { d / (max + 1.0) }
 }
 
-/// The zeron mark's pixels — `[x, y]` of each 100×100 cell on the 820×940
+/// The cypher mark's pixels — `[x, y]` of each 100×100 cell on the 820×940
 /// canvas (zeron's `logo.tsx` CELLS), shared by the static mark and the
 /// animated loader.
 #[rustfmt::skip]
@@ -155,7 +155,7 @@ mod tests {
         );
         // Always inside the unit interval, for any input.
         for raw in [-4.2f32, -0.1, 0.0, 0.5, 7.9] {
-            for index in 0..ZERON_CELLS {
+            for index in 0..CYPHER_CELLS {
                 let phase = staggered_phase(raw, index, PULSE_STAGGER);
                 assert!((0.0..1.0).contains(&phase), "{raw} {index} -> {phase}");
             }

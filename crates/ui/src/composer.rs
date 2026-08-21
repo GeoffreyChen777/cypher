@@ -24,12 +24,12 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
-use zeron_proto::{
+use cypher_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
+use cypher_proto::{
     FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
     UserInputQuestion,
 };
-use zeron_rpc::{RpcError, methods};
+use cypher_rpc::{RpcError, methods};
 
 use crate::attachments::{self, StagedAttachment};
 use crate::motion;
@@ -729,7 +729,7 @@ const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
-const FILE_MENTION_SCHEME: &str = "zeron-file:";
+const FILE_MENTION_SCHEME: &str = "cypher-file:";
 
 /// A restorable point in the input's history: text plus where the caret and
 /// selection sat when the edit landed.
@@ -3356,7 +3356,7 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 fn mention_error_message(err: &RpcError) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to search its files".into()
+            "The session's device runs an older Cypher — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
         RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
@@ -3367,7 +3367,7 @@ fn mention_error_message(err: &RpcError) -> SharedString {
 fn slash_error_message(err: &RpcError) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to list commands".into()
+            "The session's device runs an older Cypher — update it to list commands".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
         RpcError::BadParams(_) | RpcError::Failed(_) => {
@@ -3394,7 +3394,7 @@ pub struct Composer {
     /// gets focus back on close.
     preview_focus: FocusHandle,
     /// Focus grab deferred to the next render (open sites don't all have a
-    /// `Window` — the `ZERON_ATTACH_PREVIEW` boot knob opens in `new`).
+    /// `Window` — the `CYPHER_ATTACH_PREVIEW` boot knob opens in `new`).
     preview_focus_pending: bool,
     /// In-flight file-picker prompt (paperclip).
     picker_task: Option<Task<()>>,
@@ -3599,9 +3599,9 @@ impl Composer {
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
-        // a rig) — `ZERON_ATTACH=/path/a.png[,/path/b.png]`, and
-        // `ZERON_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
-        if let Ok(spec) = std::env::var("ZERON_ATTACH") {
+        // a rig) — `CYPHER_ATTACH=/path/a.png[,/path/b.png]`, and
+        // `CYPHER_ATTACH_PREVIEW=1` boots with the first one's lightbox open.
+        if let Some(spec) = cypher_env::var("ATTACH") {
             let staged: Vec<StagedAttachment> = spec
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
@@ -3609,13 +3609,13 @@ impl Composer {
                     match attachments::stage_file(std::path::Path::new(path.trim())) {
                         Ok(att) => Some(att),
                         Err(err) => {
-                            tracing::warn!(%path, error = %err, "ZERON_ATTACH stage failed");
+                            tracing::warn!(%path, error = %err, "CYPHER_ATTACH stage failed");
                             None
                         }
                     }
                 })
                 .collect();
-            if std::env::var("ZERON_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
+            if cypher_env::var("ATTACH_PREVIEW").is_some_and(|v| v == "1")
                 && let Some(first) = staged.first()
             {
                 composer.preview = Some(attachments::PreviewImage {
@@ -3635,7 +3635,7 @@ impl Composer {
         composer
     }
 
-    /// Capture-knob passthrough (`ZERON_OPEN_DIALOG=model`): open the
+    /// Capture-knob passthrough (`CYPHER_OPEN_DIALOG=model`): open the
     /// combined harness/model menu.
     pub fn debug_open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pickers
@@ -5038,7 +5038,7 @@ impl Composer {
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
             id: message_id.clone(),
-            role: zeron_doc::MessageRole::User,
+            role: cypher_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: echo_text.clone(),
@@ -5135,7 +5135,7 @@ impl Composer {
                                     .call(methods::CREATE_WORKTREE, params)
                                     .await
                                     .map_err(|e| format!("Worktree failed: {e}"))?;
-                                let worktree: zeron_proto::Worktree = serde_json::from_value(value)
+                                let worktree: cypher_proto::Worktree = serde_json::from_value(value)
                                     .map_err(|e| format!("Worktree reply malformed: {e}"))?;
                                 cwd = worktree.path.clone();
                                 worktree_cwd = Some(worktree.path);
@@ -5236,7 +5236,7 @@ impl Composer {
                     // without flickering).
                     let refreshed = SessionMessageEntry {
                         id: message_id.clone(),
-                        role: zeron_doc::MessageRole::User,
+                        role: cypher_doc::MessageRole::User,
                         parts: vec![MessagePart::Text {
                             id: "t0".into(),
                             text: content.clone(),
@@ -5971,7 +5971,7 @@ impl Render for Composer {
         // grok already finished").
         let steer_queues = mode == SendButtonMode::Steer
             && self.pickers.read(cx).resolved_steering_mode(cx)
-                == Some(zeron_proto::SteeringMode::TurnBoundary);
+                == Some(cypher_proto::SteeringMode::TurnBoundary);
         let container = container.when(steer_queues, |el| {
             el.child(
                 div()
@@ -6480,7 +6480,7 @@ mod tests {
         let raw = local_file_link("src/a file#[x].rs", false);
         assert_eq!(
             raw,
-            "[a file#\\[x\\].rs](zeron-file:src/a%20file%23%5Bx%5D.rs)"
+            "[a file#\\[x\\].rs](cypher-file:src/a%20file%23%5Bx%5D.rs)"
         );
         let links = file_mention_links(&raw);
         assert_eq!(links.len(), 1);
@@ -6489,10 +6489,13 @@ mod tests {
         assert!(!links[0].is_dir);
 
         let folder = local_file_link("src/components", true);
-        assert_eq!(folder, "[components](zeron-file:src/components/)");
+        assert_eq!(folder, "[components](cypher-file:src/components/)");
         let links = file_mention_links(&folder);
         assert_eq!(links[0].path, "src/components");
         assert!(links[0].is_dir);
+
+        // A non-cypher scheme (e.g. the old `zeron-file:`) is rejected.
+        assert!(file_mention_links("[composer.rs](zeron-file:src/composer.rs)").is_empty());
     }
 
     #[test]
@@ -6593,15 +6596,17 @@ mod tests {
     fn sent_mention_display_leaves_plain_prompts_untouched() {
         assert_eq!(sent_mention_display("fix the composer"), None);
         assert_eq!(
-            sent_mention_display("what is a zeron-file: link?"),
+            sent_mention_display("what is a cypher-file: link?"),
             None,
             "scheme substring without a valid mention link"
         );
         assert_eq!(
-            sent_mention_display("[a.rs](zeron-file:../a.rs)"),
+            sent_mention_display("[a.rs](cypher-file:../a.rs)"),
             None,
             "a hostile path never becomes a chip in the transcript either"
         );
+        // A non-cypher scheme (e.g. the old `zeron-file:`) does not project.
+        assert!(sent_mention_display("[a.rs](zeron-file:src/a.rs)").is_none());
     }
 
     fn question(id: &str, options: &[&str], multi: bool) -> UserInputQuestion {
@@ -7012,7 +7017,7 @@ mod tests {
 
     #[test]
     fn pending_input_detection() {
-        use zeron_doc::MessageStatus;
+        use cypher_doc::MessageStatus;
         let input_part = MessagePart::Input {
             id: "in-r1".into(),
             request_id: "r1".into(),

@@ -7,9 +7,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use cypher_proto::WorkspaceScope;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeron_proto::WorkspaceScope;
 
 use crate::EngineError;
 
@@ -380,7 +380,7 @@ mod tests {
         let core = crate::EngineCore::assemble_with_profile(
             profile,
             std::sync::Arc::new(crate::default_registry(pi_sessions)),
-            zeron_proto::HarnessId::Mock,
+            cypher_proto::HarnessId::Mock,
             None,
         )
         .unwrap();
@@ -398,13 +398,13 @@ mod tests {
     #[tokio::test]
     async fn development_constructor_uses_account_scoped_uploads() {
         let dir = tempfile::tempdir().unwrap();
-        let org_id = crate::env_or("ZERON_ORG_ID", crate::DEFAULT_ORG_ID);
-        let user_id = crate::env_or("ZERON_USER_ID", crate::DEFAULT_USER_ID);
+        let org_id = crate::env_or("ORG_ID", crate::DEFAULT_ORG_ID);
+        let user_id = crate::env_or("USER_ID", crate::DEFAULT_USER_ID);
         let expected = EngineProfile::development(dir.path(), &org_id, &user_id);
         let core = crate::EngineCore::assemble(
             dir.path(),
             std::sync::Arc::new(crate::default_registry(dir.path().join("agent-sessions"))),
-            zeron_proto::HarnessId::Mock,
+            cypher_proto::HarnessId::Mock,
             None,
         )
         .unwrap();
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(core.workspace_scope(), WorkspaceScope::Development);
         assert_eq!(core.uploads.dir(), expected.store_root().join("uploads"));
         assert!(expected.store_root().is_dir());
-        if std::env::var("ZERON_ORG_ID").is_err() && std::env::var("ZERON_USER_ID").is_err() {
+        if cypher_env::var("ORG_ID").is_none() && cypher_env::var("USER_ID").is_none() {
             assert_eq!(
                 expected.store_root(),
                 dir.path().join("orgs/dev-org/dev-user")

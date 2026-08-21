@@ -1,12 +1,13 @@
 [package]
-name = "zeron-harness"
+name = "cypher-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-zeron-proto.workspace = true
+cypher-env.workspace = true
+cypher-proto.workspace = true
 base64 = "0.22"
 tokio.workspace = true
 tokio-util.workspace = true

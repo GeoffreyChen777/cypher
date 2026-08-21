@@ -1,6 +1,6 @@
 //! Session-level Subagents: the live status of the CURRENT chat's subagent
 //! runs, aggregated from the transcript's subagent tool parts and the
-//! engine's live `Session.subagents` snapshot (`zeron.subagents.v1`).
+//! engine's live `Session.subagents` snapshot (`cypher.subagents.v1`).
 //!
 //! Deliberately NOT a transcript row (no `RowKind`/cache entry): it is chrome
 //! on the right of the status strip — a compact trigger that opens an
@@ -8,7 +8,7 @@
 //! transcript + the session row already carry.
 //!
 //! State rules (the only way a run reads as live `Running` is a structured
-//! `zeron.subagents.v1` snapshot):
+//! `cypher.subagents.v1` snapshot):
 //! - **snapshot** is the single authority for `Running`/`Stale` (async
 //!   Running/Done/Error fully wins; sync doc terminal state still wins over a
 //!   stale snapshot). A snapshot that goes away never resurrects a doc-only
@@ -32,8 +32,8 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 
-use zeron_doc::{MessagePart, MessageStatus, SessionMessageEntry};
-use zeron_proto::{
+use cypher_doc::{MessagePart, MessageStatus, SessionMessageEntry};
+use cypher_proto::{
     SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus, view::subagent_call_info,
 };
 
@@ -76,13 +76,13 @@ pub struct SubagentPanelEntry {
     pub started_at: i64,
     pub updated_at: i64,
     pub ended_at: Option<i64>,
-    /// Zeron child chat id backing this run (engine-owned): the row is
+    /// Cypher child chat id backing this run (engine-owned): the row is
     /// clickable and navigation selects the child's real live session.
     pub child_chat_id: Option<String>,
 }
 
 impl SubagentPanelEntry {
-    /// A row with a Zeron child chat behind it (navigable via the Inspector).
+    /// A row with a Cypher child chat behind it (navigable via the Inspector).
     pub fn is_navigable(&self) -> bool {
         self.child_chat_id.is_some()
     }
@@ -283,14 +283,14 @@ pub fn aggregate_subagents(
     out
 }
 
-/// A durable Zeron child chat row of the selected parent (from the synced
+/// A durable Cypher child chat row of the selected parent (from the synced
 /// `Chat.child` relation), reduced to what the Inspector needs: the child chat
 /// id + the persisted relation metadata. This is the DURABLE truth for
 /// reopenability — it survives an empty parent snapshot and a parent restart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DurableChildRow {
     pub chat_id: String,
-    /// The parent `zeron.subagents.v1` run id (the extension's stable run id).
+    /// The parent `cypher.subagents.v1` run id (the extension's stable run id).
     pub parent_run_id: String,
     /// The parent tool call id this run answers to (durable link to the
     /// transcript part; matches doc-only rows after a restart).
@@ -596,7 +596,7 @@ impl SubagentsPanel {
     /// (hairline separators, no nested cards), scrolled. Width
     /// `min(520, main column − 32)` — a fixed width capped by the window,
     /// since a floating layer has no ancestor to resolve `w_full` against.
-    /// Open a Zeron child chat from the inspector: close the popover (the
+    /// Open a Cypher child chat from the inspector: close the popover (the
     /// exit animation reaps it) and select the child through the normal
     /// `AppState::select_chat` path. The Shell's NavHistory observation
     /// records the switch, so Back returns to this parent session.
@@ -657,7 +657,7 @@ impl SubagentsPanel {
             }
             let row = inspector_row(theme, entry);
             rows = rows.child(match entry.child_chat_id.clone() {
-                // Zeron-hosted child runs are navigable. Keyboard navigation
+                // Cypher-hosted child runs are navigable. Keyboard navigation
                 // is REAL focused-row navigation on the tracked list (Up/Down
                 // move `active_row`, Enter/Space open the active row, Escape
                 // closes) — the rows themselves are click targets only, never
@@ -1076,7 +1076,7 @@ impl Render for SubagentsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::ToolCall;
+    use cypher_proto::ToolCall;
 
     fn ms(epoch_secs: i64) -> i64 {
         epoch_secs * 1000
@@ -1108,7 +1108,7 @@ mod tests {
     fn entry(parts: Vec<MessagePart>) -> SessionMessageEntry {
         SessionMessageEntry {
             id: "m1".into(),
-            role: zeron_doc::MessageRole::Assistant,
+            role: cypher_doc::MessageRole::Assistant,
             parts,
             created_at: ms(1000),
             device_id: "d".into(),
@@ -1739,7 +1739,7 @@ mod tests {
         assert!(info.is_async);
     }
 
-    /// The Zeron child chat id rides the snapshot run into the panel entry:
+    /// The Cypher child chat id rides the snapshot run into the panel entry:
     /// a run with `childChatId` reads navigable (the row opens the child's
     /// live session), and a run without one never does (standalone spawns).
     #[test]

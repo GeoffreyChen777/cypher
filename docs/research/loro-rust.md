@@ -31,7 +31,7 @@
   DocSync (to_doc/from_doc, #[loro(root)]), VersionGuard for stale heads.
   GAP: no incremental event-driven mirror — either re-hydrate subtrees on subscribe events or
   hand-write: subscribe_root -> walk event diffs (map/list/text deltas) -> patch cached Rust state.
-- Plan: build a small `zeron-mirror` crate: typed schema structs + incremental diff application over
+- Plan: build a small mirror crate (now `cypher-doc`): typed schema structs + incremental diff application over
   doc.subscribe events + lorosurgeon-style reconcile for writes (evaluate lorosurgeon as a dep vs
   hand-rolling; our schema is small and known).
 

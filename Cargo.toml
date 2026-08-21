@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/env",
     "crates/proto",
     "crates/doc",
     "crates/sync",
@@ -10,25 +11,26 @@ members = [
     "crates/update",
     "crates/ui",
     "crates/syntax",
-    "apps/zeron",
+    "apps/cypher",
 ]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
 
 [workspace.dependencies]
-zeron-proto = { path = "crates/proto" }
-zeron-doc = { path = "crates/doc" }
-zeron-sync = { path = "crates/sync" }
-zeron-harness = { path = "crates/harness" }
-zeron-engine = { path = "crates/engine" }
-zeron-rpc = { path = "crates/rpc" }
-zeron-update = { path = "crates/update" }
-zeron-ui = { path = "crates/ui" }
-zeron-syntax = { path = "crates/syntax" }
+cypher-env = { path = "crates/env" }
+cypher-proto = { path = "crates/proto" }
+cypher-doc = { path = "crates/doc" }
+cypher-sync = { path = "crates/sync" }
+cypher-harness = { path = "crates/harness" }
+cypher-engine = { path = "crates/engine" }
+cypher-rpc = { path = "crates/rpc" }
+cypher-update = { path = "crates/update" }
+cypher-ui = { path = "crates/ui" }
+cypher-syntax = { path = "crates/syntax" }
 
 # CRDT
 loro = "1.13"

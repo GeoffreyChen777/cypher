@@ -1,17 +1,18 @@
 [package]
-name = "zeron-engine"
+name = "cypher-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-zeron-proto.workspace = true
-zeron-doc.workspace = true
-zeron-sync.workspace = true
-zeron-harness.workspace = true
-zeron-rpc.workspace = true
-zeron-update.workspace = true
+cypher-env.workspace = true
+cypher-proto.workspace = true
+cypher-doc.workspace = true
+cypher-sync.workspace = true
+cypher-harness.workspace = true
+cypher-rpc.workspace = true
+cypher-update.workspace = true
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -38,4 +39,4 @@ ignore.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
-zeron-sync = { workspace = true, features = ["mock-server"] }
+cypher-sync = { workspace = true, features = ["mock-server"] }

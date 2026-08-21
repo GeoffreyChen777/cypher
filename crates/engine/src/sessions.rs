@@ -24,14 +24,14 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use zeron_doc::{
+use cypher_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{
+use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
-use zeron_proto::{
+use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, SubagentRun,
     SubagentRunStatus, UserInputAnswer, UserInputQuestion,
 };
@@ -238,7 +238,7 @@ impl SessionsEngine {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
 
-    /// Live subagent projection (pi `zeron.subagents.v1`): mirror the latest
+    /// Live subagent projection (pi `cypher.subagents.v1`): mirror the latest
     /// snapshot onto the chat's session row — `subagents` + `updated_at` ONLY.
     /// Deliberately no status transition and no `started_at` change: a
     /// background subagent finishing must not flip a parked session Working
@@ -325,7 +325,7 @@ impl SessionsEngine {
         lock(&self.inner.statuses).values().any(|s| {
             matches!(
                 s.status,
-                zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                cypher_proto::SessionStatus::Working | cypher_proto::SessionStatus::AwaitingInput
             )
         })
     }
@@ -867,7 +867,7 @@ impl SessionsEngine {
                             reasoning: None,
                             model_options: Default::default(),
                             cwd,
-                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
@@ -968,7 +968,7 @@ impl Inner {
         }
     }
 
-    /// Live subagent projection (pi `zeron.subagents.v1`): update the chat's
+    /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
     /// session row's `subagents` + `updated_at` ONLY — no status transition,
     /// no `started_at` change, and a missing row is created Idle (a subagent
     /// can be the chat's only activity). The `updated_at` bump doubles as the
@@ -1060,7 +1060,7 @@ impl Inner {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 
-    /// Host-side run context for one chat: its identity plus — for Zeron-hosted
+    /// Host-side run context for one chat: its identity plus — for Cypher-hosted
     /// child subagent chats — the persisted child env the pi harness applies
     /// (system prompt/tools/model/thinking) and the host-LOCAL messaging
     /// channel for the INITIAL run. A NON-serialized internal seam: the child
@@ -1481,16 +1481,14 @@ async fn drive_run(
     // segment finalized Complete, status Idle, child and mailbox warm. A
     // false trip (the agent was quietly waiting on something invisible)
     // costs a status dip: the parked-resume path below re-arms Working the
-    // moment output flows again, and nothing is lost. `ZERON_TURN_QUIESCE_MS`
+    // moment output flows again, and nothing is lost. `CYPHER_TURN_QUIESCE_MS`
     // overrides the window; 0 disables.
-    let quiesce_after: Option<std::time::Duration> = match std::env::var("ZERON_TURN_QUIESCE_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        Some(0) => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
-        None => Some(std::time::Duration::from_secs(120)),
-    };
+    let quiesce_after: Option<std::time::Duration> =
+        match cypher_env::var("TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
+            Some(0) => None,
+            Some(ms) => Some(std::time::Duration::from_millis(ms)),
+            None => Some(std::time::Duration::from_secs(120)),
+        };
     let mut last_stream_activity = tokio::time::Instant::now();
     // SELF-CONTINUED turns get a much SHORTER quiesce window. A turn the
     // agent starts on its own (background-task wake) can never receive a
@@ -1501,14 +1499,11 @@ async fn drive_run(
     // so the default 120s window read as 2min of stuck-Working after every
     // background notification (user report 2026-08-13). The in-flight
     // fold gate below still protects running tools; reasoning heartbeats
-    // push the window during real thinking. `ZERON_SELF_TURN_QUIESCE_MS`
+    // push the window during real thinking. `CYPHER_SELF_TURN_QUIESCE_MS`
     // overrides; 0 falls back to the normal window. An explicit
-    // `ZERON_TURN_QUIESCE_MS=0` still disables the watchdog entirely.
+    // `CYPHER_TURN_QUIESCE_MS=0` still disables the watchdog entirely.
     let self_quiesce_after: Option<std::time::Duration> =
-        match std::env::var("ZERON_SELF_TURN_QUIESCE_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
+        match cypher_env::var("SELF_TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
             Some(0) => None,
             Some(ms) => Some(std::time::Duration::from_millis(ms)),
             None => Some(std::time::Duration::from_secs(20)),
@@ -1619,7 +1614,7 @@ async fn drive_run(
                 && steerable
                 && !folded.iter().any(|p| match p {
                     MessagePart::Tool { id, resolved: false, .. } => {
-                        id != zeron_proto::LIVE_PLAN_TOOL_ID
+                        id != cypher_proto::LIVE_PLAN_TOOL_ID
                     }
                     MessagePart::Input { resolved: false, .. } => true,
                     _ => false,
@@ -1729,7 +1724,7 @@ async fn drive_run(
                 ) || matches!(
                     &event,
                     AgentEvent::ToolCall { id, .. }
-                        if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+                        if id == cypher_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
                 ));
             if self_continued {
                 tracing::info!(
@@ -1798,8 +1793,8 @@ async fn drive_run(
             // treating its reappearance after a park/steer reset as a stale
             // echo dropped the todo list for the rest of the run — from the
             // first boundary on, plans never rendered again.
-            AgentEvent::ToolCall { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
-            AgentEvent::ToolResult { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
+            AgentEvent::ToolCall { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
+            AgentEvent::ToolResult { id, .. } if id == cypher_proto::LIVE_PLAN_TOOL_ID => {}
             AgentEvent::ToolCall { id, .. } => {
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
@@ -1959,7 +1954,7 @@ async fn drive_run(
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run
-            // journal. To reintroduce: `zeron_doc::sidecar_payload(&event)`
+            // journal. To reintroduce: `cypher_doc::sidecar_payload(&event)`
             // → `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`, all
             // still in place and tested.
         }
