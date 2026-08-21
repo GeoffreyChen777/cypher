@@ -20,6 +20,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: cypher-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   linux:
     strategy:
@@ -61,7 +65,7 @@ jobs:
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
-    runs-on: macos-latest # Apple silicon
+    runs-on: macos-15 # Apple silicon
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -70,6 +74,8 @@ jobs:
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
+      - name: verify Apple silicon runner
+        run: test "$(uname -m)" = arm64
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
