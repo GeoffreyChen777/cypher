@@ -1307,12 +1307,7 @@ impl AppState {
                 methods::AUTH_STATUS,
                 AppState::apply_auth_value,
             ),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::UPDATE_STATUS,
-                AppState::apply_update,
-            ),
+            spawn_update_watch(cx, handle.clone()),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
@@ -1561,6 +1556,85 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
     })
 }
 
+/// Capped exponential backoff for the UpdateStatus watch: 2, 4, 8, 16, then 30s
+/// forever. The other standing watches retry at a flat 2s; the update strip is
+/// advisory and must not churn the IPC + log every 2s while the stream is
+/// unavailable or closes prematurely (the 0.1.0 local-only regression). A
+/// stream that delivered a valid frame resets the step, so a healthy engine
+/// restart is picked up quickly.
+const UPDATE_BACKOFF_SECS: [u64; 5] = [2, 4, 8, 16, 30];
+
+/// Delay for backoff `step` (0-based), capped at the final entry.
+fn update_backoff_delay(step: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(UPDATE_BACKOFF_SECS[step.min(UPDATE_BACKOFF_SECS.len() - 1)])
+}
+
+/// UpdateStatus watch. Unlike the other standing watches, the update strip is
+/// advisory: a missing or prematurely closed stream must never surface a
+/// user-facing error or churn the IPC every 2s forever. On 0.1.0 local-only
+/// runtimes had no updater, so the generic watch's flat-2s resubscribe loop
+/// spun forever; this one backs off (capped exponential) and keeps the last
+/// valid frame on screen while it is unavailable.
+fn spawn_update_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let mut backoff_step = 0usize;
+        loop {
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::UPDATE_STATUS, serde_json::json!({}))
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::debug!(error = %err, "update status unavailable; retrying");
+                    let delay = update_backoff_delay(backoff_step);
+                    if backoff_step < UPDATE_BACKOFF_SECS.len() - 1 {
+                        backoff_step += 1;
+                    }
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(delay).await;
+                    continue;
+                }
+            };
+            let mut frames = 0usize;
+            while let Some(value) = rx.recv().await {
+                let parsed: cypher_update::UpdateStatus = match serde_json::from_value(value) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "dropping malformed update frame");
+                        continue;
+                    }
+                };
+                let alive = this.update(cx, |state, cx| {
+                    state.apply_update(parsed);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+                frames += 1;
+            }
+            // Stream ended (engine restart, RPC drop). A stream that delivered a
+            // valid frame resets the backoff; one that closed prematurely keeps
+            // backing off so a broken runtime cannot churn every 2s.
+            tracing::debug!("update status stream ended; retrying");
+            if frames > 0 {
+                backoff_step = 0;
+            }
+            let delay = update_backoff_delay(backoff_step);
+            if backoff_step < UPDATE_BACKOFF_SECS.len() - 1 {
+                backoff_step += 1;
+            }
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(delay).await;
+        }
+    })
+}
+
 /// Best-effort `LocalDevice` probe: fills `local_device_id` for the "This
 /// device" badge. Engines that don't serve the method leave it `None`.
 fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
@@ -1805,6 +1879,57 @@ mod tests {
             .await
             .unwrap();
         assert!(harnesses.as_array().is_some_and(|h| !h.is_empty()));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_only_runtime_serves_update_status() {
+        // Regression (0.1.0): the release checker used to be attached only for
+        // edge-enabled runtimes, so a fresh local-only profile had no Updater —
+        // `UpdateStatus` errored, the UI's subscription closed instantly, and the
+        // generic watch re-subscribed every 2s forever. The updater must exist
+        // for every profile (release endpoints are public, updates are
+        // device-local); only the token-change wake is edge-gated.
+        let dir = tempfile::tempdir().unwrap();
+        let handle = EngineHandle::bootstrap(EngineBootConfig {
+            data_dir: dir.path().to_path_buf(),
+            ipc_port: free_port().await,
+            // Unreachable — the 20s initial check is never reached inside this
+            // test, so no real network happens.
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None, // offline
+            org_id: None,
+            workos_client_id: Some("client_test".into()), // signed out → Local
+            default_harness: HarnessId::Mock,
+        })
+        .await
+        .unwrap();
+        assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Local);
+
+        // The RPC is served by the real assembled engine (in-memory transport).
+        let mut rx = handle
+            .client()
+            .subscribe(methods::UPDATE_STATUS, serde_json::json!({}))
+            .await
+            .expect("a local-only runtime must serve UpdateStatus");
+
+        // Immediate initial frame: current version, no update yet.
+        let initial = rx
+            .recv()
+            .await
+            .expect("initial UpdateStatus frame must arrive immediately");
+        let status: cypher_update::UpdateStatus = serde_json::from_value(initial).unwrap();
+        assert_eq!(status.current_version, cypher_update::current_version());
+        assert!(!status.update_available);
+
+        // The stream stays open (no frame, no close) before the 20s check.
+        let still_open =
+            tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+        assert!(
+            still_open.is_err(),
+            "UpdateStatus stream must remain open, got: {still_open:?}"
+        );
+
         handle.shutdown().await;
     }
 
@@ -2280,6 +2405,23 @@ mod tests {
 
         state.apply_devices(vec![device("local", "José's MacBook Pro")]);
         assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
+    }
+
+    #[test]
+    fn update_backoff_is_capped_and_restarts_from_zero() {
+        // 2 → 4 → 8 → 16 → 30s cap.
+        assert_eq!(update_backoff_delay(0), std::time::Duration::from_secs(2));
+        assert_eq!(update_backoff_delay(1), std::time::Duration::from_secs(4));
+        assert_eq!(update_backoff_delay(2), std::time::Duration::from_secs(8));
+        assert_eq!(update_backoff_delay(3), std::time::Duration::from_secs(16));
+        assert_eq!(update_backoff_delay(4), std::time::Duration::from_secs(30));
+        // Any further step stays capped — a broken stream cannot spin faster.
+        assert_eq!(
+            update_backoff_delay(100),
+            std::time::Duration::from_secs(30)
+        );
+        // A healthy stream resets the step, so the next retry is fast again.
+        assert_eq!(update_backoff_delay(0), std::time::Duration::from_secs(2));
     }
 
     #[test]

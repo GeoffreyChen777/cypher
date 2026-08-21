@@ -931,6 +931,57 @@ pub struct Shell {
     _comment_popup_events: Subscription,
 }
 
+/// Pure presentation of the update strip: given the engine's last
+/// UpdateStatus, the version running in THIS process, the version the user
+/// dismissed, and this install's flow, decide whether a strip is visible and
+/// what it says. Rendered by [`Shell::render_update_strip`]; unit-tested.
+struct UpdateStripView {
+    label: SharedString,
+    clickable: bool,
+    /// Failure tone (mac flow): label in danger color, chip tinted red.
+    failed: bool,
+}
+
+fn update_strip_view(
+    status: Option<&cypher_update::UpdateStatus>,
+    app_version: &str,
+    dismissed: Option<&str>,
+    mac_app: bool,
+    flow: &UpdateFlow,
+) -> Option<UpdateStripView> {
+    let status = status?;
+    let latest = status.latest_version.as_deref()?;
+    // The engine may be a DIFFERENT-version daemon than the UI process it
+    // serves, so its `update_available` reflects the engine's own version and
+    // must not gate this process's strip. Show iff `latest` is newer than the
+    // version running here; install kind only changes the action.
+    if !cypher_update::version_newer(latest, app_version) {
+        return None;
+    }
+    if dismissed == Some(latest) {
+        return None;
+    }
+    let (label, clickable, failed) = if mac_app {
+        match flow {
+            UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true, false),
+            UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false, false),
+            UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true, false),
+            UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true, true),
+        }
+    } else {
+        (
+            format!("Update available — v{latest} · run `cypher update`").into(),
+            true,
+            false,
+        )
+    };
+    Some(UpdateStripView {
+        label,
+        clickable,
+        failed,
+    })
+}
+
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
@@ -3372,30 +3423,19 @@ impl Shell {
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
     /// (`cypher update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.state.read(cx).update.clone()?;
-        if !status.update_available {
-            return None;
-        }
-        let latest = status.latest_version.clone()?;
-        if self.update_dismissed.as_deref() == Some(latest.as_str()) {
-            return None;
-        }
         let mac_app = matches!(self.install, cypher_update::InstallKind::MacApp { .. });
-
-        let (label, clickable): (SharedString, bool) = if mac_app {
-            match &self.update_flow {
-                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
-                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
-            }
-        } else {
-            (
-                format!("Update available — v{latest} · run `cypher update`").into(),
-                true,
-            )
-        };
-        let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
+        let view = update_strip_view(
+            self.state.read(cx).update.as_ref(),
+            cypher_update::current_version(),
+            self.update_dismissed.as_deref(),
+            mac_app,
+            &self.update_flow,
+        )?;
+        let UpdateStripView {
+            label,
+            clickable,
+            failed,
+        } = view;
         let tone = if failed { theme.danger } else { theme.accent };
         // Dark-purple GLASS tint (user request), not the 400-level accent as
         // a fill: deep pigment at partial alpha tints the blur showing
@@ -6405,6 +6445,151 @@ mod tests {
             .await
             .unwrap();
         release.await.unwrap();
+    }
+
+    #[test]
+    fn update_strip_presentation() {
+        use cypher_update::UpdateStatus;
+        // `engine_current` = the attached daemon's compiled version (which can
+        // differ from the UI process's), `app` = the version running in THIS
+        // process.
+        let status = |engine_current: &str, latest: Option<&str>, available: bool| UpdateStatus {
+            current_version: engine_current.into(),
+            latest_version: latest.map(str::to_string),
+            update_available: available,
+            checked_at: None,
+            error: None,
+        };
+        // App-version source of truth: both table cases are decided against the
+        // UI process's version, never the engine's `update_available` boolean.
+        let mac_visible = |engine_current: &str, available: bool, latest: &str, app: &str| {
+            update_strip_view(
+                Some(&status(engine_current, Some(latest), available)),
+                app,
+                None,
+                true,
+                &UpdateFlow::Idle,
+            )
+            .is_some()
+        };
+
+        // Table: app 0.1.0 + engine 0.1.1/latest 0.1.1 → SHOW. The engine is
+        // up to date (its boolean is false) but this UI process is older.
+        assert!(mac_visible("0.1.1", false, "0.1.1", "0.1.0"));
+        // Table: app 0.1.1 + old engine boolean true/latest 0.1.1 → HIDE. The
+        // engine daemon is merely older; this UI process is already at latest.
+        assert!(!mac_visible("0.1.0", true, "0.1.1", "0.1.1"));
+        // Same version from either side never shows.
+        assert!(!mac_visible("0.1.1", true, "0.1.1", "0.1.1"));
+        assert!(!mac_visible("0.1.0", false, "0.1.1", "0.1.1"));
+        // A genuinely newer release than this process still shows, whatever the
+        // engine says.
+        assert!(mac_visible("0.1.1", false, "0.1.2", "0.1.1"));
+
+        // Hidden: no status, no latest, or the dismissed version.
+        assert!(update_strip_view(None, "0.1.0", None, true, &UpdateFlow::Idle).is_none());
+        assert!(
+            update_strip_view(
+                Some(&status("0.1.0", None, false)),
+                "0.1.0",
+                None,
+                true,
+                &UpdateFlow::Idle
+            )
+            .is_none()
+        );
+        assert!(
+            update_strip_view(
+                Some(&status("0.1.0", Some("0.1.1"), true)),
+                "0.1.0",
+                Some("0.1.1"),
+                true,
+                &UpdateFlow::Idle
+            )
+            .is_none()
+        );
+        // A newer release than the dismissed one shows again.
+        assert!(
+            update_strip_view(
+                Some(&status("0.1.0", Some("0.1.2"), true)),
+                "0.1.0",
+                Some("0.1.1"),
+                true,
+                &UpdateFlow::Idle
+            )
+            .is_some()
+        );
+
+        // Advisory (non-mac) install also follows this process's version, not
+        // the attached engine's boolean.
+        let view = update_strip_view(
+            Some(&status("0.1.1", Some("0.1.1"), false)),
+            "0.1.0",
+            None,
+            false,
+            &UpdateFlow::Idle,
+        )
+        .unwrap();
+        assert_eq!(
+            view.label,
+            "Update available — v0.1.1 · run `cypher update`"
+        );
+        assert!(view.clickable && !view.failed);
+        assert!(
+            update_strip_view(
+                Some(&status("0.1.0", Some("0.1.1"), true)),
+                "0.1.1",
+                None,
+                false,
+                &UpdateFlow::Idle,
+            )
+            .is_none()
+        );
+
+        // Mac bundle flow: Idle / Downloading / Ready / Failed labels + flags.
+        let view = update_strip_view(
+            Some(&status("0.1.0", Some("0.1.1"), true)),
+            "0.1.0",
+            None,
+            true,
+            &UpdateFlow::Idle,
+        )
+        .unwrap();
+        assert_eq!(view.label, "Update available — v0.1.1");
+        assert!(view.clickable && !view.failed);
+
+        let view = update_strip_view(
+            Some(&status("0.1.0", Some("0.1.1"), true)),
+            "0.1.0",
+            None,
+            true,
+            &UpdateFlow::Downloading,
+        )
+        .unwrap();
+        assert_eq!(view.label, "Downloading v0.1.1…");
+        assert!(!view.clickable && !view.failed);
+
+        let view = update_strip_view(
+            Some(&status("0.1.0", Some("0.1.1"), true)),
+            "0.1.0",
+            None,
+            true,
+            &UpdateFlow::Ready(PathBuf::from("/tmp/staged")),
+        )
+        .unwrap();
+        assert_eq!(view.label, "Update ready — restart to apply");
+        assert!(view.clickable && !view.failed);
+
+        let view = update_strip_view(
+            Some(&status("0.1.0", Some("0.1.1"), true)),
+            "0.1.0",
+            None,
+            true,
+            &UpdateFlow::Failed("checksum mismatch".into()),
+        )
+        .unwrap();
+        assert_eq!(view.label, "Update failed: checksum mismatch");
+        assert!(view.clickable && view.failed);
     }
 
     #[tokio::test]

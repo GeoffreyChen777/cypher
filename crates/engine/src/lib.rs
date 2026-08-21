@@ -734,28 +734,32 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
-        if edge_enabled {
-            // Release checker: polls {edge}/releases on a 6h cadence; headless
-            // installs with CYPHER_AUTO_UPDATE=1 apply + restart themselves —
-            // gated
-            // on quiescence so a restart never lands under a live run or open PTY.
-            let quiescent: cypher_update::QuiescentCheck = {
-                let sessions = core.sessions.clone();
-                let terminals = core.terminals.clone();
-                Arc::new(move || !sessions.any_active() && !terminals.any_open())
-            };
-            let updater = cypher_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
-            if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
-                let updater_for_tokens = updater.clone();
-                let wake = tokio::spawn(async move {
-                    while token_changes.changed().await.is_ok() {
-                        updater_for_tokens.check_now();
-                    }
-                });
-                core.set_updater_wake(wake);
-            }
-            core.set_updater(updater);
+        // Release checker: polls {edge}/releases on a 6h cadence; headless
+        // installs with CYPHER_AUTO_UPDATE=1 apply + restart themselves — gated
+        // on quiescence so a restart never lands under a live run or open PTY.
+        //
+        // Attached for EVERY runtime/profile: release endpoints are public and
+        // updates are device-local, so UpdateStatus must be served even by a
+        // local-only runtime (0.1.0 gated this on `edge_enabled`, leaving local
+        // runtimes without the UpdateStatus RPC — the UI's stream closed and
+        // resubscribed every 2s forever). Only the token-change wake stays
+        // edge-gated: it exists to re-check when auth recovers.
+        let quiescent: cypher_update::QuiescentCheck = {
+            let sessions = core.sessions.clone();
+            let terminals = core.terminals.clone();
+            Arc::new(move || !sessions.any_active() && !terminals.any_open())
+        };
+        let updater = cypher_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
+            let updater_for_tokens = updater.clone();
+            let wake = tokio::spawn(async move {
+                while token_changes.changed().await.is_ok() {
+                    updater_for_tokens.check_now();
+                }
+            });
+            core.set_updater_wake(wake);
         }
+        core.set_updater(updater);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat

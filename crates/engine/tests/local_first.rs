@@ -303,7 +303,7 @@ async fn clean_local_auth_construction_does_not_probe_edge_health() {
 }
 
 #[tokio::test]
-async fn local_runtime_does_not_start_the_edge_updater() {
+async fn local_runtime_serves_update_status_without_edge_routing() {
     let dir = tempfile::tempdir().unwrap();
     let (edge_url, requests, edge_task) = rejecting_edge().await;
     let config = config(dir.path(), edge_url, Some("client_test"), None);
@@ -319,10 +319,37 @@ async fn local_runtime_does_not_start_the_edge_updater() {
 
     assert_eq!(scope, WorkspaceScope::Local);
     assert!(runtime.core().links().is_none());
+    // The release checker runs for EVERY runtime/profile — a local-only
+    // runtime must still serve UpdateStatus to the UI (release endpoints are
+    // public, updates are device-local). The old gate left local runtimes
+    // without the RPC and the UI's stream resubscribed forever.
     assert!(
-        runtime.core().updater().is_none(),
-        "local runtime must not start an Edge updater"
+        runtime.core().updater().is_some(),
+        "local runtime must serve UpdateStatus via the release checker"
     );
+    let service = runtime.core().rpc_service();
+    let client = cypher_rpc::memory_client(service);
+    let mut updates = client
+        .subscribe(cypher_rpc::methods::UPDATE_STATUS, serde_json::json!({}))
+        .await
+        .expect("local runtime must accept UpdateStatus subscriptions");
+    let initial = tokio::time::timeout(std::time::Duration::from_secs(1), updates.recv())
+        .await
+        .expect("initial UpdateStatus frame timed out")
+        .expect("UpdateStatus stream closed before its initial frame");
+    let initial: cypher_update::UpdateStatus =
+        serde_json::from_value(initial).expect("initial UpdateStatus must deserialize");
+    assert_eq!(initial.current_version, env!("CARGO_PKG_VERSION"));
+    assert!(!initial.update_available);
+    assert!(initial.latest_version.is_none());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), updates.recv())
+            .await
+            .is_err(),
+        "UpdateStatus stream must remain open before the delayed first check"
+    );
+    // ...but nothing edge-bound happens: no token wake, and the first release
+    // check waits out the 20s initial delay, so zero network requests land.
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     runtime.shutdown().await;

@@ -526,8 +526,12 @@ impl Updater {
     /// Spawn the check loop (must run on a tokio runtime).
     pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
         let (status_tx, _) = watch::channel(UpdateStatus::initial());
-        let (check_tx, _) = watch::channel(0);
-        let (shutdown_tx, _) = watch::channel(false);
+        // Create the loop's receivers synchronously. If they were subscribed
+        // inside the spawned task, an immediate `check_now` could be lost and
+        // an immediate `shutdown` could fail while no receiver existed,
+        // leaving shutdown waiting forever for the 6h loop.
+        let (check_tx, checks) = watch::channel(0);
+        let (shutdown_tx, shutdown) = watch::channel(false);
         let updater = Self {
             edge_url,
             status_tx: Arc::new(status_tx),
@@ -537,7 +541,7 @@ impl Updater {
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
         let for_loop = updater.clone();
-        let task = tokio::spawn(async move { for_loop.check_loop().await });
+        let task = tokio::spawn(async move { for_loop.check_loop(shutdown, checks).await });
         *updater.check_task.lock().unwrap() = Some(task);
         updater
     }
@@ -572,15 +576,17 @@ impl Updater {
         self.quiescent.as_ref().is_none_or(|check| check())
     }
 
-    async fn check_loop(&self) {
-        let mut shutdown = self.shutdown_tx.subscribe();
+    async fn check_loop(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+        mut checks: watch::Receiver<u64>,
+    ) {
         // Shutdown must cut the loop at ANY await point — including mid
         // `check_once()` / `auto_apply_when_idle()` HTTP — so the whole body
         // races the flag rather than checking it between iterations.
         tokio::select! {
             _ = shutdown.wait_for(|stop| *stop) => {}
             _ = async {
-                let mut checks = self.check_tx.subscribe();
                 tokio::select! {
                     _ = tokio::time::sleep(CHECK_INITIAL_DELAY) => {}
                     _ = checks.changed() => {}
@@ -782,6 +788,14 @@ mod tests {
         );
         let bare: Manifest = serde_json::from_str(r#"{"version":"0.1.1"}"#).unwrap();
         assert!(bare.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn immediate_shutdown_cannot_miss_the_loop_receiver() {
+        let updater = Updater::spawn("http://127.0.0.1:1".into(), None);
+        tokio::time::timeout(std::time::Duration::from_secs(1), updater.shutdown())
+            .await
+            .expect("immediate updater shutdown must not hang");
     }
 
     #[cfg(unix)]
