@@ -201,7 +201,24 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                 return;
             }
             if refresh_token == "dead" {
-                respond(&mut stream, "401 Unauthorized", r#"{"error":"revoked"}"#).await;
+                respond(
+                    &mut stream,
+                    "401 Unauthorized",
+                    r#"{"error":"revoked","code":"invalid_grant"}"#,
+                )
+                .await;
+                return;
+            }
+            // A 401 whose body carries no recognized permanent code — a
+            // transient blip (rate limit, upstream) or an unclassifiable
+            // rejection — must NOT clear the session.
+            if refresh_token == "blip" {
+                respond(
+                    &mut stream,
+                    "401 Unauthorized",
+                    r#"{"error":"revoked","code":"upstream"}"#,
+                )
+                .await;
                 return;
             }
             let n = state.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
@@ -299,6 +316,12 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     assert_eq!(
         query_param(&url, "client_id").as_deref(),
         Some("client_test")
+    );
+    // GitHub-only enforcement: the provider is pinned to the exact
+    // `GitHubOAuth`, never AuthKit's email/SSO selector.
+    assert_eq!(
+        query_param(&url, "provider").as_deref(),
+        Some("GitHubOAuth")
     );
     let redirect = query_param(&url, "redirect_uri").expect("redirect");
     assert!(
@@ -435,6 +458,28 @@ async fn revoked_refresh_token_signs_out() {
         "revocation must not rewrite the captured startup fact"
     );
     assert!(!dir.path().join("session.json").exists());
+}
+
+#[tokio::test]
+async fn non_permanent_401_keeps_session() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The edge answers 401 but the body carries no recognized permanent code
+    // (e.g. `code: "upstream"` — an unclassified/transient rejection). That is
+    // NOT a dead session: permanent rejection requires a stable machine code
+    // like `invalid_grant`, never just a 401.
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"refreshToken":"blip","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+    )
+    .expect("seed session");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    assert!(auth.state().is_signed_in());
+
+    // The refresh fails but is NOT permanent → the session survives.
+    assert_eq!(auth.access_token().await, None);
+    assert!(auth.state().is_signed_in());
+    assert!(dir.path().join("session.json").exists());
 }
 
 #[tokio::test]

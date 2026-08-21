@@ -20,6 +20,12 @@ final class AppConfig: @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: AuthTokens?
     private var devBearer: String?
+    private let refreshGate = RefreshGate()
+
+    /// Injectable for tests: how a fresh AuthClient is built. The production
+    /// default rides URLSession.shared; tests substitute a recording client
+    /// to count /auth/refresh calls deterministically.
+    var makeClient: (URL) -> AuthClient = { AuthClient(baseURL: $0) }
 
     init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
          deviceId: String, deviceName: String,
@@ -34,36 +40,90 @@ final class AppConfig: @unchecked Sendable {
         self.devBearer = devBearer
     }
 
-    func updateTokens(_ new: AuthTokens) {
-        lock.lock(); defer { lock.unlock() }
-        tokens = new
-    }
-
     /// Current bearer, refreshing the WorkOS access token when needed.
+    /// Single-flight: concurrent callers sharing one expired token await the
+    /// same in-flight `/auth/refresh` (a refresh token is single-use — the
+    /// race this removes would rotate it N times and invalidate it on the
+    /// second), and rotated tokens persist exactly once. A failed refresh
+    /// never yields the known-expired bearer: transient failures return nil
+    /// (refresh token preserved), permanent rejection clears every
+    /// credential.
     func currentToken() async -> String? {
         switch mode {
         case .dev:
             lock.lock(); defer { lock.unlock() }
             return devBearer
         case .workos:
-            lock.lock()
-            let current = tokens
-            lock.unlock()
-            guard let current else { return nil }
-            if !Self.isExpired(jwt: current.accessToken) {
+            // Fast path: a still-fresh token needs no refresh.
+            if let current = readTokens(), !Self.isExpired(jwt: current.accessToken) {
                 return current.accessToken
             }
-            let client = AuthClient(baseURL: edgeURL)
-            guard let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
-                                                            organizationId: orgId) else {
-                roomLog.error("auth: token refresh failed; using expired access token (server will reject and rooms will redial)")
-                return current.accessToken  // let the server reject; backoff redials
+            let refreshed = await refreshGate.refresh { [self] in
+                await performRefresh()
             }
-            updateTokens(refreshed)
-            Keychain.save(refreshed.accessToken, key: "accessToken")
-            Keychain.save(refreshed.refreshToken, key: "refreshToken")
-            return refreshed.accessToken
+            return refreshed?.accessToken
         }
+    }
+
+    /// One refresh attempt under the gate. Re-checks freshness (the refresh
+    /// we queued behind may have done the work), rotates via `/auth/refresh`,
+    /// persists once, and classifies failures: a permanent 401 clears every
+    /// credential; transient failures (429/5xx/transport) preserve the
+    /// refresh token and yield nil for this attempt.
+    private func performRefresh() async -> AuthTokens? {
+        // Re-check under the gate: the refresh we queued behind may already
+        // have rotated the tokens.
+        if let current = readTokens(), !Self.isExpired(jwt: current.accessToken) {
+            return current
+        }
+        guard let current = readTokens() else { return nil }
+        let client = makeClient(edgeURL)
+        do {
+            let refreshed = try await client.refresh(refreshToken: current.refreshToken,
+                                                     organizationId: orgId)
+            persist(refreshed)
+            return refreshed
+        } catch let error as AuthError {
+            if error.isPermanent {
+                // The session is dead (revoked/deleted) and can never
+                // recover: drop in-memory + keychain credentials so neither
+                // this process nor a relaunch keeps dialing with them.
+                roomLog.error("auth: refresh permanently rejected; clearing session")
+                clearTokens()
+            } else {
+                // Transient (429/5xx/transport): keep the refresh token for a
+                // later attempt; this attempt simply has no bearer.
+                roomLog.error("auth: refresh failed transiently (\(error.localizedDescription))")
+            }
+            return nil
+        } catch {
+            roomLog.error("auth: refresh failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func readTokens() -> AuthTokens? {
+        lock.lock(); defer { lock.unlock() }
+        return tokens
+    }
+
+    private func updateTokens(_ new: AuthTokens) {
+        lock.lock(); defer { lock.unlock() }
+        tokens = new
+    }
+
+    private func persist(_ new: AuthTokens) {
+        updateTokens(new)
+        Keychain.save(new.accessToken, key: "accessToken")
+        Keychain.save(new.refreshToken, key: "refreshToken")
+    }
+
+    /// Permanent rejection: wipe in-memory and stored credentials.
+    private func clearTokens() {
+        lock.lock(); defer { lock.unlock() }
+        tokens = nil
+        Keychain.delete(key: "accessToken")
+        Keychain.delete(key: "refreshToken")
     }
 
     private var wsBase: URL {
@@ -137,5 +197,24 @@ final class AppConfig: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["chatId": chatId])
         _ = try? await URLSession.shared.data(for: request)
+    }
+}
+
+/// Single-flight refresh gate. Concurrent `currentToken` calls that all see
+/// one expired token share exactly one in-flight `/auth/refresh` and await
+/// its result — a refresh token is single-use, so the lock/read/unlock race
+/// this replaces would rotate it once per caller and invalidate it on the
+/// second. Rotated tokens therefore persist exactly once per refresh.
+private actor RefreshGate {
+    private var inFlight: Task<AuthTokens?, Never>?
+
+    func refresh(_ run: @escaping @Sendable () async -> AuthTokens?) async -> AuthTokens? {
+        if let inFlight {
+            return await inFlight.value
+        }
+        let task = Task { await run() }
+        inFlight = task
+        defer { inFlight = nil }
+        return await task.value
     }
 }

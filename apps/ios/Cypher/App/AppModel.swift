@@ -189,21 +189,34 @@ final class AppModel {
     // MARK: Sign-in flows
 
     /// WorkOS paste-code exchange. Returns the org list for the picker (or
-    /// connects straight away when exactly one org exists).
-    func signIn(edgeURL: URL, code: String) async throws {
+    /// connects straight away when exactly one org exists); a user with zero
+    /// memberships lands on the picker's first-user onboarding form.
+    func signIn(edgeURL: URL, code: String, codeVerifier: String) async throws {
         let client = AuthClient(baseURL: edgeURL)
-        let (user, tokens) = try await client.exchange(code: code)
+        let (user, tokens) = try await client.exchange(code: code, codeVerifier: codeVerifier)
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.workos.rawValue
         storedUserId = user.id
         let orgs = try await client.orgs(accessToken: tokens.accessToken)
-        if let only = orgs.first, orgs.count == 1 {
+        switch OrgSelection.route(for: orgs) {
+        case .autoSelect(let only):
             try await selectOrg(only, tokens: tokens)
-        } else if orgs.isEmpty {
-            throw AuthError.http(403, "No organizations for this account")
-        } else {
+        case .pick:
             phase = .pickingOrg(tokens, orgs)
+        case .createOrg:
+            // No memberships: first-user onboarding (the picker shows the
+            // workspace-name form and creates on submit).
+            phase = .pickingOrg(tokens, [])
         }
+    }
+
+    /// First-user onboarding: create a workspace, then re-scope into it via
+    /// the same refresh/select path as a picked org.
+    func createOrg(name: String, tokens: AuthTokens) async throws {
+        guard let url = URL(string: edgeURLString) else { return }
+        let client = AuthClient(baseURL: url)
+        let org = try await client.createOrg(name: name, accessToken: tokens.accessToken)
+        try await selectOrg(org, tokens: tokens)
     }
 
     func selectOrg(_ org: AuthOrg, tokens: AuthTokens) async throws {

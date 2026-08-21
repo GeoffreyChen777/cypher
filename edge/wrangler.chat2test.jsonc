@@ -30,7 +30,7 @@
     { "binding": "RELEASES", "bucket_name": "comet-native-blobs-chat2test" }
   ],
   "vars": {
-    "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "WORKOS_CLIENT_ID": "client_test",
     "AUTH_MODE": "dev"
   },
   "observability": {

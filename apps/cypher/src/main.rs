@@ -66,7 +66,7 @@ const DEFAULT_EDGE_URL: &str = "https://edge.letscypher.app";
 /// authorize URL), so baking it in is safe. Overridden by `CYPHER_WORKOS_CLIENT_ID`;
 /// set it to the empty string — or set a dev bearer via `CYPHER_EDGE_TOKEN` — to
 /// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
+const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01M0JTKFKB6QZWHZDGYW7AN8QH";
 
 fn edge_url_from_env() -> String {
     cypher_env::var("EDGE_URL")
@@ -74,15 +74,26 @@ fn edge_url_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
 }
 
-/// WorkOS client id resolution: explicit env wins (empty string = dev mode);
-/// otherwise a `CYPHER_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
-/// local wrangler); otherwise the baked production client id makes optional
-/// sync available while a bare start remains local-only.
-fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
+/// The ONLY edge the baked production client id may target. A custom
+/// `CYPHER_EDGE_URL` (local wrangler, self-hosted) has no production WorkOS
+/// credentials and must never mint real authorize URLs.
+const PRODUCTION_EDGE_URL: &str = "https://edge.letscypher.app";
+
+/// WorkOS client id resolution:
+///  - an explicit `CYPHER_WORKOS_CLIENT_ID` always wins (empty string = dev
+///    mode, disabling WorkOS entirely);
+///  - otherwise a `CYPHER_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
+///    local wrangler) — a bare production client id plus a dev bearer would
+///    authorize against the real WorkOS tenant;
+///  - otherwise the baked production client id applies ONLY when the resolved
+///    edge is exactly [`PRODUCTION_EDGE_URL`]; any custom `CYPHER_EDGE_URL`
+///    without an explicit client id disables WorkOS.
+fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Option<String> {
     match std::env::var("CYPHER_WORKOS_CLIENT_ID") {
         Ok(v) if v.trim().is_empty() => None,
         Ok(v) => Some(v),
         Err(_) if edge_token.is_some() => None,
+        Err(_) if edge_url != PRODUCTION_EDGE_URL => None,
         Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
     }
 }
@@ -189,7 +200,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
                 edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
+                workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
                 edge_token,
                 org_id: cypher_env::var("ORG_ID"),
                 default_harness: cypher_ui::HarnessId::ClaudeCode,
@@ -224,7 +235,7 @@ fn engine_config_from_env() -> cypher_engine::EngineConfig {
         org_id: cypher_env::var("ORG_ID"),
         // Real auth against production by default; see
         // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_token),
+        workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
         edge_token,
     }
 }
@@ -462,6 +473,102 @@ mod log_file_tests {
             "rotation resumes"
         );
         drop(third);
+    }
+}
+
+#[cfg(test)]
+mod workos_resolver_tests {
+    use super::{DEFAULT_WORKOS_CLIENT_ID, PRODUCTION_EDGE_URL, workos_client_id_from_env};
+    use std::sync::Mutex;
+
+    /// Env vars are process-global and cargo runs tests in parallel — serialize
+    /// the resolver cases so one cannot observe another's vars.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    fn resolve(edge_url: &str, token: Option<&str>) -> Option<String> {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+        set("CYPHER_EDGE_TOKEN", token);
+        let result = workos_client_id_from_env(edge_url, &token.map(str::to_string));
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+        set("CYPHER_EDGE_TOKEN", None);
+        result
+    }
+
+    #[test]
+    fn explicit_client_id_always_wins() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Wins over a dev bearer...
+        set("CYPHER_WORKOS_CLIENT_ID", Some("client_custom"));
+        set("CYPHER_EDGE_TOKEN", Some("dev-token"));
+        assert_eq!(
+            workos_client_id_from_env(PRODUCTION_EDGE_URL, &Some("dev-token".into())),
+            Some("client_custom".into())
+        );
+        // ...and over a custom edge URL.
+        set("CYPHER_EDGE_TOKEN", None);
+        assert_eq!(
+            workos_client_id_from_env("http://localhost:27640", &None),
+            Some("client_custom".into())
+        );
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+    }
+
+    #[test]
+    fn explicit_empty_client_id_disables_even_on_production() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set("CYPHER_WORKOS_CLIENT_ID", Some("  ")); // whitespace = empty
+        set("CYPHER_EDGE_TOKEN", None);
+        assert_eq!(workos_client_id_from_env(PRODUCTION_EDGE_URL, &None), None);
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+    }
+
+    #[test]
+    fn dev_token_implies_dev_mode_without_explicit_id() {
+        assert_eq!(
+            resolve(PRODUCTION_EDGE_URL, Some("dev-token")),
+            None,
+            "a dev bearer must not pair with the production client id"
+        );
+    }
+
+    #[test]
+    fn production_edge_without_overrides_gets_baked_id() {
+        assert_eq!(
+            resolve(PRODUCTION_EDGE_URL, None),
+            Some(DEFAULT_WORKOS_CLIENT_ID.into())
+        );
+        // Exact match only: a trailing slash is a different (custom) edge.
+        assert_eq!(
+            resolve("https://edge.letscypher.app/", None),
+            None,
+            "the URL must match exactly"
+        );
+    }
+
+    #[test]
+    fn custom_edge_without_explicit_id_disables_workos() {
+        for edge in [
+            "http://localhost:27640",
+            "https://edge.example.dev",
+            "https://edge.letscypher.app.evil.example",
+        ] {
+            assert_eq!(resolve(edge, None), None, "custom edge {edge}");
+            assert_eq!(resolve(edge, Some("dev-token")), None, "custom edge {edge}");
+        }
     }
 }
 

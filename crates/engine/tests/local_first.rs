@@ -46,7 +46,9 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
                 let mut request = [0u8; 4096];
                 let _ = stream.read(&mut request).await;
                 seen.fetch_add(1, Ordering::SeqCst);
-                let body = r#"{"error":"revoked"}"#;
+                // A permanent rejection: 401 with the stable `invalid_grant`
+                // machine code (the real edge's shape for a dead refresh token).
+                let body = r#"{"error":"revoked","code":"invalid_grant"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()

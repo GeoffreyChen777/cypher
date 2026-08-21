@@ -11,6 +11,7 @@
  *   GET  /auth/orgs                   — caller's active org memberships
  *   POST /auth/orgs                   — create org + admin membership
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
+ *   GET  /auth/ios/callback           — iOS bridge → cypher://callback (query intact)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)

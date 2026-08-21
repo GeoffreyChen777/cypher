@@ -565,11 +565,11 @@ impl Engine {
         {
             auth_config.workos_api_base = base;
         }
-        auth_config.callback_port = Some(
-            cypher_env::var("CALLBACK_PORT")
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(27641),
-        );
+        // Production default: an EPHEMERAL loopback port (OS-assigned). Only an
+        // explicit CYPHER_CALLBACK_PORT pins a concrete port (port-forwarded
+        // dev boxes, firewalled hosts). The dashboard registers the wildcard
+        // `http://127.0.0.1:*/callback`, so the exact port is irrelevant to it.
+        auth_config.callback_port = cypher_env::var("CALLBACK_PORT").and_then(|p| p.parse().ok());
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
         }

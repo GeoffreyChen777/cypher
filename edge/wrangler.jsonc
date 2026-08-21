@@ -67,11 +67,11 @@
     }
   ],
   "vars": {
-    // WorkOS AuthKit client id — JWTs verified against its JWKS. Placeholder;
-    // set the real client id before deploying. Set AUTH_MODE=dev locally to
-    // accept bearer==userId. WORKOS_API_KEY is a wrangler secret
+    // Cypher Production WorkOS AuthKit client id — JWTs are verified against
+    // its issuer/JWKS. Set AUTH_MODE=dev locally to accept bearer==userId.
+    // WORKOS_API_KEY is a wrangler secret
     // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
-    "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "WORKOS_CLIENT_ID": "client_01M0JTKFKB6QZWHZDGYW7AN8QH",
     "AUTH_MODE": "workos"
   },
   "observability": {

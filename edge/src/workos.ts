@@ -13,9 +13,29 @@ import type { Env } from "./env";
 
 const API = "https://api.workos.com";
 
-/** Thrown for rejected WorkOS calls; routes map it to 401 (same as the old
- * server's WorkOsAuthFailed). */
-export class WorkOsAuthFailed extends Error {}
+/** Stable machine-readable codes carried by [`WorkOsAuthError`]. Devices key
+ * session-revocation off `invalid_grant` ALONE — every other code is
+ * retryable, so a transient WorkOS/network hiccup can never clear a session. */
+export type WorkOsErrorCode = "invalid_grant" | "rate_limited" | "network" | "upstream";
+
+/** Typed WorkOS failure. Replaces the old blanket `WorkOsAuthFailed` → 401
+ * mapping: carries the HTTP status to surface, a stable machine-readable
+ * `code`, whether the attempt is retryable (false = permanent credential
+ * rejection — the ONLY case a device may sign out), and a human-safe message
+ * that never embeds upstream error bodies. */
+export class WorkOsAuthError extends Error {
+  readonly status: number;
+  readonly code: WorkOsErrorCode;
+  readonly retryable: boolean;
+
+  constructor(status: number, code: WorkOsErrorCode, retryable: boolean, message: string) {
+    super(message);
+    this.name = "WorkOsAuthError";
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
 
 export interface ExchangeResult {
   readonly user: {
@@ -58,19 +78,66 @@ interface WireMembership {
   organization_name?: string | null;
 }
 
-const failed = async (res: Response): Promise<never> => {
-  let message = "authentication failed";
+/** Parse a rejected WorkOS body for its OAuth `error` code without trusting
+ * the rest; a non-JSON body is simply an unknown error. */
+const readWireError = async (res: Response): Promise<{
+  error?: string;
+  error_description?: string;
+  message?: string;
+}> => {
   try {
-    const body = (await res.json()) as { message?: string; error_description?: string; error?: string };
-    message = body.message ?? body.error_description ?? body.error ?? message;
+    return (await res.json()) as { error?: string; error_description?: string; message?: string };
   } catch {
-    /* non-JSON error body */
+    return {};
   }
-  throw new WorkOsAuthFailed(message);
+};
+
+/** Map a rejected WorkOS response to a typed, status-preserving error.
+ *
+ *  - `invalid_grant` (expired/invalid auth code or refresh token — WorkOS's
+ *    explicit credential rejection) → 401, permanent.
+ *  - 429 rate limit → 429, retryable.
+ *  - 5xx → 503, retryable.
+ *  - anything else (unexpected 4xx, unknown error code, non-JSON body) → 502,
+ *    retryable, WITHOUT the upstream body: only an explicit `invalid_grant`
+ *    may clear a session, so every ambiguous failure is conservative. */
+const failed = async (res: Response): Promise<never> => {
+  const { error, error_description, message } = await readWireError(res);
+  const status = res.status;
+  if (error === "invalid_grant") {
+    throw new WorkOsAuthError(
+      401,
+      "invalid_grant",
+      false,
+      error_description ?? message ?? "authentication rejected"
+    );
+  }
+  if (status === 429) {
+    throw new WorkOsAuthError(429, "rate_limited", true, "rate limited — try again later");
+  }
+  if (status >= 500) {
+    throw new WorkOsAuthError(503, "upstream", true, "authentication service unavailable");
+  }
+  throw new WorkOsAuthError(
+    502,
+    "upstream",
+    true,
+    "authentication failed — please try again"
+  );
+};
+
+/** fetch that turns transport failures (DNS, connection reset, timeouts) into
+ * a typed, retryable 502 — never an untyped throw the routes can't classify. */
+const fetchOrError = async (url: string, init: RequestInit): Promise<Response> => {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new WorkOsAuthError(502, "network", true, "could not reach the authentication service");
+  }
 };
 
 const post = async (apiKey: string, path: string, body: unknown): Promise<Response> =>
-  fetch(`${API}${path}`, {
+  fetchOrError(`${API}${path}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -79,16 +146,26 @@ const post = async (apiKey: string, path: string, body: unknown): Promise<Respon
     body: JSON.stringify(body)
   });
 
-/** `authenticateWithCode`: WorkOS code → tokens + user. */
-export const exchange = async (env: Env, apiKey: string, code: string): Promise<ExchangeResult> => {
-  const res = await fetch(`${API}/user_management/authenticate`, {
+/** `authenticateWithCode`: WorkOS code + PKCE verifier → tokens + user. The
+ * verifier (`code_verifier`) is what proves this exchange belongs to the
+ * authorize URL that published its S256 `code_challenge`; it must match the
+ * challenge WorkOS issued. Neither the code nor the verifier is ever logged
+ * here or by the caller. */
+export const exchange = async (
+  env: Env,
+  apiKey: string,
+  code: string,
+  codeVerifier: string
+): Promise<ExchangeResult> => {
+  const res = await fetchOrError(`${API}/user_management/authenticate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       client_id: env.WORKOS_CLIENT_ID,
       client_secret: apiKey,
       grant_type: "authorization_code",
-      code
+      code,
+      code_verifier: codeVerifier
     })
   });
   if (!res.ok) return failed(res);
@@ -113,7 +190,7 @@ export const refresh = async (
   refreshToken: string,
   organizationId?: string
 ): Promise<RefreshResult> => {
-  const res = await fetch(`${API}/user_management/authenticate`, {
+  const res = await fetchOrError(`${API}/user_management/authenticate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -132,9 +209,10 @@ export const refresh = async (
 /** The user's active organization memberships. */
 export const listOrgs = async (apiKey: string, userId: string): Promise<OrgMembership[]> => {
   const params = new URLSearchParams({ user_id: userId, statuses: "active", limit: "100" });
-  const res = await fetch(`${API}/user_management/organization_memberships?${params}`, {
-    headers: { authorization: `Bearer ${apiKey}` }
-  });
+  const res = await fetchOrError(
+    `${API}/user_management/organization_memberships?${params}`,
+    { headers: { authorization: `Bearer ${apiKey}` } }
+  );
   if (!res.ok) return failed(res);
   const r = (await res.json()) as { data: WireMembership[] };
   return r.data.map((m) => ({

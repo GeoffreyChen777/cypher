@@ -4,6 +4,9 @@
 //! The engine is a public client: it builds the AuthKit authorize URL itself but
 //! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker
 //! (`/auth/exchange`, `/auth/refresh` — the WorkOS API key lives only there).
+//! Every authorization attempt draws a fresh RFC 7636 PKCE verifier (stored with
+//! the pending `state`), publishes its S256 `code_challenge`, and presents the
+//! verifier exactly once at the exchange; cancellation erases it.
 //!
 //! Two modes:
 //! - **Dev** (no WorkOS client id configured, or the edge reports `auth: "dev"`): always
@@ -226,10 +229,21 @@ struct AuthInner {
     loopback: tokio::sync::Mutex<Option<u16>>,
 }
 
+/// A pending authorization attempt: the RFC 7636 PKCE verifier bound to the
+/// OAuth `state`, plus when it was started (TTL is [`SIGN_IN_TTL`]). The
+/// verifier is consumed exactly once together with the state — the same
+/// `take_pending` call removes both, so a replayed callback can never reuse a
+/// verifier and a canceled sign-in can never exchange with one.
+struct PendingSignIn {
+    verifier: String,
+    at: Instant,
+}
+
 #[derive(Default)]
 struct SignInLifecycle {
     generation: u64,
-    pending: HashMap<String, Instant>,
+    /// `state` → the pending attempt it fences.
+    pending: HashMap<String, PendingSignIn>,
 }
 
 /// The auth service — cheap to clone by `Arc`.
@@ -382,6 +396,13 @@ impl Auth {
             }
             let mut state_rx = auth.watch_state();
             let mut wake = cypher_sync::wake::subscribe();
+            // Exponential backoff for failed refreshes: a transient edge/WorkOS
+            // outage must never turn into a tight retry loop. A session is only
+            // revoked by an explicit permanent rejection, which signs out and
+            // parks this loop on the state channel at the top.
+            const BACKOFF_MIN: Duration = Duration::from_secs(5);
+            const BACKOFF_MAX: Duration = Duration::from_secs(300);
+            let mut backoff = BACKOFF_MIN;
             loop {
                 if !state_rx.borrow().is_signed_in() {
                     if state_rx.changed().await.is_err() {
@@ -415,8 +436,15 @@ impl Auth {
                     }
                 }
                 if let Err(err) = auth.refresh(None).await {
-                    tracing::warn!(error = %err, "auth: background refresh failed");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    tracing::warn!(
+                        error = %err,
+                        backoff_s = backoff.as_secs(),
+                        "auth: background refresh failed; backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                } else {
+                    backoff = BACKOFF_MIN;
                 }
             }
         })
@@ -458,13 +486,13 @@ impl Auth {
                     .into(),
             ));
         }
-        let Some(generation) = self.take_pending(state) else {
+        let Some((generation, verifier)) = self.take_pending(state) else {
             return Err(EngineError::Other(
                 "invalid or expired sign-in code — start sign-in again and paste the full code"
                     .into(),
             ));
         };
-        let result = self.exchange_code(code).await?;
+        let result = self.exchange_code(code, &verifier).await?;
         self.finish_sign_in(result, generation)
     }
 
@@ -542,37 +570,56 @@ impl Auth {
 
     fn begin_sign_in(&self, redirect_uri: &str) -> String {
         let state = uuid::Uuid::new_v4().to_string();
+        // RFC 7636 §4: every authorization attempt draws a fresh CSPRNG
+        // verifier and sends its S256 challenge up front; the verifier itself
+        // never leaves this device until the code exchange.
+        let verifier = new_pkce_verifier();
+        let challenge = pkce_s256_challenge(&verifier);
         {
             let mut sign_in = lock(&self.inner.sign_in);
             let cutoff = Instant::now();
             sign_in
                 .pending
-                .retain(|_, at| cutoff.duration_since(*at) < SIGN_IN_TTL);
-            sign_in.pending.insert(state.clone(), cutoff);
+                .retain(|_, pending| cutoff.duration_since(pending.at) < SIGN_IN_TTL);
+            sign_in.pending.insert(
+                state.clone(),
+                PendingSignIn {
+                    verifier,
+                    at: cutoff,
+                },
+            );
         }
         let client_id = self.inner.workos.clone().unwrap_or_default();
+        // GitHub-only: pin `provider` to the exact `GitHubOAuth` so the app
+        // flow can never fall back to AuthKit's email/SSO screen. Defense-in-
+        // depth — the dashboard AuthKit still exposes those providers, but the
+        // Cypher app surfaces GitHub sign-in exclusively. Callback and PKCE are
+        // unaffected by the provider pin.
         format!(
-            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
+            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=GitHubOAuth&state={}&code_challenge={}&code_challenge_method=S256",
             self.inner.config.workos_api_base.trim_end_matches('/'),
             url_encode(&client_id),
             url_encode(redirect_uri),
-            state
+            state,
+            challenge
         )
     }
 
-    /// Consume a pending sign-in state and capture its cancellation generation.
-    /// `None` means unknown/expired (CSRF check).
-    fn take_pending(&self, state: &str) -> Option<u64> {
+    /// Consume a pending sign-in state (and its PKCE verifier) and capture the
+    /// cancellation generation. `None` means unknown/expired (CSRF check). The
+    /// verifier leaves with the state: the same state can never be exchanged
+    /// twice, and an unmatched verifier is never recoverable.
+    fn take_pending(&self, state: &str) -> Option<(u64, String)> {
         let mut sign_in = lock(&self.inner.sign_in);
         let now = Instant::now();
         sign_in
             .pending
-            .retain(|_, at| now.duration_since(*at) < SIGN_IN_TTL);
-        sign_in.pending.remove(state)?;
-        Some(sign_in.generation)
+            .retain(|_, pending| now.duration_since(pending.at) < SIGN_IN_TTL);
+        let pending = sign_in.pending.remove(state)?;
+        Some((sign_in.generation, pending.verifier))
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<SignInResult, EngineError> {
+    async fn exchange_code(&self, code: &str, verifier: &str) -> Result<SignInResult, EngineError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WireUser {
@@ -598,7 +645,12 @@ impl Auth {
             .inner
             .http
             .post(&url)
-            .json(&serde_json::json!({ "code": code }))
+            .json(&serde_json::json!({
+                "code": code,
+                // RFC 7636 §4.5: the verifier is presented exactly once, at
+                // the exchange, to the edge that saw the challenge.
+                "codeVerifier": verifier
+            }))
             .send()
             .await
             .map_err(|e| EngineError::Other(format!("the edge is unreachable: {e}")))?;
@@ -709,19 +761,31 @@ impl Auth {
             }
         };
         let status = res.status().as_u16();
-        if (400..500).contains(&status) && organization_id.is_none() {
-            // A definitive 4xx means the refresh token itself is dead (revoked session,
-            // deleted user) — it can NEVER succeed again. Degrade to SignedOut so every
-            // downstream retry loop quiets down. (Org-switch refreshes are exempt: a 4xx
-            // there means "not a member", not a dead session.)
-            tracing::warn!(
-                status,
-                "auth: refresh rejected — session revoked; signing out"
-            );
-            self.sign_out();
-            return Ok(None);
-        }
         if !res.status().is_success() {
+            // Permanent rejection requires BOTH an HTTP 401 AND a stable machine
+            // `code` that means the refresh token itself is dead (revoked session,
+            // deleted user) — it can NEVER succeed again, so degrade to SignedOut
+            // and every downstream retry loop quiets down. Everything else — 429
+            // rate limits, 502/503 upstream/network failures, or even a 401 whose
+            // body carries no recognized code — is transient: the session survives
+            // and the caller backs off and retries. This applies to org-switch
+            // refreshes too: an `invalid_grant` is a dead refresh token no matter
+            // what scope the attempt carried, while a "not a member" rejection
+            // surfaces its own (non-permanent) code and stays an error.
+            let code = res
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_owned));
+            if status == 401 && code.as_deref().is_some_and(is_permanent_refresh_rejection) {
+                tracing::warn!(
+                    status,
+                    code = code.as_deref().unwrap_or(""),
+                    "auth: refresh rejected — session revoked; signing out"
+                );
+                self.sign_out();
+                return Ok(None);
+            }
             return Err(EngineError::Other(format!("refresh failed ({status})")));
         }
         #[derive(Deserialize)]
@@ -934,7 +998,7 @@ async fn handle_loopback_conn(
         };
         match (code, state) {
             (Some(code), Some(state)) => match auth.take_pending(state) {
-                Some(generation) => match auth.exchange_code(code).await {
+                Some((generation, verifier)) => match auth.exchange_code(code, &verifier).await {
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
@@ -976,8 +1040,40 @@ fn page(message: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// PKCE (RFC 7636) — verifier/challenge generation
+// ---------------------------------------------------------------------------
+
+/// A fresh RFC 7636 §4.1 verifier: 43–128 characters of the unreserved URL-safe
+/// alphabet. 32 CSPRNG bytes encode to 43 base64url chars (no padding), so the
+/// output is both in range and free of any characters needing URL escaping.
+fn new_pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("the OS CSPRNG must be available");
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// RFC 7636 §4.2 S256 challenge: `base64url(sha256(verifier))` without padding.
+fn pkce_s256_challenge(verifier: &str) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+// ---------------------------------------------------------------------------
 // Small utilities (JWT claims, base64url, URL encoding, 0600 writes)
 // ---------------------------------------------------------------------------
+
+/// The stable machine codes that mean the refresh token is permanently dead.
+/// The edge only ever emits `invalid_grant` (WorkOS's explicit credential
+/// rejection, surfaced on `/auth/refresh`); `refresh_token_invalid` is accepted
+/// as a conservative alias. Any other code — or a body with no code at all — is
+/// treated as retryable: a transient hiccup must never clear a session.
+fn is_permanent_refresh_rejection(code: &str) -> bool {
+    matches!(code, "invalid_grant" | "refresh_token_invalid")
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct JwtClaims {
@@ -1136,6 +1232,398 @@ mod tests {
         assert_eq!(url_encode("a b"), "a%20b");
     }
 
+    // -- PKCE (RFC 7636) ------------------------------------------------
+
+    /// Parse `k=v&k2=v2` query params with the production url-decoder.
+    fn query_params(url: &str) -> HashMap<String, String> {
+        url.split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), url_decode(v)))
+            .collect()
+    }
+
+    #[test]
+    fn pkce_verifier_is_random_url_safe_and_in_range() {
+        let a = new_pkce_verifier();
+        let b = new_pkce_verifier();
+        for v in [&a, &b] {
+            assert!(
+                (43..=128).contains(&v.len()),
+                "verifier must be 43-128 chars, got {}",
+                v.len()
+            );
+            assert!(
+                v.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~')),
+                "verifier must be URL-safe unreserved: {v}"
+            );
+        }
+        // Two draws must never collide: a CSPRNG, not a counter/timestamp.
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn pkce_s256_challenge_matches_independent_sha256() {
+        use sha2::Digest as _;
+        let verifier = new_pkce_verifier();
+        let challenge = pkce_s256_challenge(&verifier);
+        // Independent recomputation, exactly as the WorkOS authorize endpoint
+        // will: base64url(sha256(verifier)), no padding.
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        hasher.update(verifier.as_bytes());
+        let digest = hasher.finalize();
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        assert_eq!(challenge, URL_SAFE_NO_PAD.encode(digest));
+        assert_eq!(challenge.len(), 43);
+    }
+
+    #[test]
+    fn authorize_url_carries_pkce_challenge_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://edge.test", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+        let url = auth.start_headless_sign_in();
+        assert!(url.starts_with("https://api.workos.com/user_management/authorize?"));
+        let params = query_params(&url);
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("client_test")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        let state = params.get("state").expect("state present");
+        let challenge = params.get("code_challenge").expect("challenge present");
+        // The URL challenge is exactly the S256 challenge of the verifier
+        // bound to that same state (proving they travel together).
+        let (generation, verifier) = auth.take_pending(state).expect("pending state exists");
+        assert_eq!(challenge, &pkce_s256_challenge(&verifier));
+        let _ = generation;
+    }
+
+    #[test]
+    fn pending_state_is_consumed_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://edge.test", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+        let url = auth.start_headless_sign_in();
+        let state = query_params(&url).remove("state").expect("state present");
+
+        let first = auth.take_pending(&state);
+        assert!(first.is_some(), "first take yields state+verifier");
+        // The same state is dead now — a replayed callback can never exchange.
+        assert_eq!(auth.take_pending(&state), None);
+        // Unknown states were never pending.
+        assert_eq!(auth.take_pending("state-that-never-existed"), None);
+    }
+
+    #[test]
+    fn expired_pending_state_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://edge.test", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+        // Backdate a pending attempt past the TTL (the test module sees the
+        // private lifecycle, so it can simulate the clock).
+        let mut sign_in = lock(&auth.inner.sign_in);
+        sign_in.pending.insert(
+            "stale-state".into(),
+            PendingSignIn {
+                verifier: new_pkce_verifier(),
+                at: Instant::now() - SIGN_IN_TTL - Duration::from_secs(1),
+            },
+        );
+        drop(sign_in);
+        assert_eq!(auth.take_pending("stale-state"), None);
+    }
+
+    #[test]
+    fn sign_out_erases_pending_verifiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://edge.test", dir.path());
+        config.workos_client_id = Some("client_test".into());
+        let auth = Auth::new(config);
+        let url = auth.start_headless_sign_in();
+        let state = query_params(&url).remove("state").expect("state present");
+        auth.sign_out();
+        // Cancellation fenced the attempt: state AND verifier are gone, so a
+        // late callback cannot exchange.
+        assert_eq!(auth.take_pending(&state), None);
+        assert!(lock(&auth.inner.sign_in).pending.is_empty());
+    }
+
+    // -- Wire-level PKCE (mock edge, real loopback listener) -------------
+
+    /// A one-shot HTTP "edge": captures the first request body and answers
+    /// with the given JSON exchange payload. Returns `(base_url, body_rx)`.
+    async fn mock_edge(
+        json_body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
+            let head_end = loop {
+                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(n > 0, "edge: client hung up before the request body");
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]);
+            let content_length: usize = head
+                .lines()
+                .find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    (k.trim().eq_ignore_ascii_case("content-length"))
+                        .then(|| v.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while buf.len() < head_end + content_length {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "edge: client hung up mid-body");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let body =
+                String::from_utf8_lossy(&buf[head_end..head_end + content_length]).into_owned();
+            let _ = tx.send(body);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{json_body}",
+                json_body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+
+    /// `Auth` in WorkOS mode against a mock edge, with a scratch data dir.
+    fn workos_auth(edge_url: &str) -> (Auth, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new(edge_url, dir.path());
+        config.workos_client_id = Some("client_test".into());
+        (Auth::new(config), dir)
+    }
+
+    /// `workos_auth` plus a persisted WorkOS session (refresh token + user +
+    /// org), the state a signed-in device has on disk.
+    fn workos_auth_with_session(edge_url: &str) -> (Auth, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let session = StoredSession {
+            refresh_token: "rt-1".into(),
+            user: AuthUser {
+                id: "u1".into(),
+                email: "a@b.c".into(),
+                name: None,
+            },
+            org_id: Some("org_1".into()),
+        };
+        std::fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+        let auth = Auth::new(config_with_edge(edge_url, dir.path()));
+        assert!(auth.state().is_signed_in());
+        (auth, dir)
+    }
+
+    fn config_with_edge(edge_url: &str, data_dir: &std::path::Path) -> AuthConfig {
+        let mut config = AuthConfig::new(edge_url, data_dir);
+        config.workos_client_id = Some("client_test".into());
+        config
+    }
+
+    /// A one-shot HTTP "edge" answering with an arbitrary status line + body
+    /// (drains the request first so the client's write completes).
+    async fn mock_edge_status(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
+            let head_end = loop {
+                let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]);
+            let content_length: usize = head
+                .lines()
+                .find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    (k.trim().eq_ignore_ascii_case("content-length"))
+                        .then(|| v.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while buf.len() < head_end + content_length {
+                let Ok(n) = stream.read(&mut chunk).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// A one-shot HTTP "edge" that accepts the connection and closes without
+    /// answering — a transport failure (dropped connection).
+    async fn mock_edge_dropped() -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    const EXCHANGE_OK: &str = r#"{"user":{"id":"u1","email":"a@b.c","firstName":"Ann","lastName":"X"},"accessToken":"at","refreshToken":"rt"}"#;
+
+    /// Drive the headed flow end-to-end: authorize URL carries the S256
+    /// challenge; the loopback callback exchanges the code and the captured
+    /// body proves the verifier for that exact challenge is presented exactly
+    /// once — a replayed callback is rejected 400.
+    #[tokio::test]
+    async fn loopback_exchange_presents_verifier_for_its_challenge_once() {
+        let (edge, body_rx) = mock_edge(EXCHANGE_OK).await;
+        let (auth, _dir) = workos_auth(&edge);
+
+        let url = auth.start_sign_in().await.expect("sign-in URL");
+        let params = query_params(&url);
+        let state = params.get("state").expect("state").clone();
+        let challenge = params.get("code_challenge").expect("challenge").clone();
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        let callback = params
+            .get("redirect_uri")
+            .expect("loopback redirect")
+            .clone();
+        let port: u16 = callback
+            .split('/')
+            .nth(2)
+            .and_then(|host| host.rsplit_once(':').map(|(_, p)| p.parse().ok()).flatten())
+            .expect("loopback port");
+
+        async fn callback_get(port: u16, code: &str, state: &str) -> String {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "GET /callback?code={code}&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut resp = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                resp.extend_from_slice(&chunk[..n]);
+            }
+            String::from_utf8_lossy(&resp).into_owned()
+        }
+
+        let first = callback_get(port, "auth-code-1", &state).await;
+        assert!(first.contains("200 OK"), "first callback: {first}");
+
+        let body = tokio::time::timeout(Duration::from_secs(5), body_rx)
+            .await
+            .expect("exchange reached the edge")
+            .expect("edge captured body");
+        let sent: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(sent["code"], "auth-code-1");
+        let verifier = sent["codeVerifier"].as_str().expect("codeVerifier present");
+        // The verifier that left this device is the one whose S256 hash was
+        // published in the authorize URL — nothing else could pass WorkOS.
+        assert_eq!(challenge, pkce_s256_challenge(verifier));
+
+        // Replay the same callback: the state+verifier pair was consumed.
+        let second = callback_get(port, "auth-code-1", &state).await;
+        assert!(second.contains("400 Bad Request"), "replay: {second}");
+    }
+
+    /// The headless paste-code path: `complete_sign_in` consumes the pending
+    /// state+verifier, exchanges with `codeVerifier`, and a second paste of
+    /// the same code is rejected without touching the edge again.
+    #[tokio::test]
+    async fn headless_exchange_consumes_verifier_exactly_once() {
+        let (edge, body_rx) = mock_edge(EXCHANGE_OK).await;
+        let (auth, _dir) = workos_auth(&edge);
+
+        let url = auth.start_headless_sign_in();
+        let params = query_params(&url);
+        let state = params.get("state").expect("state").clone();
+        let challenge = params.get("code_challenge").expect("challenge").clone();
+        let pasted = format!("{state}.paste-code-1");
+        auth.complete_sign_in(&pasted)
+            .await
+            .expect("first paste signs in");
+
+        let body = tokio::time::timeout(Duration::from_secs(5), body_rx)
+            .await
+            .expect("exchange reached the edge")
+            .expect("edge captured body");
+        let sent: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(sent["code"], "paste-code-1");
+        let verifier = sent["codeVerifier"].as_str().expect("codeVerifier present");
+        assert_eq!(challenge, pkce_s256_challenge(verifier));
+
+        // The verifier was single-use: a replayed paste must fail without a
+        // second edge round trip (take_pending already returned None).
+        assert!(auth.complete_sign_in(&pasted).await.is_err());
+    }
+
     #[test]
     fn auth_state_serializes_as_proto_shape() {
         let user = AuthUser {
@@ -1169,6 +1657,146 @@ mod tests {
                 "state": "needsOrganization",
                 "user": {"id": "u1", "email": "u@x", "name": null},
             })
+        );
+    }
+
+    // -- Refresh error semantics (Phase C) --------------------------------
+    //
+    // A transient WorkOS/edge failure must NEVER revoke a signed-in device:
+    // only an explicit permanent credential rejection (401 + `invalid_grant`)
+    // clears the session. 429, 5xx, malformed bodies, and dropped connections
+    // all preserve the stored session and surface an error to retry.
+
+    /// The stored session still on disk, for asserting preservation.
+    fn stored_session(dir: &tempfile::TempDir) -> StoredSession {
+        let bytes = std::fs::read(dir.path().join("session.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_invalid_grant_signs_out_and_removes_session() {
+        let edge = mock_edge_status(
+            "401 Unauthorized",
+            r#"{"error":"invalid_grant","code":"invalid_grant","retryable":false}"#,
+        )
+        .await;
+        let (auth, dir) = workos_auth_with_session(&edge);
+
+        let result = auth.refresh(None).await;
+        // A permanent rejection resolves as signed-out (not an error): the
+        // session can never recover, so the caller stops retrying.
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+        assert!(matches!(auth.state(), AuthState::SignedOut));
+        assert!(
+            !dir.path().join("session.json").exists(),
+            "stored session removed on permanent rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_429_preserves_session() {
+        let edge = mock_edge_status(
+            "429 Too Many Requests",
+            r#"{"error":"rate limited","code":"rate_limited","retryable":true}"#,
+        )
+        .await;
+        let (auth, dir) = workos_auth_with_session(&edge);
+
+        let result = auth.refresh(None).await;
+        assert!(
+            result.is_err(),
+            "transient failure surfaces as a retryable error"
+        );
+        assert!(auth.state().is_signed_in(), "session stays signed in");
+        assert_eq!(stored_session(&dir).refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_5xx_preserves_session() {
+        for (status, body) in [
+            (
+                "500 Internal Server Error",
+                r#"{"code":"upstream","retryable":true}"#,
+            ),
+            (
+                "503 Service Unavailable",
+                r#"{"code":"upstream","retryable":true}"#,
+            ),
+        ] {
+            let edge = mock_edge_status(status, body).await;
+            let (auth, dir) = workos_auth_with_session(&edge);
+            let result = auth.refresh(None).await;
+            assert!(result.is_err(), "{status} surfaces as an error");
+            assert!(auth.state().is_signed_in(), "{status} keeps the session");
+            assert_eq!(stored_session(&dir).refresh_token, "rt-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_malformed_gateway_body_preserves_session() {
+        // A 200 with a non-JSON body: the gateway is broken, not the session.
+        let edge = mock_edge_status("200 OK", "<html>oops</html>").await;
+        let (auth, dir) = workos_auth_with_session(&edge);
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_err(), "malformed response surfaces as an error");
+        assert!(
+            auth.state().is_signed_in(),
+            "malformed response keeps the session"
+        );
+        assert_eq!(stored_session(&dir).refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_dropped_connection_preserves_session() {
+        let edge = mock_edge_dropped().await;
+        let (auth, dir) = workos_auth_with_session(&edge);
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_err(), "transport failure surfaces as an error");
+        assert!(
+            auth.state().is_signed_in(),
+            "transport failure keeps the session"
+        );
+        assert_eq!(stored_session(&dir).refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn refresh_401_without_machine_code_preserves_session() {
+        // A bare 401 with no recognized `code` is ambiguous, not a confirmed
+        // credential rejection — keep the session (conservative direction).
+        let edge = mock_edge_status("401 Unauthorized", r#"{"error":"nope"}"#).await;
+        let (auth, dir) = workos_auth_with_session(&edge);
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_err());
+        assert!(
+            auth.state().is_signed_in(),
+            "ambiguous 401 keeps the session"
+        );
+        assert_eq!(stored_session(&dir).refresh_token, "rt-1");
+    }
+
+    #[tokio::test]
+    async fn exchange_failure_surfaces_without_persisting_session() {
+        let edge = mock_edge_status(
+            "401 Unauthorized",
+            r#"{"error":"invalid_grant","code":"invalid_grant","retryable":false}"#,
+        )
+        .await;
+        let (auth, dir) = workos_auth(&edge);
+        let url = auth.start_headless_sign_in();
+        let state = query_params(&url).remove("state").expect("state present");
+
+        let err = auth
+            .complete_sign_in(&format!("{state}.expired-code"))
+            .await;
+        assert!(err.is_err(), "exchange rejection surfaces as an error");
+        assert!(matches!(auth.state(), AuthState::SignedOut));
+        assert!(
+            !dir.path().join("session.json").exists(),
+            "a failed exchange never persists a session"
         );
     }
 }

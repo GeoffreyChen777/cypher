@@ -25,14 +25,35 @@ struct AuthTokens: Codable, Equatable {
     var refreshToken: String
 }
 
-enum AuthError: LocalizedError {
-    case http(Int, String)
+enum AuthError: LocalizedError, Equatable {
+    /// Non-2xx from the edge. `code`/`retryable` come from the edge's typed
+    /// JSON envelope `{error, code, retryable}` when it was parseable; a raw
+    /// status with an unparseable body carries `nil` for both.
+    case http(Int, String, code: String?, retryable: Bool?)
     case invalidResponse
+    case transport(String)
+
+    /// A permanent auth rejection (revoked session, deleted user) is the ONLY
+    /// case a client may clear its stored credentials. This depends on the
+    /// edge's EXPLICIT permanent semantics — never on a bare 401:
+    ///  - an explicit `retryable: false` is permanent;
+    ///  - no explicit signal, but the machine `code` is `invalid_grant`
+    ///    (WorkOS's explicit credential rejection) → permanent;
+    ///  - a raw/ambiguous 401 with neither is treated as transient, so a
+    ///    misbehaving gateway can never log a user out.
+    var isPermanent: Bool {
+        guard case .http(let status, _, let code, let retryable) = self else { return false }
+        if let retryable { return !retryable }
+        return status == 401 && code == "invalid_grant"
+    }
+
+    var isTransient: Bool { !isPermanent }
 
     var errorDescription: String? {
         switch self {
-        case .http(let code, let body): return "Auth failed (\(code)): \(body)"
+        case .http(let code, let body, _, _): return "Auth failed (\(code)): \(body)"
         case .invalidResponse: return "Unexpected auth response"
+        case .transport(let detail): return "Auth request failed: \(detail)"
         }
     }
 }
@@ -40,13 +61,35 @@ enum AuthError: LocalizedError {
 struct AuthClient {
     var baseURL: URL
 
-    func exchange(code: String) async throws -> (AuthUser, AuthTokens) {
+    /// Injectable request transport (tests substitute a recording stub); the
+    /// production default rides URLSession.shared. Non-2xx statuses surface
+    /// as `.http`, transport errors as `.transport` (transient).
+    var perform: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse) = { request in
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw AuthError.transport(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.invalidResponse
+        }
+        return (data, http)
+    }
+
+    /// Paste-code exchange. The RFC 7636 `codeVerifier` belongs to the same
+    /// attempt that published its S256 `code_challenge` on the authorize URL;
+    /// it is sent exactly once, with the code, and is never logged.
+    func exchange(code: String, codeVerifier: String? = nil) async throws -> (AuthUser, AuthTokens) {
         struct Response: Codable {
             var user: AuthUser
             var accessToken: String
             var refreshToken: String
         }
-        let r: Response = try await post("auth/exchange", body: ["code": code])
+        var body: [String: String] = ["code": code]
+        if let codeVerifier { body["codeVerifier"] = codeVerifier }
+        let r: Response = try await post("auth/exchange", body: body)
         return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken))
     }
 
@@ -60,9 +103,24 @@ struct AuthClient {
         struct Response: Codable { var orgs: [AuthOrg] }
         var request = URLRequest(url: baseURL.appending(path: "auth/orgs"))
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try Self.check(data: data, response: response)
+        let (data, http) = try await perform(request)
+        try Self.check(statusCode: http.statusCode, data: data)
         return try JSONDecoder().decode(Response.self, from: data).orgs
+    }
+
+    /// POST /auth/orgs — create a workspace and make the caller its first
+    /// (admin) member (the edge's createOrg: WorkOS org + membership).
+    func createOrg(name: String, accessToken: String) async throws -> AuthOrg {
+        struct Response: Codable { var organizationId: String }
+        var request = URLRequest(url: baseURL.appending(path: "auth/orgs"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(["name": name])
+        let (data, http) = try await perform(request)
+        try Self.check(statusCode: http.statusCode, data: data)
+        let orgId = try JSONDecoder().decode(Response.self, from: data).organizationId
+        return AuthOrg(id: orgId, organizationId: orgId, name: name)
     }
 
     private func post<T: Decodable>(_ path: String, body: [String: String]) async throws -> T {
@@ -70,15 +128,30 @@ struct AuthClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try Self.check(data: data, response: response)
+        let (data, http) = try await perform(request)
+        try Self.check(statusCode: http.statusCode, data: data)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    private static func check(data: Data, response: URLResponse) throws {
-        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            throw AuthError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+    /// The edge's typed error envelope (Phase C): `{error, code, retryable}`.
+    /// `code` is the stable machine-readable code; `retryable` is the explicit
+    /// transient/permanent classification. Either may be absent on a body the
+    /// edge did not write.
+    private struct ErrorEnvelope: Codable {
+        var error: String?
+        var code: String?
+        var retryable: Bool?
+    }
+
+    private static func check(statusCode: Int, data: Data) throws {
+        guard (200..<300).contains(statusCode) else {
+            let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
+            throw AuthError.http(
+                statusCode,
+                envelope?.error ?? String(data: data, encoding: .utf8) ?? "",
+                code: envelope?.code,
+                retryable: envelope?.retryable
+            )
         }
     }
 }
