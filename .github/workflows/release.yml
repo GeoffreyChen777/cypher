@@ -7,13 +7,14 @@ name: release
 # `cypher-releases` R2 bucket (served at edge.letscypher.app/releases/*
 # for `curl -fsSL https://edge.letscypher.app/install.sh | sh`), bumping latest.txt.
 #
-# Trigger: push a tag `v<version>` matching the workspace version in
-# Cargo.toml (bump it in the same commit), or run manually via
-# workflow_dispatch (builds + uploads artifacts, no release/R2 publish).
+# Trigger: push a tag `cypher-v<version>` matching the workspace version in
+# Cargo.toml (bump it in the same commit) to build AND publish a GitHub
+# Release + R2 update-channel upload; or run manually via workflow_dispatch,
+# which stays build/upload-only (artifacts only — no release/R2 publish).
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["cypher-v*"]
   workflow_dispatch:
 
 permissions:
@@ -49,9 +50,8 @@ jobs:
           path: target/package/*.tar.gz
           if-no-files-found: error
 
-  # Heads-up: the macOS cfg paths (Keychain in agent_accounts.rs) have never
-  # been type-checked against the Apple SDK — this job may surface errors on
-  # its first runs. continue-on-error keeps the Linux release shippable.
+  # Required job: the publish job consumes these artifacts, so a failure here
+  # blocks the release (there is no Linux-only release path anymore).
   #
   # Signing/notarization (both optional — absent secrets fall back to an
   # ad-hoc-signed build):
@@ -62,7 +62,6 @@ jobs:
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
     runs-on: macos-latest # Apple silicon
-    continue-on-error: true
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -114,7 +113,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/cypher-v')
     needs: [linux, macos]
     runs-on: ubuntu-latest
     env:
@@ -138,11 +137,47 @@ jobs:
           npx wrangler@4 r2 bucket info cypher-releases
       - name: version guard (tag == artifact version)
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          ls dist/
-          ls dist/ | grep -q "cypher-$ver-" \
-            || { echo "tag v$ver does not match built artifact versions — bump Cargo.toml [workspace.package] version"; exit 1; }
+          ver="${GITHUB_REF_NAME#cypher-v}"
+          [ -n "$ver" ] || { echo "::error::empty version from tag $GITHUB_REF_NAME (expected cypher-v<version>)"; exit 1; }
           echo "VERSION=$ver" >> "$GITHUB_ENV"
+      - name: verify artifact set (exact, non-empty, valid archives)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ver="$VERSION"
+          expected=(
+            "cypher-$ver-linux-x86_64.tar.gz"
+            "cypher-$ver-linux-aarch64.tar.gz"
+            "cypher-$ver-macos-arm64.dmg"
+            "cypher-$ver-macos-arm64-app.tar.gz"
+          )
+          ls -la dist/
+          cd dist
+          # Reject extras: every downloaded file must be in the expected set.
+          for f in *; do
+            match=0
+            for want in "${expected[@]}"; do
+              [[ "$f" == "$want" ]] && match=1
+            done
+            if (( match != 1 )); then
+              echo "::error::unexpected artifact for v$ver: $f"
+              exit 1
+            fi
+            # Reject empty files.
+            test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
+          done
+          # Reject missing: every expected artifact must be present.
+          for want in "${expected[@]}"; do
+            test -e "$want" || { echo "::error::missing artifact for v$ver: $want"; exit 1; }
+          done
+          # Tarballs must be readable gzip archives (the dmg is validated by size above).
+          for want in "${expected[@]}"; do
+            [[ "$want" == *.tar.gz ]] || continue
+            echo "== $want =="
+            tar -tzf "$want" >/dev/null || { echo "::error::$want is not a valid tar.gz"; exit 1; }
+            tar -tzf "$want"
+          done
+          echo "artifact set OK: ${expected[*]}"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
