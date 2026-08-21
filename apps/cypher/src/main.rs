@@ -178,6 +178,7 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Restart => daemon::restart(),
             DaemonCommand::Status => daemon::status(),
         },
+        #[cfg(feature = "ui")]
         None => {
             let edge_token = cypher_env::var("EDGE_TOKEN");
             // Headed: the UI probes CYPHER_IPC_PORT and connects to a running
@@ -195,6 +196,13 @@ fn main() -> anyhow::Result<()> {
             });
             Ok(())
         }
+        // Headless build (`--no-default-features`): there is no desktop UI to
+        // launch. Point at the headless entrypoint instead of a cryptic gpui
+        // link failure.
+        #[cfg(not(feature = "ui"))]
+        None => Err(anyhow::anyhow!(
+            "this build has no desktop UI — run `cypher headless` (or a subcommand like `cypher status`)"
+        )),
     }
 }
 

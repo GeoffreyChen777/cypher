@@ -48,6 +48,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: package
         run: scripts/package-linux.sh
+      - name: smoke (headless on clean ubuntu:24.04)
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64)  pkg_arch="x86_64";  platform="linux/amd64" ;;
+            aarch64) pkg_arch="aarch64"; platform="linux/arm64" ;;
+            *) echo "::error::unexpected host arch '$arch'"; exit 1 ;;
+          esac
+          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          tarball="target/package/cypher-$version-linux-$pkg_arch.tar.gz"
+          # Verify the host arch maps to the expected artifact suffix.
+          test -f "$tarball" || {
+            echo "::error::expected artifact '$tarball' (host $arch) not found"; exit 1
+          }
+          echo "host $arch -> $tarball"
+          rm -rf /tmp/cypher-smoke && mkdir -p /tmp/cypher-smoke
+          tar -xzf "$tarball" -C /tmp/cypher-smoke
+          bin="$(find /tmp/cypher-smoke -type f -name cypher | head -1)"
+          test -n "$bin" || { echo "::error::no cypher binary in tarball"; exit 1; }
+          # Run in a clean Ubuntu 24.04 container for the matching architecture
+          # (platform == host, so no QEMU). timeout 124 means the headless
+          # engine stayed up the full 8s (killed by timeout) — a success. Any
+          # immediate exit (e.g. missing libxcb) fails the release. The rc is
+          # captured inside the container so docker's own exit code is never
+          # mistaken for the app's.
+          docker run --rm --platform "$platform" \
+            -v "$bin:/usr/local/bin/cypher:ro" \
+            -e CYPHER_DATA_DIR=/tmp/cypher \
+            ubuntu:24.04 \
+            sh -c 'timeout 8 cypher headless; rc=$?; if [ "$rc" = 124 ]; then echo "OK: cypher headless stayed up 8s (timeout 124)"; exit 0; fi; echo "FAIL: cypher headless exited with $rc"; exit 1'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ runner.arch }}

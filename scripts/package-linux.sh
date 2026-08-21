@@ -4,6 +4,11 @@
 # containing the binary, the .desktop entry, and the icon, plus an install.sh
 # that drops them into ~/.local (XDG) paths.
 #
+# The binary is built headless (--no-default-features): the desktop UI/GPUI is
+# not linked, so the artifact runs on a clean Ubuntu 24.04 container with no
+# X11/Wayland deps. `cypher headless`, login/logout/status/sync/daemon/update
+# all still work; invoking with no subcommand prints a clear error.
+#
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
 
@@ -20,10 +25,10 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p cypher
+  cargo build --release --locked --no-default-features -p cypher
   BIN="$ROOT/target/release/cypher"
 else
-  cargo build -p cypher
+  cargo build --locked --no-default-features -p cypher
   BIN="$ROOT/target/debug/cypher"
 fi
 

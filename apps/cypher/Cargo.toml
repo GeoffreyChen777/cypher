@@ -9,11 +9,18 @@ publish.workspace = true
 name = "cypher"
 path = "src/main.rs"
 
+[features]
+# Desktop UI (gpui) is optional so the Linux artifact can ship genuinely
+# headless: `cargo build --no-default-features` links no X11/Wayland/GPUI and
+# runs on a clean Ubuntu 24.04 container. macOS packages the default build.
+default = ["ui"]
+ui = ["dep:cypher-ui"]
+
 [dependencies]
 cypher-env.workspace = true
 cypher-engine.workspace = true
 cypher-rpc.workspace = true
-cypher-ui.workspace = true
+cypher-ui = { workspace = true, optional = true }
 cypher-update.workspace = true
 tokio.workspace = true
 clap.workspace = true

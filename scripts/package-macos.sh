@@ -22,7 +22,8 @@ DMG="$OUT_DIR/cypher-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/cypher-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
-cargo build --release -p cypher
+# Default features (desktop UI): macOS always ships the headed build.
+cargo build --release --locked -p cypher
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
