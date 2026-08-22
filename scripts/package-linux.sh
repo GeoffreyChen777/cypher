@@ -5,9 +5,14 @@
 # that drops them into ~/.local (XDG) paths.
 #
 # The binary is built headless (--no-default-features): the desktop UI/GPUI is
-# not linked, so the artifact runs on a clean Ubuntu 24.04 container with no
-# X11/Wayland deps. `cypher headless`, login/logout/status/sync/daemon/update
-# all still work; invoking with no subcommand prints a clear error.
+# not linked, so the artifact runs on a clean container with no X11/Wayland
+# deps. `cypher headless`, login/logout/status/sync/daemon/update all still
+# work; invoking with no subcommand prints a clear error.
+#
+# Release builds run inside an Ubuntu 20.04 container (glibc 2.31 baseline) so
+# the artifact also runs on older Linux; scripts/check-linux-abi.sh proves the
+# freshly built binary imports no GLIBC version newer than the baseline before
+# anything is packaged.
 #
 # Usage: scripts/package-linux.sh
 # Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
@@ -31,6 +36,10 @@ else
   cargo build --locked --no-default-features -p cypher
   BIN="$ROOT/target/debug/cypher"
 fi
+
+# Fail the package immediately if the binary imports GLIBC newer than the
+# 2.31 / Ubuntu 20.04 baseline (that is what breaks older Linux hosts).
+scripts/check-linux-abi.sh "$BIN"
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"

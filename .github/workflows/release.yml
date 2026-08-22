@@ -30,55 +30,87 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
+          - runner: ubuntu-24.04 # x86_64 host
+          - runner: ubuntu-24.04-arm # aarch64 host
     runs-on: ${{ matrix.runner }}
+    # Build inside an Ubuntu 20.04 (glibc 2.31) container. Building on the
+    # host runner (Ubuntu 24.04, glibc 2.39) makes the binaries import
+    # GLIBC_2.39 symbols and crash on older Linux — the 0.1.2 defect this
+    # release fixes. The runner only supplies CPU/arch (x86_64 vs aarch64);
+    # every step below executes in the container, so the produced binaries
+    # link against glibc <= 2.31. No host target caches are reused (no
+    # Swatinem/rust-cache): a cache built on a newer glibc could leak
+    # GLIBC_2.39 artifacts into the package.
+    container:
+      image: ubuntu:20.04
+    # Container jobs default `run:` steps to /bin/sh. The release scripts use
+    # bash strict mode and bash conditionals, so make that contract explicit.
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - name: gpui system deps
+      # Headless build deps only (no X11/Wayland/GPUI deps — the binary is
+      # built --no-default-features). binutils provides readelf for the ABI
+      # check; git is required by actions/checkout.
+      - name: bootstrap container (headless build deps)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake
-      - name: rust toolchain (rust-toolchain.toml)
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq \
+            ca-certificates curl git build-essential pkg-config cmake binutils
+      - name: bootstrap rust toolchain (stable/minimal) in container
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - name: verify rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: package
+      - name: shell tests (check-linux-abi)
+        run: |
+          bash -n scripts/check-linux-abi.sh scripts/package-linux.sh scripts/test-check-linux-abi.sh
+          scripts/test-check-linux-abi.sh
+      - name: package (headless, glibc 2.31 baseline)
         run: scripts/package-linux.sh
-      - name: smoke (headless on clean ubuntu:24.04)
+      - name: smoke + ABI check (headless on Ubuntu 20.04 / glibc 2.31)
         run: |
           set -euo pipefail
           arch="$(uname -m)"
           case "$arch" in
-            x86_64)  pkg_arch="x86_64";  platform="linux/amd64" ;;
-            aarch64) pkg_arch="aarch64"; platform="linux/arm64" ;;
-            *) echo "::error::unexpected host arch '$arch'"; exit 1 ;;
+            x86_64)  pkg_arch="x86_64" ;;
+            aarch64) pkg_arch="aarch64" ;;
+            *) echo "::error::unexpected container arch '$arch'"; exit 1 ;;
           esac
           version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           tarball="target/package/cypher-$version-linux-$pkg_arch.tar.gz"
-          # Verify the host arch maps to the expected artifact suffix.
+          # Verify the container arch maps to the expected artifact suffix.
           test -f "$tarball" || {
-            echo "::error::expected artifact '$tarball' (host $arch) not found"; exit 1
+            echo "::error::expected artifact '$tarball' (container arch $arch) not found"; exit 1
           }
-          echo "host $arch -> $tarball"
+          echo "container arch $arch -> $tarball"
           rm -rf /tmp/cypher-smoke && mkdir -p /tmp/cypher-smoke
           tar -xzf "$tarball" -C /tmp/cypher-smoke
           bin="$(find /tmp/cypher-smoke -type f -name cypher | head -1)"
           test -n "$bin" || { echo "::error::no cypher binary in tarball"; exit 1; }
-          # Run in a clean Ubuntu 24.04 container for the matching architecture
-          # (platform == host, so no QEMU). timeout 124 means the headless
-          # engine stayed up the full 8s (killed by timeout) — a success. Any
-          # immediate exit (e.g. missing libxcb) fails the release. The rc is
-          # captured inside the container so docker's own exit code is never
-          # mistaken for the app's.
-          docker run --rm --platform "$platform" \
-            -v "$bin:/usr/local/bin/cypher:ro" \
-            -e CYPHER_DATA_DIR=/tmp/cypher \
-            ubuntu:24.04 \
-            sh -c 'timeout 8 cypher headless; rc=$?; if [ "$rc" = 124 ]; then echo "OK: cypher headless stayed up 8s (timeout 124)"; exit 0; fi; echo "FAIL: cypher headless exited with $rc"; exit 1'
+          # Run directly inside the Ubuntu 20.04 container (glibc 2.31): a
+          # timeout rc of 124 means the headless engine stayed up the full 8s
+          # (killed by timeout) — a success. Any immediate exit (e.g. missing
+          # libxcb, or an imported GLIBC_2.39 symbol) fails the release.
+          export CYPHER_DATA_DIR=/tmp/cypher
+          set +e
+          timeout 8 "$bin" headless
+          rc=$?
+          set -e
+          if [ "$rc" = 124 ]; then
+            echo "OK: cypher headless stayed up 8s (timeout 124) on glibc 2.31"
+          else
+            echo "FAIL: cypher headless exited with $rc on Ubuntu 20.04 (glibc 2.31)"
+            exit 1
+          fi
+          # Prove the artifact imports no GLIBC newer than 2.31.
+          scripts/check-linux-abi.sh "$bin"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ runner.arch }}

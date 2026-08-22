@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://edge.letscypher.app/install.sh | sh
 #
-# Installs the self-contained native binary (no runtime deps) to
+# Installs the headless native binary (glibc 2.31+ on GNU/Linux) to
 # ~/.cypher/app, puts `cypher` on PATH, and runs it as a local-only systemd
 # user service that survives reboots. Signing in is optional and enables sync
 # after a restart. Re-running upgrades in place; existing state is preserved.

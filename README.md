@@ -15,6 +15,10 @@ cypher status
 
 The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
 
+Official Linux binaries support glibc-based x86_64 and aarch64 systems with
+glibc 2.31 or newer (for example Ubuntu 20.04 or Debian 11 and newer).
+Alpine/musl is not currently an official target.
+
 Day-to-day:
 
 ```bash

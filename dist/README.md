@@ -9,10 +9,14 @@ PROFILE=debug scripts/package-linux.sh   # fast smoke package
 
 Produces `target/package/cypher-<version>-linux-<arch>.tar.gz` containing:
 
-- `cypher` — the binary (headed by default; `cypher headless` runs the engine alone)
+- `cypher` — the headless CLI/engine binary (`--no-default-features`; no GPUI/X11/Wayland linkage)
 - `cypher.desktop` — XDG desktop entry
 - `cypher.png` — 1024×1024 Cypher app icon
 - `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
+
+Release Linux packages are built inside Ubuntu 20.04 and guarded to import no
+GLIBC symbol newer than 2.31. Run `scripts/check-linux-abi.sh <binary>` when
+auditing a candidate outside the release workflow.
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 `strip = "symbols"` for distribution builds.
