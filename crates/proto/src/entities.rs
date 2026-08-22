@@ -455,6 +455,9 @@ pub struct UserProfile {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
+    /// GitHub/WorkOS profile picture, when the identity provider returned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -615,5 +618,54 @@ mod tests {
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn user_profile_avatar_url_round_trips_and_stays_optional() {
+        let with_avatar = UserProfile {
+            id: "u1".into(),
+            email: "a@b.c".into(),
+            name: Some("Ann".into()),
+            avatar_url: Some("https://avatars.example.com/a.png".into()),
+        };
+        let value = serde_json::to_value(&with_avatar).unwrap();
+        assert_eq!(value["avatarUrl"], "https://avatars.example.com/a.png");
+        assert_eq!(
+            serde_json::from_value::<UserProfile>(value).unwrap(),
+            with_avatar
+        );
+
+        // Absent (older engines / pre-avatar wire) and explicit null both
+        // deserialize to `None` — old session payloads stay readable.
+        for wire in [
+            serde_json::json!({"id": "u1", "email": "a@b.c"}),
+            serde_json::json!({"id": "u1", "email": "a@b.c", "avatarUrl": null}),
+        ] {
+            let parsed: UserProfile = serde_json::from_value(wire).unwrap();
+            assert_eq!(parsed.avatar_url, None);
+        }
+
+        // `None` omits the key from the wire (small, and old viewports that
+        // don't know `avatarUrl` are unaffected).
+        let no_avatar = UserProfile {
+            id: "u1".into(),
+            email: "a@b.c".into(),
+            name: None,
+            avatar_url: None,
+        };
+        let value = serde_json::to_value(&no_avatar).unwrap();
+        assert!(value.get("avatarUrl").is_none());
+
+        // The AuthState envelope carries it through too.
+        let state = AuthState::SignedIn {
+            user: with_avatar.clone(),
+            org_id: Some("org_1".into()),
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["user"]["avatarUrl"],
+            "https://avatars.example.com/a.png"
+        );
+        assert_eq!(serde_json::from_value::<AuthState>(value).unwrap(), state);
     }
 }

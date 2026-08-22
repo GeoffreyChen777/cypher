@@ -186,6 +186,7 @@ mod gate_tests {
             id: "user-1".into(),
             email: "user@example.com".into(),
             name: None,
+            avatar_url: None,
         }
     }
 
@@ -243,6 +244,52 @@ mod gate_tests {
             GatePhase::SignIn
         );
     }
+
+    #[test]
+    fn parse_auth_state_legacy_tag_carries_the_avatar_url() {
+        // The engine's old `_tag` shape, with an avatar on the user.
+        let legacy = serde_json::json!({
+            "_tag": "SignedIn",
+            "user": {"id": "u1", "email": "a@b.c", "name": null, "avatarUrl": "https://avatars.example.com/a.png"},
+            "orgId": "org_1",
+        });
+        let parsed = parse_auth_state(&legacy).expect("legacy SignedIn parses");
+        let AuthState::SignedIn { user, org_id } = parsed else {
+            panic!("expected SignedIn");
+        };
+        assert_eq!(org_id.as_deref(), Some("org_1"));
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://avatars.example.com/a.png")
+        );
+
+        // Legacy frames without an avatar stay readable (None).
+        let bare = serde_json::json!({
+            "_tag": "NeedsOrganization",
+            "user": {"id": "u1", "email": "a@b.c"},
+        });
+        let parsed = parse_auth_state(&bare).expect("legacy NeedsOrganization parses");
+        let AuthState::NeedsOrganization { user } = parsed else {
+            panic!("expected NeedsOrganization");
+        };
+        assert_eq!(user.avatar_url, None);
+
+        // The canonical `state`-tagged shape parses through serde with the
+        // avatar intact (both converge on one form).
+        let canonical = serde_json::json!({
+            "state": "signedIn",
+            "user": {"id": "u1", "email": "a@b.c", "avatarUrl": "https://avatars.example.com/b.png"},
+            "orgId": "org_1",
+        });
+        let parsed = parse_auth_state(&canonical).expect("canonical SignedIn parses");
+        let AuthState::SignedIn { user, .. } = parsed else {
+            panic!("expected SignedIn");
+        };
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://avatars.example.com/b.png")
+        );
+    }
 }
 
 /// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its
@@ -260,6 +307,10 @@ pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
             id: u.get("id")?.as_str()?.to_string(),
             email: u.get("email")?.as_str()?.to_string(),
             name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
+            avatar_url: u
+                .get("avatarUrl")
+                .and_then(|a| a.as_str())
+                .map(str::to_string),
         })
     };
     match tag {

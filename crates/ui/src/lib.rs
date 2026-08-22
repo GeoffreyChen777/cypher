@@ -130,7 +130,17 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
-    let app = gpui_platform::application().with_assets(icons::Assets);
+    // `reqwest_client` enables rustls's aws-lc provider while Cypher's
+    // existing reqwest stack enables ring. With both features in one process,
+    // rustls cannot choose automatically and panics on the first TLS request.
+    // Select ring once before either client can open a connection.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    // A real HTTP client for gpui's `img()` element — the GitHub/WorkOS
+    // profile-picture avatar is a remote URL, and gpui's default null client
+    // would fail every fetch (the avatar always falls back to the initial).
+    let app = gpui_platform::application()
+        .with_assets(icons::Assets)
+        .with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()));
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).

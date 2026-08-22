@@ -45,12 +45,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // Wire types (feature-inventory §2 AuthRpc)
 // ---------------------------------------------------------------------------
 
+/// Wire-identical to [`cypher_proto::UserProfile`]: camelCase on the wire and
+/// in `session.json` (`avatarUrl`), with `id`/`email`/`name` unchanged by the
+/// rename. An old session.json written before the avatar field stays readable
+/// via `#[serde(default)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthUser {
     pub id: String,
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// GitHub/WorkOS profile picture (edge's `profilePictureUrl`), when the
+    /// identity provider returned one. Load failure falls back to the
+    /// initial-letter avatar in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +111,7 @@ impl AuthState {
             id: user.id.clone(),
             email: user.email.clone(),
             name: user.name.clone(),
+            avatar_url: user.avatar_url.clone(),
         };
         match self {
             AuthState::SignedOut => cypher_proto::AuthState::SignedOut,
@@ -267,12 +278,29 @@ impl Auth {
         } else {
             None
         };
+        // Sanitize the loaded session's avatar exactly once, BEFORE it feeds
+        // either the initial state or `inner.stored`: an unsanitized value kept
+        // in memory could be re-emitted by a later org-changing refresh. Persist
+        // the cleaned session too, so disk and memory agree from the first load.
+        let stored = stored.map(|mut session| {
+            let cleaned = sanitize_avatar_url(session.user.avatar_url.clone());
+            if session.user.avatar_url != cleaned {
+                session.user.avatar_url = cleaned;
+                if let Ok(bytes) = serde_json::to_vec(&session) {
+                    if let Err(err) = write_private(&session_file, &bytes) {
+                        tracing::warn!(error = %err, "auth: failed to persist cleaned session");
+                    }
+                }
+            }
+            session
+        });
         let initial = match (&workos, &stored) {
             (None, _) => AuthState::SignedIn {
                 user: AuthUser {
                     id: config.dev_user_id.clone(),
                     email: config.dev_user_id.clone(),
                     name: None,
+                    avatar_url: None,
                 },
                 org_id: None,
             },
@@ -629,6 +657,8 @@ impl Auth {
             first_name: Option<String>,
             #[serde(default)]
             last_name: Option<String>,
+            #[serde(default)]
+            profile_picture_url: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -675,6 +705,7 @@ impl Auth {
                 id: body.user.id,
                 email: body.user.email,
                 name: (!name.is_empty()).then_some(name),
+                avatar_url: sanitize_avatar_url(body.user.profile_picture_url),
             },
             access_token: body.access_token,
             refresh_token: body.refresh_token,
@@ -790,9 +821,19 @@ impl Auth {
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
+        struct RefreshUser {
+            #[serde(default)]
+            profile_picture_url: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Tokens {
             access_token: String,
             refresh_token: String,
+            /// Absent = the edge predates avatar sync (preserve the stored
+            /// avatar); present = replace/clear from `profilePictureUrl`.
+            #[serde(default)]
+            user: Option<RefreshUser>,
         }
         let tokens: Tokens = res
             .json()
@@ -802,20 +843,35 @@ impl Auth {
         let entry = AccessEntry::fresh(tokens.access_token.clone());
         tracing::info!(ttl_s = entry.ttl.as_secs(), "auth: access token refreshed");
         *lock(&self.inner.access) = Some(entry);
-        let (user, org_changed) = {
+        // `None` (the refresh carried no user) → PRESERVE the stored avatar;
+        // `Some(None)` (user present, no/sanitized-away picture) → CLEAR it.
+        let avatar_update: Option<Option<String>> = tokens
+            .user
+            .as_ref()
+            .map(|u| sanitize_avatar_url(u.profile_picture_url.clone()));
+        let (user, org_changed, avatar_changed) = {
             let mut stored = lock(&self.inner.stored);
             match stored.as_mut() {
                 Some(session) => {
                     let changed = session.org_id != org_id;
                     session.refresh_token = tokens.refresh_token;
                     session.org_id = org_id.clone();
-                    (session.user.clone(), changed)
+                    let mut avatar_changed = false;
+                    if let Some(avatar) = avatar_update
+                        && session.user.avatar_url != avatar
+                    {
+                        session.user.avatar_url = avatar;
+                        avatar_changed = true;
+                    }
+                    (session.user.clone(), changed, avatar_changed)
                 }
                 None => return Ok(None), // signed out mid-refresh
             }
         };
         self.persist(lock(&self.inner.stored).as_ref());
-        if org_changed {
+        // Emit when the profile (avatar) or scope changed so already-signed-in
+        // surfaces update without a re-login.
+        if org_changed || avatar_changed {
             self.inner.state_tx.send_replace(state_for(user, org_id));
         }
         self.inner
@@ -920,6 +976,46 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
         },
         None => AuthState::NeedsOrganization { user },
     }
+}
+
+/// Sanitize an avatar URL from ANY ingress (loaded session, exchange,
+/// refresh) with REAL URL parsing (`reqwest::Url`, the `url` crate): the
+/// scheme must be `https`, there must be a host, there must be no embedded
+/// credentials (username/password), and the string is bounded to 2048 chars
+/// AND bytes. Everything else — malformed URLs, bad ports, whitespace,
+/// control chars, non-HTTPS schemes — → `None`. A stored value is never
+/// trusted as-is; every boundary re-validates, so a non-URL can never be
+/// interpreted as a local file and nothing can exceed the renderer's bound.
+fn sanitize_avatar_url(value: Option<String>) -> Option<String> {
+    let url = value?;
+    if url.is_empty() || url.len() > 2048 || url.chars().count() > 2048 {
+        return None;
+    }
+    // The parser percent-encodes whitespace/control chars rather than failing;
+    // the raw string must never carry them (a stored avatar URL is fetched
+    // verbatim).
+    if url.chars().any(char::is_whitespace) || url.bytes().any(|b| b < 0x20) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(&url).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    // `host_str()` requires a real host and rejects empty/malformed ones;
+    // userinfo (username/password) must never ride along.
+    if parsed.host_str()?.is_empty() || !parsed.username().is_empty() || parsed.password().is_some()
+    {
+        return None;
+    }
+    // The WHATWG parser "ignores slashes" right after `https://` —
+    // `https:///a.png` silently normalizes to host `a.png` with an EMPTY
+    // authority in the input (and `https:////a.png` similarly). A real
+    // avatar URL names its host explicitly, so reject that shape.
+    let rest = url.get(url.find(':')? + 1..)?.strip_prefix("//")?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    Some(url)
 }
 
 /// The relay/room token seam: `Auth` IS a [`cypher_rpc::TokenSource`], so the host relay
@@ -1232,6 +1328,63 @@ mod tests {
         assert_eq!(url_encode("a b"), "a%20b");
     }
 
+    // -- Avatar URL sanitization (every ingress) -----------------------
+
+    #[test]
+    fn sanitize_avatar_url_accepts_only_safe_https_urls() {
+        let good = "https://avatars.example.com/a.png";
+        assert_eq!(
+            sanitize_avatar_url(Some(good.into())).as_deref(),
+            Some(good)
+        );
+        // Query strings and paths are fine.
+        assert_eq!(
+            sanitize_avatar_url(Some("https://avatars.example.com/a.png?v=1&s=2".into()))
+                .as_deref(),
+            Some("https://avatars.example.com/a.png?v=1&s=2")
+        );
+        // Exactly 2048 chars is allowed.
+        let at_cap = format!("https://h/{}", "a".repeat(2048 - "https://h/".len()));
+        assert!(sanitize_avatar_url(Some(at_cap)).is_some());
+    }
+
+    #[test]
+    fn sanitize_avatar_url_rejects_non_https_hostless_and_oversized() {
+        for bad in [
+            None,
+            Some(String::new()),
+            // Non-HTTPS schemes (including file/javascript interpretations).
+            Some("http://avatars.example.com/a.png".into()),
+            Some("file:///etc/passwd".into()),
+            Some("javascript:alert(1)".into()),
+            Some("ftp://x/a.png".into()),
+            // Hostless.
+            Some("https://".into()),
+            Some("https:///a.png".into()),
+            Some("https://?x=1".into()),
+            // Embedded credentials (userinfo) must not ride along.
+            Some("https://user@host/a.png".into()),
+            Some("https://user:pass@host/a.png".into()),
+            // Malformed ports / hosts that a hand-rolled prefix check would
+            // accept but real URL parsing rejects.
+            Some("https://host:99999/a.png".into()),
+            Some("https://host:abc/a.png".into()),
+            Some("https://:443/a.png".into()),
+            Some("https://host:443:444/a.png".into()),
+            // Whitespace / control characters (would break URI parsing).
+            Some("https://host/a b.png".into()),
+            Some("https://host/\n".into()),
+            // Oversized: 2048 chars is the cap.
+            Some(format!("https://host/{}", "a".repeat(2048))),
+        ] {
+            assert_eq!(
+                sanitize_avatar_url(bad.clone()),
+                None,
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
     // -- PKCE (RFC 7636) ------------------------------------------------
 
     /// Parse `k=v&k2=v2` query params with the production url-decoder.
@@ -1435,6 +1588,7 @@ mod tests {
                 id: "u1".into(),
                 email: "a@b.c".into(),
                 name: None,
+                avatar_url: None,
             },
             org_id: Some("org_1".into()),
         };
@@ -1520,7 +1674,7 @@ mod tests {
         format!("http://127.0.0.1:{port}")
     }
 
-    const EXCHANGE_OK: &str = r#"{"user":{"id":"u1","email":"a@b.c","firstName":"Ann","lastName":"X"},"accessToken":"at","refreshToken":"rt"}"#;
+    const EXCHANGE_OK: &str = r#"{"user":{"id":"u1","email":"a@b.c","firstName":"Ann","lastName":"X","profilePictureUrl":"https://avatars.example/a.png"},"accessToken":"at","refreshToken":"rt"}"#;
 
     /// Drive the headed flow end-to-end: authorize URL carries the S256
     /// challenge; the loopback callback exchanges the code and the captured
@@ -1609,6 +1763,12 @@ mod tests {
         auth.complete_sign_in(&pasted)
             .await
             .expect("first paste signs in");
+        // The GitHub/WorkOS profile picture rides the exchange and lands in
+        // the signed-in user profile (for the sidebar avatar).
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            Some("https://avatars.example/a.png")
+        );
 
         let body = tokio::time::timeout(Duration::from_secs(5), body_rx)
             .await
@@ -1630,6 +1790,7 @@ mod tests {
             id: "u1".into(),
             email: "u@x".into(),
             name: None,
+            avatar_url: None,
         };
         let signed_in = AuthState::SignedIn {
             user: user.clone(),
@@ -1797,6 +1958,218 @@ mod tests {
         assert!(
             !dir.path().join("session.json").exists(),
             "a failed exchange never persists a session"
+        );
+    }
+
+    // -- Avatar refresh semantics ---------------------------------------
+    //
+    // The refresh response carries optional nested user metadata. `user`
+    // ABSENT (old edge / omitted) → preserve the stored avatar; `user`
+    // PRESENT → replace or clear from its sanitized `profilePictureUrl`.
+    // Changes emit on the state channel so already-signed-in surfaces update
+    // without a re-login.
+
+    /// `workos_auth_with_session` with a persisted avatar on the stored user
+    /// (so state and disk agree at construction, like a real loaded session).
+    fn workos_auth_with_avatar(
+        edge_url: &str,
+        avatar_url: Option<&str>,
+    ) -> (Auth, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let session = StoredSession {
+            refresh_token: "rt-1".into(),
+            user: AuthUser {
+                id: "u1".into(),
+                email: "a@b.c".into(),
+                name: None,
+                avatar_url: avatar_url.map(str::to_string),
+            },
+            org_id: Some("org_1".into()),
+        };
+        std::fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+        let auth = Auth::new(config_with_edge(edge_url, dir.path()));
+        assert!(auth.state().is_signed_in());
+        (auth, dir)
+    }
+
+    #[tokio::test]
+    async fn refresh_with_user_metadata_replaces_the_avatar_and_emits() {
+        let edge = mock_edge_status(
+            "200 OK",
+            r#"{"user":{"id":"u1","email":"a@b.c","firstName":"Ann","lastName":"X","profilePictureUrl":"https://avatars.example.com/new.png"},"accessToken":"h.eyJvcmdfaWQiOiJvcmdfMSJ9.sig","refreshToken":"rt2"}"#,
+        )
+        .await;
+        let (auth, dir) =
+            workos_auth_with_avatar(&edge, Some("https://avatars.example.com/old.png"));
+        let mut state_rx = auth.watch_state();
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            Some("https://avatars.example.com/new.png")
+        );
+        // Persisted too — the avatar survives a restart.
+        assert_eq!(
+            stored_session(&dir).user.avatar_url.as_deref(),
+            Some("https://avatars.example.com/new.png")
+        );
+        // The state channel emitted the updated profile (no re-login).
+        assert!(state_rx.changed().await.is_ok());
+        assert!(matches!(auth.state(), AuthState::SignedIn { .. }));
+    }
+
+    #[tokio::test]
+    async fn refresh_without_user_metadata_preserves_the_stored_avatar() {
+        let edge = mock_edge_status(
+            "200 OK",
+            r#"{"accessToken":"h.eyJvcmdfaWQiOiJvcmdfMSJ9.sig","refreshToken":"rt2"}"#,
+        )
+        .await;
+        let (auth, dir) =
+            workos_auth_with_avatar(&edge, Some("https://avatars.example.com/keep.png"));
+        let mut state_rx = auth.watch_state();
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_ok());
+        // Old edge / omitted user: the stored avatar survives on state AND disk.
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            Some("https://avatars.example.com/keep.png")
+        );
+        assert_eq!(
+            stored_session(&dir).user.avatar_url.as_deref(),
+            Some("https://avatars.example.com/keep.png")
+        );
+        // Nothing changed → the state channel does NOT re-emit.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state_rx.changed())
+                .await
+                .is_err(),
+            "no avatar/org change must not emit"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_with_explicit_null_clears_the_avatar() {
+        let edge = mock_edge_status(
+            "200 OK",
+            r#"{"user":{"id":"u1","email":"a@b.c","firstName":"Ann","lastName":"X","profilePictureUrl":null},"accessToken":"h.eyJvcmdfaWQiOiJvcmdfMSJ9.sig","refreshToken":"rt2"}"#,
+        )
+        .await;
+        let (auth, dir) =
+            workos_auth_with_avatar(&edge, Some("https://avatars.example.com/gone.png"));
+
+        let result = auth.refresh(None).await;
+        assert!(result.is_ok());
+        // The user is present with no picture: an explicit clear.
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            None
+        );
+        assert_eq!(stored_session(&dir).user.avatar_url, None);
+    }
+
+    // -- Loaded-session avatar boundary --------------------------------
+    //
+    // session.json serializes the user camelCase (`avatarUrl`). A valid URL
+    // is parsed and lands in state AND inner.stored (persisted too); an
+    // unsafe URL is parsed, sanitized to None everywhere, and rewritten out
+    // of the file — so a later org-changing refresh can never re-emit it.
+
+    #[test]
+    fn loaded_session_parses_and_persists_a_valid_camelcase_avatar() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"rt-1","user":{"id":"u1","email":"a@b.c","avatarUrl":"https://avatars.example.com/a.png"},"orgId":"org_1"}"#,
+        )
+        .unwrap();
+        let auth = Auth::new(config_with_edge("http://edge.test", dir.path()));
+        // Initial state carries the avatar.
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            Some("https://avatars.example.com/a.png")
+        );
+        // `inner.stored` holds the SAME clean value (nothing re-emittable).
+        let stored = stored_session(&dir);
+        assert_eq!(
+            stored.user.avatar_url.as_deref(),
+            Some("https://avatars.example.com/a.png")
+        );
+        // session.json serializes camelCase — never snake_case.
+        let raw = std::fs::read_to_string(dir.path().join("session.json")).unwrap();
+        assert!(
+            raw.contains("avatarUrl"),
+            "session.json must use avatarUrl: {raw}"
+        );
+        assert!(
+            !raw.contains("avatar_url"),
+            "session.json must not use avatar_url: {raw}"
+        );
+    }
+
+    #[test]
+    fn loaded_session_parses_then_sanitizes_an_unsafe_avatar_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"rt-1","user":{"id":"u1","email":"a@b.c","avatarUrl":"http://evil.example/a.png"},"orgId":"org_1"}"#,
+        )
+        .unwrap();
+        let auth = Auth::new(config_with_edge("http://edge.test", dir.path()));
+        // The unsafe URL IS parsed (it was really read in), then sanitized to
+        // None everywhere: initial state, inner.stored, and the persisted file.
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            None
+        );
+        assert_eq!(stored_session(&dir).user.avatar_url, None);
+        let raw = std::fs::read_to_string(dir.path().join("session.json")).unwrap();
+        assert!(
+            !raw.contains("evil.example"),
+            "unsafe URL must be rewritten out: {raw}"
+        );
+        assert!(
+            !raw.contains("avatarUrl"),
+            "cleaned session omits the avatar: {raw}"
+        );
+    }
+
+    /// Gap-2 regression: an unsafe avatar must never survive in `inner.stored`
+    /// and get re-emitted by a later org-changing refresh.
+    #[tokio::test]
+    async fn unsafe_loaded_avatar_never_reemits_after_org_changing_refresh() {
+        let edge = mock_edge_status(
+            "200 OK",
+            r#"{"accessToken":"h.eyJvcmdfaWQiOiJvcmdfMiJ9.sig","refreshToken":"rt2"}"#,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("session.json"),
+            r#"{"refreshToken":"rt-1","user":{"id":"u1","email":"a@b.c","avatarUrl":"http://evil.example/a.png"},"orgId":"org_1"}"#,
+        )
+        .unwrap();
+        let auth = Auth::new(config_with_edge(&edge, dir.path()));
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            None,
+            "unsafe avatar sanitized at load"
+        );
+        // A refresh that changes org (org_1 → org_2) emits a new SignedIn
+        // state built from `inner.stored` — which must be the sanitized user.
+        let result = auth.refresh(None).await;
+        assert!(result.is_ok());
+        assert_eq!(auth.state().org_id(), Some("org_2"));
+        assert_eq!(
+            auth.state().user().and_then(|u| u.avatar_url.as_deref()),
+            None,
+            "unsafe avatar must not re-emit through an org-changing refresh"
         );
     }
 }

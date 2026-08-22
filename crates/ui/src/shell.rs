@@ -704,6 +704,45 @@ fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<
     }
 }
 
+/// Final UI-side guard before an avatar URL reaches gpui's `img()`: HTTPS
+/// only and bounded to 2048 chars. The engine sanitizes every ingress, so
+/// this is defense-in-depth — and it also guarantees gpui treats the value as
+/// a remote URI, never an embedded file path.
+fn safe_avatar_url(url: Option<SharedString>) -> Option<SharedString> {
+    let url = url?;
+    if url.len() > 2048 {
+        return None;
+    }
+    // The parser percent-encodes whitespace/control chars rather than failing;
+    // the raw string must never carry them (a stored avatar URL is fetched
+    // verbatim by gpui).
+    if url.chars().any(char::is_whitespace) || url.bytes().any(|b| b < 0x20) {
+        return None;
+    }
+    // REAL URL parsing (`url::Url`, the type `reqwest::Url` re-exports): the
+    // scheme must be `https`, there must be a host, and there must be no
+    // embedded credentials. A hand-rolled prefix check would accept malformed
+    // ports/hosts; the parser rejects them — and guarantees gpui treats the
+    // value as a remote URI, never an embedded file path. The engine sanitizes
+    // every ingress, so this is defense-in-depth.
+    let parsed = url::Url::parse(&url).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    if parsed.host_str()?.is_empty() || !parsed.username().is_empty() || parsed.password().is_some()
+    {
+        return None;
+    }
+    // The WHATWG parser "ignores slashes" right after `https://` —
+    // `https:///a.png` silently normalizes to host `a.png` with an EMPTY
+    // authority in the input. A real avatar URL names its host explicitly.
+    let rest = url.get(url.find(':')? + 1..)?.strip_prefix("//")?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    Some(url)
+}
+
 fn sync_flow_after_auth(
     flow: SyncFlow,
     scope: Option<WorkspaceScope>,
@@ -3325,8 +3364,18 @@ impl Shell {
                 (line, Some("Alpha".into()), email)
             }
         };
-        let user_menu =
-            self.render_user_menu(user_line.clone(), trigger_subline, menu_identity, theme, cx);
+        let avatar_url = user
+            .as_ref()
+            .and_then(|u| u.avatar_url.clone())
+            .map(SharedString::from);
+        let user_menu = self.render_user_menu(
+            user_line.clone(),
+            trigger_subline,
+            menu_identity,
+            avatar_url,
+            theme,
+            cx,
+        );
 
         // The fixed product header + Add project action lives ABOVE the scroll
         // region (it must stay reachable no matter how long the card list gets).
@@ -3559,6 +3608,7 @@ impl Shell {
         user_line: SharedString,
         trigger_subline: Option<SharedString>,
         menu_identity: SharedString,
+        avatar_url: Option<SharedString>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -3572,6 +3622,45 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".into())
             .into();
+        // Avatar: the GitHub/WorkOS profile picture when one is on the
+        // account, else (and on any load failure) the white circle with the
+        // initial in near-black (zeron user-menu.tsx).
+        let fallback_avatar = {
+            let initial = initial.clone();
+            let theme = theme.clone();
+            move || {
+                div()
+                    .size(px(26.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.text)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.bg)
+                    .child(initial.clone())
+                    .into_any_element()
+            }
+        };
+        // Final UI-side guard: only a bounded HTTPS URL may reach gpui's
+        // `img` — anything else renders the initial-letter avatar instead and
+        // can never be interpreted as a local file.
+        let avatar = match safe_avatar_url(avatar_url) {
+            Some(url) => {
+                let loading = fallback_avatar.clone();
+                gpui::img(url)
+                    .size(px(26.0))
+                    .flex_none()
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .with_loading(loading)
+                    .with_fallback(fallback_avatar)
+                    .into_any_element()
+            }
+            None => fallback_avatar(),
+        };
         let mut trigger = div()
             .id("user-menu")
             .flex_none()
@@ -3610,21 +3699,7 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(26.0))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(initial),
-            )
+            .child(avatar)
             .child(
                 // Name with an optional status line underneath — no chip on the right.
                 div()
@@ -6431,6 +6506,38 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
+    #[test]
+    fn safe_avatar_url_guards_https_and_bounds() {
+        let ok = SharedString::from("https://avatars.example.com/a.png");
+        assert_eq!(safe_avatar_url(Some(ok.clone())), Some(ok));
+        // Non-HTTPS, hostless, malformed, and oversized values never reach
+        // gpui's `img` (never a local-file interpretation either).
+        for bad in [
+            "http://avatars.example.com/a.png",
+            "file:///etc/passwd",
+            "not a url",
+            "https://",
+            "https:///a.png",
+            // Malformed ports / hosts and embedded credentials: real URL
+            // parsing rejects what a prefix check would accept.
+            "https://host:99999/a.png",
+            "https://host:abc/a.png",
+            "https://user@host/a.png",
+            "https://user:pass@host/a.png",
+            &format!("https://host/{}", "a".repeat(2048)),
+        ] {
+            assert_eq!(
+                safe_avatar_url(Some(SharedString::from(bad))),
+                None,
+                "{bad}"
+            );
+        }
+        assert_eq!(safe_avatar_url(None), None);
+        // Exactly 2048 chars is allowed.
+        let at_cap = format!("https://h/{}", "a".repeat(2048 - "https://h/".len()));
+        assert!(safe_avatar_url(Some(SharedString::from(at_cap))).is_some());
+    }
+
     #[tokio::test]
     async fn remote_shutdown_waits_for_ipc_release() {
         let dir = tempfile::tempdir().unwrap();
@@ -6694,6 +6801,7 @@ mod tests {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
+                avatar_url: None,
             },
             org_id: Some("org-1".into()),
         };
@@ -6806,6 +6914,7 @@ mod tests {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
+                avatar_url: None,
             },
             org_id: Some("org-1".into()),
         };
@@ -6849,6 +6958,7 @@ mod tests {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
+                avatar_url: None,
             },
             org_id: Some("org-1".into()),
         };
@@ -6884,6 +6994,7 @@ mod tests {
                 id: "user-2".into(),
                 email: "other@example.com".into(),
                 name: None,
+                avatar_url: None,
             },
             org_id: Some("org-2".into()),
         };

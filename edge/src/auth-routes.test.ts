@@ -88,7 +88,13 @@ describe("POST /auth/exchange", () => {
         calls.push({ url, body: JSON.parse(init.body) });
         return new Response(
           JSON.stringify({
-            user: { id: "u1", email: "a@b.c", first_name: "Ann", last_name: "X" },
+            user: {
+              id: "u1",
+              email: "a@b.c",
+              first_name: "Ann",
+              last_name: "X",
+              profile_picture_url: "https://avatars.example.com/a.png"
+            },
             access_token: "at",
             refresh_token: "rt"
           }),
@@ -103,6 +109,10 @@ describe("POST /auth/exchange", () => {
       expect(payload.accessToken).toBe("at");
       expect(payload.refreshToken).toBe("rt");
       expect((payload.user as Record<string, unknown>).email).toBe("a@b.c");
+      // The GitHub/WorkOS profile picture rides the exchange to the device.
+      expect((payload.user as Record<string, unknown>).profilePictureUrl).toBe(
+        "https://avatars.example.com/a.png"
+      );
       // The single WorkOS call carries the PKCE verifier (snake_case) plus
       // the client credentials the edge alone holds.
       expect(calls).toHaveLength(1);
@@ -138,6 +148,45 @@ describe("POST /auth/exchange", () => {
     } finally {
       warn.mockRestore();
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("sanitizes the profile picture to null when it is not a safe HTTPS URL", async () => {
+    const bad = [
+      // Non-HTTPS.
+      "http://avatars.example.com/a.png",
+      // Malformed / not a URL at all.
+      "not a url",
+      "https://",
+      "../../etc/passwd",
+      // Oversized (2048 chars is the cap).
+      `https://avatars.example.com/${`a`.repeat(2048)}`,
+      // Malformed ports / hosts and embedded credentials (userinfo).
+      "https://avatars.example.com:99999/a.png",
+      "https://user:pass@avatars.example.com/a.png"
+    ];
+    for (const profile_picture_url of bad) {
+      vi.stubGlobal(
+        "fetch",
+        async () =>
+          new Response(
+            JSON.stringify({
+              user: { id: "u1", email: "a@b.c", first_name: "Ann", last_name: "X", profile_picture_url },
+              access_token: "at",
+              refresh_token: "rt"
+            }),
+            { status: 200 }
+          )
+      );
+      try {
+        const res = await exchange({ code: "c", codeVerifier: VALID_VERIFIER });
+        expect(res?.status).toBe(200);
+        const payload = (await res?.json()) as Record<string, unknown>;
+        const user = payload.user as Record<string, unknown>;
+        expect(user.profilePictureUrl).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
     }
   });
 
@@ -335,6 +384,84 @@ describe("POST /auth/refresh", () => {
     const res = await refresh({ refreshToken: "rt-1", organizationId: 7 });
     expect(res?.status).toBe(400);
     expect(await res?.json()).toEqual({ error: "organizationId must be a string" });
+  });
+
+  it("surfaces the refresh-grant user so devices can refresh the avatar", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            user: {
+              id: "u1",
+              email: "a@b.c",
+              first_name: "Ann",
+              last_name: "X",
+              profile_picture_url: "https://avatars.example.com/new.png"
+            },
+            access_token: "at",
+            refresh_token: "rt"
+          }),
+          { status: 200 }
+        )
+    );
+    try {
+      const res = await refresh({ refreshToken: "rt-1" });
+      expect(res?.status).toBe(200);
+      const payload = (await res?.json()) as Record<string, unknown>;
+      expect(payload.accessToken).toBe("at");
+      expect(payload.refreshToken).toBe("rt");
+      const user = payload.user as Record<string, unknown>;
+      expect(user.id).toBe("u1");
+      expect(user.profilePictureUrl).toBe("https://avatars.example.com/new.png");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("omits the nested user when WorkOS returns none (devices preserve the avatar)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({ access_token: "at", refresh_token: "rt" }),
+          { status: 200 }
+        )
+    );
+    try {
+      const res = await refresh({ refreshToken: "rt-1" });
+      expect(res?.status).toBe(200);
+      const payload = (await res?.json()) as Record<string, unknown>;
+      expect(payload.accessToken).toBe("at");
+      expect(payload.refreshToken).toBe("rt");
+      // Absent (not null): an old edge / omitted user must never clear it.
+      expect("user" in payload).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sanitizes an unsafe refresh profile picture to null (explicit clear)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            user: { id: "u1", email: "a@b.c", first_name: "Ann", last_name: "X", profile_picture_url: "http://avatars.example.com/a.png" },
+            access_token: "at",
+            refresh_token: "rt"
+          }),
+          { status: 200 }
+        )
+    );
+    try {
+      const res = await refresh({ refreshToken: "rt-1" });
+      const payload = (await res?.json()) as Record<string, unknown>;
+      const user = payload.user as Record<string, unknown>;
+      expect(user.profilePictureUrl).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

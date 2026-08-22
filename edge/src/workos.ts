@@ -43,6 +43,8 @@ export interface ExchangeResult {
     readonly email: string;
     readonly firstName: string | null;
     readonly lastName: string | null;
+    /** GitHub/WorkOS profile picture (drives the desktop sidebar avatar). */
+    readonly profilePictureUrl: string | null;
   };
   readonly accessToken: string;
   readonly refreshToken: string;
@@ -51,6 +53,17 @@ export interface ExchangeResult {
 export interface RefreshResult {
   readonly accessToken: string;
   readonly refreshToken: string;
+  /** The user WorkOS returned with the refresh, when it did. `user` ABSENT
+   * means this edge predates avatar sync (or WorkOS omitted the user) — the
+   * device must PRESERVE its stored avatar; `user.profilePictureUrl: null`
+   * is an explicit "no picture" that CLEARS it. */
+  readonly user?: {
+    readonly id: string;
+    readonly email: string;
+    readonly firstName: string | null;
+    readonly lastName: string | null;
+    readonly profilePictureUrl: string | null;
+  };
 }
 
 export interface OrgMembership {
@@ -64,6 +77,7 @@ interface WireUser {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  profile_picture_url: string | null;
 }
 
 interface WireAuthResponse {
@@ -90,6 +104,28 @@ const readWireError = async (res: Response): Promise<{
   } catch {
     return {};
   }
+};
+
+/** Sanitize a WorkOS profile picture URL before it ever leaves the edge:
+ * HTTPS with a host, bounded to 2048 chars AND bytes, and parseable. Anything
+ * else (non-string, malformed, non-HTTPS, oversized) → `null`, so a hostile
+ * or garbage value can never reach a device — and a non-URL can never be
+ * interpreted as a local file. */
+const sanitizeProfilePicture = (value: unknown): string | null => {
+  const bounded = (s: string) => s.length <= 2048 && new TextEncoder().encode(s).length <= 2048;
+  if (typeof value !== "string" || !bounded(value)) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || !url.hostname) return null;
+  // Embedded credentials (userinfo) must never ride along.
+  if (url.username || url.password) return null;
+  // Normalize (URL parsing may append a path `/`), then re-bounds.
+  const normalized = url.toString();
+  return bounded(normalized) ? normalized : null;
 };
 
 /** Map a rejected WorkOS response to a typed, status-preserving error.
@@ -175,7 +211,8 @@ export const exchange = async (
       id: r.user.id,
       email: r.user.email,
       firstName: r.user.first_name,
-      lastName: r.user.last_name
+      lastName: r.user.last_name,
+      profilePictureUrl: sanitizeProfilePicture(r.user.profile_picture_url)
     },
     accessToken: r.access_token,
     refreshToken: r.refresh_token
@@ -203,7 +240,25 @@ export const refresh = async (
   });
   if (!res.ok) return failed(res);
   const r = (await res.json()) as WireAuthResponse;
-  return { accessToken: r.access_token, refreshToken: r.refresh_token };
+  // The refresh grant carries the user too; surface it (avatar sanitized)
+  // so devices can refresh the signed-in profile without re-login. When
+  // WorkOS omits the user, `user` stays ABSENT (never null) so a device
+  // preserves its stored avatar instead of clearing it.
+  return {
+    accessToken: r.access_token,
+    refreshToken: r.refresh_token,
+    ...(r.user
+      ? {
+          user: {
+            id: r.user.id,
+            email: r.user.email,
+            firstName: r.user.first_name,
+            lastName: r.user.last_name,
+            profilePictureUrl: sanitizeProfilePicture(r.user.profile_picture_url)
+          }
+        }
+      : {})
+  };
 };
 
 /** The user's active organization memberships. */

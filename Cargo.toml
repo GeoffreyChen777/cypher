@@ -65,6 +65,9 @@ gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a1
     "runtime_shaders",
 ] }
 gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+# Real HTTP for gpui's `img()` element (remote avatar URLs); gpui itself
+# defaults to a null client, so images would always fall back.
+reqwest_client = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
 
 # diffs
 similar = "2"
@@ -105,6 +108,7 @@ alacritty_terminal = "0.26"
 pulldown-cmark = "0.12"
 unicode-segmentation = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 ignore = "0.4"
 
 [profile.release]

@@ -12,6 +12,7 @@ struct AuthUser: Codable, Equatable {
     var email: String?
     var firstName: String?
     var lastName: String?
+    var profilePictureUrl: String?
 }
 
 struct AuthOrg: Codable, Identifiable, Equatable {

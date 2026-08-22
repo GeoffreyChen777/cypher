@@ -174,7 +174,7 @@ impl HarnessesPage {
     }
 
     /// The page-header device switcher (the Accounts pattern): platform glyph
-    /// · name · presence dot · sort glyph, opening a dropdown of every
+    /// · name · sort glyph, opening a dropdown of every
     /// registered device.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
@@ -207,68 +207,59 @@ impl HarnessesPage {
             .as_ref()
             .map(|d| d.name.clone().into())
             .unwrap_or_else(|| SharedString::from("This device"));
-        let emerald = theme.success;
         let open = self.device_menu_open;
 
-        let mut trigger =
-            div()
-                .id("harnesses-device-switcher")
-                .flex_none()
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .bg(if open {
-                    crate::theme::ink(0.06)
-                } else {
-                    gpui::transparent_black()
-                })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, _| {
-                        this.device_menu_pressed_open = this.device_menu_open;
-                    }),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    // A press that found the menu open closes it — never
-                    // reopen on the same gesture.
-                    let pressed_open = std::mem::take(&mut this.device_menu_pressed_open);
-                    this.device_menu_open = !pressed_open && !this.device_menu_open;
-                    cx.notify();
-                }))
-                .child(
-                    icon(trigger_glyph)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(trigger_label),
-                )
-                .child(div().size(px(6.0)).rounded_full().flex_none().bg(
-                    if effective == local_id {
-                        emerald
-                    } else {
-                        crate::theme::ink(0.2)
-                    },
-                ))
-                .child(
-                    icon(icons::SORT_VERTICAL)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.4 })),
-                );
+        let mut trigger = div()
+            .id("harnesses-device-switcher")
+            .flex_none()
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .bg(if open {
+                crate::theme::ink(0.06)
+            } else {
+                gpui::transparent_black()
+            })
+            .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.device_menu_pressed_open = this.device_menu_open;
+                }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                // A press that found the menu open closes it — never
+                // reopen on the same gesture.
+                let pressed_open = std::mem::take(&mut this.device_menu_pressed_open);
+                this.device_menu_open = !pressed_open && !this.device_menu_open;
+                cx.notify();
+            }))
+            .child(
+                icon(trigger_glyph)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(trigger_label),
+            )
+            .child(
+                icon(icons::SORT_VERTICAL)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.4 })),
+            );
 
         if open {
             let menu = popover::popover_card(theme)
@@ -311,17 +302,6 @@ impl HarnessesPage {
                                     .child(SharedString::from("You")),
                             )
                         })
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(if is_local {
-                                    emerald
-                                } else {
-                                    crate::theme::ink(0.2)
-                                }),
-                        )
                 }))
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu("harnesses-device-menu", menu, None));

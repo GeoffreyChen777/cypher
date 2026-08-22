@@ -1103,15 +1103,20 @@ impl WorkspaceHostInner {
             let now = now_ms();
             let mut live_fresh_peers = 0usize;
             for device in devices.iter_mut() {
+                // RegistryClient intentionally exposes REMOTE presence only.
+                // The local engine being able to publish this view is itself
+                // authoritative proof that its own device is online.
+                if device.id == self.config.device_id {
+                    device.last_seen_at = chrono::DateTime::<Utc>::from_timestamp_millis(now);
+                    continue;
+                }
                 // Freshest of the live presence entry and the cache: the room
                 // map's 30s TTL (and its empty state right after a rejoin)
                 // must not erase freshness this engine already witnessed — the
                 // device is offline only once heartbeats genuinely stop
                 // arriving for the UI's whole online window.
                 let live = live_map.get(&device.id).copied();
-                if device.id != self.config.device_id
-                    && live.is_some_and(|ms| now.saturating_sub(ms) < PRESENCE_FRESH_MS)
-                {
+                if live.is_some_and(|ms| now.saturating_sub(ms) < PRESENCE_FRESH_MS) {
                     live_fresh_peers += 1;
                 }
                 let cached = seen.get(&device.id).copied();
@@ -1124,8 +1129,7 @@ impl WorkspaceHostInner {
                 {
                     device.last_seen_at = Some(at);
                 }
-                if device.id != self.config.device_id && now.saturating_sub(ms) < PRESENCE_FRESH_MS
-                {
+                if now.saturating_sub(ms) < PRESENCE_FRESH_MS {
                     alive_peers.push(device.id.clone());
                 }
             }
@@ -1386,7 +1390,13 @@ fn device_name_on_boot(existing_name: Option<&str>, detected_name: &str) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{device_name_on_boot, linked_worktree_root};
+    use std::sync::Arc;
+
+    use chrono::{TimeDelta, Utc};
+    use cypher_proto::Device;
+    use cypher_sync::DocsStore;
+
+    use super::{WorkspaceHost, WorkspaceHostConfig, device_name_on_boot, linked_worktree_root};
 
     #[test]
     fn boot_repairs_the_legacy_unknown_device_sentinel() {
@@ -1402,6 +1412,38 @@ mod tests {
             device_name_on_boot(Some("Work laptop"), "MacBook Pro"),
             "Work laptop"
         );
+    }
+
+    #[tokio::test]
+    async fn local_device_is_fresh_while_the_host_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "local-device".into(),
+                device_name: "Local".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let mut devices = vec![Device {
+            id: "local-device".into(),
+            name: "Local".into(),
+            platform: "linux".into(),
+            last_seen_at: Some(Utc::now() - TimeDelta::minutes(10)),
+            created_at: None,
+            version: None,
+        }];
+
+        host.inner.overlay_presence(&mut devices);
+
+        let age = Utc::now()
+            .signed_duration_since(devices[0].last_seen_at.unwrap())
+            .num_seconds();
+        assert!(age <= 1, "local presence should be fresh, age={age}s");
     }
 
     #[test]

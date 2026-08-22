@@ -258,7 +258,7 @@ impl AccountsPage {
     }
 
     /// The page-header device switcher (zeron device-switcher.tsx): a quiet
-    /// trigger — platform glyph · name · presence dot · sort glyph — opening a
+    /// trigger — platform glyph · name · sort glyph — opening a
     /// dropdown of every registered device. Selecting one retargets the page.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
@@ -293,69 +293,60 @@ impl AccountsPage {
             .as_ref()
             .map(|d| d.name.clone().into())
             .unwrap_or_else(|| SharedString::from("This device"));
-        let emerald = theme.success;
         let open = self.device_menu.is_open();
 
-        let mut trigger =
-            div()
-                .id("accounts-device-switcher")
-                .flex_none()
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .bg(if open {
-                    crate::theme::ink(0.06)
+        let mut trigger = div()
+            .id("accounts-device-switcher")
+            .flex_none()
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .bg(if open {
+                crate::theme::ink(0.06)
+            } else {
+                gpui::transparent_black()
+            })
+            .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.device_menu.note_trigger_press()),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.device_menu.take_press_was_open() {
+                    this.close_device_menu(cx);
                 } else {
-                    gpui::transparent_black()
-                })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.device_menu.note_trigger_press()),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    // A press that found the menu open closes it (the card's
-                    // mouse-down-out already began the close) — never reopen.
-                    if this.device_menu.take_press_was_open() {
-                        this.close_device_menu(cx);
-                    } else {
-                        this.device_menu.open(());
-                    }
-                    cx.notify();
-                }))
-                .child(
-                    icon(trigger_glyph)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(trigger_label),
-                )
-                .child(div().size(px(6.0)).rounded_full().flex_none().bg(
-                    if effective == local_id {
-                        emerald
-                    } else {
-                        crate::theme::ink(0.2)
-                    },
-                ))
-                .child(
-                    icon(icons::SORT_VERTICAL)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.4 })),
-                );
+                    this.device_menu.open(());
+                }
+                cx.notify();
+            }))
+            .child(
+                icon(trigger_glyph)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(trigger_label),
+            )
+            .child(
+                icon(icons::SORT_VERTICAL)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.4 })),
+            );
 
         if self.device_menu.get().is_some() {
             let closing = self.device_menu.closing_since();
@@ -398,17 +389,6 @@ impl AccountsPage {
                                     .child(SharedString::from("You")),
                             )
                         })
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .flex_none()
-                                .bg(if is_local {
-                                    emerald
-                                } else {
-                                    crate::theme::ink(0.2)
-                                }),
-                        )
                 }))
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu(
