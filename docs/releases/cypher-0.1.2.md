@@ -39,18 +39,19 @@ to be attached.
   immediate shutdown on a freshly-spawned updater no longer hangs waiting for
   the 6h loop (covered by a regression test).
 
-## Immediate workaround for 0.1.0 installs
+## Immediate workaround for 0.1.0 and 0.1.1 installs
 
-If you installed 0.1.0 (before this release landed) and Cypher is not showing
-an update banner, update manually — either:
+If you installed 0.1.0 or 0.1.1 and Cypher is not showing an update banner,
+update manually — either:
 
 ```sh
 /Applications/Cypher.app/Contents/MacOS/cypher update
 ```
 
 or reinstall the current DMG from <https://edge.letscypher.app> / the
-[download page](https://letscypher.app). 0.1.0's desktop install had no working
-update checker; 0.1.2 and newer check automatically again.
+[download page](https://letscypher.app). Local-only desktop installs in 0.1.0
+and 0.1.1 had no working update checker; 0.1.2 and newer check automatically
+again.
 
 ## macOS build note
 
