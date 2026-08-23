@@ -59,8 +59,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_proto::{
-    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SideChatSource,
-    SubagentRunMode, ToolCall, WorkspaceScope,
+    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest,
+    SideChatSource, SubagentRunMode, ToolCall, WorkspaceScope,
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -70,6 +70,7 @@ use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
+use crate::session_forks::SessionForks;
 use crate::sessions::SessionsEngine;
 use crate::side_chats::SideChats;
 use crate::terminals::Terminals;
@@ -419,6 +420,7 @@ pub struct EngineRpc {
     uploads: Uploads,
     agent_accounts: AgentAccounts,
     side_chats: SideChats,
+    session_forks: SessionForks,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
@@ -443,6 +445,7 @@ impl EngineRpc {
         uploads: Uploads,
         agent_accounts: AgentAccounts,
         side_chats: SideChats,
+        session_forks: SessionForks,
         workspace_scope: WorkspaceScope,
     ) -> Self {
         let engine_info = EngineInfo {
@@ -460,6 +463,7 @@ impl EngineRpc {
             uploads,
             agent_accounts,
             side_chats,
+            session_forks,
             auth: None,
             links: None,
             updater: None,
@@ -1155,6 +1159,9 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_SIDE_CHAT_STATUS
             | methods::PROMOTE_SIDE_CHAT
             | methods::DISPOSE_SIDE_CHAT
+            // Session Forks are owned by the source chat's host device (the
+            // Pi session store lives there).
+            | methods::FORK_SESSION
     )
 }
 
@@ -2193,6 +2200,15 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::FORK_SESSION => {
+                let p: SessionForkRequest = parse_params(params)?;
+                let reply = self
+                    .session_forks
+                    .fork(p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
             }
             methods::WATCH_AGENT_EVENTS => {
                 #[derive(Deserialize)]

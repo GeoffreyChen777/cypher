@@ -120,6 +120,22 @@ pub trait Harness: Send + Sync {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
+
+    /// Session Fork (v1) — Pi-only. Materialize a NEW persisted harness
+    /// session for a boundary on the source session WITHOUT mutating the
+    /// source session file or any live client. The result's session path is
+    /// `None` for an EMPTY-CONTEXT fork before the first user (pi persists
+    /// that file only when the first user message lands). The default
+    /// implementation answers Unsupported: every non-Pi harness keeps this
+    /// response.
+    async fn fork_session(
+        &self,
+        _request: cypher_proto::PiSessionForkRequest,
+    ) -> Result<cypher_proto::PiSessionForkResult, HarnessError> {
+        Err(HarnessError::Protocol(
+            "session fork is unsupported for this harness (Pi only in v1)".into(),
+        ))
+    }
 }
 
 pub mod acp;

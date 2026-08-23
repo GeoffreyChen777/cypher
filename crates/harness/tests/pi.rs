@@ -16,7 +16,17 @@ use cypher_proto::{
     ToolCall, UserInputAnswer,
 };
 
-const FIXTURE_SESSION_FILE: &str = "/tmp/pi-test/session.jsonl";
+/// The session file the fake pi reports by default: it now derives its
+/// session paths from the `--session-dir` the harness passes (real pi stores
+/// every session under its session dir), so the expectation follows the
+/// harness's managed root.
+fn fixture_session_file() -> String {
+    std::env::temp_dir()
+        .join("cypher-pi-test-sessions")
+        .join("session.jsonl")
+        .to_string_lossy()
+        .into_owned()
+}
 
 fn fixture_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -214,7 +224,7 @@ async fn compact_builtin_is_intercepted_and_dones_immediately() {
         done,
         (
             Some("Context compacted: 150000 → 32000 tokens".into()),
-            Some(FIXTURE_SESSION_FILE.into()),
+            Some(fixture_session_file()),
         )
     );
 }
@@ -252,7 +262,7 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
             e,
             AgentEvent::SessionStarted { harness, session_id, cwd, model, .. }
                 if *harness == HarnessId::Pi
-                    && session_id == FIXTURE_SESSION_FILE
+                    && session_id == fixture_session_file().as_str()
                     && cwd == "/tmp"
                     && model == "Claude Sonnet 4"
         )),
@@ -335,10 +345,7 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
             _ => None,
         })
         .expect("done present");
-    assert_eq!(
-        done,
-        (Some("Done.".into()), Some(FIXTURE_SESSION_FILE.into()))
-    );
+    assert_eq!(done, (Some("Done.".into()), Some(fixture_session_file())));
 }
 
 #[tokio::test]
@@ -419,7 +426,7 @@ async fn no_agent_activity_terminates_with_done_completed_carrying_notify_text()
         done,
         (
             Some("Available subagents:\n- actor: does things\n- coder: writes code".into()),
-            Some(FIXTURE_SESSION_FILE.into()),
+            Some(fixture_session_file()),
         )
     );
 }
@@ -929,4 +936,295 @@ fn descriptor_surface_matches_registry_expectations() {
             ReasoningLevel::Max,
         ]
     );
+}
+
+// ── Session Fork (v1) ──────────────────────────────────────────────────────
+
+/// A fork-ready harness with a REAL managed session root. Returns the
+/// harness, the session root path, and the kept-alive temp dir.
+fn fork_harness() -> (PiHarness, std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let session_root = dir.path().join("agent-sessions");
+    std::fs::create_dir_all(&session_root).unwrap();
+    let harness = PiHarness::new(session_root.clone()).with_executable(fixture_path());
+    (harness, session_root, dir)
+}
+
+/// Write a real source session file under the managed root; returns its path.
+fn write_source(session_root: &std::path::Path, name: &str, bytes: &[u8]) -> String {
+    let path = session_root.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// Any leftover `.fork-*.jsonl` scratch snapshots in the managed root — the
+/// controller must remove them on every path.
+fn scratch_leftovers(session_root: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(session_root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".fork-"))
+        .collect()
+}
+
+/// The fixture's fork session path for an entry id, in the managed root's
+/// CANONICAL form (the controller canonicalizes the returned path).
+fn expected_fork_path(session_root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    std::fs::canonicalize(session_root).unwrap().join(name)
+}
+
+/// A fork of the SECOND visible user prompt: the fake pi's active branch
+/// holds `["first prompt", "second prompt"]` (an abandoned `u2x` branch is
+/// ignored). The fixture refuses any fork id other than the ACTIVE `u2`
+/// entry, so a successful result proves the harness mapped the Cypher prompt
+/// to the right pi user entry and that the new session path came from
+/// `get_state` after the fork moved the session.
+#[tokio::test]
+async fn fork_before_user_returns_new_session_and_targets_the_active_entry() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
+        })
+        .await
+        .expect("fork succeeds");
+    // The per-entry session path proves the harness targeted the ACTIVE u2
+    // entry (the abandoned u2x branch was ignored by the leaf walk).
+    assert_eq!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        expected_fork_path(&root, "forked-u2.jsonl")
+    );
+}
+
+/// CloneLeaf duplicates the active branch at its leaf; the fixture moves
+/// SESSION_FILE to the clone path, so `get_state` reports it.
+#[tokio::test]
+async fn clone_leaf_returns_the_cloned_session_path() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::CloneLeaf,
+        })
+        .await
+        .expect("clone succeeds");
+    assert_eq!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        expected_fork_path(&root, "cloned.jsonl")
+    );
+}
+
+/// A prompt that no pi active user entry matches is a LOUD mapping failure,
+/// never a positional guess (the fixture would happily fork u1 for a guessed
+/// index — the refusal is the harness's).
+#[tokio::test]
+async fn fork_refuses_mismatched_prompts() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "totally different".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
+        })
+        .await
+        .err()
+        .expect("mismatch must fail");
+    assert!(err.to_string().contains("no pi user entry"), "{err}");
+    // The failed mapping still cleaned up its scratch snapshot.
+    assert!(
+        scratch_leftovers(&root).is_empty(),
+        "scratch must be cleaned"
+    );
+}
+
+/// The fake pi's fork handler keys its session path on the entry id, so the
+/// returned path proves the FIRST Cypher prompt mapped onto the ACTIVE u1
+/// entry (not the abandoned u2x or a guessed position). The fixture
+/// MATERIALIZES the file by default, so the harness reports it as `Some`
+/// ("if pi did persist a first-user path, it may be returned").
+#[tokio::test]
+async fn fork_of_the_first_prompt_targets_the_active_entry() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
+        })
+        .await
+        .expect("first-prompt fork succeeds");
+    assert_eq!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        expected_fork_path(&root, "forked-u1.jsonl")
+    );
+}
+
+/// CloneLeaf refuses when the Cypher snapshot has FEWER user prompts than
+/// the pi active branch: the pi session grew past the snapshot, so cloning
+/// at the leaf would pull in a newer user the Cypher transcript omits.
+#[tokio::test]
+async fn clone_leaf_refuses_when_snapshot_lags_the_active_branch() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{}");
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            // The fixture's active branch has TWO user entries (u1, u2); the
+            // snapshot carries only one — cloning must be refused.
+            visible_user_prompts: vec!["first prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::CloneLeaf,
+        })
+        .await
+        .err()
+        .expect("stale snapshot must fail");
+    assert!(
+        err.to_string().contains("refusing to clone a newer leaf"),
+        "{err}"
+    );
+    assert!(scratch_leftovers(&root).is_empty());
+}
+
+/// A source session OUTSIDE the managed session root is rejected before any
+/// helper spawns — the controller must never hand pi an unmanaged path.
+#[tokio::test]
+async fn fork_rejects_source_outside_managed_root() {
+    let (harness, root, dir) = fork_harness();
+    // A regular file OUTSIDE the managed root (a sibling temp dir).
+    let outside = dir.path().join("outside.jsonl");
+    std::fs::write(&outside, b"{}").unwrap();
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: outside.to_string_lossy().into_owned(),
+            visible_user_prompts: vec!["first prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
+        })
+        .await
+        .err()
+        .expect("outside-root source must fail");
+    assert!(
+        err.to_string().contains("outside managed session root"),
+        "{err}"
+    );
+    assert!(scratch_leftovers(&root).is_empty());
+}
+
+/// A MISSING source session is rejected loudly (never silently forked from
+/// nothing).
+#[tokio::test]
+async fn fork_rejects_missing_source() {
+    let (harness, root, _dir) = fork_harness();
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: root.join("ghost.jsonl").to_string_lossy().into_owned(),
+            visible_user_prompts: vec!["first prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
+        })
+        .await
+        .err()
+        .expect("missing source must fail");
+    assert!(
+        err.to_string().contains("source session unavailable"),
+        "{err}"
+    );
+}
+
+/// The source file's bytes are never touched: the controller snapshots it
+/// into a scratch copy the helper loads, and the source stays byte-identical
+/// after a successful fork. The scratch is also gone afterwards.
+#[tokio::test]
+async fn fork_preserves_source_bytes_and_cleans_scratch() {
+    let (harness, root, _dir) = fork_harness();
+    let source_bytes = b"{\"session\":\"seed\",\"lines\":[1,2,3]}\n".to_vec();
+    let source = write_source(&root, "source.jsonl", &source_bytes);
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source.clone(),
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
+        })
+        .await
+        .expect("fork succeeds");
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    assert!(result.session_path.is_some());
+    // The returned fork path differs from the source and no scratch remains.
+    assert_ne!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        std::path::PathBuf::from(source)
+    );
+    assert!(
+        scratch_leftovers(&root).is_empty(),
+        "scratch must be cleaned"
+    );
+}
+
+/// A fork BEFORE THE FIRST USER is EMPTY-CONTEXT: real pi (0.84.1) reports
+/// a `sessionFile` that is NOT persisted until the target's first user
+/// message lands. The harness must represent that as `session_path: None` —
+/// never a bogus missing path a later `switch_session` would choke on. The
+/// `.unmaterialized` marker makes the fixture skip creating the file.
+#[tokio::test]
+async fn fork_before_first_user_returns_no_session_when_not_materialized() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    std::fs::write(root.join(".unmaterialized"), b"").unwrap();
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
+        })
+        .await
+        .expect("empty-context first-user fork succeeds");
+    assert_eq!(result.session_path, None);
+    // The managed root holds ONLY the source + no scratch leftovers.
+    assert!(scratch_leftovers(&root).is_empty());
+}
+
+/// A fork BEFORE a LATER user copies a real prefix: pi MUST have persisted
+/// the new session file. A missing file there is a LOUD error, never a
+/// `None` (the target's first send would `switch_session` to a dead path).
+#[tokio::test]
+async fn fork_before_later_user_requires_a_materialized_session() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    std::fs::write(root.join(".unmaterialized"), b"").unwrap();
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
+        })
+        .await
+        .err()
+        .expect("non-first fork with a missing new file must fail");
+    assert!(err.to_string().contains("not materialized"), "{err}");
+    assert!(scratch_leftovers(&root).is_empty());
+}
+
+/// CloneLeaf is a non-empty boundary too: the cloned session file must be a
+/// REGULAR materialized file, never a missing path.
+#[tokio::test]
+async fn clone_leaf_requires_a_materialized_session() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    std::fs::write(root.join(".unmaterialized"), b"").unwrap();
+    let err = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "second prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::CloneLeaf,
+        })
+        .await
+        .err()
+        .expect("clone with a missing new file must fail");
+    assert!(err.to_string().contains("not materialized"), "{err}");
+    assert!(scratch_leftovers(&root).is_empty());
 }

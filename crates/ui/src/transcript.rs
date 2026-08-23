@@ -33,13 +33,14 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
-    ListScrollEvent, ListState, ObjectFit, Point, SharedString, StyledImage as _, StyledText,
-    Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
+    AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, ListAlignment,
+    ListOffset, ListScrollEvent, ListState, ObjectFit, Point, SharedString, StyledImage as _,
+    StyledText, Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
 use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use cypher_proto::ToolCall;
+use cypher_proto::view::Indicator;
+use cypher_proto::{Chat, HarnessId, ToolCall};
 
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
@@ -546,6 +547,9 @@ pub struct Row {
     /// The owning message entry — hover anywhere on the entry's rows reveals
     /// its timestamp strip (zeron chat-view.tsx `group`/`group-hover`).
     pub entry_id: SharedString,
+    /// The owning entry's role — drives the fork affordance's role-specific
+    /// tooltip AND gates System rows entirely (they never fork).
+    pub role: MessageRole,
     /// Epoch-ms for the 16px hover-timestamp strip UNDER this row: set on the
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
@@ -566,6 +570,107 @@ where
             .format("%b %-d, %-I:%M %p")
             .to_string(),
         None => String::new(),
+    }
+}
+
+/// Events the transcript emits to the shell (Session Fork v1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptEvent {
+    /// The user clicked a settled entry's fork affordance: fork the
+    /// conversation at `anchor_message_id` (before this user / from this
+    /// response) into a NEW durable root chat.
+    ForkRequested {
+        chat_id: String,
+        anchor_message_id: String,
+    },
+}
+
+impl EventEmitter<TranscriptEvent> for Transcript {}
+
+/// Session Fork affordance state for the timestamp strip's git-branch icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkGate {
+    /// Shown and clickable: the source is a settled Pi root chat.
+    Enabled,
+    /// Shown but inert (dimmed), with the reason for the tooltip.
+    Disabled(&'static str),
+}
+
+/// The fork affordance gate (pure — tests exercise the real gating without a
+/// gpui App). Embedded (Side Chat) panels, offline engines, child chats,
+/// non-Pi configs, live (Working/AwaitingInput) chats, and an OFFLINE SOURCE
+/// HOST DEVICE are all disabled. Remote Pi chats stay ENABLED while their
+/// host is online: the shell relays `ForkSession` to the source chat's host
+/// device.
+pub fn fork_gate(
+    embedded: bool,
+    chat: Option<&Chat>,
+    live: bool,
+    offline: bool,
+    host_online: bool,
+) -> ForkGate {
+    if embedded {
+        return ForkGate::Disabled("Side chats can't be forked.");
+    }
+    if offline {
+        return ForkGate::Disabled("The engine is offline.");
+    }
+    let Some(chat) = chat else {
+        return ForkGate::Disabled("No chat selected.");
+    };
+    if chat.is_child() {
+        return ForkGate::Disabled("Subagent chats can't be forked.");
+    }
+    if chat.config.as_ref().map(|c| c.harness) != Some(HarnessId::Pi) {
+        return ForkGate::Disabled("Only Pi chats can be forked.");
+    }
+    if live {
+        return ForkGate::Disabled("Wait for the chat to finish before forking.");
+    }
+    if !host_online {
+        return ForkGate::Disabled("The device hosting this chat is offline.");
+    }
+    ForkGate::Enabled
+}
+
+/// The fork affordance's tooltip: role-specific while enabled, the disabled
+/// reason otherwise. Enabled text is exactly `Fork before this message` for
+/// User and `Fork after this response` for Assistant.
+pub fn fork_tooltip(role: MessageRole, gate: &ForkGate) -> &'static str {
+    match gate {
+        ForkGate::Disabled(reason) => reason,
+        ForkGate::Enabled => match role {
+            MessageRole::User => "Fork before this message",
+            MessageRole::Assistant => "Fork after this response",
+            // System rows never emit a fork affordance; keep a fallback text
+            // so a misroute is still coherent.
+            MessageRole::System => "Fork after this message",
+        },
+    }
+}
+
+/// The fork affordance's hover tooltip (Session Fork v1).
+struct ForkTooltip {
+    text: SharedString,
+}
+
+impl Render for ForkTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        motion::fade_quick(
+            "fork-tooltip",
+            div()
+                .max_w(px(280.0))
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(self.text.clone()),
+        )
     }
 }
 
@@ -681,6 +786,7 @@ pub fn rows_for_entry(
                 pending,
             },
             entry_id,
+            role: entry.role,
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
@@ -709,6 +815,7 @@ pub fn rows_for_entry(
                     auto_open,
                 },
                 entry_id: entry.id.clone().into(),
+                role: entry.role,
                 timestamp: None,
             });
             *group_ix += 1;
@@ -775,6 +882,7 @@ pub fn rows_for_entry(
                                 version,
                                 turn_start: false,
                                 entry_id: entry_id.clone(),
+                                role: entry.role,
                                 timestamp: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
@@ -813,6 +921,7 @@ pub fn rows_for_entry(
                                 resolved: *resolved,
                             },
                             entry_id: entry_id.clone(),
+                            role: entry.role,
                             timestamp: None,
                         });
                     }
@@ -829,6 +938,7 @@ pub fn rows_for_entry(
                                 message: single_line(message).into(),
                             },
                             entry_id: entry_id.clone(),
+                            role: entry.role,
                             timestamp: None,
                         });
                     }
@@ -1470,6 +1580,11 @@ pub struct Transcript {
     /// The shared shell-level Comment pill/editor (round 20). Weak: the
     /// shell owns it; the transcript only ever drives and reads it.
     comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    /// In-flight Session Forks, keyed `(chat id, anchor message id)`: while
+    /// an entry's fork RPC is pending its affordance shows a spinner and is
+    /// inert (double-click guard). The shell begins/ends these around the
+    /// ForkSession call.
+    fork_pending: std::collections::HashSet<(String, String)>,
     _observe: Subscription,
 }
 
@@ -1577,6 +1692,7 @@ impl Transcript {
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
             comment_popup,
+            fork_pending: std::collections::HashSet::new(),
             _observe: observe,
         };
         this.sync(cx);
@@ -2791,6 +2907,49 @@ impl Transcript {
         )
     }
 
+    /// Session Fork (v1): the affordance gate for THIS chat, from live
+    /// state. A remote Pi chat stays enabled only while its SOURCE HOST device
+    /// is present (the shell relays ForkSession to that device); embedded /
+    /// offline / child / non-Pi / live are inert. The LOCAL engine is still
+    /// authoritative (an offline engine disables everything).
+    fn fork_gate_for(&self, cx: &App) -> ForkGate {
+        let chat_id = self.chat_id.as_deref();
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let chat = chat_id.and_then(|id| state.chats.iter().find(|c| c.id == id));
+        let live = chat_id.is_some_and(|id| {
+            matches!(
+                state.indicator_for(id, now),
+                Indicator::Working | Indicator::AwaitingInput
+            )
+        });
+        // The source chat's host must be present: `device_online` treats the
+        // local device as trivially online and gives unknown devices the
+        // benefit of the doubt, so only a REMOTE host's stale heartbeat
+        // disables the affordance.
+        let host_online = chat.is_none_or(|c| state.device_online(&c.device_id, now));
+        fork_gate(
+            self.embedded,
+            chat,
+            live,
+            state.engine().is_none(),
+            host_online,
+        )
+    }
+
+    /// Session Fork (v1): mark a fork RPC in flight for `(chat, anchor)` —
+    /// the affordance becomes a spinner + inert (double-click guard). The
+    /// shell calls this when the ForkRequested event fires.
+    pub fn begin_fork(&mut self, chat_id: String, anchor_message_id: String) {
+        self.fork_pending.insert((chat_id, anchor_message_id));
+    }
+
+    /// Session Fork (v1): clear the in-flight marker when the ForkSession
+    /// RPC settles (success or failure) so the affordance re-arms.
+    pub fn end_fork(&mut self, chat_id: String, anchor_message_id: String) {
+        self.fork_pending.remove(&(chat_id, anchor_message_id));
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -2998,6 +3157,86 @@ impl Transcript {
         // flush: the Timestamp follows the bubble HStack directly (VStack gap
         // defaults to 0 in mugen), the label's centering inside the 16px lane
         // is all the gap the original has.
+        // Session Fork (v1): the git-branch affordance rides the timestamp
+        // strip of every SETTLED entry, beside the time. Gated on the chat's
+        // forkability (embedded Side Chat / offline / child / non-Pi / live
+        // are inert); a remote Pi chat stays enabled — the shell relays
+        // ForkSession to the source chat's host device.
+        let fork_gate = self.fork_gate_for(cx);
+        let fork_enabled = fork_gate == ForkGate::Enabled;
+        // Role-specific tooltip; System rows never get an affordance at all
+        // (`fork_button` is None below), so no fork action can be emitted.
+        let fork_role = row.role;
+        let fork_tip: SharedString = fork_tooltip(fork_role, &fork_gate).into();
+        let fork_chat_id = self.chat_id.clone().unwrap_or_default();
+        let fork_entry_id = row.entry_id.clone();
+        // In-flight marker for THIS anchor: the affordance becomes a spinner
+        // and is inert (double-click guard) until the shell's ForkSession
+        // RPC settles.
+        let fork_pending = !fork_chat_id.is_empty()
+            && self
+                .fork_pending
+                .contains(&(fork_chat_id.clone(), fork_entry_id.to_string()));
+        let fork_clickable = fork_enabled && !fork_pending;
+        // The affordance is built ONCE per row (before the hover closure) as
+        // an optional child: the MAIN surface shows it (spinner while a fork
+        // is in flight, branch icon otherwise); an embedded Side Chat
+        // transcript and SYSTEM rows never do. `None` keeps the hover branch
+        // untouched.
+        let fork_button: Option<AnyElement> = if self.embedded || row.role == MessageRole::System {
+            None
+        } else {
+            let fork_chat_id = fork_chat_id.clone();
+            let fork_entry_id = fork_entry_id.clone();
+            Some(
+                div()
+                    .id((row.id.clone(), 0usize))
+                    .size(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if fork_pending {
+                        crate::loaders::gradient_spinner(
+                            "fork-spinner",
+                            &theme,
+                            2.5,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        crate::icons::icon(crate::icons::GIT_BRANCH)
+                            .size(px(10.0))
+                            .text_color(if fork_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_muted.opacity(0.3)
+                            })
+                            .into_any_element()
+                    })
+                    .when(fork_clickable, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if fork_chat_id.is_empty() {
+                                    return;
+                                }
+                                cx.emit(TranscriptEvent::ForkRequested {
+                                    chat_id: fork_chat_id.clone(),
+                                    anchor_message_id: fork_entry_id.to_string(),
+                                });
+                            }))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| ForkTooltip {
+                            text: fork_tip.clone(),
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(Duration::from_millis(350))
+                    .into_any_element(),
+            )
+        };
         let strip = row.timestamp.map(|ms| {
             div()
                 .h(px(if is_user_row { 16.0 } else { 20.0 }))
@@ -3017,9 +3256,13 @@ impl Transcript {
                     el.child(motion::fade_quick(
                         SharedString::from(format!("ts-{}", row.id)),
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
                             .text_size(px(11.0))
                             .text_color(theme.text_muted.opacity(0.55))
-                            .child(SharedString::from(format_timestamp(ms, &chrono::Local))),
+                            .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
+                            .when_some(fork_button, |el, button| el.child(button)),
                     ))
                 })
         });
@@ -5188,5 +5431,164 @@ mod tests {
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
         assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+    }
+
+    // ---- Session Fork v1 (affordance gating + tooltips) ----
+
+    fn pi_chat(child: bool, non_pi: bool) -> Chat {
+        Chat {
+            id: "chat-1".into(),
+            device_id: "dev-1".into(),
+            title: Some("My chat".into()),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            config: Some(cypher_proto::ChatConfig {
+                harness: if non_pi {
+                    HarnessId::ClaudeCode
+                } else {
+                    HarnessId::Pi
+                },
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+            }),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            child: child.then(|| cypher_proto::ChildChat {
+                parent_chat_id: "p".into(),
+                parent_run_id: "r".into(),
+                agent: "a".into(),
+                task: "t".into(),
+                mode: cypher_proto::SubagentRunMode::Sync,
+                tool_call_id: None,
+                profile: cypher_proto::ChildAgentProfile {
+                    system_prompt: String::new(),
+                    tools: vec![],
+                    model: None,
+                    thinking: None,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn fork_gate_enables_only_settled_local_pi_root_chats() {
+        // A plain Pi root chat whose HOST is online is forkable (live/offline
+        // are the remaining gates).
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(false, false)), false, false, true),
+            ForkGate::Enabled
+        );
+        // A remote source chat whose HOST DEVICE is offline is refused.
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(false, false)), false, false, false),
+            ForkGate::Disabled("The device hosting this chat is offline.")
+        );
+        // Embedded (temporary Side Chat) panels are always inert.
+        assert_eq!(
+            fork_gate(true, Some(&pi_chat(false, false)), false, false, true),
+            ForkGate::Disabled("Side chats can't be forked.")
+        );
+        // Non-Pi config is refused.
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(false, true)), false, false, true),
+            ForkGate::Disabled("Only Pi chats can be forked.")
+        );
+        // Child subagent chats are refused.
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(true, false)), false, false, true),
+            ForkGate::Disabled("Subagent chats can't be forked.")
+        );
+        // A live (Working/Awaiting) run disables the affordance.
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(false, false)), true, false, true),
+            ForkGate::Disabled("Wait for the chat to finish before forking.")
+        );
+        // Offline engine disables everything (local stays authoritative).
+        assert_eq!(
+            fork_gate(false, Some(&pi_chat(false, false)), false, true, true),
+            ForkGate::Disabled("The engine is offline.")
+        );
+        // No selected chat row disables too.
+        assert_eq!(
+            fork_gate(false, None, false, false, true),
+            ForkGate::Disabled("No chat selected.")
+        );
+    }
+
+    #[test]
+    fn fork_tooltips_are_role_specific_and_honour_disabled_reasons() {
+        // Enabled tooltip text is EXACTLY these strings.
+        assert_eq!(
+            fork_tooltip(MessageRole::User, &ForkGate::Enabled),
+            "Fork before this message"
+        );
+        assert_eq!(
+            fork_tooltip(MessageRole::Assistant, &ForkGate::Enabled),
+            "Fork after this response"
+        );
+        // System rows never emit an affordance, but a fallback stays coherent.
+        assert_eq!(
+            fork_tooltip(MessageRole::System, &ForkGate::Enabled),
+            "Fork after this message"
+        );
+        // A disabled affordance explains itself regardless of role.
+        assert_eq!(
+            fork_tooltip(
+                MessageRole::User,
+                &ForkGate::Disabled("Only Pi chats can be forked.")
+            ),
+            "Only Pi chats can be forked."
+        );
+    }
+
+    #[test]
+    fn rows_carry_their_entry_role_for_fork_gating() {
+        // Every row inherits its entry's role — System rows (which must never
+        // emit a fork affordance) are distinguishable from Assistant rows.
+        for (role, id) in [
+            (MessageRole::User, "u1"),
+            (MessageRole::Assistant, "a1"),
+            (MessageRole::System, "s1"),
+        ] {
+            let entry = SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![text_part("t0", "content")],
+                created_at: 0,
+                device_id: "dev".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+            };
+            let rows = rows_for_entry(&entry, false, &mut parse);
+            assert!(!rows.is_empty(), "{id} renders a row");
+            assert!(
+                rows.iter().all(|r| r.role == role),
+                "{id}: every row carries the entry role"
+            );
+        }
+        // A tool-only assistant entry still carries the assistant role on its
+        // ToolGroup row (System rows gate the affordance by role, not kind).
+        let tool_entry = SessionMessageEntry {
+            id: "a2".into(),
+            role: MessageRole::Assistant,
+            parts: vec![tool_part("t1", "cargo test")],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        let rows = rows_for_entry(&tool_entry, false, &mut parse);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        assert_eq!(rows[0].role, MessageRole::Assistant);
     }
 }

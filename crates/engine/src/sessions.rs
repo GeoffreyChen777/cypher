@@ -875,6 +875,41 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Session Fork quiesce: cancel a PARKED (Idle) attached run so the fork
+    /// helper can operate on the source session with no warm child in the
+    /// way — following the idle reaper's CLEAN path (harness-level
+    /// cancellation, the run settles as Idle — never an aborted stamp, the
+    /// transcript is untouched) and waiting boundedly for the run to be
+    /// removed. Working/AwaitingInput runs must be rejected by the caller
+    /// BEFORE this is called; this method only acts on an Idle parked run
+    /// and is a no-op when no run is attached.
+    pub async fn quiesce_idle_for_fork(&self, chat_id: &str) -> Result<(), EngineError> {
+        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.run_id.clone(),
+                h.interrupt_token.clone(),
+                h.cancel.clone(),
+            )
+        });
+        let Some((run_id, token, cancel)) = target else {
+            return Ok(()); // nothing attached — nothing to quiesce
+        };
+        // The idle reaper's exact teardown: cancel the harness-level token;
+        // the run task's parked loop breaks with SessionStatus::Idle (clean
+        // end, no aborted stamp) and removes the run in its exit path.
+        token.cancel();
+        let _ = cancel.send(true);
+        for _ in 0..500 {
+            if !self.is_live(chat_id, &run_id) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(EngineError::Other(format!(
+            "source run did not quiesce in time: {chat_id}"
+        )))
+    }
+
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
     /// mid-stream), stamp this device's abandoned `streaming` doc entries `aborted`
     /// with a VISIBLE "Run interrupted by engine restart" error part, close the
@@ -1020,6 +1055,14 @@ impl SessionsEngine {
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
+    }
+
+    /// Session Fork (v1): is `chat_id` a temporary Side Chat (host-memory
+    /// only, no durable workspace row)? Forks of a temporary chat are refused
+    /// — the source must be a durable root chat whose transcript and Pi
+    /// session live on disk.
+    pub fn is_ephemeral(&self, chat_id: &str) -> bool {
+        self.inner.is_ephemeral(chat_id)
     }
 }
 

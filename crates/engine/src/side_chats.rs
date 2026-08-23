@@ -644,7 +644,7 @@ pub fn side_chat_title(selected_text: &str) -> String {
     }
 }
 
-/// Serialize ONE transcript entry for the parent-context window: a role
+/// Serialize ONE transcript entry for a context window: a role
 /// prefix plus its SAFE visible content. Hidden reasoning, raw tool output
 /// bytes, diffs, and the command ledger never enter context — tools reduce
 /// to a one-line summary, errors to their message, and input questions to
@@ -710,7 +710,7 @@ fn tool_call_label(call: &cypher_proto::ToolCall) -> &'static str {
     }
 }
 
-/// The parent transcript window: the NEWEST whole messages through `anchor`
+/// The bounded transcript window: the NEWEST whole messages through `anchor`
 /// (or the tail when the anchor doesn't resolve), capped at 8 messages and a
 /// 48 KiB character budget (separators count against the budget). Whole
 /// messages only — the newest are selected to fit the budget, dropping OLDER
@@ -718,7 +718,12 @@ fn tool_call_label(call: &cypher_proto::ToolCall) -> &'static str {
 /// NEWEST message alone exceeds the budget, its head is taken so the newest
 /// context still means something (the one allowed truncation) — the result is
 /// never empty.
-fn bounded_transcript_context(
+///
+/// Public so the UI's `@session` reference feature reuses the exact same
+/// safe visible-content policy as the Side Chat parent-context window
+/// (hidden prompt data, absolute attachment paths, and huge raw tool output
+/// never enter).
+pub fn bounded_transcript_context(
     entries: &[SessionMessageEntry],
     anchor: Option<&str>,
 ) -> Option<String> {

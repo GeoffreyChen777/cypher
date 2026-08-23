@@ -37,6 +37,7 @@
 //! (StderrTail, SIGTERM→SIGKILL, PATH composition) reused from `lib.rs`.
 
 mod client;
+pub mod fork;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -775,6 +776,15 @@ impl Harness for PiHarness {
             .get_or_try_init(|| self.discover_commands())
             .await?;
         Ok(synthesize_commands(discovered))
+    }
+
+    /// Session Fork (v1): Pi implements it natively (a separate
+    /// `--no-extensions` helper process — see [`PiHarness::fork_session`]).
+    async fn fork_session(
+        &self,
+        request: cypher_proto::PiSessionForkRequest,
+    ) -> Result<cypher_proto::PiSessionForkResult, HarnessError> {
+        self.fork_session(request).await
     }
 
     async fn run(

@@ -921,6 +921,12 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Session Fork idempotence: `(sourceChatId, anchorMessageId) → requestId`
+    /// (the client-minted target chat id). The SAME id is reused across RPC
+    /// errors / lost replies so a retry returns the already-created chat;
+    /// the mapping is dropped on a definitive reply (Created or typed
+    /// Unavailable).
+    fork_request_ids: std::collections::HashMap<(String, String), String>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
@@ -1014,6 +1020,9 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
+    /// Transcript → shell events (Session Fork v1): the settled entry's fork
+    /// affordance emits ForkRequested; the shell owns the ForkSession RPC.
+    _transcript_events: Subscription,
     /// Shared floating Comment pill/editor (round 20): rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
@@ -1098,6 +1107,21 @@ impl Shell {
                     transcript.update(cx, |t, cx| {
                         t.on_own_send(chat_id.clone(), message_id.clone(), cx)
                     });
+                }
+            }
+        });
+        // Session Fork (v1): a settled entry's fork affordance → the shell
+        // owns the ForkSession RPC (target host when remote) and the created
+        // chat's selection/prefill.
+        let transcript_events = cx.subscribe(&transcript, {
+            |this: &mut Shell, _, event: &crate::transcript::TranscriptEvent, cx| match event {
+                crate::transcript::TranscriptEvent::ForkRequested {
+                    chat_id,
+                    anchor_message_id,
+                } => {
+                    // The shell owns the ForkSession RPC (target host when
+                    // remote); `fork_session` arms the loading guard itself.
+                    this.fork_session(chat_id.clone(), anchor_message_id.clone(), cx);
                 }
             }
         });
@@ -1242,6 +1266,7 @@ impl Shell {
             sound_prev: std::collections::HashMap::new(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            fork_request_ids: std::collections::HashMap::new(),
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
@@ -1286,6 +1311,7 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
+            _transcript_events: transcript_events,
             comment_popup,
             _comment_popup_events: comment_popup_events,
         }
@@ -1819,6 +1845,223 @@ impl Shell {
         } else {
             format!("Could not open Side Chat: {err}")
         }
+    }
+
+    /// Session Fork idempotence: should the `(sourceChatId, anchorMessageId)`
+    /// → requestId mapping survive this RPC outcome? Errors / lost replies
+    /// keep it (the retry must reuse the SAME target id so the engine returns
+    /// the created chat); a definitive reply (Created or typed Unavailable)
+    /// drops it.
+    fn fork_request_id_retained(
+        result: &Result<cypher_proto::SessionForkResponse, cypher_rpc::RpcError>,
+    ) -> bool {
+        matches!(result, Err(_))
+    }
+
+    /// User-facing notice text for a failed `ForkSession` RPC.
+    /// `unknown method: ForkSession` means the device hosting the source
+    /// chat runs an engine too old for Session Fork — the message says so
+    /// and how to fix it. Every other failure gets the generic "Could not
+    /// fork: …" (the full RPC error).
+    fn fork_session_error_text(err: &cypher_rpc::RpcError) -> String {
+        if let cypher_rpc::RpcError::UnknownMethod(method) = err
+            && method == methods::FORK_SESSION
+        {
+            "Session Fork requires a newer Cypher engine on the device \
+             hosting this session. Update that device or use a session \
+             hosted on this device."
+                .to_string()
+        } else {
+            format!("Could not fork: {err}")
+        }
+    }
+
+    /// `ForkSession` for a settled transcript entry (Session Fork v1): mint
+    /// a NEW durable root Pi chat on the source chat's host device
+    /// (relay-forwarded when the source is remote). The reply's composer
+    /// prefill is seeded immediately; the fork is SELECTED only when the
+    /// user is still on the source chat — a late reply (user switched away)
+    /// still inserts the chat into the sidebar but only notifies, never
+    /// yanks the selection. Engine/Unavailable failures surface as a desktop
+    /// notice AND the in-app sidebar notice strip. The transcript's in-flight
+    /// marker (spinner + double-click guard) is begun here and ended on
+    /// every settle path.
+    ///
+    /// Idempotence: the request id (the client-minted target chat id) is
+    /// cached per `(sourceChatId, anchorMessageId)` and REUSED across RPC
+    /// errors / lost replies — a retry hits the engine with the same id and
+    /// returns the already-created chat instead of minting a twin. The cache
+    /// entry is dropped once the RPC settles definitively (Created or typed
+    /// Unavailable).
+    fn fork_session(&mut self, chat_id: String, anchor_message_id: String, cx: &mut Context<Self>) {
+        self.transcript.update(cx, |t, cx| {
+            t.begin_fork(chat_id.clone(), anchor_message_id.clone());
+            cx.notify();
+        });
+        // Unwind the in-flight marker on every settle path (the RPC result
+        // or an offline pre-flight failure).
+        let settle = {
+            let transcript = self.transcript.clone();
+            let chat_id = chat_id.clone();
+            let anchor_message_id = anchor_message_id.clone();
+            move |cx: &mut Context<Shell>| {
+                transcript.update(cx, |t, cx| {
+                    t.end_fork(chat_id.clone(), anchor_message_id.clone());
+                    cx.notify();
+                });
+            }
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            tracing::warn!(%chat_id, "ForkSession skipped: engine offline");
+            let notice = "Cannot fork: the engine is not connected.";
+            crate::notify::post("Fork", notice);
+            self.sidebar_notice = Some(notice.into());
+            settle(cx);
+            cx.notify();
+            return;
+        };
+        // The request id is the client-minted TARGET chat id — reuse the
+        // cached id for this (source, anchor) so a lost-reply retry returns
+        // the SAME chat (idempotent); mint + remember it on first click.
+        let key = (chat_id.clone(), anchor_message_id.clone());
+        let request_id = self.fork_request_ids.get(&key).cloned().unwrap_or_else(|| {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.fork_request_ids.insert(key, id.clone());
+            id
+        });
+        let mut params = serde_json::Map::new();
+        params.insert("requestId".into(), serde_json::Value::String(request_id));
+        params.insert(
+            "sourceChatId".into(),
+            serde_json::Value::String(chat_id.clone()),
+        );
+        params.insert(
+            "anchorMessageId".into(),
+            serde_json::Value::String(anchor_message_id.clone()),
+        );
+        {
+            let state = self.state.read(cx);
+            if let (Some(chat), Some(local)) = (
+                state.chats.iter().find(|c| c.id == chat_id),
+                state.local_device_id.clone(),
+            ) && chat.device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(chat.device_id.clone()),
+                );
+            }
+        }
+        let params = serde_json::Value::Object(params);
+        let weak = cx.weak_entity();
+        let composer = self.composer.clone();
+        let state = self.state.clone();
+        cx.spawn(async move |_this, cx| {
+            let value = engine.client().call(methods::FORK_SESSION, params).await;
+            // Always clear the in-flight marker once the RPC settles.
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |_shell, cx| {
+                    settle(cx);
+                    cx.notify();
+                });
+            }
+            let result: Result<cypher_proto::SessionForkResponse, cypher_rpc::RpcError> = value
+                .and_then(|v| {
+                    serde_json::from_value(v)
+                        .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
+                });
+            // The (source, anchor) → requestId mapping is RETAINED on errors /
+            // lost replies (the retry must reuse the SAME target id so the
+            // engine returns the created chat) and DROPPED on a definitive
+            // reply (Created / typed Unavailable) — the settle arms below
+            // honor `retained`.
+            let retained = Self::fork_request_id_retained(&result);
+            let response = match result {
+                Ok(response) => response,
+                Err(err) => {
+                    // `retained` is true here — nothing removes the mapping.
+                    tracing::warn!(%chat_id, error = %err, "ForkSession failed");
+                    let notice = Self::fork_session_error_text(&err);
+                    crate::notify::post("Fork", &notice);
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.sidebar_notice = Some(notice.clone().into());
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
+            };
+            match response {
+                cypher_proto::SessionForkResponse::Created(created) => {
+                    // Insert the new chat + seed its composer draft BEFORE the
+                    // selection flips (the composer applies stashed drafts on
+                    // the swap).
+                    let fork_id = created.chat.id.clone();
+                    let title = created
+                        .chat
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "Fork".to_string());
+                    state.update(cx, |state, cx| {
+                        state.insert_chat_optimistic(created.chat.clone());
+                        cx.notify();
+                    });
+                    composer.update(cx, |composer, cx| {
+                        if let Some(text) = created.composer_text {
+                            composer.seed_draft(&fork_id, text, cx);
+                        }
+                    });
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            // Definitive reply: this fork is settled, drop the
+                            // idempotence mapping (a fresh future fork mints a
+                            // fresh id). Errors/lost replies retain it.
+                            if !retained {
+                                shell
+                                    .fork_request_ids
+                                    .remove(&(chat_id.clone(), anchor_message_id.clone()));
+                            }
+                            if shell.active_chat == chat_id {
+                                // Still on the source: select the fork.
+                                shell.state.update(cx, |state, cx| {
+                                    state.select_chat(Some(fork_id.clone()), cx);
+                                });
+                                let notice = format!("Fork created: {title}");
+                                crate::notify::post("Fork", &notice);
+                            } else {
+                                // User switched away: insert-only, never yank.
+                                let notice = format!("Fork created: {title}");
+                                crate::notify::post("Fork", &notice);
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+                cypher_proto::SessionForkResponse::Unavailable(unavailable) => {
+                    // Definitive refusal: drop the idempotence mapping too.
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            if !retained {
+                                shell
+                                    .fork_request_ids
+                                    .remove(&(chat_id.clone(), anchor_message_id.clone()));
+                            }
+                            cx.notify();
+                        });
+                    }
+                    let notice = format!("Fork unavailable: {}", unavailable.message);
+                    crate::notify::post("Fork", &notice);
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.sidebar_notice = Some(notice.clone().into());
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     /// `StartSideChat` for a settled selection: mint the temporary chat on
@@ -6962,6 +7205,82 @@ mod tests {
                 "{generic}"
             );
         }
+    }
+
+    /// Session Fork v1: an old hosting engine answers UnknownMethod for
+    /// `ForkSession` — the notice must say what's wrong and how to fix it.
+    #[test]
+    fn fork_session_error_text_is_actionable_for_unknown_method() {
+        use cypher_rpc::RpcError;
+        let unknown = Shell::fork_session_error_text(&RpcError::UnknownMethod(
+            methods::FORK_SESSION.to_string(),
+        ));
+        assert!(unknown.contains("newer Cypher engine"), "{unknown}");
+        assert!(unknown.contains("device hosting this session"), "{unknown}");
+        assert!(unknown.contains("Update that device"), "{unknown}");
+        // A DIFFERENT unknown method is not the Session Fork feature gap.
+        assert_eq!(
+            Shell::fork_session_error_text(&RpcError::UnknownMethod("Nope".into())),
+            "Could not fork: unknown method: Nope"
+        );
+        // Engine-side failures keep the generic prefix + raw error.
+        assert_eq!(
+            Shell::fork_session_error_text(&RpcError::Failed("engine exploded".into())),
+            "Could not fork: engine exploded"
+        );
+    }
+
+    /// Session Fork idempotence: the `(sourceChatId, anchorMessageId) →
+    /// requestId` mapping survives RPC errors / lost replies (so a retry
+    /// reuses the SAME target id) and is dropped on a definitive reply
+    /// (Created or typed Unavailable).
+    #[test]
+    fn fork_request_id_is_retained_after_errors_but_not_definitive_replies() {
+        use cypher_rpc::RpcError;
+        // Lost replies / transport errors: retain — the retry reuses the id.
+        assert!(Shell::fork_request_id_retained(&Err(RpcError::Transport(
+            "connection lost".into()
+        ))));
+        assert!(Shell::fork_request_id_retained(&Err(RpcError::Closed)));
+        assert!(Shell::fork_request_id_retained(&Err(RpcError::Failed(
+            "engine exploded".into()
+        ))));
+        assert!(Shell::fork_request_id_retained(&Err(
+            RpcError::UnknownMethod(methods::FORK_SESSION.to_string())
+        )));
+        // A definitive reply (Created / typed Unavailable) drops the mapping.
+        let chat = cypher_proto::Chat {
+            id: "fork-x".into(),
+            device_id: "dev".into(),
+            title: Some("Fork".into()),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: Some(2),
+            child: None,
+        };
+        assert!(!Shell::fork_request_id_retained(&Ok(
+            cypher_proto::SessionForkResponse::Created(cypher_proto::SessionForkCreated {
+                chat,
+                mode: cypher_proto::SessionForkMode::EditUser,
+                composer_text: None,
+            })
+        )));
+        assert!(!Shell::fork_request_id_retained(&Ok(
+            cypher_proto::SessionForkResponse::Unavailable(cypher_proto::SessionForkUnavailable {
+                reason: cypher_proto::SessionForkUnavailableReason::LiveSession,
+                message: "still running".into(),
+            })
+        )));
     }
 
     #[tokio::test]

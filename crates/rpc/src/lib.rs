@@ -163,6 +163,10 @@ pub mod methods {
     /// Dispose an UNPROMOTED Side Chat: interrupt the run and drop all
     /// ephemeral state (unary, no-op after promotion).
     pub const DISPOSE_SIDE_CHAT: &str = "DisposeSideChat";
+    /// Fork a settled transcript prefix into a NEW durable root chat on the
+    /// source chat's host device (unary, idempotent by the client-minted
+    /// `requestId` = target chat id). Session Fork is Pi-only in v1.
+    pub const FORK_SESSION: &str = "ForkSession";
 }
 
 #[derive(Debug, thiserror::Error)]

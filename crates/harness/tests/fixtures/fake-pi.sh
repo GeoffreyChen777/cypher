@@ -12,7 +12,17 @@ emit() { printf '%s\n' "$1"; }
 # pi ids are strings — keep the surrounding quotes in the echoed id.
 rid() { printf '%s' "$1" | sed 's/.*"id":"\([^"]*\)".*/"\1"/'; }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
-SESSION_FILE="${SESSION_FILE:-/tmp/pi-test/session.jsonl}"
+# Parse --session-dir out of the CLI args so fork/clone results (and the
+# default session file) land INSIDE the managed root the controller validates
+# against — real pi stores every session under its --session-dir.
+SESSION_DIR=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--session-dir" ]; then SESSION_DIR="$arg"; fi
+  prev="$arg"
+done
+[ -n "$SESSION_DIR" ] || SESSION_DIR=/tmp/pi-test
+SESSION_FILE="${SESSION_FILE:-$SESSION_DIR/session.jsonl}"
 # ---- command loop -----------------------------------------------------------
 # Preamble commands (discovery + run setup) are answered inline; a `prompt`
 # dispatches its scenario, which runs to completion and exits (EOF then ends
@@ -89,6 +99,50 @@ while read -r line; do
       exit 1
       ;;
     esac
+    ;;
+
+  *'"type":"get_entries"'*)
+    # Session Fork fixture: a session with an abandoned branch (u2x under
+    # a1) that the active branch (leaf a2) must ignore. The active user
+    # entries are u1 ("first prompt") and u2 ("second prompt").
+    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_entries\",\"success\":true,\"data\":{\"entries\":[{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"timestamp\":\"t1\",\"message\":{\"role\":\"user\",\"content\":\"first prompt\"}},{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"timestamp\":\"t2\",\"message\":{\"role\":\"assistant\",\"content\":\"first reply\"}},{\"type\":\"message\",\"id\":\"u2x\",\"parentId\":\"a1\",\"timestamp\":\"t3\",\"message\":{\"role\":\"user\",\"content\":\"abandoned prompt\"}},{\"type\":\"message\",\"id\":\"u2\",\"parentId\":\"a1\",\"timestamp\":\"t4\",\"message\":{\"role\":\"user\",\"content\":\"second prompt\"}},{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"u2\",\"timestamp\":\"t5\",\"message\":{\"role\":\"assistant\",\"content\":\"second reply\"}}],\"leafId\":\"a2\"}}"
+    ;;
+
+  *'"type":"fork"'*)
+    # Session Fork fixture: fork BEFORE a user entry by its id — a new
+    # persisted session (SESSION_FILE moves to an id-specific path) is the
+    # durable effect. Each ACTIVE user entry id yields its own session path,
+    # so a test can assert WHICH entry the harness targeted; any other id
+    # (abandoned branch, unknown) is refused.
+    case "$line" in
+    *'"entryId":"u1"'*)
+      SESSION_FILE="$SESSION_DIR/forked-u1.jsonl"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"fork\",\"success\":true,\"data\":{\"text\":\"first prompt\",\"cancelled\":false}}"
+      ;;
+    *'"entryId":"u2"'*)
+      SESSION_FILE="$SESSION_DIR/forked-u2.jsonl"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"fork\",\"success\":true,\"data\":{\"text\":\"second prompt\",\"cancelled\":false}}"
+      ;;
+    *)
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"fork\",\"success\":false,\"error\":\"no user entry for fork\"}"
+      exit 1
+      ;;
+    esac
+    # Real pi persists the forked session file immediately (every boundary
+    # past the first user), so the harness requires it to EXIST. A test that
+    # simulates pi NOT materializing the file — the empty-context fork
+    # BEFORE THE FIRST USER, whose file pi only writes on the target's first
+    # prompt — drops a `.unmaterialized` marker into the session dir and the
+    # fixture skips creating the file.
+    [ -e "$SESSION_DIR/.unmaterialized" ] || : > "$SESSION_FILE"
+    ;;
+
+  *'"type":"clone"'*)
+    # Session Fork fixture: clone duplicates the active branch at its leaf —
+    # the new persisted session file is the observable durable effect.
+    SESSION_FILE="$SESSION_DIR/cloned.jsonl"
+    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"clone\",\"success\":true,\"data\":{\"cancelled\":false}}"
+    [ -e "$SESSION_DIR/.unmaterialized" ] || : > "$SESSION_FILE"
     ;;
 
   *'"type":"prompt"'*)

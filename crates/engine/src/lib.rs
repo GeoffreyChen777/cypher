@@ -27,6 +27,7 @@ pub mod registry;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
+pub mod session_forks;
 pub mod sessions;
 pub mod side_chats;
 pub mod spaces;
@@ -51,8 +52,10 @@ pub use registry::{
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
+pub use session_forks::SessionForks;
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
 pub use side_chats::SideChats;
+pub use side_chats::bounded_transcript_context;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
@@ -126,6 +129,9 @@ pub struct EngineCore {
     /// service built from this core shares one manager and shutdown reaps
     /// unpromoted chats.
     pub side_chats: SideChats,
+    /// Session Fork (v1): clone a settled transcript prefix into a NEW
+    /// durable root Pi chat on the source chat's host device.
+    pub session_forks: SessionForks,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -229,6 +235,13 @@ impl EngineCore {
             },
         )?;
         let side_chats = SideChats::new(sessions.clone(), doc_host.clone(), workspace.clone());
+        let session_forks = SessionForks::new(
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
+            registry.clone(),
+            profile.store_root().join("agent-sessions"),
+        );
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
@@ -296,6 +309,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             side_chats,
+            session_forks,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -422,6 +436,7 @@ impl EngineCore {
             self.uploads.clone(),
             self.agent_accounts.clone(),
             self.side_chats.clone(),
+            self.session_forks.clone(),
             self.workspace_scope,
         )
         .with_auth(self.auth());

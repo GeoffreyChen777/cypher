@@ -990,6 +990,61 @@ impl WorkspaceHost {
         Ok(true)
     }
 
+    /// Session Fork (v1): create the NEW durable root chat row for a fork.
+    /// Copies the source's host device / space / cwd / branch / checkout /
+    /// config (same checkout, same root) verbatim; the fork's own identity is
+    /// the `<source title> — Fork` title and — when the fork materialized a
+    /// persisted pi session — the fresh harness session path + cwd. An
+    /// EMPTY-CONTEXT fork before the first user carries NO session yet
+    /// (`harness_session_id` / `harness_session_cwd` = `None`): its first
+    /// send starts a fresh pi session from empty context (the source is
+    /// Pi-configured, so normal dispatch works). Born on chat2
+    /// (`room_gen: 2`) like every new chat. The sidebar TIMESTAMP is birth
+    /// `now` (`last_message_at` = `last_seen_at` = now): a fork is NEW
+    /// activity and must never be buried under the source's old timestamp —
+    /// only the endpoint PREVIEW comes from the newest copied message.
+    /// Idempotent by id — a lost-reply retry never mints a twin.
+    pub fn create_fork_chat(
+        &self,
+        fork_chat_id: &str,
+        source: &Chat,
+        title: &str,
+        harness_session_id: Option<&str>,
+        harness_session_cwd: Option<&str>,
+        last_message_preview: Option<String>,
+    ) -> Result<(), EngineError> {
+        if self.read(|doc| doc.chat(fork_chat_id))?.is_some() {
+            return Ok(()); // idempotent: a retry never duplicates
+        }
+        let now = Utc::now();
+        self.mutate(|doc| {
+            doc.upsert_chat(&Chat {
+                id: fork_chat_id.to_string(),
+                device_id: source.device_id.clone(),
+                title: Some(title.to_string()),
+                archived: false,
+                cwd: source.cwd.clone(),
+                branch: source.branch.clone(),
+                checkout_id: source.checkout_id.clone(),
+                config: source.config.clone(),
+                last_message_preview,
+                // Fresh activity: a fork sorts as NEWLY created, never by the
+                // source's old transcript timestamp.
+                last_message_at: Some(now),
+                created_at: now,
+                harness_session_id: harness_session_id.map(str::to_string),
+                room_gen: Some(2),
+                harness_session_cwd: harness_session_cwd.map(str::to_string),
+                space_id: source.space_id.clone(),
+                // Seen on birth: the caller selects the fork immediately, so
+                // it must never flash a "completed (unseen)" badge.
+                last_seen_at: Some(now),
+                child: None,
+            })
+        })?;
+        Ok(())
+    }
+
     /// Create a Cypher-hosted child subagent chat (`StartSubagent` bridge): a
     /// Pi-configured, titled chat row carrying the additive child metadata
     /// (parent chat id + parent run id + agent/task/mode + persisted profile).
