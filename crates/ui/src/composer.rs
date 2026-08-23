@@ -26,8 +26,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use cypher_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use cypher_proto::{
-    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
-    UserInputQuestion,
+    FileSearchMatch, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SlashCommand,
+    UserInputAnswer, UserInputQuestion,
 };
 use cypher_rpc::{RpcError, methods};
 
@@ -3247,6 +3247,70 @@ pub enum ComposerEvent {
     Sent { chat_id: String, message_id: String },
 }
 
+/// Where this Composer's turns go. [`ComposerTransport::Main`] is the normal
+/// chat surface (the engine's `QueueCommand` doc-command path, unchanged);
+/// [`ComposerTransport::SideChat`] reroutes ONLY the RPC transport to the
+/// engine's private side-chat methods (`SendSideChat` / `InterruptSideChat` /
+/// `RespondSideChatInput`) while reusing the entire render path and UX.
+#[derive(Debug, Clone)]
+pub enum ComposerTransport {
+    Main,
+    SideChat(ComposerSideChat),
+}
+
+/// The side-chat RPC identity: the temporary chat's id and the authoritative
+/// host device (`targetDeviceId` rides every side-chat RPC when it differs
+/// from the connected engine's).
+#[derive(Debug, Clone)]
+pub struct ComposerSideChat {
+    pub side_chat_id: String,
+    pub target_device_id: String,
+}
+
+impl ComposerSideChat {
+    /// The RunRequest for a side-chat turn: inherited harness/model/reasoning/
+    /// options from the fork's synthetic row (the parent's config), the
+    /// inherited cwd, and the inherited sandbox. Pure — unit-tested.
+    pub fn run_request(
+        prompt: String,
+        cwd: String,
+        harness: Option<HarnessId>,
+        model: Option<String>,
+        reasoning: Option<ReasoningLevel>,
+        model_options: serde_json::Map<String, serde_json::Value>,
+        sandbox: SandboxLevel,
+        attachments: Vec<String>,
+    ) -> RunRequest {
+        RunRequest {
+            prompt,
+            harness,
+            model,
+            reasoning,
+            model_options,
+            cwd,
+            sandbox,
+            auto_approve: false,
+            resume: None,
+            attachments,
+        }
+    }
+
+    /// Merge `targetDeviceId` into the params when the side chat's host device
+    /// differs from the connected engine's own.
+    pub fn with_target(
+        &self,
+        params: &mut serde_json::Map<String, serde_json::Value>,
+        local_device_id: Option<&str>,
+    ) {
+        if local_device_id.is_some_and(|local| local != self.target_device_id.as_str()) {
+            params.insert(
+                "targetDeviceId".into(),
+                serde_json::Value::String(self.target_device_id.clone()),
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MentionToken {
     range: Range<usize>,
@@ -3419,6 +3483,9 @@ pub struct Composer {
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
+    /// Where turns go: the normal chat surface, or a temporary Side Chat's
+    /// private RPC transport (same render path, branched transport only).
+    transport: ComposerTransport,
     /// Ordered pending comments for the CURRENT chat (round 19). Cleared on
     /// chat switch; snapshotted (then optimistically hidden) on send, restored
     /// on queue failure, gone on acceptance.
@@ -3505,12 +3572,43 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_transport(state, ComposerTransport::Main, cx)
+    }
+
+    /// A Composer bound to a Side Chat fork ([`crate::state::SideChatContext`]):
+    /// the SAME component and render path as the main surface, with the RPC
+    /// transport branched to the engine's private side-chat methods. The fork
+    /// state's synthetic selected row makes every inherited config read
+    /// (`selected_chat_row`, `resolved`) resolve to the parent's working
+    /// context; the pickers display those values locked.
+    pub fn for_side_chat(
+        state: Entity<AppState>,
+        side_chat: ComposerSideChat,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_transport(state, ComposerTransport::SideChat(side_chat), cx)
+    }
+
+    fn with_transport(
+        state: Entity<AppState>,
+        transport: ComposerTransport,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Do anything…", cx);
             input.enable_mentions();
             input
         });
-        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let pickers = cx.new(|cx| {
+            let mut pickers = Pickers::new(state.clone(), cx);
+            // A temporary side chat's model/traits controls display the
+            // inherited values but are read-only — the synthetic row is never
+            // a `setChatConfig` target.
+            if matches!(transport, ComposerTransport::SideChat(_)) {
+                pickers.set_locked();
+            }
+            pickers
+        });
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -3580,6 +3678,7 @@ impl Composer {
             answered_requests: HashSet::new(),
             advance_task: None,
             send_task: None,
+            transport,
             comments: Vec::new(),
             comments_popup: crate::popover::Popup::default(),
             comment_edit: None,
@@ -3703,6 +3802,61 @@ impl Composer {
         self.attachments.remove(chat_id);
     }
 
+    /// The current draft text (promotion handoff): the live input text, or the
+    /// stashed draft when the input is empty.
+    pub fn current_draft(&self, cx: &App) -> String {
+        let text = self.input.read(cx).text().to_string();
+        if text.is_empty() {
+            self.drafts
+                .get(&self.current_key)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            text
+        }
+    }
+
+    /// The staged-but-unsent attachments for the current chat (promotion
+    /// handoff).
+    pub fn staged_attachments(&self) -> Vec<StagedAttachment> {
+        self.attachments
+            .get(&self.current_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Seed a draft for `chat_id` (promotion handoff). Handles both the
+    /// already-selected case (set the live input) and the not-yet-swapped case
+    /// (stash under the chat key — the swap picks it up).
+    pub fn seed_draft(&mut self, chat_id: &str, text: String, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.current_key == chat_id {
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+        } else {
+            self.drafts.insert(chat_id.to_string(), text);
+        }
+        cx.notify();
+    }
+
+    /// Seed staged attachments for `chat_id` (promotion handoff).
+    pub fn seed_attachments(
+        &mut self,
+        chat_id: &str,
+        staged: Vec<StagedAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        if staged.is_empty() {
+            return;
+        }
+        self.attachments
+            .entry(chat_id.to_string())
+            .or_default()
+            .extend(staged);
+        cx.notify();
+    }
+
     // ---- surface comments (round 20: transcript, Git diff, terminal) ----
 
     /// Append a comment saved in a surface's anchored editor (transcript,
@@ -3716,6 +3870,11 @@ impl Composer {
         comment: String,
         cx: &mut Context<Self>,
     ) {
+        // Temporary side chats offer no annotation surface (no comment pill,
+        // no nested Side Chat) — drop any stray forwarded comment defensively.
+        if matches!(self.transport, ComposerTransport::SideChat(_)) {
+            return;
+        }
         if self.state.read(cx).selected_chat.as_deref() != Some(chat_id.as_str()) {
             return;
         }
@@ -4934,8 +5093,11 @@ impl Composer {
         // Annotated slash-command sends are blocked with an inline composer
         // error — comments ride the NEXT NORMAL Run/Steer only, and a slash
         // command would be misrouted by the harness's command interception.
-        // Everything (draft + comments) is preserved.
-        if block_slash_with_comments(!self.comments.is_empty(), &text) {
+        // Everything (draft + comments) is preserved. Comments never exist in
+        // a side chat (no annotation surface), so the block is main-only.
+        if matches!(self.transport, ComposerTransport::Main)
+            && block_slash_with_comments(!self.comments.is_empty(), &text)
+        {
             self.failure = Some(
                 "Comments can't be sent with a slash command — remove the /command or the comments first."
                     .into(),
@@ -5083,6 +5245,17 @@ impl Composer {
         let restore_text = text.clone();
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
+        // Transport identity rides the async block (the side-chat branch
+        // dispatches through `SEND_SIDE_CHAT`); the inherited sandbox comes
+        // from the fork's synthetic row (the parent's config).
+        let transport = self.transport.clone();
+        let inherited_sandbox = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|c| c.config.as_ref())
+            .map(|c| c.sandbox)
+            .unwrap_or(SandboxLevel::WorkspaceWrite);
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<(), String> = async {
                 // Resolve the working directory: existing chats keep theirs;
@@ -5268,38 +5441,80 @@ impl Composer {
                     Some(serialize_agent_prompt(&sent_comments, &content))
                 };
 
-                let command = if steer_cmd {
-                    SessionCommandPayload::Steer {
-                        prompt: content.clone(),
-                        message_id: Some(message_id.clone()),
-                        agent_prompt: agent_prompt.clone(),
+                match &transport {
+                    ComposerTransport::Main => {
+                        let command = if steer_cmd {
+                            SessionCommandPayload::Steer {
+                                prompt: content.clone(),
+                                message_id: Some(message_id.clone()),
+                                agent_prompt: agent_prompt.clone(),
+                            }
+                        } else {
+                            SessionCommandPayload::Run {
+                                request: RunRequest {
+                                    prompt: content.clone(),
+                                    harness: resolved.harness,
+                                    model: resolved.model.clone(),
+                                    reasoning: resolved.reasoning,
+                                    model_options: resolved.model_options.clone(),
+                                    cwd,
+                                    sandbox: SandboxLevel::WorkspaceWrite,
+                                    auto_approve: false,
+                                    resume: None,
+                                    attachments: attachment_paths,
+                                },
+                                message_id: message_id.clone(),
+                                agent_prompt: agent_prompt.clone(),
+                            }
+                        };
+                        let command = serde_json::to_value(&command)
+                            .map_err(|e| format!("Send failed: {e}"))?;
+                        let params =
+                            serde_json::json!({ "chatId": chat_id, "command": command });
+                        engine
+                            .client()
+                            .call(methods::QUEUE_COMMAND, params)
+                            .await
+                            .map_err(|e| format!("Send failed: {e}"))?;
                     }
-                } else {
-                    SessionCommandPayload::Run {
-                        request: RunRequest {
-                            prompt: content.clone(),
-                            harness: resolved.harness,
-                            model: resolved.model.clone(),
-                            reasoning: resolved.reasoning,
-                            model_options: resolved.model_options.clone(),
+                    ComposerTransport::SideChat(side) => {
+                        // Send AND live steer both ride `SendSideChat` with the
+                        // RunRequest + messageId (the engine resumes the same
+                        // temporary chat; there is no separate steer verb). The
+                        // inherited sandbox (parent config) is threaded through
+                        // instead of the main surface's hardcoded default.
+                        let request = ComposerSideChat::run_request(
+                            content.clone(),
                             cwd,
-                            sandbox: SandboxLevel::WorkspaceWrite,
-                            auto_approve: false,
-                            resume: None,
-                            attachments: attachment_paths,
-                        },
-                        message_id: message_id.clone(),
-                        agent_prompt: agent_prompt.clone(),
+                            resolved.harness,
+                            resolved.model.clone(),
+                            resolved.reasoning,
+                            resolved.model_options.clone(),
+                            inherited_sandbox,
+                            attachment_paths,
+                        );
+                        let mut params = serde_json::Map::new();
+                        params.insert(
+                            "sideChatId".into(),
+                            serde_json::Value::String(side.side_chat_id.clone()),
+                        );
+                        params.insert(
+                            "request".into(),
+                            serde_json::to_value(&request)
+                                .map_err(|e| format!("Send failed: {e}"))?,
+                        );
+                        params.insert(
+                            "messageId".into(),
+                            serde_json::Value::String(message_id.clone()),
+                        );
+                        side.with_target(&mut params, local_device_id.as_deref());
+                        engine
+                            .client()
+                            .call(methods::SEND_SIDE_CHAT, serde_json::Value::Object(params))
+                            .await
+                            .map_err(|e| format!("Send failed: {e}"))?;
                     }
-                };
-                let command = serde_json::to_value(&command)
-                    .map_err(|e| format!("Send failed: {e}"))?;
-                let params = serde_json::json!({ "chatId": chat_id, "command": command });
-                engine
-                    .client()
-                    .call(methods::QUEUE_COMMAND, params)
-                    .await
-                    .map_err(|e| format!("Send failed: {e}"))?;
+                }
                 Ok(())
             }
             .await;
@@ -5329,8 +5544,10 @@ impl Composer {
                     // Restore the comments taken at send: the snapshot first,
                     // then any added DURING the in-flight send (deduped by id)
                     // — order is preserved. Only if still in the same chat.
-                    if composer.state.read(cx).selected_chat.as_deref()
-                        == Some(err_chat_id.as_str())
+                    // Side chats never hold comments (defensive guard).
+                    if matches!(composer.transport, ComposerTransport::Main)
+                        && composer.state.read(cx).selected_chat.as_deref()
+                            == Some(err_chat_id.as_str())
                     {
                         composer.comments = merge_restored_comments(
                             sent_comments.clone(),
@@ -5348,23 +5565,51 @@ impl Composer {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
-            return;
-        };
-        let params = serde_json::json!({
-            "chatId": chat_id,
-            "command": { "kind": "interrupt" },
-        });
-        self.send_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
-            if let Err(err) = result {
-                this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Stop failed: {err}").into());
-                    cx.notify();
-                })
-                .ok();
+        match self.transport.clone() {
+            ComposerTransport::Main => {
+                let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+                    return;
+                };
+                let params = serde_json::json!({
+                    "chatId": chat_id,
+                    "command": { "kind": "interrupt" },
+                });
+                self.send_task = Some(cx.spawn(async move |this, cx| {
+                    let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
+                    if let Err(err) = result {
+                        this.update(cx, |composer, cx| {
+                            composer.failure = Some(format!("Stop failed: {err}").into());
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }));
             }
-        }));
+            ComposerTransport::SideChat(side) => {
+                let mut params = serde_json::Map::new();
+                params.insert(
+                    "sideChatId".into(),
+                    serde_json::Value::String(side.side_chat_id.clone()),
+                );
+                side.with_target(&mut params, self.state.read(cx).local_device_id.as_deref());
+                self.send_task = Some(cx.spawn(async move |this, cx| {
+                    let result = engine
+                        .client()
+                        .call(
+                            methods::INTERRUPT_SIDE_CHAT,
+                            serde_json::Value::Object(params),
+                        )
+                        .await;
+                    if let Err(err) = result {
+                        this.update(cx, |composer, cx| {
+                            composer.failure = Some(format!("Stop failed: {err}").into());
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }));
+            }
+        }
     }
 
     // ---- wizard glue ----
@@ -5443,16 +5688,50 @@ impl Composer {
             return;
         };
         let request_id = wizard.request_id.clone();
-        let command = SessionCommandPayload::RespondInput {
-            request_id: request_id.clone(),
-            answers,
-        };
-        let params = match serde_json::to_value(&command) {
-            Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
-            Err(_) => return,
+        // RPC transport branch: main answers through `QueueCommand`
+        // `RespondInput`; a temporary side chat through `RespondSideChatInput`.
+        let transport = self.transport.clone();
+        let params = match &transport {
+            ComposerTransport::Main => {
+                let command = SessionCommandPayload::RespondInput {
+                    request_id: request_id.clone(),
+                    answers,
+                };
+                match serde_json::to_value(&command) {
+                    Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
+                    Err(_) => return,
+                }
+            }
+            ComposerTransport::SideChat(side) => {
+                let mut params = serde_json::Map::new();
+                params.insert(
+                    "sideChatId".into(),
+                    serde_json::Value::String(side.side_chat_id.clone()),
+                );
+                params.insert(
+                    "requestId".into(),
+                    serde_json::Value::String(request_id.clone()),
+                );
+                params.insert(
+                    "answers".into(),
+                    serde_json::to_value(&answers).unwrap_or_default(),
+                );
+                side.with_target(&mut params, self.state.read(cx).local_device_id.as_deref());
+                serde_json::Value::Object(params)
+            }
         };
         self.send_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
+            let result = engine
+                .client()
+                .call(
+                    if matches!(transport, ComposerTransport::SideChat(_)) {
+                        methods::RESPOND_SIDE_CHAT_INPUT
+                    } else {
+                        methods::QUEUE_COMMAND
+                    },
+                    params,
+                )
+                .await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.failure = Some(format!("Answer failed: {err}").into());
@@ -6244,6 +6523,62 @@ mod tests {
             quote: quote.into(),
             comment: text.into(),
         }
+    }
+
+    // ---- side chat transport (round 21 refactor) ----
+
+    #[test]
+    fn side_chat_run_request_inherits_config() {
+        // The reused composer builds the side-chat RunRequest from the fork's
+        // inherited values: harness/model/reasoning/options/cwd/sandbox, with
+        // the attachment paths threaded through the same pipeline.
+        let request = ComposerSideChat::run_request(
+            "fix it".into(),
+            "/home/w/dev/cypher".into(),
+            Some(HarnessId::ClaudeCode),
+            Some("claude-fable-5".into()),
+            Some(ReasoningLevel::High),
+            serde_json::Map::new(),
+            SandboxLevel::WorkspaceWrite,
+            vec!["pending/a.png".into()],
+        );
+        assert_eq!(request.prompt, "fix it");
+        assert_eq!(request.cwd, "/home/w/dev/cypher");
+        assert_eq!(request.harness, Some(HarnessId::ClaudeCode));
+        assert_eq!(request.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(request.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(request.sandbox, SandboxLevel::WorkspaceWrite);
+        assert_eq!(request.attachments, vec!["pending/a.png"]);
+        assert!(!request.auto_approve);
+        assert!(request.resume.is_none());
+    }
+
+    #[test]
+    fn side_chat_with_target_only_adds_a_remote_device() {
+        // A remote side chat's params carry `targetDeviceId`; a same-device
+        // side chat (or an unknown local id) does not — the engine's own
+        // device is implicit.
+        let remote = ComposerSideChat {
+            side_chat_id: "s1".into(),
+            target_device_id: "remote-dev".into(),
+        };
+        let mut params = serde_json::Map::new();
+        remote.with_target(&mut params, Some("local"));
+        assert_eq!(
+            params.get("targetDeviceId").and_then(|v| v.as_str()),
+            Some("remote-dev")
+        );
+        let local = ComposerSideChat {
+            side_chat_id: "s1".into(),
+            target_device_id: "local".into(),
+        };
+        let mut params = serde_json::Map::new();
+        local.with_target(&mut params, Some("local"));
+        assert!(params.get("targetDeviceId").is_none());
+        // No local identity yet: stay conservative — no target param.
+        let mut params = serde_json::Map::new();
+        remote.with_target(&mut params, None);
+        assert!(params.get("targetDeviceId").is_none());
     }
 
     // ---- transcript comments (round 19) ----

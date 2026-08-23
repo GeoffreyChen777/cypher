@@ -23,14 +23,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use gpui::{App, Context, Entity, Task};
+use gpui::{App, AppContext, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use cypher_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use cypher_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use cypher_proto::{
-    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, SideChatStatus, Space,
+    WorkspaceScope,
 };
 use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
@@ -662,6 +663,31 @@ pub struct SidebarGroup<'a> {
     pub chats: Vec<(ChatIndicator, &'a Chat)>,
 }
 
+/// A temporary Side Chat's forked state (round 21 refactor): a SECONDARY
+/// [`AppState`] entity per panel that shares the main state's [`EngineHandle`]
+/// but never mutates the main selection. It owns a synthetic selected `Chat`
+/// row inheriting the parent's device/space/cwd/branch/checkout/config, a
+/// targeted `WatchDocMessages` transcript watch, and the private
+/// `WatchSideChatStatus` projected into its `sessions` — so the EXISTING
+/// `Transcript` / `Composer` components (which read `selected_chat`,
+/// `transcript`, `pending_echoes` and `sessions`) work unchanged.
+///
+/// No normal `WatchChats`/`WatchSessions`/`WatchSpaces`/`WatchDevices` watches
+/// run in the fork — they would replace the synthetic row/list state. The
+/// remote `targetDeviceId` stays authoritative on the two watches and on every
+/// side-chat RPC.
+pub struct SideChatContext {
+    pub state: Entity<AppState>,
+    /// The chat the side chat was opened from — its host device owns the
+    /// side chat and the promoted row inherits its working context.
+    pub parent_chat_id: String,
+    /// The engine-hosted temporary chat id (== the promoted row's id).
+    pub side_chat_id: String,
+    /// The device hosting the side chat — every side-chat RPC carries this
+    /// as `targetDeviceId` when it differs from the connected engine's.
+    pub target_device_id: String,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -709,6 +735,120 @@ impl AppState {
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) {
         self.sessions = sessions;
+    }
+
+    /// Project one `WatchSideChatStatus` frame into `sessions` (upsert by
+    /// chat id). Temporary side chats never appear in the public
+    /// `WatchSessions` stream; this is the ONLY status channel for a fork, and
+    /// projecting it into `sessions` makes the reused Transcript/Composer
+    /// status logic (`session_for`, `indicator_for`, `run_live`) work
+    /// unchanged. `device_id` is the side chat's authoritative host device.
+    pub fn apply_side_chat_status(&mut self, status: SideChatStatus, target_device_id: &str) {
+        let session = Session {
+            chat_id: status.side_chat_id,
+            device_id: target_device_id.to_string(),
+            status: status.status,
+            started_at: status.started_at,
+            updated_at: status.updated_at,
+            subagents: Vec::new(),
+        };
+        if let Some(existing) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.chat_id == session.chat_id)
+        {
+            *existing = session;
+        } else {
+            self.sessions.push(session);
+        }
+    }
+
+    /// Build a forked/secondary [`AppState`] for one temporary Side Chat: a
+    /// synthetic selected `Chat` row inheriting the parent's
+    /// device/space/cwd/branch/checkout/config, plus the targeted
+    /// `WatchDocMessages` (transcript) and private `WatchSideChatStatus`
+    /// watches — and nothing else. The main state's selection is untouched;
+    /// the shared [`EngineHandle`] is cloned, never restarted.
+    ///
+    /// The parent chat is read from `main`; when the parent row is missing
+    /// (should not happen — the shell's StartSideChat race guard disposes
+    /// late starts) the fork still exists but carries no synthetic row, so
+    /// the panel renders a degraded empty transcript.
+    pub fn new_side_chat_fork(
+        main: &Entity<AppState>,
+        parent_chat_id: &str,
+        side_chat_id: &str,
+        target_device_id: &str,
+        cx: &mut App,
+    ) -> Entity<AppState> {
+        let (engine, local, workspace_scope, parent, parent_space, devices) = {
+            let m = main.read(cx);
+            let parent = m.chats.iter().find(|c| c.id == parent_chat_id).cloned();
+            let parent_space = parent
+                .as_ref()
+                .and_then(|p| p.space_id.as_deref())
+                .and_then(|space_id| m.spaces.iter().find(|s| s.id == space_id).cloned());
+            (
+                m.engine.clone(),
+                m.local_device_id.clone(),
+                m.workspace_scope,
+                parent,
+                parent_space,
+                m.devices.clone(),
+            )
+        };
+        let fork = cx.new(|_cx| {
+            let mut s = AppState::new();
+            s.engine = engine.clone();
+            s.connection = ConnectionStatus::Ready;
+            s.workspace_scope = workspace_scope;
+            s.local_device_id = local;
+            s.devices = devices;
+            s.spaces = parent_space.into_iter().collect();
+            if let Some(parent) = parent {
+                let synthetic = side_chat_synthetic_row(&parent, side_chat_id, target_device_id);
+                s.chats = vec![synthetic];
+                s.selected_chat = Some(side_chat_id.to_string());
+                s.selected_space = parent.space_id.clone();
+                s.selected_device = Some(target_device_id.to_string());
+                s.no_project = parent.space_id.is_none();
+            }
+            s
+        });
+        // The fork's standing (and only) watches: the targeted transcript
+        // watch and the private status watch. No WatchChats/WatchSessions —
+        // they would erase the synthetic state.
+        fork.update(cx, |s, cx| {
+            if let Some(engine) = engine {
+                s.transcript_task = Some(spawn_fork_transcript_watch(
+                    cx,
+                    engine.clone(),
+                    side_chat_id.to_string(),
+                    target_device_id.to_string(),
+                ));
+                s.watch_tasks.push(spawn_side_chat_status_watch(
+                    cx,
+                    engine,
+                    side_chat_id.to_string(),
+                    target_device_id.to_string(),
+                ));
+            }
+        });
+        fork
+    }
+
+    /// Optimistic insert for a promoted Side Chat (round 21): the engine has
+    /// already created the row (PromoteSideChat is synchronous engine-side),
+    /// so this local copy makes the promotion seamless — the sidebar renders
+    /// and the chat is selectable immediately, before the next chats frame
+    /// replaces it with the authoritative row. Idempotent: a row that already
+    /// arrived is left untouched.
+    pub fn insert_chat_optimistic(&mut self, chat: Chat) {
+        if self.chats.iter().any(|c| c.id == chat.id) {
+            return;
+        }
+        self.chats.push(chat);
+        sort_chats(&mut self.chats);
     }
 
     pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) {
@@ -1734,6 +1874,190 @@ fn spawn_transcript_watch(
             cx.background_executor().timer(RETRY_DELAY).await;
         }
     })
+}
+
+/// `WatchDocMessages` for a Side Chat fork: identical to [`spawn_transcript_watch`]
+/// but carries `targetDeviceId` (the side chat is owned by the parent's host
+/// device, which may differ from the connected engine's), and the fork's
+/// selection never changes so the guard is trivially true. The task dies with
+/// the fork (panel close drops the entity).
+fn spawn_fork_transcript_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    chat_id: String,
+    target_device_id: String,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        'resubscribe: loop {
+            let mut params = serde_json::Map::new();
+            params.insert("chatId".into(), serde_json::Value::String(chat_id.clone()));
+            if let Some(local) = this.update(cx, |s, _| s.local_device_id.clone()).ok().flatten()
+                && target_device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(target_device_id.clone()),
+                );
+            }
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::WATCH_DOC_MESSAGES, serde_json::Value::Object(params))
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::warn!(%chat_id, error = %err, "side chat transcript watch failed; retrying");
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue 'resubscribe;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let frame: TranscriptFrame = match serde_json::from_value(value) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "malformed side chat transcript frame; resubscribing");
+                        cx.background_executor().timer(RETRY_DELAY).await;
+                        continue 'resubscribe;
+                    }
+                };
+                let mut desync = false;
+                let alive = this.update(cx, |s, cx| {
+                    if let Err(err) = s.apply_transcript_frame(frame) {
+                        tracing::warn!(%chat_id, error = %err, "side chat transcript desync");
+                        desync = true;
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+                if desync {
+                    continue 'resubscribe;
+                }
+            }
+            tracing::debug!(%chat_id, "side chat transcript stream ended; resubscribing");
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+/// `WatchSideChatStatus`: the private per-chat status stream, projected into
+/// the fork's `sessions` via [`AppState::apply_side_chat_status`] (`null`
+/// until the first transition or after dispose). The stream ends at
+/// promotion/dispose; retrying after a clean end would hang, so a closed
+/// stream simply stops the fork's status updates (the panel is usually gone
+/// by then anyway).
+fn spawn_side_chat_status_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    side_chat_id: String,
+    target_device_id: String,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        loop {
+            let mut params = serde_json::Map::new();
+            params.insert(
+                "sideChatId".into(),
+                serde_json::Value::String(side_chat_id.clone()),
+            );
+            if let Some(local) = this.update(cx, |s, _| s.local_device_id.clone()).ok().flatten()
+                && target_device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(target_device_id.clone()),
+                );
+            }
+            let mut rx = match handle
+                .client()
+                .subscribe(
+                    methods::WATCH_SIDE_CHAT_STATUS,
+                    serde_json::Value::Object(params),
+                )
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::warn!(%side_chat_id, error = %err, "side chat status watch failed; retrying");
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                if value.is_null() {
+                    // First frame / after dispose: no session yet.
+                    if this
+                        .update(cx, |s, cx| {
+                            s.sessions.retain(|s| s.chat_id != side_chat_id);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                let status: SideChatStatus = match serde_json::from_value(value) {
+                    Ok(status) => status,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "malformed side chat status frame");
+                        continue;
+                    }
+                };
+                let alive = this.update(cx, |s, cx| {
+                    s.apply_side_chat_status(status.clone(), &target_device_id);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+            // Stream ended: after dispose or promotion the panel is normally
+            // already gone; if it somehow outlived the chat, retry.
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+/// The synthetic `Chat` row a Side Chat fork selects (pure — testable without
+/// a panel): the side chat inherits the parent's working context
+/// (device/space/cwd/branch/checkout/config) so the reused Transcript/Composer
+/// read the right values, but is its OWN row (the engine holds the real temp
+/// in memory; there is no workspace row until promotion).
+fn side_chat_synthetic_row(parent: &Chat, side_chat_id: &str, target_device_id: &str) -> Chat {
+    Chat {
+        id: side_chat_id.to_string(),
+        device_id: target_device_id.to_string(),
+        title: None,
+        archived: false,
+        cwd: parent.cwd.clone(),
+        branch: parent.branch.clone(),
+        checkout_id: parent.checkout_id.clone(),
+        config: parent.config.clone(),
+        last_message_preview: None,
+        last_message_at: None,
+        created_at: chrono::Utc::now(),
+        harness_session_id: None,
+        harness_session_cwd: None,
+        space_id: parent.space_id.clone(),
+        last_seen_at: None,
+        room_gen: Some(2),
+        child: None,
+    }
 }
 
 #[cfg(test)]
@@ -2858,6 +3182,33 @@ mod tests {
     }
 
     #[test]
+    fn insert_chat_optimistic_inserts_sorts_and_is_idempotent() {
+        // Round 21: a promoted Side Chat lands optimistically before the next
+        // chats frame — inserted (sorted), never duplicated, and never
+        // clobbering an authoritative row that already arrived.
+        let mut state = AppState::new();
+        state.apply_chats(vec![chat("old", 0, None), chat("new", 5, None)]);
+        let mut promoted = chat("promoted", 9, None);
+        promoted.space_id = Some("s1".into());
+        state.insert_chat_optimistic(promoted.clone());
+        assert_eq!(
+            state
+                .chats
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["promoted", "new", "old"],
+            "inserted row participates in the sort (newest created first)"
+        );
+        // Idempotent: the same id is never inserted twice.
+        state.insert_chat_optimistic(promoted);
+        assert_eq!(state.chats.len(), 3);
+        // An already-present id is untouched (authoritative frame won).
+        state.insert_chat_optimistic(chat("old", 0, None));
+        assert_eq!(state.chats.len(), 3);
+    }
+
+    #[test]
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
@@ -2892,6 +3243,82 @@ mod tests {
                 model_options: serde_json::Map::new(),
                 sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
             },
+        );
+    }
+
+    // ---- temporary Side Chat fork (round 21 refactor) ----
+
+    #[test]
+    fn side_chat_synthetic_row_inherits_parent_context() {
+        // The fork's synthetic row carries the parent's device/space/cwd/
+        // branch/checkout/config so the reused Transcript/Composer read the
+        // inherited working context.
+        let mut parent = chat("parent", 0, Some(10));
+        parent.device_id = "remote-dev".into();
+        parent.cwd = Some("/home/w/dev/cypher".into());
+        parent.branch = Some("cypher/side".into());
+        parent.checkout_id = Some("co-1".into());
+        parent.space_id = Some("s1".into());
+        parent.config = Some(cypher_proto::ChatConfig {
+            harness: HarnessId::ClaudeCode,
+            model: Some("claude-fable-5".into()),
+            reasoning: Some(cypher_proto::ReasoningLevel::High),
+            model_options: serde_json::Map::new(),
+            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+        });
+        let row = side_chat_synthetic_row(&parent, "side-1", "remote-dev");
+        assert_eq!(row.id, "side-1");
+        assert_eq!(row.device_id, "remote-dev");
+        assert_eq!(row.cwd.as_deref(), Some("/home/w/dev/cypher"));
+        assert_eq!(row.branch.as_deref(), Some("cypher/side"));
+        assert_eq!(row.checkout_id.as_deref(), Some("co-1"));
+        assert_eq!(row.space_id.as_deref(), Some("s1"));
+        assert_eq!(row.config, parent.config);
+        // It is its OWN row — no public row exists until promotion.
+        assert_ne!(row.id, parent.id);
+        assert!(row.archived == false && row.last_message_at.is_none());
+    }
+
+    #[test]
+    fn side_chat_status_projects_into_sessions_by_id() {
+        // The private WatchSideChatStatus frames upsert into `sessions` so
+        // the reused status logic (indicator_for / run_live) works.
+        let mut state = AppState::new();
+        let status =
+            |s: cypher_proto::SessionStatus, at: chrono::DateTime<chrono::Utc>| -> SideChatStatus {
+                SideChatStatus {
+                    side_chat_id: "side-1".into(),
+                    status: s,
+                    started_at: Some(at),
+                    updated_at: at,
+                }
+            };
+        let t0 = chrono::Utc::now();
+        state.apply_side_chat_status(
+            status(cypher_proto::SessionStatus::Working, t0),
+            "remote-dev",
+        );
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].chat_id, "side-1");
+        assert_eq!(state.sessions[0].device_id, "remote-dev");
+        assert_eq!(
+            state.sessions[0].status,
+            cypher_proto::SessionStatus::Working
+        );
+        // A later frame upserts, never duplicates.
+        state.apply_side_chat_status(
+            status(
+                cypher_proto::SessionStatus::Idle,
+                t0 + chrono::TimeDelta::seconds(1),
+            ),
+            "remote-dev",
+        );
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].status, cypher_proto::SessionStatus::Idle);
+        // The fork's indicator reads the projected row (no public session).
+        assert_eq!(
+            state.indicator_for("side-1", t0 + chrono::TimeDelta::seconds(2)),
+            Indicator::None
         );
     }
 

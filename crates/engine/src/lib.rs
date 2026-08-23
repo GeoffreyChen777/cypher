@@ -28,6 +28,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
+pub mod side_chats;
 pub mod spaces;
 pub mod terminals;
 pub mod titles;
@@ -51,6 +52,7 @@ pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
+pub use side_chats::SideChats;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
@@ -119,6 +121,11 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    /// Temporary Side Chats (round 21): engine-hosted chats opened from a
+    /// settled selection. Owned HERE (not by [`EngineRpc`]) so every RPC
+    /// service built from this core shares one manager and shutdown reaps
+    /// unpromoted chats.
+    pub side_chats: SideChats,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -221,6 +228,7 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         )?;
+        let side_chats = SideChats::new(sessions.clone(), doc_host.clone(), workspace.clone());
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
@@ -287,6 +295,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            side_chats,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -412,6 +421,7 @@ impl EngineCore {
             self.diff_sync.clone(),
             self.uploads.clone(),
             self.agent_accounts.clone(),
+            self.side_chats.clone(),
             self.workspace_scope,
         )
         .with_auth(self.auth());
@@ -442,6 +452,11 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        // Reap temporary Side Chats FIRST: interrupt their live runs and drop
+        // every ephemeral doc (host-memory only — dispose leaves no durable
+        // remnants; a promoted chat is untouched) BEFORE the general session
+        // teardown settles/flushes the remaining normal chats.
+        self.side_chats.shutdown().await;
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.agent_accounts.shutdown();

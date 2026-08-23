@@ -141,6 +141,28 @@ pub mod methods {
     /// for a chat (journal replay after `afterSeq`, then live) — the parent
     /// extension observes the child's terminal `Done`/result through this.
     pub const WATCH_AGENT_EVENTS: &str = "WatchAgentEvents";
+    // Selected-text Side Chats (round 21): temporary engine-hosted chats
+    // opened from a settled selection. All are relay-forwardable — the parent
+    // chat's host device owns the side chat, so every call carries
+    // `targetDeviceId` (see the engine `side_chats` module).
+    /// Open a temporary Side Chat from a settled selection (unary).
+    pub const START_SIDE_CHAT: &str = "StartSideChat";
+    /// Send a user turn into a Side Chat (unary). The FIRST send injects the
+    /// stored selection + bounded parent context into the effective
+    /// `agentPrompt`; later sends resume normally.
+    pub const SEND_SIDE_CHAT: &str = "SendSideChat";
+    /// Interrupt a Side Chat's live run (unary).
+    pub const INTERRUPT_SIDE_CHAT: &str = "InterruptSideChat";
+    /// Answer an in-flight input request in a Side Chat (unary).
+    pub const RESPOND_SIDE_CHAT_INPUT: &str = "RespondSideChatInput";
+    /// Private live status stream for one Side Chat (stream) — never the
+    /// public WatchSessions stream.
+    pub const WATCH_SIDE_CHAT_STATUS: &str = "WatchSideChatStatus";
+    /// Promote a Side Chat into a normal root chat (unary, idempotent).
+    pub const PROMOTE_SIDE_CHAT: &str = "PromoteSideChat";
+    /// Dispose an UNPROMOTED Side Chat: interrupt the run and drop all
+    /// ephemeral state (unary, no-op after promotion).
+    pub const DISPOSE_SIDE_CHAT: &str = "DisposeSideChat";
 }
 
 #[derive(Debug, thiserror::Error)]

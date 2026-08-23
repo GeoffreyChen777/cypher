@@ -11,57 +11,36 @@
 
 use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px};
 
+use crate::icons::cypher_app_icon;
 use crate::motion::{self, CYPHER_PULSE, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT};
 use crate::theme::Theme;
 
 // Shared with the terminal viewport (`cypher_proto::motion`) so both animate the
 // same loaders from the same numbers.
-pub use cypher_proto::motion::{
-    CYPHER_CELLS, MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, mark_cell_stagger,
-};
+pub use cypher_proto::motion::{CYPHER_CELLS, MATRIX_SIDE};
 
-/// The animated cypher mark (zeron-loader.tsx `ZeronLoader`): the full logo
-/// pixel grid with a light wave sweeping tail→head. Each cell rests dim
-/// (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
-/// stagger follows the flight axis. `height_px` sets the mark's height (width
-/// follows the 820:940 canvas).
+/// The official Cypher app icon with a quiet brand pulse. The fixed square
+/// keeps surrounding layout stable while the image breathes inside it.
 pub fn cypher_mark_loader(
     _id: &'static str,
-    theme: &Theme,
+    _theme: &Theme,
     height_px: f32,
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    let color = theme.text;
-    let scale = height_px / 940.0;
-    let cell = 100.0 * scale;
     let delta = motion::pulse_delta(&CYPHER_PULSE, view, cx);
+    let wave = motion::pulse_wave(delta);
+    let icon_size = height_px * (0.97 + 0.03 * wave);
     div()
-        .relative()
-        .w(px(820.0 * scale))
-        .h(px(height_px))
-        .children(MARK_CELLS.iter().map(move |&(x, y)| {
-            let stagger = mark_cell_stagger(x, y);
-            // Fixed slot; the animated cell breathes inside it (paint-local).
-            div()
-                .absolute()
-                .left(px(x * scale))
-                .top(px(y * scale))
-                .size(px(cell))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child({
-                    // Negative CSS delay ⇒ the cell starts mid-cycle:
-                    // the stagger ADDS phase (zeron-loader.tsx delayFor).
-                    let phase = (delta + stagger).rem_euclid(1.0);
-                    div()
-                        .rounded(px(16.0 * scale))
-                        .bg(color)
-                        .opacity(motion::pulse_opacity(phase))
-                        .size(px(cell * motion::pulse_scale(phase)))
-                })
-        }))
+        .size(px(height_px))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            cypher_app_icon()
+                .size(px(icon_size))
+                .opacity(0.82 + 0.18 * wave),
+        )
 }
 
 /// The cypher wave loader: a row of cells pulsing opacity 0.08→1 / scale 0.9→1
@@ -275,27 +254,3 @@ const _: () = {
     assert!(CYPHER_PULSE.duration_ms == 2400);
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mark_stagger_follows_flight_axis() {
-        // Tail tip (720, 0) leads: near-maximal stagger (starts deepest into
-        // the cycle); head (0, 840) trails with stagger 0.
-        let tail = mark_cell_stagger(720.0, 0.0);
-        let head = mark_cell_stagger(0.0, 840.0);
-        assert!(tail > head, "tail {tail} should lead head {head}");
-        assert!((head - 0.0).abs() < 1e-6, "head stagger ≈ 0, got {head}");
-        assert!(tail <= MARK_SPREAD + 1e-6, "stagger capped at SPREAD");
-        // Every logo cell stays inside [0, SPREAD].
-        for &(x, y) in &MARK_CELLS {
-            let s = mark_cell_stagger(x, y);
-            assert!(
-                (0.0..=MARK_SPREAD + 1e-6).contains(&s),
-                "cell ({x},{y}) stagger {s}"
-            );
-        }
-    }
-}

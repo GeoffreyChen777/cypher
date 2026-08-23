@@ -59,8 +59,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_proto::{
-    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SubagentRunMode, ToolCall,
-    WorkspaceScope,
+    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SideChatSource,
+    SubagentRunMode, ToolCall, WorkspaceScope,
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -71,6 +71,7 @@ use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
 use crate::sessions::SessionsEngine;
+use crate::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
@@ -417,6 +418,7 @@ pub struct EngineRpc {
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
+    side_chats: SideChats,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
@@ -440,6 +442,7 @@ impl EngineRpc {
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
         agent_accounts: AgentAccounts,
+        side_chats: SideChats,
         workspace_scope: WorkspaceScope,
     ) -> Self {
         let engine_info = EngineInfo {
@@ -456,6 +459,7 @@ impl EngineRpc {
             diff_sync,
             uploads,
             agent_accounts,
+            side_chats,
             auth: None,
             links: None,
             updater: None,
@@ -1143,6 +1147,14 @@ fn forwardable(method: &str) -> bool {
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
             | methods::APPLY_UPDATE
+            // Side Chats are owned by the parent chat's host device.
+            | methods::START_SIDE_CHAT
+            | methods::SEND_SIDE_CHAT
+            | methods::INTERRUPT_SIDE_CHAT
+            | methods::RESPOND_SIDE_CHAT_INPUT
+            | methods::WATCH_SIDE_CHAT_STATUS
+            | methods::PROMOTE_SIDE_CHAT
+            | methods::DISPOSE_SIDE_CHAT
     )
 }
 
@@ -1154,7 +1166,39 @@ fn is_stream_method(method: &str) -> bool {
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::UPDATE_STATUS
+            | methods::WATCH_SIDE_CHAT_STATUS
     )
+}
+
+/// The Side Chat status watch as a stream: current value first (`null` until
+/// the first transition), then every change. Ends when the private channel
+/// closes — after dispose, or at promotion when the panel switches to the
+/// normal chat surface.
+fn side_chat_status_stream(
+    side_chat_id: String,
+    rx: watch::Receiver<Option<cypher_proto::Session>>,
+) -> BoxStream<'static, serde_json::Value> {
+    use cypher_proto::SideChatStatus;
+    futures::stream::unfold(
+        (side_chat_id, rx, false),
+        |(side_chat_id, mut rx, emitted)| async move {
+            if emitted {
+                rx.changed().await.ok()?;
+            }
+            let frame = {
+                let session = rx.borrow_and_update().clone();
+                session.map(|s| SideChatStatus {
+                    side_chat_id: side_chat_id.clone(),
+                    status: s.status,
+                    started_at: s.started_at,
+                    updated_at: s.updated_at,
+                })
+            };
+            let value = serde_json::to_value(&frame).ok()?;
+            Some((value, (side_chat_id, rx, true)))
+        },
+    )
+    .boxed()
 }
 
 /// A watch receiver as a stream: current value first, then every change.
@@ -2047,6 +2091,108 @@ impl RpcService for EngineRpc {
             methods::START_SUBAGENT => {
                 let p: StartSubagentParams = parse_params(params)?;
                 self.start_subagent(p).await
+            }
+            methods::START_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    parent_chat_id: String,
+                    source: SideChatSource,
+                    selected_text: String,
+                }
+                let p: P = parse_params(params)?;
+                let created = self
+                    .side_chats
+                    .start(&p.parent_chat_id, p.source, p.selected_text)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&created)
+            }
+            methods::SEND_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                    request: RunRequest,
+                    #[serde(default)]
+                    message_id: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                self.side_chats
+                    .send(&p.side_chat_id, p.request, p.message_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::INTERRUPT_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let interrupted = self
+                    .side_chats
+                    .interrupt(&p.side_chat_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "interrupted": interrupted }))
+            }
+            methods::RESPOND_SIDE_CHAT_INPUT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                    request_id: String,
+                    answers: Vec<cypher_proto::UserInputAnswer>,
+                }
+                let p: P = parse_params(params)?;
+                let resolved = self
+                    .side_chats
+                    .respond_input(&p.side_chat_id, &p.request_id, p.answers)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "resolved": resolved }))
+            }
+            methods::WATCH_SIDE_CHAT_STATUS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let rx = self
+                    .side_chats
+                    .watch_status(&p.side_chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                Ok(RpcReply::Stream(side_chat_status_stream(
+                    p.side_chat_id,
+                    rx,
+                )))
+            }
+            methods::PROMOTE_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let promoted = self
+                    .side_chats
+                    .promote(&p.side_chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&promoted)
+            }
+            methods::DISPOSE_SIDE_CHAT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    side_chat_id: String,
+                }
+                let p: P = parse_params(params)?;
+                self.side_chats
+                    .dispose(&p.side_chat_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_AGENT_EVENTS => {
                 #[derive(Deserialize)]

@@ -22,7 +22,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
 use cypher_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
@@ -932,6 +932,62 @@ impl WorkspaceHost {
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.delete_chat(chat_id))?)
+    }
+
+    /// Sidebar freshness with an explicit timestamp: set the promoted Side
+    /// Chat's preview + last-message activity from its transcript's newest
+    /// message (round-21 audit — a promoted chat must not land blank in the
+    /// sidebar). Best-effort: `false` when the row is missing.
+    pub fn set_chat_last_message(
+        &self,
+        chat_id: &str,
+        preview: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_last_message(chat_id, preview, at))?)
+    }
+
+    /// Promote a temporary Side Chat into a normal ROOT chat (round 21): a
+    /// non-child Chat row with the SAME id, inheriting the parent's device /
+    /// space / cwd / branch / config / checkout (deliberately NOT the parent's
+    /// harness session — the promoted chat's own session continuity rides the
+    /// in-memory harness-session backfill). The row's title is deterministic,
+    /// derived from the selected quote (`title`). Born on chat2 (`room_gen: 2`).
+    ///
+    /// Idempotent: returns `Ok(false)` when a row already exists (a lost
+    /// PromoteSideChat reply retried after the first promotion landed) — the
+    /// caller treats that as already-promoted rather than double-writing.
+    pub fn promote_side_chat(
+        &self,
+        side_chat_id: &str,
+        parent: &Chat,
+        title: &str,
+    ) -> Result<bool, EngineError> {
+        if self.read(|doc| doc.chat(side_chat_id))?.is_some() {
+            return Ok(false);
+        }
+        self.mutate(|doc| {
+            doc.upsert_chat(&Chat {
+                id: side_chat_id.to_string(),
+                device_id: parent.device_id.clone(),
+                title: Some(title.to_string()),
+                archived: false,
+                cwd: parent.cwd.clone(),
+                branch: parent.branch.clone(),
+                checkout_id: parent.checkout_id.clone(),
+                config: parent.config.clone(),
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: Utc::now(),
+                harness_session_id: None,
+                room_gen: Some(2),
+                harness_session_cwd: None,
+                space_id: parent.space_id.clone(),
+                last_seen_at: None,
+                child: None,
+            })
+        })?;
+        Ok(true)
     }
 
     /// Create a Cypher-hosted child subagent chat (`StartSubagent` bridge): a

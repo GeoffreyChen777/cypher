@@ -250,6 +250,7 @@ mod tests {
             id: "user-1".into(),
             email: "user@example.com".into(),
             name: None,
+            avatar_url: None,
         };
         assert!(
             !account_status(

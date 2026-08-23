@@ -28,7 +28,7 @@ use gpui_tokio::Tokio;
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
-use crate::icons::{self, icon};
+use crate::icons::{self, cypher_app_icon, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
 use crate::popover::{self, Loadable};
@@ -198,17 +198,24 @@ pub enum Route {
     Settings(SettingsSection),
 }
 
-/// One right-pane surface tab (t3code RightPanelSurface, narrowed to our two
-/// kinds): a git-diff page (each tab its own [`Changes`] viewer — multiple
-/// diff panels, user request) or one embedded terminal keyed by its
-/// [`TerminalPanel`] tab key. `Picker` is the empty state ("Open a surface").
+/// One right-pane surface tab (t3code RightPanelSurface): a git-diff page
+/// (each tab its own [`Changes`] viewer — multiple diff panels, user
+/// request), one embedded terminal keyed by its [`TerminalPanel`] tab key,
+/// or a temporary Side Chat (round 21). `Picker` is the empty state
+/// ("Open a surface").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum RightSurface {
     #[default]
     Picker,
     Diff(u64),
     Terminal(u64),
+    SideChat(u64),
 }
+
+/// Round-21 Side Chats cap: at most this many temporary side chat tabs per
+/// chat (they are host-memory engine objects; a runaway count would leak
+/// docs and streams). Further offers are ignored.
+const MAX_SIDE_CHATS_PER_CHAT: usize = 8;
 
 /// Per-chat panel open flags (zeron parity: `sessionPanels` — the terminal and
 /// changes panels open *per session*, in memory only; heights and every other
@@ -345,6 +352,45 @@ impl NavHistory {
 /// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
 /// equivalent.
 pub const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
+
+/// The drag-drop spec for the right-pane surface tab strip: move the surface
+/// at `from` to `to` (both must be in bounds and distinct). Pure so the
+/// reorder behaviour — including mixed diff/terminal/side-chat strips — is
+/// testable without a live shell. Returns whether the strip changed.
+/// Round-21 audit: remove a Side Chat surface from ITS PARENT chat's tab
+/// strip — closing/promoting a HIDDEN side tab (the user switched away) must
+/// remove it from the parent's `right_tabs` key, never whichever main chat is
+/// currently selected. Pure so the keyed removal is testable without a shell.
+pub fn remove_side_chat_from_tabs(
+    right_tabs: &mut std::collections::HashMap<String, Vec<RightSurface>>,
+    parent_chat_id: &str,
+    id: u64,
+) -> bool {
+    match right_tabs.get_mut(parent_chat_id) {
+        Some(tabs) => {
+            let before = tabs.len();
+            tabs.retain(|s| *s != RightSurface::SideChat(id));
+            before != tabs.len()
+        }
+        None => false,
+    }
+}
+
+pub fn reorder_right_surfaces(tabs: &mut [RightSurface], from: usize, to: usize) -> bool {
+    if from < tabs.len() && to < tabs.len() && from != to {
+        let surface = tabs[from];
+        if from < to {
+            tabs.copy_within(from + 1..=to, from);
+            tabs[to] = surface;
+        } else {
+            tabs.copy_within(to..from, to + 1);
+            tabs[to] = surface;
+        }
+        true
+    } else {
+        false
+    }
+}
 
 /// FLIP diff for a keyed list: given the previously rendered order and the new
 /// order (key + row height), return each surviving key's paint-only start
@@ -825,6 +871,12 @@ pub struct Shell {
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
+    /// Temporary Side Chat tabs (round 21): one [`SideChatPanel`] per open
+    /// side chat, keyed by a shell-minted sequence id. Owned here so the
+    /// shell can promote/close/dispose them and re-render their tabs.
+    side_chats: std::collections::HashMap<u64, Entity<crate::side_chats::SideChatPanel>>,
+    side_chat_subs: std::collections::HashMap<u64, Subscription>,
+    side_chat_seq: u64,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -1057,8 +1109,7 @@ impl Shell {
         // selected.
         let comment_popup_events = cx.subscribe(&comment_popup, {
             let composer = composer.clone();
-            move |_this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event
-            {
+            move |this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event {
                 crate::comments::CommentPopupEvent::CommentSaved {
                     chat_id,
                     quote,
@@ -1070,6 +1121,17 @@ impl Shell {
                     composer.update(cx, |composer, cx| {
                         composer.add_comment(chat_id.clone(), quote.clone(), comment.clone(), cx)
                     });
+                }
+                crate::comments::CommentPopupEvent::SideChatRequested {
+                    chat_id,
+                    source,
+                    selected_text,
+                } => {
+                    // Round 21: open a temporary Side Chat from the settled
+                    // selection (the shell owns the StartSideChat call and
+                    // the right-pane tab). The selected quote rides along so
+                    // the engine validates + injects it on the first send.
+                    this.open_side_chat(chat_id.clone(), source.clone(), selected_text.clone(), cx);
                 }
             }
         });
@@ -1151,6 +1213,9 @@ impl Shell {
             diffs: std::collections::HashMap::new(),
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
+            side_chats: std::collections::HashMap::new(),
+            side_chat_subs: std::collections::HashMap::new(),
+            side_chat_seq: 0,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -1598,6 +1663,10 @@ impl Shell {
                     .iter()
                     .find(|(k, _, _)| k == tab)
                     .map(|(_, title, _)| (*surface, title.clone())),
+                RightSurface::SideChat(id) => self
+                    .side_chats
+                    .get(id)
+                    .map(|panel| (*surface, panel.read(cx).tab_title())),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -1607,12 +1676,8 @@ impl Shell {
     fn reorder_right_tabs(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let key = self.panel_key(cx);
         if let Some(tabs) = self.right_tabs.get_mut(&key)
-            && from < tabs.len()
-            && to < tabs.len()
-            && from != to
+            && reorder_right_surfaces(tabs, from, to)
         {
-            let surface = tabs.remove(from);
-            tabs.insert(to, surface);
             cx.notify();
         }
     }
@@ -1689,6 +1754,7 @@ impl Shell {
                     changes.update(cx, |changes, cx| changes.ensure_content(cx));
                 }
             }
+            RightSurface::SideChat(_) => {}
             RightSurface::Picker => {}
         }
         cx.notify();
@@ -1731,6 +1797,332 @@ impl Shell {
             .or_default()
             .push(RightSurface::Diff(id));
         self.set_right_active(RightSurface::Diff(id), cx);
+    }
+
+    // ---- temporary Side Chats (round 21) ----
+
+    /// User-facing notice text for a failed `StartSideChat` RPC.
+    ///
+    /// `unknown method: StartSideChat` means the device hosting the parent
+    /// session still runs a Cypher engine older than the Side Chat feature
+    /// — the message says so and how to fix it. Every other failure gets
+    /// the generic "Could not open Side Chat: …" (the full RPC error,
+    /// e.g. an engine-side `Failed` message).
+    fn side_chat_start_error_text(err: &cypher_rpc::RpcError) -> String {
+        if let cypher_rpc::RpcError::UnknownMethod(method) = err
+            && method == methods::START_SIDE_CHAT
+        {
+            "Side Chat requires a newer Cypher engine on the device hosting \
+             this session. Update that device or use a session hosted on \
+             this device."
+                .to_string()
+        } else {
+            format!("Could not open Side Chat: {err}")
+        }
+    }
+
+    /// `StartSideChat` for a settled selection: mint the temporary chat on
+    /// the engine (relay-forwarded when the parent chat is remote — the
+    /// parent's host device owns the side chat), then open its right-pane
+    /// tab. `selected_text` is the settled quote IN FULL (the engine
+    /// validates it — empty/oversized are rejected there — and injects it
+    /// into the first send). Capped at [`MAX_SIDE_CHATS_PER_CHAT`] per chat
+    /// as a UX guard (the ENGINE enforces the global cap authoritatively).
+    /// Start/cap/offline failures surface as a desktop notice AND the
+    /// in-app sidebar notice strip, never a silent return.
+    fn open_side_chat(
+        &mut self,
+        parent_chat_id: String,
+        source: cypher_proto::SideChatSource,
+        selected_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.panel_key(cx);
+        let open = self
+            .right_tabs
+            .get(&key)
+            .map(|v| {
+                v.iter()
+                    .filter(|s| matches!(s, RightSurface::SideChat(_)))
+                    .count()
+            })
+            .unwrap_or(0);
+        if open >= MAX_SIDE_CHATS_PER_CHAT {
+            tracing::warn!(%parent_chat_id, "Side Chat tab cap reached per chat");
+            let notice = "Too many side chats open for this chat (max 8).";
+            crate::notify::post("Side Chat", notice);
+            self.sidebar_notice = Some(notice.into());
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            tracing::warn!(%parent_chat_id, "StartSideChat skipped: engine offline");
+            let notice = "Cannot open a side chat: engine is not connected.";
+            crate::notify::post("Side Chat", notice);
+            self.sidebar_notice = Some(notice.into());
+            cx.notify();
+            return;
+        };
+        // Remote parent: the side chat is owned by the PARENT'S host device
+        // (relay-forwarded). The reply's `targetDeviceId` then rides every
+        // subsequent side-chat RPC.
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "parentChatId".into(),
+            serde_json::Value::String(parent_chat_id.clone()),
+        );
+        params.insert(
+            "source".into(),
+            serde_json::to_value(&source).unwrap_or_default(),
+        );
+        params.insert(
+            "selectedText".into(),
+            serde_json::Value::String(selected_text.clone()),
+        );
+        {
+            let state = self.state.read(cx);
+            if let (Some(chat), Some(local)) = (
+                state.chats.iter().find(|c| c.id == parent_chat_id),
+                state.local_device_id.clone(),
+            ) && chat.device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(chat.device_id.clone()),
+                );
+            }
+        }
+        let params = serde_json::Value::Object(params);
+        let weak = cx.weak_entity();
+        let quote = selected_text;
+        cx.spawn(async move |_this, cx| {
+            let value = engine.client().call(methods::START_SIDE_CHAT, params).await;
+            let created: cypher_proto::SideChatCreated = match value.and_then(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
+            }) {
+                Ok(created) => created,
+                Err(err) => {
+                    tracing::warn!(%parent_chat_id, error = %err, "StartSideChat failed");
+                    let notice = Self::side_chat_start_error_text(&err);
+                    crate::notify::post("Side Chat", &notice);
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.sidebar_notice = Some(notice.clone().into());
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
+            };
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |shell, cx| {
+                    shell.register_side_chat_tab(created, source.clone(), quote.clone(), cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// A successful `StartSideChat` lands here: build the panel, subscribe to
+    /// its events, and open the tab.
+    ///
+    /// Race guard (round-21 audit): the START round-trip may outlive the user
+    /// switching to a DIFFERENT chat. A side chat belongs to its source
+    /// parent's panel key — attaching it under the new chat's key would
+    /// mis-scope the tab, so the created temp is disposed immediately and
+    /// nothing is opened.
+    fn register_side_chat_tab(
+        &mut self,
+        created: cypher_proto::SideChatCreated,
+        source: cypher_proto::SideChatSource,
+        selected_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let parent_chat_id = created.parent_chat_id.clone();
+        if self.active_chat != parent_chat_id {
+            tracing::warn!(
+                parent = %parent_chat_id,
+                switched_to = %self.active_chat,
+                side_chat = %created.side_chat_id,
+                "StartSideChat returned after the user switched away; disposing the temp"
+            );
+            let mut params = serde_json::Map::new();
+            params.insert(
+                "sideChatId".into(),
+                serde_json::Value::String(created.side_chat_id.clone()),
+            );
+            let state = self.state.read(cx);
+            if let Some(local) = state.local_device_id.clone()
+                && created.target_device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(created.target_device_id.clone()),
+                );
+            }
+            let engine = self.state.read(cx).engine().cloned();
+            if let Some(engine) = engine {
+                cx.spawn(async move |_, _| {
+                    let _ = engine
+                        .client()
+                        .call(
+                            methods::DISPOSE_SIDE_CHAT,
+                            serde_json::Value::Object(params),
+                        )
+                        .await;
+                })
+                .detach();
+            }
+            return;
+        }
+        let panel = cx.new(|cx| {
+            crate::side_chats::SideChatPanel::new(
+                self.state.clone(),
+                parent_chat_id.clone(),
+                created.side_chat_id.clone(),
+                created.target_device_id.clone(),
+                source,
+                selected_text,
+                cx,
+            )
+        });
+        self.side_chat_seq += 1;
+        let id = self.side_chat_seq;
+        let sub = cx.subscribe(&panel, |this: &mut Self, _, event, cx| match event {
+            crate::side_chats::SideChatEvent::Promoted {
+                chat_id,
+                side_chat_id,
+            } => {
+                // Expand: the chat is now a normal root chat. Capture the
+                // panel's fork + composer + parent BEFORE the tab closes
+                // (close drops the panel) — the promoted row inherits the
+                // parent's device/space/cwd/config, and the fork's
+                // transcript/echoes/draft/staged attachments ride into the
+                // main surface so the switch is seamless (no blank flash,
+                // no lost draft). Promotion only changes the main selection
+                // AFTER the RPC succeeded — this handler runs on that.
+                let handoff = this
+                    .side_chats
+                    .values()
+                    .find(|p| p.read(cx).side_chat_id == *side_chat_id)
+                    .map(|p| {
+                        let panel = p.read(cx);
+                        let parent_chat_id = panel.parent_chat_id().to_string();
+                        let fork = panel.fork();
+                        let composer = panel.composer();
+                        let fork_transcript = fork.read(cx).transcript.clone();
+                        let fork_echoes = fork.read(cx).pending_echoes().to_vec();
+                        let draft = composer.read(cx).current_draft(cx);
+                        let staged = composer.read(cx).staged_attachments();
+                        (parent_chat_id, fork_transcript, fork_echoes, draft, staged)
+                    });
+                this.close_side_chat_tab(side_chat_id.clone(), cx);
+                let (parent_chat_id, fork_transcript, fork_echoes, draft, staged) =
+                    handoff.unwrap_or_default();
+                this.state.update(cx, |s, cx| {
+                    // Optimistic insert: the engine already created the row
+                    // (PromoteSideChat is synchronous engine-side), so the
+                    // sidebar renders and selection works before the next
+                    // chats frame replaces it with the authoritative row.
+                    if let Some(parent) = s.chats.iter().find(|c| c.id == parent_chat_id).cloned()
+                        && !s.chats.iter().any(|c| c.id == *chat_id)
+                    {
+                        s.insert_chat_optimistic(cypher_proto::Chat {
+                            id: chat_id.clone(),
+                            device_id: parent.device_id.clone(),
+                            title: None,
+                            archived: false,
+                            cwd: parent.cwd.clone(),
+                            branch: parent.branch.clone(),
+                            checkout_id: parent.checkout_id.clone(),
+                            config: parent.config.clone(),
+                            last_message_preview: None,
+                            last_message_at: None,
+                            created_at: chrono::Utc::now(),
+                            harness_session_id: None,
+                            harness_session_cwd: None,
+                            space_id: parent.space_id.clone(),
+                            last_seen_at: None,
+                            room_gen: Some(2),
+                            child: None,
+                        });
+                    }
+                    s.select_chat(Some(chat_id.clone()), cx);
+                    // Seed the main transcript from the fork so there is no
+                    // blank flash while the promoted chat's doc watch reset
+                    // lands (same content — the doc watch diff is a no-op),
+                    // and carry any unconfirmed optimistic echoes over.
+                    s.transcript = fork_transcript;
+                    for echo in fork_echoes {
+                        s.push_echo(&chat_id, echo);
+                    }
+                    cx.notify();
+                });
+                // Hand the side composer's unsent draft + staged attachments
+                // off to the main composer (keyed by the promoted chat id).
+                this.composer.update(cx, |composer, cx| {
+                    composer.seed_draft(&chat_id, draft, cx);
+                    composer.seed_attachments(&chat_id, staged, cx);
+                });
+            }
+            crate::side_chats::SideChatEvent::Close { side_chat_id } => {
+                this.close_side_chat_tab(side_chat_id.clone(), cx);
+            }
+        });
+        self.side_chats.insert(id, panel);
+        self.side_chat_subs.insert(id, sub);
+        let key = self.panel_key(cx);
+        self.right_tabs
+            .entry(key.clone())
+            .or_default()
+            .push(RightSurface::SideChat(id));
+        self.set_right_active(RightSurface::SideChat(id), cx);
+        // Opening a side chat implies the right pane is showing it — at its
+        // NORMAL width (never a takeover/expanded pane: the conversation
+        // stays visible beside the side chat).
+        self.right_pane_expanded = false;
+        if !self.right_pane_open(cx) {
+            self.panels.toggle_changes(&key);
+        }
+        cx.notify();
+    }
+
+    /// Remove a side chat tab by its panel's side-chat id (event path):
+    /// dispose (no-op after promotion) and drop the panel (its transcript /
+    /// status tasks die with it).
+    fn close_side_chat_tab(&mut self, side_chat_id: String, cx: &mut Context<Self>) {
+        if let Some(id) = self
+            .side_chats
+            .iter()
+            .find(|(_, p)| p.read(cx).side_chat_id == side_chat_id)
+            .map(|(id, _)| *id)
+        {
+            self.close_side_chat_by_seq(id, cx);
+        }
+    }
+
+    /// Remove a side chat tab by its shell-minted sequence id (tab-strip ✕
+    /// path).
+    fn close_side_chat_by_seq(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(panel) = self.side_chats.get(&id).cloned() else {
+            return;
+        };
+        // Round-21 audit: a side chat belongs to its PARENT chat's tab strip
+        // — closing/promoting a HIDDEN side tab (the user switched away)
+        // must remove it from the parent's `right_tabs` key, never whichever
+        // main chat is currently selected.
+        let key = panel.read(cx).parent_chat_id().to_string();
+        remove_side_chat_from_tabs(&mut self.right_tabs, &key, id);
+        panel.update(cx, |panel, cx| panel.dispose(cx));
+        self.side_chats.remove(&id);
+        self.side_chat_subs.remove(&id);
+        self.panels.update(&key, |p| {
+            if p.right_active == RightSurface::SideChat(id) {
+                p.right_active = RightSurface::Picker;
+            }
+        });
+        cx.notify();
     }
 
     /// The picker's Terminal card / the `+` menu's Terminal row: every click
@@ -1776,6 +2168,9 @@ impl Shell {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
+            }
+            RightSurface::SideChat(id) => {
+                self.close_side_chat_by_seq(id, cx);
             }
             RightSurface::Picker => {}
         }
@@ -3361,7 +3756,7 @@ impl Shell {
                     .as_ref()
                     .map(|u| SharedString::from(u.email.clone()))
                     .unwrap_or_else(|| line.clone());
-                (line, Some("Alpha".into()), email)
+                (line, None, email)
             }
         };
         let avatar_url = user
@@ -4395,14 +4790,12 @@ impl Shell {
     where
         T: 'static,
     {
-        let hover = Theme::of(cx).border_strong;
         div()
             .id(id)
             .w(px(5.0))
             .h_full()
             .flex_none()
             .cursor_col_resize()
-            .hover(move |s| s.bg(hover))
             .on_drag(marker(), |_, _point: Point<gpui::Pixels>, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DragGhost)
@@ -4977,6 +5370,13 @@ impl Shell {
                     panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
                     panel.into_any_element()
                 }
+                RightSurface::SideChat(id) => {
+                    if let Some(panel) = self.side_chats.get(&id) {
+                        panel.clone().into_any_element()
+                    } else {
+                        self.render_surface_picker(cx)
+                    }
+                }
                 _ => self.render_surface_picker(cx),
             }
         } else {
@@ -5147,10 +5547,9 @@ impl Shell {
             .items_center()
             .text_center()
             .child(
-                icon(icons::CYPHER_LOGO)
-                    .w(px(31.4))
-                    .h(px(36.0))
-                    .text_color(theme.text),
+                cypher_app_icon()
+                    .w(px(36.0))
+                    .h(px(36.0)),
             )
             .child(
                 div()
@@ -5293,6 +5692,7 @@ impl Shell {
             let is_active = surface == active;
             let icon_path = match surface {
                 RightSurface::Diff(_) => icons::GIT_BRANCH,
+                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 _ => icons::TERMINAL,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
@@ -5645,10 +6045,9 @@ impl Shell {
                 .items_center()
                 .text_center()
                 .child(
-                    icon(icons::CYPHER_LOGO)
-                        .w(px(31.4))
-                        .h(px(36.0))
-                        .text_color(theme.text),
+                    cypher_app_icon()
+                        .w(px(36.0))
+                        .h(px(36.0)),
                 )
                 .child(
                     div()
@@ -5830,12 +6229,7 @@ impl Shell {
             .shadow_lg()
             .flex()
             .flex_col()
-            .child(
-                icon(icons::CYPHER_LOGO)
-                    .w(px(24.4))
-                    .h(px(28.0))
-                    .text_color(theme.text),
-            )
+            .child(cypher_app_icon().w(px(28.0)).h(px(28.0)))
             .child(
                 div()
                     .mt(px(20.0))
@@ -6386,10 +6780,10 @@ impl Render for Shell {
                 // neutral keeps dark mode from reading as pure black, while
                 // the soft shadow separates it from the shell without drawing
                 // another vertical hairline beside the sidebar. It is inset
-                // 8px on every outer edge; the right gap narrows to 4px while
-                // the right pane is open.
+                // 8px on the window edges; the internal sidebar/card seam is
+                // tighter at 4px, matching the card/right-pane seam.
                 let card: AnyElement = div()
-                    .ml(px(8.0))
+                    .ml(px(4.0))
                     .mt(px(8.0))
                     .mb(px(8.0))
                     .mr(px(if self.right_pane_open(cx) { 4.0 } else { 8.0 }))
@@ -6536,6 +6930,38 @@ mod tests {
         // Exactly 2048 chars is allowed.
         let at_cap = format!("https://h/{}", "a".repeat(2048 - "https://h/".len()));
         assert!(safe_avatar_url(Some(SharedString::from(at_cap))).is_some());
+    }
+
+    #[test]
+    fn side_chat_start_error_text_is_actionable_for_unknown_method() {
+        use cypher_rpc::RpcError;
+        // Old engine on the hosting device: no `StartSideChat` method →
+        // the message says what's wrong and what to do, not just an error.
+        let unknown = Shell::side_chat_start_error_text(&RpcError::UnknownMethod(
+            methods::START_SIDE_CHAT.to_string(),
+        ));
+        assert!(unknown.contains("newer Cypher engine"), "{unknown}");
+        assert!(unknown.contains("device hosting this session"), "{unknown}");
+        assert!(unknown.contains("Update that device"), "{unknown}");
+        // A DIFFERENT unknown method is not the Side Chat feature gap.
+        let other = Shell::side_chat_start_error_text(&RpcError::UnknownMethod("Nope".into()));
+        assert_eq!(other, "Could not open Side Chat: unknown method: Nope");
+        // Engine-side failures keep the generic prefix + raw error.
+        assert_eq!(
+            Shell::side_chat_start_error_text(&RpcError::Failed("engine exploded".into())),
+            "Could not open Side Chat: engine exploded"
+        );
+        for generic in [
+            RpcError::BadParams("bad".into()),
+            RpcError::Transport("down".into()),
+            RpcError::Closed,
+        ] {
+            assert!(
+                Shell::side_chat_start_error_text(&generic)
+                    .starts_with("Could not open Side Chat:"),
+                "{generic}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -7139,6 +7565,70 @@ mod tests {
         assert_eq!(panels.get("b").right_active, RightSurface::Picker);
         panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
         assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
+        // A Side Chat tab (round 21) is a right surface like any other.
+        panels.update("a", |p| p.right_active = RightSurface::SideChat(11));
+        assert_eq!(panels.get("a").right_active, RightSurface::SideChat(11));
+        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
+    }
+
+    #[test]
+    fn removing_a_hidden_side_chat_only_touches_its_parents_key() {
+        // Round-21 audit: closing/promoting a side chat tab must remove it
+        // from the PARENT chat's `right_tabs`, even when another chat is
+        // currently selected (a hidden side tab).
+        let mut tabs: std::collections::HashMap<String, Vec<RightSurface>> =
+            std::collections::HashMap::new();
+        tabs.insert(
+            "chat-a".into(),
+            vec![RightSurface::SideChat(3), RightSurface::Diff(1)],
+        );
+        tabs.insert("chat-b".into(), vec![RightSurface::Terminal(2)]);
+
+        // The currently-selected chat is B, but the side chat belongs to A.
+        assert!(remove_side_chat_from_tabs(&mut tabs, "chat-a", 3));
+        assert_eq!(tabs["chat-a"], vec![RightSurface::Diff(1)]);
+        assert_eq!(tabs["chat-b"], vec![RightSurface::Terminal(2)]);
+
+        // Unknown parent / absent side chat: no-op, other keys untouched.
+        assert!(!remove_side_chat_from_tabs(&mut tabs, "chat-b", 3));
+        assert!(!remove_side_chat_from_tabs(&mut tabs, "chat-missing", 3));
+        assert_eq!(tabs["chat-a"], vec![RightSurface::Diff(1)]);
+        assert_eq!(tabs["chat-b"], vec![RightSurface::Terminal(2)]);
+    }
+
+    #[test]
+    fn right_surface_reorder_moves_mixed_strips() {
+        // Round 21: the surface strip mixes diffs, terminals, and side chats;
+        // the drag-drop reorder must move them as one ordered list.
+        let mut tabs = vec![
+            RightSurface::Diff(1),
+            RightSurface::Terminal(2),
+            RightSurface::SideChat(3),
+            RightSurface::Diff(4),
+            RightSurface::SideChat(5),
+        ];
+        // Drag the first side chat (index 2) to the end.
+        assert!(reorder_right_surfaces(&mut tabs, 2, 4));
+        assert_eq!(
+            tabs,
+            vec![
+                RightSurface::Diff(1),
+                RightSurface::Terminal(2),
+                RightSurface::Diff(4),
+                RightSurface::SideChat(5),
+                RightSurface::SideChat(3),
+            ]
+        );
+        // Drag it back to the front.
+        assert!(reorder_right_surfaces(&mut tabs, 4, 0));
+        assert_eq!(tabs[0], RightSurface::SideChat(3));
+        assert_eq!(tabs[1], RightSurface::Diff(1));
+        // Out-of-bounds and same-index drags are no-ops (no notify).
+        let before = tabs.clone();
+        assert!(!reorder_right_surfaces(&mut tabs, 9, 1));
+        assert!(!reorder_right_surfaces(&mut tabs, 1, 1));
+        assert!(!reorder_right_surfaces(&mut tabs, 1, 9));
+        assert_eq!(tabs, before);
     }
 
     // ---- sidebar resort FLIP diff (§1.6) ----

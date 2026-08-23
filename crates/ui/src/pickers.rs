@@ -397,6 +397,10 @@ pub enum PickerKind {
 
 pub struct Pickers {
     state: Entity<AppState>,
+    /// Read-only mode for a temporary Side Chat's composer (round 21 refactor):
+    /// the chips DISPLAY the inherited values but never mutate — a synthetic
+    /// side-chat row is never a `setChatConfig` target.
+    locked: bool,
     config: DraftConfig,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
@@ -556,6 +560,7 @@ impl Pickers {
         let space_owner = state.read(cx).selected_space.clone();
         Self {
             state,
+            locked: false,
             space_owner,
             config: DraftConfig::default(),
             defaults,
@@ -599,6 +604,13 @@ impl Pickers {
         &self.config
     }
 
+    /// Lock the pickers read-only (temporary Side Chat composer): the chips
+    /// keep displaying the inherited values, but no popover opens and no
+    /// config is ever written to the synthetic row.
+    pub fn set_locked(&mut self) {
+        self.locked = true;
+    }
+
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
         self.state.read(cx).selected_chat.is_some()
@@ -608,14 +620,20 @@ impl Pickers {
         self.state.read(cx).engine().cloned()
     }
 
-    /// The selected space's device when it differs from the connected
-    /// engine's own — harness/model catalogs come from the device that RUNS
-    /// the agents (the CLIs live there; the viewer may have neither claude
-    /// nor codex installed — user report: "can't load codex models/traits
-    /// anywhere" from a Mac without codex).
+    /// The catalog host device when it differs from the connected engine's
+    /// own — harness/model catalogs come from the device that RUNS the agents
+    /// (the CLIs live there; the viewer may have neither claude nor codex
+    /// installed — user report: "can't load codex models/traits anywhere"
+    /// from a Mac without codex). Prefers the selected chat's OWN host device
+    /// (a side chat's synthetic row names its parent's device — including a
+    /// remote PROJECT-LESS side chat, which has no space row to target); a
+    /// new-chat canvas targets its picked project's host.
     fn space_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_space_row()?.device_id.clone();
+        let device = state
+            .selected_chat_row()
+            .map(|c| c.device_id.clone())
+            .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))?;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -774,6 +792,11 @@ impl Pickers {
     }
 
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
+        // Read-only (temporary Side Chat): the chips are inert — they show
+        // the inherited values, nothing opens.
+        if self.locked {
+            return;
+        }
         // A press that found this picker open closes it — the card's
         // `on_mouse_down_out` already began the close on that same press,
         // so by click time the popup reads as closed and a plain toggle
@@ -1229,6 +1252,10 @@ impl Pickers {
     }
 
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
+        // Read-only (temporary Side Chat): inherited values are display-only.
+        if self.locked {
+            return;
+        }
         self.animate_close(cx);
         if self.state.read(cx).selected_chat.is_some() {
             // Existing chat: persist to the chat row (Mutate setChatConfig) —
@@ -1253,6 +1280,10 @@ impl Pickers {
     }
 
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
+        // Read-only (temporary Side Chat): inherited values are display-only.
+        if self.locked {
+            return;
+        }
         // Always a concrete selection (no toggle-back-to-default).
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
@@ -1271,6 +1302,10 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
+        // Read-only (temporary Side Chat): inherited values are display-only.
+        if self.locked {
+            return;
+        }
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -1297,6 +1332,12 @@ impl Pickers {
     /// row always carries the CONCRETE resolved model/reasoning, with the
     /// reasoning re-clamped to the (possibly just-changed) model's ladder.
     fn update_chat_config(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ChatConfig)) {
+        // Read-only (temporary Side Chat): never `setChatConfig` on a
+        // synthetic side-chat row — the row vanishes on dispose and is
+        // engine-owned until promotion.
+        if self.locked {
+            return;
+        }
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return;
         };

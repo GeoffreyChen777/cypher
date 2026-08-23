@@ -40,6 +40,21 @@ pub enum SelectionScope {
     /// so two diff tabs never share a scope and a closed pane's scope is
     /// never reused.
     Changes(u64),
+    /// A temporary Side Chat transcript ([`next_side_chat_scope`]): one fresh
+    /// scope per panel, so a side chat beside the main transcript — or two
+    /// side chats side by side — never collide in the shared selection
+    /// registry. Side-chat scopes render selection + copy but deliberately
+    /// offer NO annotation actions (no Comment pill, no nested Side Chat).
+    SideChat(u64),
+}
+
+/// Allocate a fresh per-panel Side Chat selection scope. Each temporary
+/// Side Chat transcript allocates its own so a panel can never collide with
+/// the main transcript or another simultaneously-visible panel, and a closed
+/// panel's scope is never reused.
+pub fn next_side_chat_scope() -> SelectionScope {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    SelectionScope::SideChat(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Allocate a fresh per-pane diff selection scope. Each [`Changes`](crate::changes::Changes)
@@ -485,6 +500,19 @@ mod tests {
         let b = next_change_scope();
         assert_ne!(a, b);
         assert!(matches!(a, SelectionScope::Changes(_)));
+    }
+
+    #[test]
+    fn next_side_chat_scope_allocates_unique_ids() {
+        // Round 21 refactor: each temporary Side Chat transcript gets a fresh
+        // scope so it never collides with the main transcript or another
+        // simultaneously-visible panel.
+        let a = next_side_chat_scope();
+        let b = next_side_chat_scope();
+        assert_ne!(a, b);
+        assert!(matches!(a, SelectionScope::SideChat(_)));
+        assert_ne!(a, SelectionScope::Transcript);
+        assert_ne!(a, SelectionScope::Changes(0));
     }
 
     #[test]

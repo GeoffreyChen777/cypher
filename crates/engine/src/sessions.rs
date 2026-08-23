@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -135,6 +135,19 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Temporary Side Chat ids (round 21): in-memory status + harness-session
+    /// continuity ONLY. Everything that would make a chat observable or durable
+    /// — the public `sessions_tx` watch, workspace session rows, the run
+    /// journal, the auto-titler, turn-start snapshots, and persistent
+    /// harness-session row writes — is suppressed for these ids. Registered by
+    /// the side-chat manager on start, removed on promote (statuses then flow
+    /// through the public paths) or dispose.
+    ephemeral: Mutex<HashSet<String>>,
+    /// Private status watch per ephemeral chat — the Side Chat panel's only
+    /// status channel while temporary (public WatchSessions never sees these).
+    /// The Sender is retained here so late subscribers still see the last
+    /// transition; entries are removed on promote/dispose.
+    ephemeral_tx: Mutex<HashMap<String, watch::Sender<Option<Session>>>>,
 }
 
 /// Host-local messaging channel for one child chat's INITIAL run (see
@@ -183,6 +196,8 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                ephemeral: Mutex::new(HashSet::new()),
+                ephemeral_tx: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -215,7 +230,95 @@ impl SessionsEngine {
         let _ = self.inner.turn_listener.set(listener);
     }
 
+    // ── temporary Side Chat support (round 21) ─────────────────────────────
+
+    /// Mark `chat_id` as a temporary Side Chat: its status/harness-session
+    /// continuity stays in memory while every workspace/journal/observability
+    /// write is suppressed (see [`Inner::ephemeral`]). Called by the side-chat
+    /// manager on start. Idempotent.
+    pub fn register_ephemeral(&self, chat_id: &str) {
+        lock(&self.inner.ephemeral).insert(chat_id.to_string());
+        // Eagerly create the PRIVATE status sender: a publish that races
+        // ahead of the panel's subscribe must never be lost. A very fast
+        // first send can mark Working→Idle before `WatchSideChatStatus`
+        // lands, and the watch sender retains the current value for the
+        // late subscriber.
+        lock(&self.inner.ephemeral_tx)
+            .entry(chat_id.to_string())
+            .or_insert_with(|| watch::channel(None).0);
+    }
+
+    /// Remove `chat_id` from the ephemeral set (promotion: statuses now flow
+    /// through the public watch + workspace rows) and drop its private status
+    /// channel. The in-memory `statuses` entry survives, so the promoted chat
+    /// keeps its live status on the next public publish. Idempotent.
+    pub fn unregister_ephemeral(&self, chat_id: &str) {
+        lock(&self.inner.ephemeral).remove(chat_id);
+        lock(&self.inner.ephemeral_tx).remove(chat_id);
+    }
+
+    /// The Side Chat panel's PRIVATE status watch: `None` until the first
+    /// transition (or after dispose), then the chat's live [`Session`]. Never
+    /// appears in the public `watch_sessions` stream while ephemeral.
+    pub fn watch_ephemeral(&self, chat_id: &str) -> watch::Receiver<Option<Session>> {
+        let mut map = lock(&self.inner.ephemeral_tx);
+        map.entry(chat_id.to_string())
+            .or_insert_with(|| watch::channel(None).0)
+            .subscribe()
+    }
+
+    /// Dispose path: drop the in-memory status entry entirely. A temporary
+    /// Side Chat must leave no trace — after `unregister_ephemeral` its id is
+    /// no longer filtered from public publishes, so without this the stale
+    /// status would resurface in `WatchSessions` on the next transition of
+    /// any chat. (Promotion does NOT call this: the promoted chat keeps its
+    /// live status.)
+    pub fn drop_status(&self, chat_id: &str) {
+        lock(&self.inner.statuses).remove(chat_id);
+    }
+
+    /// Watcher-count helper for the stale reaper: how many live status-watch
+    /// receivers this ephemeral chat has. A Side Chat panel holds one while
+    /// open; the count drops to zero once the tab closes (or the watch RPC
+    /// was lost).
+    pub fn ephemeral_watcher_count(&self, chat_id: &str) -> usize {
+        lock(&self.inner.ephemeral_tx)
+            .get(chat_id)
+            .map_or(0, |tx| tx.receiver_count())
+    }
+
+    /// Promotion hook (round-21 audit): remove the chat from the ephemeral
+    /// set (statuses now flow through the public paths) and publish its
+    /// CURRENT status to the public `WatchSessions` watch + the workspace
+    /// session row immediately — the panel switches to the normal surface at
+    /// promotion, and a stale private-only status must never linger
+    /// unpublished. Deliberately NOT called on dispose (dispose drops the
+    /// status entirely via [`Self::drop_status`]).
+    pub fn promote_ephemeral(&self, chat_id: &str) {
+        self.unregister_ephemeral(chat_id);
+        let session = lock(&self.inner.statuses).get(chat_id).cloned();
+        if let Some(session) = session {
+            self.inner.publish_session(chat_id, &session);
+        }
+    }
+
+    /// Promotion backfill: stamp the (now normal) chat row with the harness
+    /// session recorded in memory while the chat was temporary. No-op when
+    /// none was recorded. Idempotent.
+    pub fn persist_harness_session(&self, chat_id: &str) {
+        let known = lock(&self.inner.harness_sessions).get(chat_id).cloned();
+        if let Some(known) = known
+            && !known.session_id.is_empty()
+            && let Some(ws) = self.inner.workspace()
+        {
+            ws.set_chat_harness_session(chat_id, &known.session_id, &known.cwd);
+        }
+    }
+
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+        if self.inner.is_ephemeral(chat_id) {
+            return; // temporary Side Chat: no checkout snapshot for the diff pane
+        }
         if let Some(listener) = self.inner.turn_listener.get() {
             listener(chat_id, cwd);
         }
@@ -587,7 +690,9 @@ impl SessionsEngine {
         // reason"; the titler only needs the prompt and skips titled chats;
         // the Done-time call below stays as the retry for a failed
         // generation).
-        if let Some(titles) = self.inner.titles.get() {
+        if !self.inner.is_ephemeral(chat_id)
+            && let Some(titles) = self.inner.titles.get()
+        {
             titles.maybe_generate(chat_id, harness_id, &visible_prompt, &request.cwd);
         }
 
@@ -920,7 +1025,19 @@ impl SessionsEngine {
 
 impl Inner {
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
+    /// For temporary Side Chats the journal is skipped (host-memory only — no
+    /// durable run journal until promotion); the hub broadcast (the private
+    /// subscribe/watch path) still runs.
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
+        if self.is_ephemeral(chat_id) {
+            if let Some(hub) = lock(&self.hubs).get(chat_id) {
+                let _ = hub.send(JournaledEvent {
+                    seq: 0,
+                    event: event.clone(),
+                });
+            }
+            return 0;
+        }
         let seq = match self.journal.append(chat_id, event) {
             Ok(seq) => seq,
             Err(err) => {
@@ -937,6 +1054,37 @@ impl Inner {
         seq
     }
 
+    /// True when `chat_id` is a temporary Side Chat (see [`Inner::ephemeral`]).
+    fn is_ephemeral(&self, chat_id: &str) -> bool {
+        lock(&self.ephemeral).contains(chat_id)
+    }
+
+    /// Publish a session status: ephemeral chats update ONLY their private
+    /// watch (the Side Chat panel); normal chats update the public sessions
+    /// watch AND the workspace session row (remote sidebars).
+    fn publish_session(&self, chat_id: &str, session: &Session) {
+        if self.is_ephemeral(chat_id) {
+            if let Some(tx) = lock(&self.ephemeral_tx).get(chat_id) {
+                let _ = tx.send_replace(Some(session.clone()));
+            }
+            return;
+        }
+        let ephemeral = lock(&self.ephemeral);
+        let mut list: Vec<Session> = lock(&self.statuses)
+            .values()
+            .filter(|s| !ephemeral.contains(&s.chat_id))
+            .cloned()
+            .collect();
+        list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+        drop(ephemeral);
+        // send_replace: keep the current value fresh even with no receivers,
+        // so late WatchSessions subscribers see the last transition.
+        self.sessions_tx.send_replace(list);
+        if let Some(ws) = self.workspace() {
+            ws.record_session(session);
+        }
+    }
+
     /// Bump the session's freshness on stream activity WITHOUT a status
     /// transition. Long silent-LOOKING stretches (thinking heartbeats, a big
     /// tool input being generated) still carry events — the UI's 45s
@@ -945,6 +1093,8 @@ impl Inner {
     fn touch_session(&self, chat_id: &str) {
         const TOUCH_THROTTLE_MS: i64 = 10_000;
         let now = Utc::now();
+        // The statuses guard is RELEASED before publish (publish re-locks
+        // it to build the public list — a std Mutex is not reentrant).
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -957,15 +1107,9 @@ impl Inner {
                 return;
             }
             entry.updated_at = now;
-            let session = entry.clone();
-            let mut list: Vec<Session> = statuses.values().cloned().collect();
-            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-            self.sessions_tx.send_replace(list);
-            session
+            entry.clone()
         };
-        if let Some(ws) = self.workspace() {
-            ws.record_session(&session);
-        }
+        self.publish_session(chat_id, &session);
     }
 
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
@@ -976,6 +1120,7 @@ impl Inner {
     /// never reads stale.
     fn set_subagents(&self, chat_id: &str, runs: Vec<SubagentRun>) {
         let now = Utc::now();
+        // Statuses guard released before publish (publish re-locks it).
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -990,15 +1135,9 @@ impl Inner {
                 });
             entry.subagents = runs;
             entry.updated_at = now;
-            let session = entry.clone();
-            let mut list: Vec<Session> = statuses.values().cloned().collect();
-            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-            self.sessions_tx.send_replace(list);
-            session
+            entry.clone()
         };
-        if let Some(ws) = self.workspace() {
-            ws.record_session(&session);
-        }
+        self.publish_session(chat_id, &session);
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
@@ -1036,19 +1175,10 @@ impl Inner {
                     entry.started_at = None;
                 }
             }
-            let session = entry.clone();
-            let mut list: Vec<Session> = statuses.values().cloned().collect();
-            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-            // send_replace: keep the current value fresh even with no receivers,
-            // so late WatchSessions subscribers see the last transition.
-            self.sessions_tx.send_replace(list);
-            session
+            entry.clone()
         };
-        // Mirror the transition into the workspace doc's session-status row so
-        // remote devices' sidebars show this run (staleness-checked client-side).
-        if let Some(ws) = self.workspace() {
-            ws.record_session(&session);
-        }
+        // Statuses guard released before publish (publish re-locks it).
+        self.publish_session(chat_id, &session);
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
@@ -1094,8 +1224,8 @@ impl Inner {
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
     fn note_message(&self, chat_id: &str, text: &str) {
-        if text.is_empty() {
-            return;
+        if text.is_empty() || self.is_ephemeral(chat_id) {
+            return; // temporary Side Chats never touch workspace rows
         }
         if let Some(ws) = self.workspace() {
             ws.note_message(chat_id, text);
@@ -1116,6 +1246,11 @@ impl Inner {
                 cwd: cwd.to_string(),
             },
         );
+        if self.is_ephemeral(chat_id) {
+            // Temporary Side Chat: the in-memory map keeps resume continuity
+            // within this process; the durable row is stamped at promotion.
+            return;
+        }
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd);
         }
@@ -1203,6 +1338,7 @@ impl Inner {
     /// in-memory row + watch + workspace mirror. No-op when nothing is running.
     fn fail_orphaned_subagents(&self, chat_id: &str, reason: &str) {
         let now = now_ms();
+        // Statuses guard released before publish (publish re-locks it).
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -1212,15 +1348,9 @@ impl Inner {
                 return;
             }
             entry.updated_at = Utc::now();
-            let session = entry.clone();
-            let mut list: Vec<Session> = statuses.values().cloned().collect();
-            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-            self.sessions_tx.send_replace(list);
-            session
+            entry.clone()
         };
-        if let Some(ws) = self.workspace() {
-            ws.record_session(&session);
-        }
+        self.publish_session(chat_id, &session);
     }
 }
 
@@ -2014,6 +2144,7 @@ async fn drive_run(
             // Exchange completed on an untitled chat → name it (fire-and-forget;
             // interrupted/errored turns never trigger naming).
             if *status == DoneStatus::Completed
+                && !inner.is_ephemeral(&chat_id)
                 && let Some(titles) = inner.titles.get()
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);

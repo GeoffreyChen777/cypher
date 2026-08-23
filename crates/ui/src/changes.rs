@@ -1172,6 +1172,14 @@ impl Changes {
                         entity.update(cx, |_, cx| cx.notify()).ok();
                     })
                 };
+                // Side Chat source (round 21): the diff pane's scope label
+                // labels the engine's context block (the engine holds no
+                // selection text for diff panes — it rides the user's
+                // request). The selected FILE is not resolved for a generic
+                // markdown selection over diff lines, so it stays `None`.
+                let scope_label = entity
+                    .update(cx, |this: &mut Self, _| this.scope.label().to_string())
+                    .ok();
                 if let Some(popup) = popup.upgrade() {
                     popup.update(cx, |popup, cx| {
                         popup.offer(
@@ -1185,6 +1193,10 @@ impl Changes {
                                 scope,
                             }),
                             clear,
+                            Some(cypher_proto::SideChatSource::GitDiff {
+                                scope: scope_label,
+                                file_path: None,
+                            }),
                             cx,
                         );
                     });

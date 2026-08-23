@@ -35,9 +35,35 @@ pub enum CommentPopupEvent {
         quote: String,
         comment: String,
     },
+    /// The pill's "Side Chat" action (round 21): the user wants a temporary
+    /// Side Chat opened from this settled selection. `chat_id` is the chat
+    /// selected when the selection settled (the side chat's parent); the
+    /// shell calls `StartSideChat` and opens a Side Chat tab in the right
+    /// pane. `selected_text` is the settled quote IN FULL (the engine
+    /// validates it and injects it into the first send).
+    SideChatRequested {
+        chat_id: String,
+        source: cypher_proto::SideChatSource,
+        selected_text: String,
+    },
 }
 
 impl gpui::EventEmitter<CommentPopupEvent> for CommentPopup {}
+
+/// Build the `SideChatRequested` event (pure — testable without a panel): the
+/// settled quote is carried IN FULL so the shell forwards it to `StartSideChat`
+/// and the engine injects it into the first send.
+pub fn side_chat_request_event(
+    chat_id: String,
+    source: cypher_proto::SideChatSource,
+    selected_text: String,
+) -> CommentPopupEvent {
+    CommentPopupEvent::SideChatRequested {
+        chat_id,
+        source,
+        selected_text,
+    }
+}
 
 /// Which surface owns an offer — lets a surface dismiss ONLY its own comment
 /// (a diff reload, or terminal output, must never hide the transcript's
@@ -60,9 +86,9 @@ impl CommentOwner {
     }
 }
 
-/// A settled selection offer — the small `Comment` pill shown at the
-/// selection endpoint while it waits for the click that turns it into an
-/// editor.
+/// A settled selection offer — the small `Comment` / `Side Chat` pill shown
+/// at the selection endpoint while it waits for the click that turns it
+/// into an editor (or opens a Side Chat).
 #[derive(Clone)]
 struct CommentOffer {
     /// The chat selected when the selection settled (forwarded on save so a
@@ -79,6 +105,11 @@ struct CommentOffer {
     head: Option<CommentHead>,
     /// Drops the source surface's selection wash on save/cancel/dismiss.
     clear_selection: Rc<dyn Fn(&mut App)>,
+    /// Side Chat source metadata (round 21): the offering surface
+    /// captures it at settle time so the popup's "Side Chat" action can
+    /// open a temporary Side Chat from the selection. `None` on surfaces
+    /// that offer comments only (side chat panels themselves never do).
+    source: Option<cypher_proto::SideChatSource>,
 }
 
 /// The anchored comment editor replacing the pill once clicked: the
@@ -153,6 +184,7 @@ impl CommentPopup {
         owner: CommentOwner,
         head: Option<CommentHead>,
         clear_selection: Rc<dyn Fn(&mut App)>,
+        source: Option<cypher_proto::SideChatSource>,
         cx: &mut Context<Self>,
     ) {
         self.offer = Some(CommentOffer {
@@ -162,6 +194,7 @@ impl CommentPopup {
             owner,
             head,
             clear_selection,
+            source,
         });
         self.editor = None;
         cx.notify();
@@ -262,6 +295,20 @@ impl CommentPopup {
         cx.notify();
     }
 
+    /// The pill's "Side Chat" action: emit [`CommentPopupEvent::SideChatRequested`]
+    /// and close (clearing the source selection). The shell opens the side chat.
+    /// The normalized offer quote rides the event IN FULL (`selected_text`) so
+    /// the engine can validate + inject it on the first send.
+    fn request_side_chat(&mut self, source: cypher_proto::SideChatSource, cx: &mut Context<Self>) {
+        let Some(offer) = self.offer.take() else {
+            return;
+        };
+        cx.emit(side_chat_request_event(offer.chat_id, source, offer.quote));
+        self.editor = None;
+        (offer.clear_selection)(cx);
+        cx.notify();
+    }
+
     /// Turn the pill into the anchored editor (quote preview + input).
     fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(offer) = self.offer.take() else {
@@ -278,6 +325,9 @@ impl CommentPopup {
             head: offer.head,
             clear_selection: offer.clear_selection,
         });
+        // The editor takes over from the pill: a Side Chat offer is dropped
+        // (re-armed from the next selection) — the editor never offers Side
+        // Chat, only comments.
         self.comment_input
             .update(cx, |input, cx| input.set_text("", cx));
         use gpui::Focusable as _;
@@ -352,12 +402,34 @@ impl CommentPopup {
         let theme = Theme::of(cx).clone();
         let anchor = Self::resolved_anchor(&offer.head, offer.anchor);
         let weak = cx.weak_entity();
-        let pill = div()
+        // Round 21: the pill offers BOTH actions — "Comment" opens the
+        // anchored editor; "Side Chat" opens a temporary Side Chat from the
+        // selection (only when the offering surface carried a source).
+        type ClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
+        let chip = |id: &'static str, label: &str, on_click: ClickHandler| {
+            div()
+                .id(id)
+                .h(px(24.0))
+                .px(px(9.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .hover(|s| s.text_color(theme.text).bg(crate::theme::wash(0.06)))
+                // A click here must NOT land in the text-selection listener of
+                // the surface underneath (its mouse-down would dismiss this
+                // very pill).
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(on_click)
+                .child(SharedString::from(label))
+        };
+        let mut pill = div()
             .id("comment-pill")
             .w_auto()
             .flex_none()
             .h(px(24.0))
-            .px(px(9.0))
             .rounded_full()
             .border_1()
             .border_color(theme.border)
@@ -366,17 +438,35 @@ impl CommentPopup {
             .occlude()
             .flex()
             .items_center()
-            .cursor_pointer()
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .child(SharedString::from("Comment"))
-            // A click here must NOT land in the text-selection listener of the
-            // surface underneath (its mouse-down would dismiss this very pill).
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(move |_, window, cx| {
-                weak.update(cx, |this, cx| this.open_editor(window, cx))
-                    .ok();
-            });
+            .overflow_hidden()
+            .child(chip(
+                "comment-action",
+                "Comment",
+                Box::new(move |_, window, cx| {
+                    weak.update(cx, |this, cx| this.open_editor(window, cx))
+                        .ok();
+                }),
+            ));
+        if let Some(source) = offer.source.clone() {
+            // The Side Chat action: emit SideChatRequested (the shell calls
+            // StartSideChat and opens a tab) and clear the source selection.
+            let weak = cx.weak_entity();
+            pill = pill
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .self_stretch()
+                        .bg(theme.border.opacity(0.6)),
+                )
+                .child(chip(
+                    "side-chat-action",
+                    "Side Chat",
+                    Box::new(move |_, _, cx| {
+                        weak.update(cx, |this, cx| this.request_side_chat(source.clone(), cx))
+                            .ok();
+                    }),
+                ));
+        }
         Some(
             gpui::deferred(
                 gpui::anchored()
@@ -535,6 +625,45 @@ mod tests {
             a,
             CommentOwner::Markdown(selection::SelectionScope::Transcript)
         );
+    }
+
+    /// Round 21: the SideChatRequested event carries the settled quote IN FULL
+    /// (the engine validates + injects it; the panel previews a truncated
+    /// copy, never the wire payload).
+    #[test]
+    fn side_chat_requested_carries_the_exact_quote() {
+        let quote = "the exact selected quote, with NBSPs folded\u{a0}and whitespace trimmed";
+        let normalized = normalize_quote(quote);
+        let event = side_chat_request_event(
+            "chat-a".into(),
+            cypher_proto::SideChatSource::Transcript {
+                anchor_message_id: Some("m1".into()),
+            },
+            normalized.clone(),
+        );
+        match event {
+            CommentPopupEvent::SideChatRequested {
+                chat_id,
+                source,
+                selected_text,
+            } => {
+                assert_eq!(chat_id, "chat-a");
+                assert_eq!(
+                    source,
+                    cypher_proto::SideChatSource::Transcript {
+                        anchor_message_id: Some("m1".into()),
+                    }
+                );
+                // The FULL normalized quote rides the event — never truncated
+                // or previewed on the wire.
+                assert_eq!(selected_text, normalized);
+                assert_eq!(
+                    selected_text,
+                    "the exact selected quote, with NBSPs folded and whitespace trimmed"
+                );
+            }
+            _ => panic!("expected SideChatRequested"),
+        }
     }
 
     /// The head-less (terminal) offer keeps its fixed window anchor; a

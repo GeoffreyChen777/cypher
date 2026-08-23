@@ -1,6 +1,6 @@
 // Sign-in — the OAuth authorization-code flow against WorkOS AuthKit, with
 // the secret-bearing exchange delegated to the edge (`POST /auth/exchange`).
-// The cypher mark on black, one white button — the old mobile app's Gate.
+// The Cypher app icon on black, one white button — the old mobile app's Gate.
 //
 // GitHub-only: the authorize `provider` is pinned to the exact `GitHubOAuth`
 // (never AuthKit's email/SSO selector) — defense-in-depth, since the dashboard
@@ -55,8 +55,12 @@ struct SignInView: View {
                 Spacer()
 
                 VStack(spacing: 24) {
-                    CypherMark()
+                    Image("CypherAppIcon")
+                        .renderingMode(.original)
+                        .resizable()
+                        .scaledToFit()
                         .frame(width: 72, height: 72)
+                        .accessibilityHidden(true)
                     VStack(spacing: 6) {
                         Text("Cypher")
                             .font(Theme.sans(28, weight: .semibold))
@@ -327,36 +331,5 @@ struct OrgPickerView: View {
             }
             busy = false
         }
-    }
-}
-
-/// The actual cypher mark — the desktop's geometric C logo
-/// (crates/ui/assets/icons/cypher-logo.svg), an open arc scaled from its
-/// 820×940 viewbox and tinted by `color`.
-struct CypherMark: View {
-    var color: Color = Theme.text
-
-    var body: some View {
-        CypherMarkShape()
-            .stroke(color, style: StrokeStyle(lineWidth: 76, lineCap: .round))
-            .aspectRatio(820 / 940, contentMode: .fit)
-    }
-}
-
-struct CypherMarkShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        // The mark is an open arc (gap on the right) — same geometry as the
-        // SVG (crates/ui/assets/icons/cypher-logo.svg): 820×940 viewbox,
-        // center (410,470), radius 272, endpoints at ±18° from the horizontal.
-        // Drawn in viewbox units so stroke and path scale together.
-        var path = Path()
-        path.addArc(
-            center: CGPoint(x: 410, y: 470),
-            radius: 272,
-            startAngle: .degrees(-18),
-            endAngle: .degrees(18),
-            clockwise: false
-        )
-        return path
     }
 }

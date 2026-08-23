@@ -31,6 +31,7 @@ pub mod popover;
 pub mod rail;
 pub mod settings;
 pub mod shell;
+pub mod side_chats;
 pub mod sound;
 pub mod state;
 pub mod subagents;

@@ -1067,12 +1067,17 @@ impl TerminalPanel {
         let Some(chat_id) = self.selected_chat(cx) else {
             return;
         };
-        let Some(tab_key) = self.active_tab(cx).map(|tab| tab.key) else {
+        let Some((tab_key, tab_title)) = self
+            .active_tab(cx)
+            .map(|tab| (tab.key, Self::display_title(tab).to_string()))
+        else {
             return;
         };
         // A settled non-empty selection offers its text to the shared Comment
         // pill (native `Emulator::selection_text()` — the emulator keeps the
-        // selection, so Cmd+C still copies exactly what was dragged).
+        // selection, so Cmd+C still copies exactly what was dragged). The
+        // Side Chat action carries the tab's display title as its source
+        // metadata (round 21).
         if let Some(text) = self
             .with_active_emulator(cx, |emu| emu.selection_text())
             .flatten()
@@ -1092,7 +1097,18 @@ impl TerminalPanel {
             };
             let owner = self.comment_owner;
             popup.update(cx, |popup, cx| {
-                popup.offer(chat_id, text, event.position, owner, None, clear, cx);
+                popup.offer(
+                    chat_id,
+                    text,
+                    event.position,
+                    owner,
+                    None,
+                    clear,
+                    Some(cypher_proto::SideChatSource::Terminal {
+                        title: Some(tab_title),
+                    }),
+                    cx,
+                );
             });
         }
     }

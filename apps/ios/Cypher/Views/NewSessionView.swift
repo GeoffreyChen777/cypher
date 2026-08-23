@@ -1,5 +1,5 @@
 // New session — a real composer page, not a form. Mirrors the old mobile
-// app's canvas (faded mark + "What are we building?" + glass composer with
+// app's canvas (faded app icon + "What are we building?" + glass composer with
 // picker chips) and the desktop's new-session canvas (composer expanded with
 // in-pill pickers). The space already fixes device + folder; the composer
 // carries the agent/model chip, and sending mints the chat, queues the first
@@ -69,9 +69,13 @@ struct NewSessionView: View {
             ZStack {
                 Theme.bg
                 VStack(spacing: 24) {
-                    CypherMark()
+                    Image("CypherAppIcon")
+                        .renderingMode(.original)
+                        .resizable()
+                        .scaledToFit()
                         .frame(width: 84, height: 84)
                         .opacity(0.22)
+                        .accessibilityHidden(true)
                     Text("What are we building?")
                         .font(Theme.sans(15))
                         .foregroundStyle(Theme.textFaint)

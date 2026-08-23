@@ -17,7 +17,7 @@
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use tokio::sync::watch;
@@ -222,7 +222,7 @@ pub struct ChatDocHandle {
     /// edge-less chat2 handles (no subscription is ever installed offline)
     /// as stale s2 and retired them on every open, dropping the doc out
     /// from under live runs.
-    room_gen: u32,
+    room_gen: AtomicU32,
     /// A threshold checkpoint POST is in flight (review H1: the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
@@ -232,6 +232,11 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
+    /// Temporary Side Chat doc (round 21): a fresh in-memory `SessionDoc` with
+    /// NO load/save/chat2/edge/eviction. Flipped false at promotion — the same
+    /// handle then serves the normal chat (snapshot persisted, chat2 joined,
+    /// maintenance runs) so a live run keeps streaming through the transition.
+    ephemeral: AtomicBool,
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<cypher_sync::ChatClient>>,
@@ -257,6 +262,13 @@ impl ChatDocHandle {
 
     pub fn doc_arc(&self) -> Arc<SessionDoc> {
         self.doc.clone()
+    }
+
+    /// True for a temporary Side Chat doc: host-memory only until promotion
+    /// (no snapshot load/save, no chat2/edge room, no LRU eviction, no
+    /// maintenance). See [`DocHost::open_ephemeral`].
+    pub fn is_ephemeral(&self) -> bool {
+        self.ephemeral.load(Ordering::Acquire)
     }
 
     /// Joined transcript watch — re-sent on every doc change (WatchDocMessages).
@@ -530,7 +542,9 @@ impl DocHost {
                 let cached = lock(&host.inner.handles).get(&chat.id).cloned();
                 match cached {
                     Some(handle) => {
-                        if handle.room_gen < 2 && !handle.retired.load(Ordering::Relaxed) {
+                        if handle.room_gen.load(Ordering::Relaxed) < 2
+                            && !handle.retired.load(Ordering::Relaxed)
+                        {
                             tracing::debug!(chat = %chat.id, "migration sweep: arming seed on warm s2 chat");
                             host.spawn_chat2_seed_when_quiet(edge, &chat.id, &handle);
                         }
@@ -579,7 +593,16 @@ impl DocHost {
                         let Some(handle) = handles.get(&chat_id) else {
                             continue;
                         };
-                        if handle.room_gen >= 2 {
+                        // A temporary Side Chat doc is host-memory only — its
+                        // lifecycle is owned by the side-chat manager, and
+                        // promotion writes the roomGen-2 row BEFORE the
+                        // handle flips. Retiring/removing it here would tear
+                        // the doc out from under an in-flight promotion
+                        // (round-21 audit).
+                        if handle.ephemeral.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if handle.room_gen.load(Ordering::Relaxed) >= 2 {
                             continue; // already chat2-mode
                         }
                         let live_writer = Arc::strong_count(&handle.doc) > 1;
@@ -674,7 +697,14 @@ impl DocHost {
         {
             let mut handles = lock(&self.inner.handles);
             if let Some(handle) = handles.get(chat_id) {
-                let stale = registry_gen >= 2 && handle.room_gen < 2;
+                // A temporary Side Chat doc is host-memory only — never
+                // migrated/retired by registry or epoch signals; return it
+                // as-is (the side-chat manager owns its lifecycle).
+                if handle.ephemeral.load(Ordering::Relaxed) {
+                    handle.touch();
+                    return Ok(handle.clone());
+                }
+                let stale = registry_gen >= 2 && handle.room_gen.load(Ordering::Relaxed) < 2;
                 if (stale || handle.retired.load(Ordering::Relaxed)) && !self.pinned(handle) {
                     // A seed flipped this chat under a cached fat handle
                     // (review B1): drop it so this open converges onto the
@@ -823,8 +853,9 @@ impl DocHost {
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
-            room_gen,
+            room_gen: AtomicU32::new(room_gen),
             retired: AtomicBool::new(false),
+            ephemeral: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             chat2_pending_local: Mutex::new(Vec::new()),
@@ -929,6 +960,154 @@ impl DocHost {
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
         self.evict_over_budget();
         Ok(handle)
+    }
+
+    /// Open (or return) a temporary Side Chat doc (round 21): a FRESH
+    /// in-memory [`SessionDoc`] with no snapshot load/save, no chat2/edge
+    /// room, no maintenance and no LRU eviction — host-memory only until
+    /// promotion. The handle is registered in the same map so `WatchDocMessages`
+    /// (which routes through [`Self::open`]) streams its transcript, and
+    /// `purge_chat` tears it down. The worker is the standard `chat_task`,
+    /// which skips persistence for ephemeral handles.
+    pub fn open_ephemeral(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        {
+            let handles = lock(&self.inner.handles);
+            if let Some(handle) = handles.get(chat_id) {
+                handle.touch();
+                return Ok(handle.clone());
+            }
+        }
+        let doc = Arc::new(SessionDoc::init(chat_id)?);
+        let (changed_tx, changed_rx) = watch::channel(0u64);
+        let sub = doc.doc().subscribe_root(Arc::new(move |_diff| {
+            changed_tx.send_modify(|v| *v = v.wrapping_add(1));
+        }));
+        let (messages_tx, _) = watch::channel(Vec::new());
+        let handle = Arc::new(ChatDocHandle {
+            chat_id: chat_id.to_string(),
+            device_id: self.inner.config.device_id.clone(),
+            doc: doc.clone(),
+            messages_tx,
+            mirror_dirty: AtomicBool::new(true),
+            last_access: AtomicI64::new(now_ms()),
+            snapshot_bytes: AtomicUsize::new(0),
+            // No sync room generation: an ephemeral handle is never
+            // registry/epoch-migrated (open() short-circuits on it).
+            room_gen: AtomicU32::new(0),
+            retired: AtomicBool::new(false),
+            ephemeral: AtomicBool::new(true),
+            checkpointing: Arc::new(AtomicBool::new(false)),
+            chat2: Mutex::new(None),
+            chat2_pending_local: Mutex::new(Vec::new()),
+            chat2_local_sub: Mutex::new(None),
+            _sub: sub,
+        });
+        {
+            let mut handles = lock(&self.inner.handles);
+            if let Some(existing) = handles.get(chat_id) {
+                return Ok(existing.clone()); // racing open — keep the first
+            }
+            handles.insert(chat_id.to_string(), handle.clone());
+        }
+        self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
+        Ok(handle)
+    }
+
+    /// Watcher-count helper for the stale reaper: how many live transcript-
+    /// watch receivers this chat's doc has. A Side Chat panel holds one while
+    /// open; the count drops to zero once the tab closes (or the watch RPC
+    /// was lost).
+    pub fn transcript_watcher_count(&self, chat_id: &str) -> usize {
+        lock(&self.inner.handles)
+            .get(chat_id)
+            .map_or(0, |h| h.messages_tx.receiver_count())
+    }
+
+    /// Promotion step 1 (round-21 audit): persist the temporary doc's
+    /// transcript as an epoch-2 snapshot. MUST succeed before any row exposes
+    /// the chat — a promotion never leaves a row whose transcript could be
+    /// lost (a failed save FAILS the promotion rather than warning and
+    /// exposing a lost transcript). Idempotent: an already-promoted handle is
+    /// a no-op. The [`Self::finish_promotion`] flip + room join runs only
+    /// after the workspace row exists.
+    pub fn prepare_promotion(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = lock(&self.inner.handles)
+            .get(chat_id)
+            .cloned()
+            .ok_or_else(|| EngineError::Other("no open doc to promote".into()))?;
+        if !handle.ephemeral.load(Ordering::Acquire) {
+            return Ok(()); // already promoted
+        }
+        let snapshot = handle.doc.export_snapshot()?;
+        self.inner.store.save_snapshot_with_cursor(
+            chat_id,
+            &snapshot,
+            0,
+            crate::chat2_host::CHAT2_DOC_EPOCH,
+        )?;
+        Ok(())
+    }
+
+    /// Promote a temporary Side Chat doc into a normal chat doc (round 21):
+    /// flip the SAME handle to non-ephemeral (so the live run keeps streaming
+    /// through the transition and future maintenance/flush/eviction treat it
+    /// as a real chat), and join the chat2 room. The transcript snapshot is
+    /// persisted by [`Self::prepare_promotion`] BEFORE the workspace row
+    /// existed. Idempotent — a repeated call after promotion is a no-op.
+    /// Filesystem/sidecar side effects performed before promotion are
+    /// deliberately NOT rolled back on a later dispose (dispose-after-promote
+    /// is a no-op by contract).
+    pub fn finish_promotion(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = lock(&self.inner.handles)
+            .get(chat_id)
+            .cloned()
+            .ok_or_else(|| EngineError::Other("no open doc to promote".into()))?;
+        if !handle.ephemeral.load(Ordering::Acquire) {
+            return Ok(()); // already promoted
+        }
+        // Flip BEFORE the room join: the join's own writes/checkpoints must
+        // observe a normal (non-ephemeral) handle.
+        handle.ephemeral.store(false, Ordering::Release);
+        handle.room_gen.store(2, Ordering::Release);
+        if let Some(edge) = &self.inner.config.edge {
+            // Subscription BEFORE the dial (review B3): every local commit
+            // lands in the client when connected, else in the pending buffer
+            // the join drains — nothing composed during the dial is lost.
+            let weak_push = Arc::downgrade(&handle);
+            let sub = handle
+                .doc
+                .doc()
+                .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
+                    if let Some(handle) = weak_push.upgrade() {
+                        let client_guard = lock(&handle.chat2);
+                        match &*client_guard {
+                            Some(client) => client.enqueue_update(bytes.clone()),
+                            None => lock(&handle.chat2_pending_local).push(bytes.clone()),
+                        }
+                    }
+                    true
+                }));
+            *lock(&handle.chat2_local_sub) = Some(sub);
+            // First contact with the room: everything committed before the
+            // subscription above must reach the room as the join's first
+            // batch (peers import rows only after their causal deps land).
+            match handle
+                .doc
+                .doc()
+                .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+            {
+                Ok(bytes) if !bytes.is_empty() => {
+                    lock(&handle.chat2_pending_local).push(bytes);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err,
+                        "promotion chat2 first-contact export failed");
+                }
+            }
+            self.spawn_chat2_join(edge.clone(), &handle, 0);
+        }
+        Ok(())
     }
 
     /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
@@ -1567,7 +1746,11 @@ impl DocHost {
             let evicted = {
                 let mut handles = lock(&self.inner.handles);
                 match handles.get(&chat_id) {
-                    Some(handle) if !self.pinned(handle) => handles.remove(&chat_id),
+                    Some(handle)
+                        if !self.pinned(handle) && !handle.ephemeral.load(Ordering::Acquire) =>
+                    {
+                        handles.remove(&chat_id)
+                    }
                     _ => None,
                 }
             };
@@ -1921,6 +2104,12 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
+        // Temporary Side Chat docs carry no durable command ledger — the
+        // side-chat manager dispatches sends directly (no SQLite processed-
+        // ledger writes, no claim-on-first-command workspace row).
+        if handle.is_ephemeral() {
+            return;
+        }
         if !self.is_host(&handle.chat_id) {
             return;
         }
@@ -2221,6 +2410,11 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        // Temporary Side Chats never persist until promotion (host-memory
+        // only by contract — dispose leaves no durable remnants).
+        if handle.ephemeral.load(Ordering::Acquire) {
+            return;
+        }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -2250,6 +2444,8 @@ impl DocHost {
     }
 
     /// Persist every open doc now (shutdown path; bypasses the debounce).
+    /// Temporary Side Chat docs are skipped — the side-chat manager disposes
+    /// them at shutdown, and `save_snapshot` guards ephemeral handles anyway.
     pub fn flush_all(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {

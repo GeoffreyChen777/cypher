@@ -115,6 +115,9 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// The titlebar overlays the full-height list, so its height is part of the
 /// inset; the extra 10px matches the first row's breathing room.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// Embedded (temporary Side Chat) own-turn top inset: no titlebar chrome
+/// above the panel, so the held prompt rests at a compact top gap.
+const EMBEDDED_TOP_INSET_PX: f32 = 10.0;
 /// Epsilon of extra height under the reservation. The runway ends AT the
 /// app's bottom — this is not scroll room (24px of it read as a janky
 /// overshoot-and-fight zone, user report) — it exists only to keep the held
@@ -1418,6 +1421,16 @@ pub struct Transcript {
     scroll_anim: Option<Task<()>>,
     /// MessageRail width gate (set by the shell from the container width).
     rail_enabled: bool,
+    /// Selection scope this transcript paints into: the shared Transcript
+    /// scope for the main surface, a FRESH [`SelectionScope::SideChat`] id per
+    /// temporary panel so a side chat beside the main transcript (or two side
+    /// chats) never collide in the selection registry.
+    scope: crate::markdown::selection::SelectionScope,
+    /// Embedded (temporary Side Chat) layout: narrow-panel row gutters and a
+    /// smaller first-row top inset instead of the main surface's titlebar
+    /// chrome gap. Also disables the annotation surface (no Comment pill, no
+    /// nested Side Chat) while selection + copy stay active.
+    embedded: bool,
     /// Height of the shell's composer/status/terminal stack overlaying the
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
@@ -1474,6 +1487,41 @@ impl Transcript {
         comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::with_options(
+            state,
+            comment_popup,
+            crate::markdown::selection::SelectionScope::Transcript,
+            true,
+            false,
+            cx,
+        )
+    }
+
+    /// A temporary Side Chat transcript (round 21 refactor): the EXISTING
+    /// renderer against a Side Chat fork state, with a fresh selection scope
+    /// (never colliding with the main transcript or another panel), the rail
+    /// disabled, narrow-panel gutters, and NO annotation actions — selection
+    /// and copy stay active, but there is no Comment pill and no nested Side
+    /// Chat action.
+    pub fn for_side_chat(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_options(
+            state,
+            gpui::WeakEntity::new_invalid(),
+            crate::markdown::selection::next_side_chat_scope(),
+            false,
+            true,
+            cx,
+        )
+    }
+
+    fn with_options(
+        state: Entity<AppState>,
+        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        scope: crate::markdown::selection::SelectionScope,
+        rail_enabled: bool,
+        embedded: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW_PX));
@@ -1513,7 +1561,9 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
-            rail_enabled: true,
+            rail_enabled,
+            scope,
+            embedded,
             bottom_clearance: 0.0,
             rail_hover: None,
             hovered_entry: None,
@@ -1690,7 +1740,7 @@ impl Transcript {
                                 item_ix: ix,
                                 offset_in_item: px(0.0),
                             });
-                            this.list.scroll_by(px(-Self::own_send_inset(ix)));
+                            this.list.scroll_by(px(-this.own_send_inset(ix)));
                         }
                         this.last_scroll_distance = this.distance_from_bottom();
                     }
@@ -1790,9 +1840,13 @@ impl Transcript {
     /// carries the titlebar chrome inside its own box (the first row's
     /// top gap), so the hold adds nothing — adding the inset on top parked
     /// a new chat's first prompt a double-chrome ~66px low (user report).
-    fn own_send_inset(anchor_ix: usize) -> f32 {
+    /// An embedded panel (temporary Side Chat) has no titlebar chrome, so its
+    /// non-first-row inset is the smaller panel top gap.
+    fn own_send_inset(&self, anchor_ix: usize) -> f32 {
         if anchor_ix == 0 {
             0.0
+        } else if self.embedded {
+            EMBEDDED_TOP_INSET_PX
         } else {
             OWN_SEND_TOP_INSET_PX
         }
@@ -1831,7 +1885,7 @@ impl Transcript {
             return;
         };
         let base_pad = self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0;
-        let inset = Self::own_send_inset(anchor_ix);
+        let inset = self.own_send_inset(anchor_ix);
         // A glued offset hard-tracks a GROWING end — streamed text visually
         // pushes everything above it up while the runway blank persists
         // below (user report; the glued representation also hides every
@@ -2744,9 +2798,14 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
-        // rests below the chrome it fades under.
+        // rests below the chrome it fades under. An embedded panel (temporary
+        // Side Chat) has no titlebar to clear — a compact top gap.
         let top_gap = if ix == 0 {
-            Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            if self.embedded {
+                EMBEDDED_TOP_INSET_PX + 6.0
+            } else {
+                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
@@ -2817,6 +2876,7 @@ impl Transcript {
                                     text,
                                     mentions,
                                     &theme,
+                                    self.scope,
                                     Some(self.selection_ui_for(&row.id, cx)),
                                 )),
                         ),
@@ -2832,7 +2892,7 @@ impl Transcript {
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     selection: Some(self.selection_ui_for(&row.id, cx)),
-                    scope: crate::markdown::selection::SelectionScope::Transcript,
+                    scope: self.scope,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
@@ -2876,7 +2936,7 @@ impl Transcript {
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     selection: Some(self.selection_ui_for(&row.id, cx)),
-                    scope: crate::markdown::selection::SelectionScope::Transcript,
+                    scope: self.scope,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
@@ -2998,7 +3058,8 @@ impl Transcript {
             .pt(px(top_gap))
             .pb(px(bottom_pad))
             // Wide gutters (zeron `px-4 @3xl:px-12`) around the 46rem column.
-            .px(px(48.0))
+            // An embedded panel is already narrow — compact gutters.
+            .px(px(if self.embedded { 14.0 } else { 48.0 }))
             .child(
                 div()
                     .w_full()
@@ -3061,6 +3122,9 @@ impl Transcript {
     ) -> render::SelectionUi {
         let popup = self.comment_popup.clone();
         let entity = cx.weak_entity();
+        // Copied: the scope rides the 'static callbacks (Copy), so the
+        // closures never borrow `self`.
+        let scope = self.scope;
         // A fresh drag start closes ANY surface's pill — only one floating UI
         // may exist — without touching the just-begun selection. A cleared
         // selection hides only the TRANSCRIPT pill (scoped dismissal).
@@ -3068,12 +3132,7 @@ impl Transcript {
         let started: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
             if let Some(popup) = dismiss_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.selection_started(
-                        crate::comments::CommentOwner::Markdown(
-                            crate::markdown::selection::SelectionScope::Transcript,
-                        ),
-                        cx,
-                    )
+                    popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -3081,12 +3140,7 @@ impl Transcript {
         let cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
             if let Some(popup) = clear_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
-                    popup.dismiss_if_owner(
-                        crate::comments::CommentOwner::Markdown(
-                            crate::markdown::selection::SelectionScope::Transcript,
-                        ),
-                        cx,
-                    )
+                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
@@ -3116,27 +3170,35 @@ impl Transcript {
                 let clear = {
                     let entity = entity.clone();
                     Rc::new(move |cx: &mut gpui::App| {
-                        crate::markdown::selection::clear(
-                            crate::markdown::selection::SelectionScope::Transcript,
-                        );
+                        crate::markdown::selection::clear(scope);
                         entity.update(cx, |_, cx| cx.notify()).ok();
                     })
                 };
+                // Side Chat source (round 21): the message whose text the
+                // selection settles in — resolved from the head row (the row
+                // ids encode the entry; a row a doc commit replaced falls
+                // back to `None`, and the engine then labels the context
+                // from the transcript tail).
+                let anchor_message_id = entity
+                    .update(cx, |this: &mut Transcript, _| {
+                        this.entry_for_row(snapshot.head_row())
+                    })
+                    .ok()
+                    .flatten();
                 if let Some(popup) = popup.upgrade() {
                     popup.update(cx, |popup, cx| {
                         popup.offer(
                             chat_id,
                             snapshot.text.clone(),
                             anchor,
-                            crate::comments::CommentOwner::Markdown(
-                                crate::markdown::selection::SelectionScope::Transcript,
-                            ),
+                            crate::comments::CommentOwner::Markdown(scope),
                             Some(crate::comments::CommentHead {
                                 key: snapshot.head_key.clone(),
                                 ix: snapshot.head_ix,
-                                scope: crate::markdown::selection::SelectionScope::Transcript,
+                                scope: scope,
                             }),
                             clear,
+                            Some(cypher_proto::SideChatSource::Transcript { anchor_message_id }),
                             cx,
                         );
                     });
@@ -3156,12 +3218,7 @@ impl Transcript {
     fn dismiss_comment_ui(&mut self, cx: &mut Context<Self>) {
         if let Some(popup) = self.comment_popup.upgrade() {
             popup.update(cx, |popup, cx| {
-                popup.dismiss_if_owner(
-                    crate::comments::CommentOwner::Markdown(
-                        crate::markdown::selection::SelectionScope::Transcript,
-                    ),
-                    cx,
-                )
+                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(self.scope), cx)
             });
         }
     }
@@ -3169,13 +3226,24 @@ impl Transcript {
     /// Close the floating affordance and remove the transcript selection wash.
     fn dismiss_comment_ui_and_selection(&mut self, cx: &mut Context<Self>) {
         self.dismiss_comment_ui(cx);
-        crate::markdown::selection::clear(crate::markdown::selection::SelectionScope::Transcript);
+        crate::markdown::selection::clear(self.scope);
     }
 
     /// Whether `row_id` is still a live row — the offer's head row; false
     /// means it was replaced by a doc commit.
     fn row_live(&self, row_id: &str) -> bool {
         self.rows.iter().any(|r| r.id.as_ref() == row_id)
+    }
+
+    /// The message entry a row belongs to (round 21 Side Chat anchor): rows
+    /// encode their entry in `Row::entry_id`, but only the transcript can
+    /// resolve a row id to it. `None` when the row is gone (replaced by a
+    /// doc commit).
+    fn entry_for_row(&self, row_id: &str) -> Option<String> {
+        self.rows
+            .iter()
+            .find(|r| r.id.as_ref() == row_id)
+            .map(|r| r.entry_id.to_string())
     }
 
     /// The shared popup's TRANSCRIPT offer anchors to a row a doc commit
@@ -3191,7 +3259,7 @@ impl Transcript {
         // replacing the row invalidates both (the editor's quote would stale
         // under the selection).
         let stale = popup.read(cx).head().is_some_and(|head| {
-            head.scope == crate::markdown::selection::SelectionScope::Transcript
+            head.scope == self.scope
                 && !self.row_live(crate::markdown::selection::row_of_key(&head.key))
         });
         if stale {
@@ -3681,6 +3749,7 @@ fn user_bubble_text(
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
+    scope: crate::markdown::selection::SelectionScope,
     selection: Option<render::SelectionUi>,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
@@ -3735,13 +3804,7 @@ fn user_bubble_text(
                 }
             }
             render::paint_text_selection(
-                window,
-                crate::markdown::selection::SelectionScope::Transcript,
-                &sel_key,
-                &text,
-                &layout,
-                &sel_theme,
-                selection,
+                window, scope, &sel_key, &text, &layout, &sel_theme, selection,
             );
         },
     )
@@ -4182,9 +4245,7 @@ impl Render for Transcript {
             // selection registry before any row's text elements re-register
             // (document paint order = selection order; see markdown/render.rs).
             // Scoped: the diff pane resets its own registry separately.
-            .child(crate::markdown::render::selection_frame_reset(
-                crate::markdown::selection::SelectionScope::Transcript,
-            ))
+            .child(crate::markdown::render::selection_frame_reset(self.scope))
             .child(
                 list(self.list.clone(), cx.processor(Self::render_row))
                     .size_full()

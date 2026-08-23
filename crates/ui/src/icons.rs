@@ -16,13 +16,20 @@
 
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Hsla, Result, SharedString, Styled as _, Svg, svg};
+use gpui::{
+    AssetSource, Hsla, ObjectFit, Result, SharedString, Styled as _, StyledImage as _, Svg, img,
+    svg,
+};
 
 macro_rules! icon_assets {
     ($(($const_name:ident, $path:literal)),+ $(,)?) => {
         $(pub const $const_name: &str = concat!("icons/", $path, ".svg");)+
 
-        /// Serves the embedded icons to gpui's SVG renderer.
+        /// The official Cypher app icon — raster brand artwork, not a glyph.
+        pub const CYPHER_APP_ICON: &str = "images/cypher-app-icon.png";
+
+        /// Serves the embedded glyph icons (SVG) and the app icon (PNG) to
+        /// gpui's renderers.
         pub struct Assets;
 
         impl AssetSource for Assets {
@@ -31,12 +38,15 @@ macro_rules! icon_assets {
                     $(concat!("icons/", $path, ".svg") => Some(Cow::Borrowed(
                         include_bytes!(concat!("../assets/icons/", $path, ".svg")).as_slice(),
                     )),)+
+                    CYPHER_APP_ICON => Some(Cow::Borrowed(
+                        include_bytes!("../assets/images/cypher-app-icon.png").as_slice(),
+                    )),
                     _ => None,
                 })
             }
 
             fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-                let all = [$(concat!("icons/", $path, ".svg")),+];
+                let all = [$(concat!("icons/", $path, ".svg")),+, CYPHER_APP_ICON];
                 Ok(all
                     .iter()
                     .filter(|p| p.starts_with(path))
@@ -130,7 +140,6 @@ icon_assets![
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
-    (CYPHER_LOGO, "cypher-logo"),
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
@@ -151,6 +160,16 @@ pub fn claude_brand() -> Hsla {
 /// `[&_svg]:size-4` idiom.
 pub fn icon(path: &'static str) -> Svg {
     svg().path(path).flex_none()
+}
+
+/// The official Cypher app icon as a raster image element — unlike the glyph
+/// SVGs it is never tinted (it is brand artwork, not a monochrome glyph).
+/// Square size is set by the caller (`.size(..)` / `.w(..).h(..)`);
+/// [`ObjectFit::Contain`] keeps the square artwork unclipped at any ratio.
+pub fn cypher_app_icon() -> gpui::Img {
+    img(CYPHER_APP_ICON)
+        .object_fit(ObjectFit::Contain)
+        .flex_none()
 }
 
 #[cfg(test)]
@@ -180,5 +199,34 @@ mod tests {
     fn list_filters_by_prefix() {
         assert!(!Assets.list("icons/").unwrap().is_empty());
         assert!(Assets.list("fonts/").unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_icon_is_an_embedded_png() {
+        let bytes = Assets
+            .load(CYPHER_APP_ICON)
+            .unwrap()
+            .expect("app icon loads");
+        // PNG signature: 89 50 4E 47 0D 0A 1A 0A.
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn app_icon_is_listed() {
+        let listed = Assets.list("images/").unwrap();
+        assert!(listed.contains(&SharedString::from(CYPHER_APP_ICON)));
+        assert!(
+            !Assets
+                .list("icons/")
+                .unwrap()
+                .contains(&SharedString::from(CYPHER_APP_ICON))
+        );
+    }
+
+    #[test]
+    fn old_geometric_logo_is_not_registered() {
+        assert!(Assets.load("icons/cypher-logo.svg").unwrap().is_none());
+        let listed = Assets.list("icons/").unwrap();
+        assert!(!listed.iter().any(|p| p.contains("cypher-logo")));
     }
 }

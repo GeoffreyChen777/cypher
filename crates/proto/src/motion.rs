@@ -90,35 +90,6 @@ pub fn gspin_cell_phase(row: usize, col: usize) -> f32 {
     if max == 0.0 { 0.0 } else { d / (max + 1.0) }
 }
 
-/// The cypher mark's pixels — `[x, y]` of each 100×100 cell on the 820×940
-/// canvas (zeron's `logo.tsx` CELLS), shared by the static mark and the
-/// animated loader.
-#[rustfmt::skip]
-pub const MARK_CELLS: [(f32, f32); 34] = [
-    (0., 600.), (0., 720.), (240., 840.), (240., 720.), (120., 840.), (120., 600.), (240., 600.),
-    (0., 480.), (0., 360.), (480., 840.), (480., 720.), (120., 360.), (120., 240.), (240., 360.),
-    (600., 720.), (480., 600.), (360., 360.), (240., 240.), (600., 600.), (720., 600.), (720., 480.),
-    (240., 120.), (600., 380.), (720., 240.), (720., 0.), (480., 240.), (480., 0.), (120., 480.),
-    (240., 480.), (360., 840.), (360., 720.), (360., 600.), (360., 480.), (120., 720.),
-];
-
-/// Fraction of the pulse cycle the mark's light sweep occupies.
-pub const MARK_SPREAD: f32 = 0.55;
-
-/// Per-cell stagger along the zeron's flight axis. The stagger *adds* phase
-/// (the original uses a negative CSS delay, starting the cell mid-cycle), so a
-/// larger value means the cell is further along and therefore **leads**: the
-/// tail tip `(720, 0)` leads at `MARK_SPREAD`, the head `(0, 840)` trails at 0.
-pub fn mark_cell_stagger(x: f32, y: f32) -> f32 {
-    let t = (820.0 - x + y) / 1660.0;
-    (1.0 - t) * MARK_SPREAD
-}
-
-/// A mark cell's phase at loader phase `delta`.
-pub fn mark_phase(delta: f32, x: f32, y: f32) -> f32 {
-    (delta + mark_cell_stagger(x, y)).rem_euclid(1.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,34 +155,6 @@ mod tests {
         assert!(bottom < top, "bottom {bottom} should lead top {top}");
         // Symmetric about the centre column.
         close(gspin_cell_phase(1, 0), gspin_cell_phase(1, 2), "symmetry");
-    }
-
-    #[test]
-    fn the_mark_sweeps_from_tail_to_head() {
-        // The stagger adds phase, so leading means a LARGER value: the tail tip
-        // is already mid-cycle while the head is still at zero.
-        let tail = mark_cell_stagger(720.0, 0.0);
-        let head = mark_cell_stagger(0.0, 840.0);
-        assert!(tail > head, "tail {tail} should lead head {head}");
-        close(head, 0.0, "the head anchors the sweep");
-        close(
-            tail,
-            MARK_SPREAD * (1.0 - 100.0 / 1660.0),
-            "tail leads by the spread",
-        );
-        // Every cell stays inside the unit interval once phased.
-        for (x, y) in MARK_CELLS {
-            let phase = mark_phase(0.3, x, y);
-            assert!((0.0..1.0).contains(&phase), "({x},{y}) -> {phase}");
-        }
-        // Every cell's stagger stays inside the sweep window.
-        for (x, y) in MARK_CELLS {
-            let stagger = mark_cell_stagger(x, y);
-            assert!(
-                (0.0..=MARK_SPREAD).contains(&stagger),
-                "({x},{y}) -> {stagger}"
-            );
-        }
     }
 
     #[test]
