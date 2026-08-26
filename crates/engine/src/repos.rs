@@ -861,18 +861,19 @@ impl Repos {
             tracing::warn!(path = %path.display(), "removing stale half-created chat worktree");
             std::fs::remove_dir_all(&path)?;
         }
-        std::fs::create_dir_all(&base)?;
         self.git(&["worktree", "prune"], Some(repo_path)).await?;
+        std::fs::create_dir_all(&base)?;
 
         // Adopt an existing branch (an admin record that survived cleanup) or
         // mint a fresh one off the requested base ref. An invalid base ref
         // fails here — the caller Rejects the command rather than degrading.
-        if self.branch_exists(repo_path, &branch_name).await {
+        let result = if self.branch_exists(repo_path, &branch_name).await {
             self.git(
                 &["worktree", "add", &path.to_string_lossy(), &branch_name],
                 Some(repo_path),
             )
-            .await?;
+            .await
+            .map(drop)
         } else {
             self.git(
                 &[
@@ -885,7 +886,15 @@ impl Repos {
                 ],
                 Some(repo_path),
             )
-            .await?;
+            .await
+            .map(drop)
+        };
+        if let Err(err) = result {
+            // Do not leave an empty managed repo directory behind when
+            // `worktree add` rejects the base ref. Only remove the directory
+            // itself, never a base containing another chat's worktrees.
+            let _ = std::fs::remove_dir(&base);
+            return Err(err);
         }
         let checkout = self.checkout_identity(&path).await?;
         tracing::info!(
