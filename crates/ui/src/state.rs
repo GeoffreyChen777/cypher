@@ -27,7 +27,10 @@ use gpui::{App, AppContext, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-use cypher_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
+use cypher_doc::{
+    SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionMessageEntry,
+    TranscriptDesync, TranscriptFrame,
+};
 use cypher_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use cypher_proto::{
     AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, SideChatStatus, Space,
@@ -562,6 +565,118 @@ struct PendingSend {
 /// truth after this.
 pub const PENDING_SEND_TTL_MS: i64 = 30_000;
 
+/// Projected status of one queued message command, mapped from the durable
+/// ledger by `message_id` (Run/Steer commands only). This is the source of
+/// truth over the local optimistic overlay: the composer's send-in-flight
+/// state guesses, the doc ledger knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSendStatus {
+    /// A live pending attempt exists and no earlier attempt failed.
+    Queued,
+    /// A live pending attempt exists AFTER an earlier failure — a retry is
+    /// in flight.
+    Retrying,
+    /// The latest attempt failed (Rejected/Expired) and awaits a retry.
+    Failed,
+}
+
+/// The logical message id a Run/Steer command carries (the same client-minted
+/// id as the optimistic echo — the dedup key across attempts).
+pub fn command_message_id(payload: &SessionCommandPayload) -> Option<&str> {
+    match payload {
+        SessionCommandPayload::Run { message_id, .. } => Some(message_id),
+        SessionCommandPayload::Steer {
+            message_id: Some(id),
+            ..
+        } => Some(id),
+        _ => None,
+    }
+}
+
+/// Map a message id to its projected send status from the durable ledger.
+/// `None` = no Run/Steer command (or the message already resolved).
+pub fn command_send_status(
+    commands: &[SessionCommandEntry],
+    message_id: &str,
+) -> Option<CommandSendStatus> {
+    let attempts: Vec<&SessionCommandEntry> = commands
+        .iter()
+        .filter(|c| command_message_id(&c.payload) == Some(message_id))
+        .collect();
+    if attempts.is_empty() {
+        return None;
+    }
+    let has_live = attempts
+        .iter()
+        .any(|c| c.status == SessionCommandStatus::Pending);
+    let has_failed = attempts.iter().any(|c| {
+        matches!(
+            c.status,
+            SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+        )
+    });
+    if has_live {
+        if has_failed {
+            Some(CommandSendStatus::Retrying)
+        } else {
+            Some(CommandSendStatus::Queued)
+        }
+    } else if has_failed {
+        Some(CommandSendStatus::Failed)
+    } else {
+        None
+    }
+}
+
+/// A failed (Rejected/Expired) message command the user can retry — the
+/// composer's failed row. One per message id, always the LATEST attempt.
+#[derive(Debug, Clone)]
+pub struct FailedCommand {
+    pub command_id: String,
+    pub message_id: String,
+    pub prompt: String,
+    pub resolution: Option<String>,
+    pub sent_at: Option<i64>,
+}
+
+/// The retry-able failures in the ledger, in doc order, skipping messages
+/// with a live pending attempt (their retry is already in flight).
+pub fn failed_commands(commands: &[SessionCommandEntry]) -> Vec<FailedCommand> {
+    let mut out: Vec<FailedCommand> = Vec::new();
+    for command in commands {
+        let Some(message_id) = command_message_id(&command.payload) else {
+            continue;
+        };
+        // A live attempt supersedes the failed row: Retrying is in flight.
+        if command_send_status(commands, message_id) != Some(CommandSendStatus::Failed) {
+            continue;
+        }
+        // Latest failed attempt only: a retry that failed again keeps the
+        // newest command id as the retry target.
+        let is_latest = commands.iter().any(|other| {
+            other.id != command.id
+                && command_message_id(&other.payload) == Some(message_id)
+                && other.issued_at > command.issued_at
+        });
+        if is_latest {
+            continue;
+        }
+        let prompt = match &command.payload {
+            SessionCommandPayload::Run { request, .. } => request.prompt.clone(),
+            SessionCommandPayload::Steer { prompt, .. } => prompt.clone(),
+            _ => continue,
+        };
+        out.push(FailedCommand {
+            command_id: command.id.clone(),
+            message_id: message_id.to_string(),
+            prompt,
+            resolution: command.resolution.clone(),
+            sent_at: command.sent_at,
+        });
+    }
+    out
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -601,6 +716,9 @@ pub struct AppState {
     pub spaces_synced: bool,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
+    /// Durable command ledger of the selected chat (WatchDocCommands): the
+    /// source of truth the UI projects Queued/Failed/Retrying from.
+    commands: Vec<SessionCommandEntry>,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -618,6 +736,7 @@ pub struct AppState {
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
+    commands_task: Option<Task<()>>,
 }
 
 impl Default for AppState {
@@ -703,6 +822,7 @@ impl AppState {
             selected_device: None,
             selected_chat: None,
             transcript: Vec::new(),
+            commands: Vec::new(),
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             local_device_id: None,
@@ -711,6 +831,7 @@ impl AppState {
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
+            commands_task: None,
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -729,7 +850,9 @@ impl AppState {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.selected_chat = None;
             self.transcript.clear();
+            self.commands.clear();
             self.transcript_task = None;
+            self.commands_task = None;
         }
     }
 
@@ -1053,6 +1176,40 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Fold one `WatchDocCommands` frame (the current ledger) into state.
+    /// The ledger is the durable truth: a Rejected/Expired command ends the
+    /// optimistic send-in-flight overlay so the sidebar dot stops reading
+    /// "Working" for a message the host refused, and the composer's failed
+    /// row + Retry take over.
+    pub fn apply_commands(&mut self, commands: Vec<SessionCommandEntry>) {
+        self.commands = commands;
+        if let Some(chat_id) = self.selected_chat.as_deref()
+            && let Some(pending) = self.pending_sends.get(chat_id)
+            && command_send_status(&self.commands, &pending.message_id)
+                == Some(CommandSendStatus::Failed)
+        {
+            self.pending_sends.remove(chat_id);
+        }
+    }
+
+    /// Projected status of the selected chat's message command, or `None`
+    /// when no Run/Steer command exists for it.
+    pub fn command_status_for(&self, message_id: &str) -> Option<CommandSendStatus> {
+        command_send_status(&self.commands, message_id)
+    }
+
+    /// The retry-able failures of the selected chat's ledger (composer row).
+    pub fn failed_commands(&self) -> Vec<FailedCommand> {
+        failed_commands(&self.commands)
+    }
+
+    /// Whether an optimistic echo is still genuinely in flight. A message
+    /// whose latest attempt FAILED renders at full opacity (the failed row
+    /// explains it) instead of the 0.65 sending veil forever.
+    pub fn echo_pending(&self, message_id: &str) -> bool {
+        self.command_status_for(message_id) != Some(CommandSendStatus::Failed)
+    }
+
     // ---- queries ----
 
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
@@ -1351,6 +1508,7 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        self.commands_task = None;
         self.connection = ConnectionStatus::Connecting;
         self.workspace_scope = None;
         self.auth = None;
@@ -1366,6 +1524,7 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.commands.clear();
         self.echoes.clear();
         self.pending_sends.clear();
         self.local_device_id = None;
@@ -1456,7 +1615,9 @@ impl AppState {
         self.connection = ConnectionStatus::Ready;
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
-            self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
+            self.transcript_task =
+                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            self.commands_task = Some(spawn_commands_watch(cx, handle, chat_id));
         }
         cx.notify();
     }
@@ -1476,7 +1637,9 @@ impl AppState {
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
         self.transcript.clear();
+        self.commands.clear();
         self.transcript_task = None;
+        self.commands_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.
@@ -1495,7 +1658,9 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
-            self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
+            self.transcript_task =
+                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            self.commands_task = Some(spawn_commands_watch(cx, handle, chat_id));
         }
         cx.notify();
     }
@@ -1868,6 +2033,69 @@ fn spawn_transcript_watch(
             // Stream ended: engine restart, RPC drop, or chat purge. Retry;
             // the purge case is cleaned up by apply_chats dropping this task.
             tracing::debug!(%chat_id, "transcript stream ended; resubscribing");
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+/// `WatchDocCommands`: the selected chat's durable command ledger — current
+/// value first, then re-sent on every doc change. The UI projects Queued /
+/// Retrying / Failed from this, so a Rejected or Expired command is visible
+/// even when no session row ever reflects it (the host writes nothing to the
+/// transcript for a refused message). Same resubscribe discipline as
+/// [`spawn_transcript_watch`]; dropped by `select_chat`/`apply_chats` with
+/// the chat.
+fn spawn_commands_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    chat_id: String,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        'resubscribe: loop {
+            let params = serde_json::json!({ "chatId": chat_id });
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::WATCH_DOC_COMMANDS, params)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::warn!(%chat_id, error = %err, "commands watch failed; retrying");
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue 'resubscribe;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let commands: Vec<SessionCommandEntry> = match serde_json::from_value(value) {
+                    Ok(commands) => commands,
+                    Err(err) => {
+                        // Schema skew — resubscribe for a fresh frame.
+                        tracing::warn!(error = %err, "malformed commands frame; resubscribing");
+                        cx.background_executor().timer(RETRY_DELAY).await;
+                        continue 'resubscribe;
+                    }
+                };
+                let alive = this.update(cx, |state, cx| {
+                    // Guard against a stale pump racing a newer selection.
+                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                        state.apply_commands(commands);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+            // Stream ended: engine restart, RPC drop, or chat purge. Retry;
+            // the purge case is cleaned up by apply_chats dropping this task.
+            tracing::debug!(%chat_id, "commands stream ended; resubscribing");
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
@@ -3652,5 +3880,109 @@ mod tests {
             1
         );
         assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
+    }
+
+    fn run_command(id: &str, message_id: &str, issued_at: i64, status: SessionCommandStatus) -> SessionCommandEntry {
+        SessionCommandEntry {
+            id: id.into(),
+            payload: SessionCommandPayload::Run {
+                request: cypher_proto::RunRequest {
+                    prompt: format!("prompt-{id}"),
+                    harness: None,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: "/tmp".into(),
+                    sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+                    auto_approve: false,
+                    attachments: Vec::new(),
+                    resume: None,
+                    worktree: None,
+                },
+                message_id: message_id.into(),
+                agent_prompt: None,
+            },
+            issued_by: "dev".into(),
+            issued_at,
+            based_on: None,
+            expires_at: None,
+            status,
+            resolution: Some("nope".into()),
+            sent_at: Some(issued_at),
+        }
+    }
+
+    #[test]
+    fn command_send_status_projects_durable_truth() {
+        // No command for the message: no status.
+        assert_eq!(command_send_status(&[], "m1"), None);
+        // Pending first attempt = Queued.
+        let queued = run_command("c1", "m1", 1, SessionCommandStatus::Pending);
+        assert_eq!(command_send_status(&[queued.clone()], "m1"), Some(CommandSendStatus::Queued));
+        // Applied is resolved — nothing for the UI to show.
+        let applied = run_command("c1", "m1", 1, SessionCommandStatus::Applied);
+        assert_eq!(command_send_status(&[applied], "m1"), None);
+        // Rejected / Expired = Failed.
+        let rejected = run_command("c1", "m1", 1, SessionCommandStatus::Rejected);
+        assert_eq!(command_send_status(&[rejected.clone()], "m1"), Some(CommandSendStatus::Failed));
+        let expired = run_command("c1", "m1", 1, SessionCommandStatus::Expired);
+        assert_eq!(command_send_status(&[expired], "m1"), Some(CommandSendStatus::Failed));
+        // A live pending attempt AFTER a failure = Retrying.
+        let retry = run_command("c2", "m1", 2, SessionCommandStatus::Pending);
+        assert_eq!(
+            command_send_status(&[rejected, retry], "m1"),
+            Some(CommandSendStatus::Retrying)
+        );
+    }
+
+    #[test]
+    fn failed_commands_lists_only_retryable_latest_failures() {
+        let rejected = run_command("c1", "m1", 1, SessionCommandStatus::Rejected);
+        let retry_pending = run_command("c2", "m1", 2, SessionCommandStatus::Pending);
+        let rejected_again = run_command("c3", "m1", 3, SessionCommandStatus::Rejected);
+        let expired_other = run_command("c4", "m2", 4, SessionCommandStatus::Expired);
+        let applied_other = run_command("c5", "m3", 5, SessionCommandStatus::Applied);
+        let commands = vec![rejected, retry_pending, rejected_again, expired_other, applied_other];
+        let failed = failed_commands(&commands);
+        // m1: the retry is in flight (skip); m3 applied (skip); m2: expired.
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].command_id, "c4");
+        assert_eq!(failed[0].message_id, "m2");
+        assert_eq!(failed[0].resolution.as_deref(), Some("nope"));
+        assert_eq!(failed[0].sent_at, Some(4));
+
+        // After the retry fails again, the LATEST failed attempt is the target.
+        let commands = vec![
+            run_command("c1", "m1", 1, SessionCommandStatus::Rejected),
+            run_command("c2", "m1", 2, SessionCommandStatus::Rejected),
+        ];
+        let failed = failed_commands(&commands);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].command_id, "c2");
+        assert_eq!(failed[0].prompt, "prompt-c2");
+    }
+
+    #[test]
+    fn failed_command_lifts_echo_veil_and_ends_send_overlay() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        s.begin_pending_send("c", "m1", now);
+        // A fresh pending command keeps the echo pending + the overlay.
+        s.apply_commands(vec![run_command("c1", "m1", 1, SessionCommandStatus::Pending)]);
+        assert!(s.echo_pending("m1"));
+        assert!(s.send_pending("c", now));
+        // The durable Rejected ends both: full-opacity echo + truthful dot.
+        s.apply_commands(vec![run_command("c1", "m1", 1, SessionCommandStatus::Rejected)]);
+        assert!(!s.echo_pending("m1"));
+        assert!(!s.send_pending("c", now));
+        assert_eq!(s.failed_commands().len(), 1);
+        // A retry in flight re-arms the echo veil (the message is sending again).
+        s.apply_commands(vec![
+            run_command("c1", "m1", 1, SessionCommandStatus::Rejected),
+            run_command("c2", "m1", 2, SessionCommandStatus::Pending),
+        ]);
+        assert!(s.echo_pending("m1"));
+        assert!(s.failed_commands().is_empty());
     }
 }

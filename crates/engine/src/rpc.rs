@@ -46,7 +46,7 @@
 //! piping items. To make another method device-addressable, nothing per-method is needed
 //! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
 //! handlers stay transport-agnostic. Currently routed: `ListHarnesses`, `ListModels`,
-//! `QueueCommand`, and `WatchDocMessages`.
+//! `QueueCommand`, `WatchDocMessages`, and `WatchDocCommands`.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -1119,6 +1119,7 @@ fn forwardable(method: &str) -> bool {
             | methods::QUEUE_COMMAND
             | methods::RETRY_COMMAND
             | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_DOC_COMMANDS
             // Repos/worktrees/folders are device-local filesystem state.
             | methods::LIST_REPOS
             | methods::ADD_REPO
@@ -1179,6 +1180,7 @@ fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_DOC_COMMANDS
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::UPDATE_STATUS
@@ -1450,6 +1452,16 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(doc_messages_stream(
                     handle.watch_messages(),
                 )))
+            }
+            methods::WATCH_DOC_COMMANDS => {
+                let p: ChatParams = parse_params(params)?;
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // Same watch_stream shape as the other standing watches: the
+                // current command ledger first, then every doc change.
+                Ok(RpcReply::Stream(watch_stream(handle.watch_commands())))
             }
             methods::PROBE_SYNC => {
                 self.workspace.probe();
@@ -2272,6 +2284,8 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::RETRY_COMMAND));
+        assert!(forwardable(methods::WATCH_DOC_COMMANDS));
+        assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::FETCH_ALL));
     }

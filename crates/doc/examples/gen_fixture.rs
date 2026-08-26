@@ -80,6 +80,7 @@ fn main() {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        sent_at: None,
     })
     .expect("queue command");
     doc.set_command_status("cmd-1", SessionCommandStatus::Applied, None)

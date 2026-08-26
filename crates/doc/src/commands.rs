@@ -100,6 +100,13 @@ pub struct SessionCommandEntry {
     pub status: SessionCommandStatus,
     #[serde(default)]
     pub resolution: Option<String>,
+    /// Epoch millis of the ORIGINAL user send — the first attempt's
+    /// `issued_at`. Preserved across retries (`retry_command` copies it from
+    /// the failed attempt) so the UI can show the true send time/order even
+    /// after a reissue. Additive + serde-defaulted: legacy entries written
+    /// before this field existed stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<i64>,
 }
 
 impl SessionCommandEntry {
@@ -198,6 +205,7 @@ mod tests {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            sent_at: None,
         }
     }
 
@@ -378,6 +386,58 @@ mod tests {
         assert!(json.contains(r#""agentPrompt":"annotated""#));
         let back: SessionCommandPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, steer);
+    }
+
+    #[test]
+    fn sent_at_absent_serializes_unchanged() {
+        // Legacy entry JSON (no `sentAt`) deserializes to None and
+        // re-serializes byte-identically — the additive field never leaks
+        // into old payloads.
+        let json = r#"{"id":"c1","payload":{"kind":"run","request":{"prompt":"hello","model":null,"reasoning":null,"modelOptions":{},"cwd":"/tmp","sandbox":"workspace-write","autoApprove":false,"resume":null},"messageId":"m1"},"issuedBy":"device-a","issuedAt":1000,"basedOn":null,"expiresAt":null,"status":"pending","resolution":null}"#;
+        let entry: SessionCommandEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.sent_at, None);
+        let out = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            out, json,
+            "legacy command JSON must round-trip byte-identically"
+        );
+
+        // A present sentAt round-trips.
+        let mut e = entry.clone();
+        e.sent_at = Some(1000);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(r#""sentAt":1000"#));
+        let back: SessionCommandEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sent_at, Some(1000));
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn sent_at_round_trips_through_doc_ledger() {
+        // queue_command persists sentAt; read_commands returns it.
+        let doc = crate::SessionDoc::init("chat-1").unwrap();
+        let mut e = entry(
+            "c1",
+            SessionCommandPayload::Run {
+                request: run_request(),
+                message_id: "m1".into(),
+                agent_prompt: None,
+            },
+            1_000,
+        );
+        e.sent_at = Some(1_000);
+        doc.queue_command(&e).unwrap();
+        let commands = doc.read_commands().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].sent_at, Some(1_000));
+        assert_eq!(commands[0].issued_at, 1_000);
+        // A legacy-style entry without sentAt round-trips with None.
+        let mut legacy = e.clone();
+        legacy.id = "c2".into();
+        legacy.sent_at = None;
+        doc.queue_command(&legacy).unwrap();
+        let commands = doc.read_commands().unwrap();
+        assert_eq!(commands[1].sent_at, None);
     }
 
     fn run_request() -> RunRequest {

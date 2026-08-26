@@ -168,6 +168,7 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        sent_at: None,
     })
     .expect("queue command");
 }
@@ -803,6 +804,199 @@ async fn rpc_surface_over_in_memory_transport() {
             .expect("stream alive");
         let list: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
         if list.first().and_then(|s| s["status"].as_str()) == Some("idle") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn watch_doc_commands_streams_initial_and_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    let mut stream = client
+        .subscribe(
+            cypher_rpc::methods::WATCH_DOC_COMMANDS,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .unwrap();
+
+    // The stream opens with the CURRENT ledger — empty for a fresh chat.
+    let initial = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let initial: Vec<serde_json::Value> = serde_json::from_value(initial).unwrap();
+    assert!(initial.is_empty(), "fresh chat has no commands");
+
+    // Queue a message command (the composer's path); the ledger re-sends on
+    // every doc change. The executor may already have Applied it by the time
+    // the frame lands — the durable fields are what we assert.
+    let command = serde_json::to_value(SessionCommandPayload::Run {
+        request: run_request("watch me"),
+        message_id: "m-watch-1".into(),
+
+        agent_prompt: None,
+    })
+    .unwrap();
+    client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": CHAT, "command": command }),
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let updated = loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("command update before timeout")
+            .expect("stream alive");
+        let ledger: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
+        if !ledger.is_empty() {
+            break ledger;
+        }
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0]["payload"]["messageId"], "m-watch-1");
+    // The host may already have Applied the command by the time the frame
+    // lands — what matters is the durable field shape, not the transient
+    // status.
+    let status = updated[0]["status"].as_str().unwrap();
+    assert!(
+        matches!(status, "pending" | "applied"),
+        "unexpected status {status}"
+    );
+    // The first attempt IS the send: sentAt equals issuedAt.
+    assert_eq!(updated[0]["sentAt"], updated[0]["issuedAt"]);
+}
+
+#[tokio::test]
+async fn retry_preserves_sent_at_and_message_identity() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Crash AFTER mark-processed but BEFORE execute: the ledger has the id,
+    // the doc still says pending — the drain terminalizes it Rejected.
+    {
+        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+        assert!(store.mark_processed("cmd-retry-1").unwrap());
+    }
+
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-retry-1",
+        SessionCommandPayload::Run {
+            request: run_request("retry me"),
+            message_id: "m-retry-1".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    // Terminalized as a durable Rejected (no transcript entry is ever
+    // written for a dead command).
+    wait_for(
+        || {
+            command_status(&core, "cmd-retry-1")
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Rejected)
+        },
+        "dead command rejected",
+    )
+    .await;
+    let commands = handle.doc().read_commands().unwrap();
+    let old = commands.iter().find(|c| c.id == "cmd-retry-1").unwrap();
+    assert_eq!(
+        old.sent_at, None,
+        "viewer-queued legacy entry has no sentAt"
+    );
+    // Copy out the original clock before re-reading below (the borrow of
+    // `old` must not span the next read).
+    let old_issued_at = old.issued_at;
+    let old_sent_at = old.sent_at;
+
+    // Watch the ledger while retrying: the stream must carry the fresh
+    // attempt with the ORIGINAL send clock and message identity. The client
+    // must stay alive for the stream to live.
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let mut stream = client
+        .subscribe(
+            cypher_rpc::methods::WATCH_DOC_COMMANDS,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .unwrap();
+    // Drain the opening reset (current ledger: the rejected entry).
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let retry_id = core
+        .doc_host
+        .retry_command(CHAT, "cmd-retry-1")
+        .expect("dead command can be retried");
+    assert_ne!(retry_id, "cmd-retry-1", "retry mints a fresh command id");
+
+    // The retried attempt executes (host is local); whatever its terminal
+    // status, its sentAt and message id must match the original.
+    wait_for(
+        || {
+            command_status(&core, &retry_id)
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Applied)
+        },
+        "retried command applied",
+    )
+    .await;
+    let commands = handle.doc().read_commands().unwrap();
+    let retry = commands.iter().find(|c| c.id == retry_id).unwrap();
+    match &retry.payload {
+        SessionCommandPayload::Run { message_id, .. } => {
+            assert_eq!(
+                message_id, "m-retry-1",
+                "retry preserves the logical message id"
+            )
+        }
+        other => panic!("expected run payload, got {other:?}"),
+    }
+    // sentAt survives the retry: the legacy entry had none, so the fallback
+    // is the original issued_at — never the retry's own clock.
+    assert_eq!(
+        retry.sent_at,
+        Some(old_issued_at),
+        "retry preserves the original send time"
+    );
+    assert_eq!(retry.sent_at, old_sent_at.or(Some(old_issued_at)));
+    assert!(
+        entries(&core).iter().any(|entry| entry.id == "m-retry-1"),
+        "retry writes the user entry under the preserved message id"
+    );
+
+    // And the stream eventually carries the retried entry with those fields.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("ledger update before timeout")
+            .expect("stream alive");
+        let ledger: Vec<serde_json::Value> = serde_json::from_value(item).unwrap();
+        if let Some(entry) = ledger.iter().find(|e| e["id"] == retry_id) {
+            assert_eq!(entry["payload"]["messageId"], "m-retry-1");
+            assert_eq!(entry["sentAt"], old_issued_at);
             break;
         }
     }

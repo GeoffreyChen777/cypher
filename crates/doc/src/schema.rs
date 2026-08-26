@@ -326,6 +326,9 @@ impl SessionDoc {
         if let Some(expires_at) = entry.expires_at {
             map.insert("expiresAt", expires_at)?;
         }
+        if let Some(sent_at) = entry.sent_at {
+            map.insert("sentAt", sent_at)?;
+        }
         map.insert(
             "status",
             serde_json::to_value(entry.status)?
@@ -1364,6 +1367,7 @@ mod tests {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            sent_at: None,
         };
         doc.queue_command(&entry).unwrap();
         doc.set_command_status("c1", SessionCommandStatus::Applied, None)

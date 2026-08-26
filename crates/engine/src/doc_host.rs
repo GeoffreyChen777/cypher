@@ -237,6 +237,13 @@ pub struct ChatDocHandle {
     device_id: String,
     doc: Arc<SessionDoc>,
     messages_tx: watch::Sender<Vec<SessionMessageEntry>>,
+    /// Durable command ledger watch (WatchDocCommands): current value first,
+    /// then re-sent on every doc change. Same lazy-mirror discipline as
+    /// `messages_tx` — the ledger is only rebuilt while someone watches.
+    commands_tx: watch::Sender<Vec<SessionCommandEntry>>,
+    /// True when the doc changed while nobody watched the command ledger: the
+    /// mirror rebuild is deferred to the next `watch_commands` attach.
+    commands_dirty: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -321,6 +328,22 @@ impl ChatDocHandle {
         let rx = self.messages_tx.subscribe();
         if self.mirror_dirty.load(Ordering::Acquire) {
             self.publish_messages();
+        }
+        rx
+    }
+
+    /// Durable command ledger watch (WatchDocCommands): current value first,
+    /// then re-sent on every doc change. The command ledger is the durable
+    /// truth the UI projects Queued/Failed/Retrying from — command-only
+    /// commits (a rejection, a retry) wake this watch even though the
+    /// transcript delta is empty.
+    pub fn watch_commands(&self) -> watch::Receiver<Vec<SessionCommandEntry>> {
+        self.touch();
+        // Subscribe BEFORE the dirty check, mirroring `watch_messages`: a
+        // commit racing this attach then sees a live receiver and publishes.
+        let rx = self.commands_tx.subscribe();
+        if self.commands_dirty.load(Ordering::Acquire) {
+            self.publish_commands();
         }
         rx
     }
@@ -411,6 +434,31 @@ impl ChatDocHandle {
             self.messages_tx.send_replace(Vec::new());
         } else {
             self.publish_messages();
+        }
+    }
+
+    fn publish_commands(&self) {
+        self.commands_dirty.store(false, Ordering::Release);
+        match self.doc.read_commands() {
+            Ok(commands) => {
+                self.commands_tx.send_replace(commands);
+            }
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err, "command ledger read failed");
+            }
+        }
+    }
+
+    /// Per-commit command publish, mirroring [`Self::publish_messages_if_watched`]:
+    /// unwatched docs just mark the ledger dirty and hand the next attach a
+    /// fresh materialization.
+    fn publish_commands_if_watched(&self) {
+        if self.commands_tx.receiver_count() == 0 {
+            self.commands_dirty.store(true, Ordering::Release);
+            // Shrink the stale mirror: watch_commands rebuilds on attach.
+            self.commands_tx.send_replace(Vec::new());
+        } else {
+            self.publish_commands();
         }
     }
 
@@ -882,12 +930,15 @@ impl DocHost {
         // drains, nudges) never watch the transcript, and the first
         // watch_messages attach materializes it on demand.
         let (messages_tx, _) = watch::channel(Vec::new());
+        let (commands_tx, _) = watch::channel(Vec::new());
 
         let handle = Arc::new(ChatDocHandle {
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
+            commands_tx,
+            commands_dirty: AtomicBool::new(true),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
@@ -1021,11 +1072,14 @@ impl DocHost {
             changed_tx.send_modify(|v| *v = v.wrapping_add(1));
         }));
         let (messages_tx, _) = watch::channel(Vec::new());
+        let (commands_tx, _) = watch::channel(Vec::new());
         let handle = Arc::new(ChatDocHandle {
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
+            commands_tx,
+            commands_dirty: AtomicBool::new(true),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(0),
@@ -1920,6 +1974,9 @@ impl DocHost {
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
+            // The first attempt IS the original send: the UI uses sent_at as
+            // the stable message-send clock across retries.
+            sent_at: Some(now),
         })?;
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
@@ -1948,6 +2005,8 @@ impl DocHost {
     /// attempt. The logical message id remains stable so the executor's
     /// idempotent user-entry write cannot duplicate the transcript, while the
     /// command id is new so the processed ledger does not suppress the retry.
+    /// The retry inherits the ORIGINAL `sent_at` (the user's send clock) —
+    /// only `issued_at` moves forward.
     pub fn retry_command(&self, chat_id: &str, command_id: &str) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let commands = handle.doc.read_commands()?;
@@ -2002,6 +2061,9 @@ impl DocHost {
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
+            // The user's original send time, not the retry's: the message's
+            // place in the transcript/order is set by when it was first sent.
+            sent_at: old.sent_at.or(Some(old.issued_at)),
         };
         let retry_id = retry.id.clone();
         handle.doc.queue_command(&retry)?;
@@ -2782,6 +2844,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 }
                 let Some(handle) = weak.upgrade() else { break };
                 handle.publish_messages_if_watched();
+                handle.publish_commands_if_watched();
                 host.drain_commands(&handle).await;
                 if save_deadline.is_none() {
                     save_deadline = Some(

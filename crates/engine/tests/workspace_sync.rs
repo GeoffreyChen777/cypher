@@ -197,6 +197,7 @@ fn queue_run_with(
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            sent_at: None,
         })
         .expect("queue command");
 }

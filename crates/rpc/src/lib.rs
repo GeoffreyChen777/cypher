@@ -44,6 +44,11 @@ pub mod methods {
     /// id while preserving its logical message identity.
     pub const RETRY_COMMAND: &str = "RetryCommand";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
+    /// Durable command ledger of one chat (forwardable stream, params
+    /// `{chatId}`): the current command list first, then every doc change.
+    /// The UI projects Queued / Failed / Retrying from these entries — the
+    /// authoritative source over the local optimistic overlay.
+    pub const WATCH_DOC_COMMANDS: &str = "WatchDocCommands";
     /// Nudge every open room client to verify liveness NOW (window focus,
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
