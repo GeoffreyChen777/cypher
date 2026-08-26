@@ -3331,6 +3331,12 @@ impl Pickers {
                         cx,
                     )]
                 }
+                Some(Loadable::Ready(models)) if models.is_empty() => {
+                    vec![empty_list_note(
+                        &theme,
+                        "No models available — configure a Pi provider first",
+                    )]
+                }
                 _ => vec![popover::skeleton_rows(
                     "model-skeleton",
                     &theme,
