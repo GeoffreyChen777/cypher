@@ -541,6 +541,19 @@ impl WorkspaceDoc {
     }
 }
 
+fn decode_chat_config(value: serde_json::Value) -> Option<ChatConfig> {
+    match serde_json::from_value(value) {
+        Ok(config) => Some(config),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "unknown or malformed chat config; retaining chat row"
+            );
+            None
+        }
+    }
+}
+
 fn set_opt_str(row: &LoroMap, key: &str, value: Option<&str>) -> Result<(), DocError> {
     match value {
         Some(v) => row.insert(key, v)?,
@@ -648,7 +661,10 @@ pub(crate) struct RawChat {
     #[serde(default)]
     checkout_id: Option<String>,
     #[serde(default)]
-    config: Option<ChatConfig>,
+    /// Kept as raw JSON so an unknown future harness/config value does not
+    /// make the entire chat row undecodable. `Chat::from` degrades only this
+    /// optional field to `None`.
+    config: Option<serde_json::Value>,
     #[serde(default)]
     last_message_preview: Option<String>,
     #[serde(default)]
@@ -679,7 +695,7 @@ impl From<RawChat> for Chat {
             cwd: raw.cwd,
             branch: raw.branch,
             checkout_id: raw.checkout_id,
-            config: raw.config,
+            config: raw.config.and_then(decode_chat_config),
             last_message_preview: raw.last_message_preview,
             last_message_at: raw.last_message_at.map(dt),
             created_at: dt(raw.created_at),
@@ -879,6 +895,20 @@ mod tests {
         // No such row: false, nothing created.
         assert!(!ws.set_chat_config("nope", &config).unwrap());
         assert!(ws.chat("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn unknown_future_harness_keeps_chat_row_readable() {
+        let mut value = serde_json::to_value(chat("future-chat", "dev-a")).unwrap();
+        value["config"]["harness"] = serde_json::json!("future-harness");
+        let raw: RawChat = serde_json::from_value(value).expect("row envelope remains readable");
+        let decoded = Chat::from(raw);
+        assert_eq!(decoded.id, "future-chat");
+        assert_eq!(decoded.device_id, "dev-a");
+        assert!(
+            decoded.config.is_none(),
+            "only the unknown config should degrade"
+        );
     }
 
     #[test]
