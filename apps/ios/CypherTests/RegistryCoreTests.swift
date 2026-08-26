@@ -243,3 +243,33 @@ final class RegistryMaxClockTests: XCTestCase {
         XCTAssertEqual(maxClock(tomb), hlc(9))
     }
 }
+
+final class RegistryCursorIntegrityTests: XCTestCase {
+    func testBroadcastGapHoldsCursor() {
+        let doc = RegistryDoc(deviceId: "dev-a")
+        XCTAssertFalse(doc.applyRows(seq: 3, rows: []))
+        XCTAssertEqual(doc.cursor, 0)
+        XCTAssertTrue(doc.applyRows(seq: 1, rows: []))
+        XCTAssertEqual(doc.cursor, 1)
+    }
+
+    func testAckDoesNotJumpOverUnreceivedRows() {
+        let doc = RegistryDoc(deviceId: "dev-a")
+        doc.ackBatch("missing", seq: 7)
+        XCTAssertEqual(doc.cursor, 0)
+    }
+
+    func testPreIntegritySnapshotResetsCursorOnce() throws {
+        let doc = RegistryDoc(deviceId: "dev-a")
+        _ = doc.applyState(seq: 7, full: true, gcFloor: 0, rows: [])
+        XCTAssertEqual(doc.cursor, 7)
+
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: doc.toData()) as? [String: Any]
+        )
+        object["resyncEpoch"] = 0
+        let oldData = try JSONSerialization.data(withJSONObject: object)
+        let restored = try RegistryDoc.from(data: oldData, deviceId: "dev-a")
+        XCTAssertEqual(restored.cursor, 0)
+    }
+}
