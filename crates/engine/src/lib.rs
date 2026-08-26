@@ -258,6 +258,9 @@ impl EngineCore {
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
+        // Worktree materialization for Run commands carrying a WorktreeSpec
+        // happens on the HOST at drain time (see `DocHost::materialize_worktree`).
+        doc_host.set_repos(repos.clone());
         let terminals = Terminals::new();
         let uploads = Uploads::from_root_with_fallback(
             profile.uploads_root(),

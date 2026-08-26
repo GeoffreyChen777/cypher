@@ -1011,6 +1011,7 @@ impl SessionsEngine {
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
+                            worktree: None,
                         })
                     });
                 let Some(mut request) = request else {
@@ -1566,6 +1567,7 @@ async fn drive_run(
     // retry re-derives the effective override from `resume_state.agent_prompt`.
     let mut retry_request = Some(RunRequest {
         resume: None,
+        worktree: None,
         ..request.clone()
     });
     // The harness receives the EFFECTIVE prompt (visible unless an override

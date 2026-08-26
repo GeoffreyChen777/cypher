@@ -268,10 +268,7 @@ mod frontier_tests {
     #[test]
     fn non_empty_contained_frontier_is_contained() {
         let (sink, doc, dir) = test_sink("contained");
-        doc.doc()
-            .get_map("meta")
-            .insert("k", "v")
-            .expect("insert");
+        doc.doc().get_map("meta").insert("k", "v").expect("insert");
         doc.doc().commit();
         let vv = doc.doc().oplog_vv().encode();
         assert!(sink.contains_frontier(&vv));

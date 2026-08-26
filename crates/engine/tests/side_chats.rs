@@ -193,6 +193,7 @@ async fn seed_parent(core: &EngineCore) {
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: false,
                 resume: None,
+                worktree: None,
                 attachments: Vec::new(),
             },
             Some("m1".into()),

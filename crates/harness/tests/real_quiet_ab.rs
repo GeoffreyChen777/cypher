@@ -124,6 +124,7 @@ async fn probe_once(print_trace: bool) -> (usize, usize, bool) {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     };
     let started = std::time::Instant::now();
     let mut stream = harness.run(req, controls).await.expect("run starts");

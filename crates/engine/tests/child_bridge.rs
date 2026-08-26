@@ -821,6 +821,7 @@ async fn later_child_turn_has_no_messaging_channel() {
                     sandbox: SandboxLevel::WorkspaceWrite,
                     auto_approve: false,
                     resume: None,
+                    worktree: None,
                     attachments: Vec::new(),
                 },
                 message_id: String::new(),

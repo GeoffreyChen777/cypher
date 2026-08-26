@@ -569,6 +569,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)
@@ -623,6 +624,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)

@@ -812,6 +812,7 @@ impl EngineRpc {
                     .unwrap_or(cypher_proto::SandboxLevel::WorkspaceWrite),
                 auto_approve: false,
                 resume: None,
+                worktree: None,
                 attachments: Vec::new(),
             };
             if let Err(err) = self.doc_host.queue_command(

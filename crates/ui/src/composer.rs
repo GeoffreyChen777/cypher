@@ -3753,6 +3753,7 @@ impl ComposerSideChat {
             auto_approve: false,
             resume: None,
             attachments,
+            worktree: None,
         }
     }
 
@@ -5934,6 +5935,21 @@ impl Composer {
         // worktree / fresh worktree off the picked base) — resolved NOW so
         // the async block needs no picker access.
         let plan = self.pickers.read(cx).checkout_plan(cx);
+        // New-worktree sends need a base ref: with refs never loaded the old
+        // path silently fell back to the repo folder. Block the send visibly
+        // instead — a request for a new worktree must never silently run in
+        // the base checkout.
+        if is_new
+            && matches!(
+                &plan,
+                crate::pickers::CheckoutPlan::NewWorktree { base: None }
+            )
+        {
+            self.failure =
+                Some("Choose a base ref first — New worktree can't start without one.".into());
+            cx.notify();
+            return;
+        }
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
@@ -5975,9 +5991,6 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
-        let space_remote = space
-            .as_ref()
-            .is_some_and(|s| local_device_id.as_deref() != Some(s.device_id.as_str()));
         // Session references (main transport only): the distinct chat ids the
         // prompt references, in mention order. The referenced rows are
         // resolved against the synced chats snapshot at send time inside the
@@ -6122,9 +6135,9 @@ impl Composer {
                 // new chats run per the checkout plan (t3code env-mode): the
                 // space's folder as-is, an EXISTING worktree of the picked ref
                 // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree created off the
-                // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
+                // worktree), or a fresh isolated worktree the HOST creates off
+                // the picked base ref at command-drain time (the durable
+                // WorktreeSpec below — never a pre-queue RPC).
                 let mut cwd = if is_new {
                     // Project-less sessions run from the host's home dir —
                     // "~" is expanded on the host when the run spawns.
@@ -6134,6 +6147,12 @@ impl Composer {
                 }
                 .unwrap_or_else(|| ".".to_string());
                 let mut worktree_cwd: Option<String> = None;
+                // Fresh-worktree plans ride the QUEUED Run command (a
+                // WorktreeSpec the HOST materializes at drain time) instead of
+                // a blocking CreateWorktree relay RPC here: the RPC had no
+                // timeout, so a lost relay frame wedged the send on "Sending…"
+                // forever while the session ran remotely anyway.
+                let mut run_worktree: Option<cypher_proto::WorktreeSpec> = None;
                 // The picked ref rides createChat so the session footer names
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
@@ -6149,29 +6168,19 @@ impl Composer {
                             chat_branch = branch.clone();
                         }
                         crate::pickers::CheckoutPlan::NewWorktree { base } => {
+                            // Footer shows the base until the host stamps the
+                            // actual cypher/<name> branch post-creation. cwd
+                            // stays the repo folder — the compatible initial
+                            // cwd for an old host that doesn't know the spec
+                            // (it degrades to the main checkout instead of
+                            // failing the run).
                             chat_branch = base.clone();
                             if let (Some(repo_path), Some(base)) = (&space_path, base) {
-                                let mut params = serde_json::json!({
-                                    "repoPath": repo_path,
-                                    "branch": base,
+                                run_worktree = Some(cypher_proto::WorktreeSpec {
+                                    repo_path: repo_path.clone(),
+                                    base_ref: base.clone(),
+                                    name_hint: None,
                                 });
-                                if space_remote
-                                    && let Some(object) = params.as_object_mut()
-                                {
-                                    object.insert(
-                                        "targetDeviceId".into(),
-                                        serde_json::Value::String(device_id.clone()),
-                                    );
-                                }
-                                let value = engine
-                                    .client()
-                                    .call(methods::CREATE_WORKTREE, params)
-                                    .await
-                                    .map_err(|e| format!("Worktree failed: {e}"))?;
-                                let worktree: cypher_proto::Worktree = serde_json::from_value(value)
-                                    .map_err(|e| format!("Worktree reply malformed: {e}"))?;
-                                cwd = worktree.path.clone();
-                                worktree_cwd = Some(worktree.path);
                             }
                         }
                     }
@@ -6367,6 +6376,7 @@ impl Composer {
                                     auto_approve: false,
                                     resume: None,
                                     attachments: attachment_paths,
+                                    worktree: run_worktree,
                                 },
                                 message_id: message_id.clone(),
                                 agent_prompt: agent_prompt.clone(),

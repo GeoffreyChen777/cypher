@@ -883,10 +883,7 @@ impl Actor {
         // A live row can outrun the backfill and expose a hole immediately
         // after joining. Repair it before waiting for ordinary traffic.
         let mut gap_repairs = 0u32;
-        if !self
-            .maybe_repair_gap(&mut pipe, &mut gap_repairs)
-            .await
-        {
+        if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
             return SessionEnd::Reconnect;
         }
         loop {
@@ -989,7 +986,11 @@ impl Actor {
             tracing::warn!("chat2: gap repairs exhausted; redialing for a full catch-up");
             return false;
         }
-        tracing::info!(after, attempt = *repairs, "chat2: backfilling over a row gap");
+        tracing::info!(
+            after,
+            attempt = *repairs,
+            "chat2: backfilling over a row gap"
+        );
         let req = wire::encode(
             frame_type::ROWS_REQ,
             &wire::RowsReqHeader {

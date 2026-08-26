@@ -157,6 +157,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     }
 }
 

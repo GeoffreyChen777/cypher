@@ -775,6 +775,133 @@ impl Repos {
         Ok(())
     }
 
+    /// Absolute paths of the repo's LINKED worktrees (excluding the main
+    /// checkout), parsed from `git worktree list --porcelain`. Detached
+    /// worktrees are included — unlike [`Self::refs`] this is a path probe,
+    /// not a branch-indexed map.
+    async fn linked_worktree_paths(&self, repo_path: &Path) -> Vec<String> {
+        let Ok(out) = self
+            .git(&["worktree", "list", "--porcelain"], Some(repo_path))
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        let mut stanza = 0usize;
+        for line in out.lines().map(str::trim) {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                stanza += 1;
+                // The first stanza is the main checkout, not a linked tree.
+                if stanza > 1 {
+                    paths.push(p.to_string());
+                }
+            }
+        }
+        paths
+    }
+
+    /// Create (or reuse) the deterministic chat worktree a durable Run's
+    /// [`cypher_proto::WorktreeSpec`] asks for: a `cypher/<name>` branch off
+    /// `base_ref` in an isolated checkout under
+    /// `{worktrees_root}/<repo>/<name>`, named stably from `chat_key` so a
+    /// retry or duplicate spec-carrying Run for the same chat resolves to the
+    /// same path/branch instead of minting a second worktree.
+    ///
+    /// Safe against half-finished creations: an existing path that is NOT a
+    /// linked worktree of `repo_path` (a crashed `worktree add`) is removed
+    /// and recreated; an existing `cypher/<name>` branch (an admin record that
+    /// survived a cleanup) is adopted rather than re-minted. An invalid
+    /// `base_ref` fails here, which the caller surfaces as a Rejected command
+    /// — never a silent fallback to the base checkout.
+    pub async fn ensure_chat_worktree(
+        &self,
+        repo_path: &Path,
+        base_ref: &str,
+        chat_key: &str,
+        name_hint: Option<&str>,
+    ) -> Result<Worktree, EngineError> {
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
+        let name = chat_worktree_name(chat_key, name_hint);
+        let base = self.inner.worktrees_root.join(&repo_name);
+        let path = base.join(&name);
+        let branch_name = format!("cypher/{name}");
+
+        // Reuse: the deterministic path is already a linked worktree of this
+        // repo (a previous run, or the user kept it). Return it as-is with its
+        // ACTUAL current branch (the user may have checked out their own).
+        let canonical_target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let linked = self.linked_worktree_paths(repo_path).await;
+        if linked.iter().any(|p| {
+            std::fs::canonicalize(Path::new(p))
+                .map(|c| c == canonical_target)
+                .unwrap_or(false)
+        }) {
+            let branch = self
+                .current_branch(&path)
+                .await
+                .unwrap_or_else(|_| branch_name.clone());
+            let checkout = self.checkout_identity(&path).await?;
+            tracing::info!(path = %path.display(), branch = %branch, "chat worktree reused");
+            return Ok(Worktree {
+                repo_path: repo_path.to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                branch,
+                name,
+                checkout_id: Some(checkout.id),
+            });
+        }
+
+        // Semi-finished safety: a stale dir that is not a worktree of this
+        // repo is a half-created checkout under OUR managed root — clear it
+        // and start over. Prune dangling admin records too.
+        if path.exists() {
+            tracing::warn!(path = %path.display(), "removing stale half-created chat worktree");
+            std::fs::remove_dir_all(&path)?;
+        }
+        std::fs::create_dir_all(&base)?;
+        self.git(&["worktree", "prune"], Some(repo_path)).await?;
+
+        // Adopt an existing branch (an admin record that survived cleanup) or
+        // mint a fresh one off the requested base ref. An invalid base ref
+        // fails here — the caller Rejects the command rather than degrading.
+        if self.branch_exists(repo_path, &branch_name).await {
+            self.git(
+                &["worktree", "add", &path.to_string_lossy(), &branch_name],
+                Some(repo_path),
+            )
+            .await?;
+        } else {
+            self.git(
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch_name,
+                    &path.to_string_lossy(),
+                    base_ref,
+                ],
+                Some(repo_path),
+            )
+            .await?;
+        }
+        let checkout = self.checkout_identity(&path).await?;
+        tracing::info!(
+            path = %path.display(),
+            branch = %branch_name,
+            "chat worktree materialized"
+        );
+        Ok(Worktree {
+            repo_path: repo_path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().to_string(),
+            branch: branch_name,
+            name,
+            checkout_id: Some(checkout.id),
+        })
+    }
+
     // ── ListFolders ─────────────────────────────────────────────────────────
 
     /// One directory level (home by default): dotfiles hidden, directories first,
@@ -1102,6 +1229,33 @@ pub fn worktree_branch_from_title(title: &str) -> String {
     format!("cypher/{}", if slug.is_empty() { "update" } else { slug })
 }
 
+/// Stable, deterministic worktree name for a chat: a slug of the chat key (or
+/// the spec's optional name hint) plus an 8-hex hash of the chat key, so
+/// retries and duplicate spec-carrying Runs for the same chat resolve to the
+/// same path and `cypher/<name>` branch — never a second worktree.
+pub fn chat_worktree_name(chat_key: &str, name_hint: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(chat_key.as_bytes());
+    let hash = &hex(&hasher.finalize())[..8];
+    let slug: String = name_hint
+        .unwrap_or(chat_key)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(32)
+        .collect::<String>();
+    let slug = if slug.is_empty() { "chat" } else { &slug };
+    format!("{slug}-{hash}")
+}
+
 fn bounded_field(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -1216,6 +1370,45 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_worktree_name_is_stable_and_unique_per_chat() {
+        // Same chat key → same name (retry/duplicate Run reuse, never a second
+        // worktree)…
+        assert_eq!(
+            chat_worktree_name("chat-abc", None),
+            chat_worktree_name("chat-abc", None)
+        );
+        // …different chat keys differ (two chats never share a worktree)…
+        assert_ne!(
+            chat_worktree_name("chat-abc", None),
+            chat_worktree_name("chat-def", None)
+        );
+        // The name carries a slugged key and an 8-hex hash suffix, and the
+        // optional name hint only affects the slug, never the hash (reuse key).
+        let named = chat_worktree_name("chat-abc", Some("Fix the Panel"));
+        assert_eq!(
+            named,
+            "fix-the-panel-".to_string()
+                + &chat_worktree_name("chat-abc", None)
+                    .rsplit('-')
+                    .next()
+                    .unwrap()
+        );
+        assert_eq!(named.len(), "fix-the-panel".len() + 1 + 8);
+        // A name hint is cosmetic: same chat key + different hints still
+        // differ only in the slug portion.
+        assert_ne!(named, chat_worktree_name("chat-abc", None));
+        // Non-ASCII/empty keys still produce a valid folder name.
+        let weird = chat_worktree_name("", None);
+        assert_eq!(weird, chat_worktree_name("", None));
+        assert!(!weird.is_empty());
+        assert!(
+            chat_worktree_name("a/b c", None)
+                .chars()
+                .all(|c| { c.is_ascii_alphanumeric() || c == '-' })
+        );
+    }
 
     #[test]
     fn fuzzy_score_matches_a_path_subsequence() {

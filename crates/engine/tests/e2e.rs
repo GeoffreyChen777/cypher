@@ -37,6 +37,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     }
 }
 
@@ -570,10 +571,7 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
     // Give the drain a moment: the dead command must be terminalized — no
     // user entry or run can be recovered from the original consumed attempt.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        entries(&core).is_empty(),
-        "dead command must not execute"
-    );
+    assert!(entries(&core).is_empty(), "dead command must not execute");
     assert_eq!(
         command_status(&core, "cmd-crashed"),
         Some((
@@ -1712,6 +1710,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         attachments: vec![path],
         resume: None,
+        worktree: None,
     };
     core.doc_host
         .queue_command(

@@ -172,6 +172,8 @@ struct DocHostInner {
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
     workspace: OnceLock<WorkspaceHost>,
+    /// Worktree materialization for Run commands (see `set_repos`).
+    repos: OnceLock<crate::repos::Repos>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -200,10 +202,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn same_message_identity(
-    left: &SessionCommandPayload,
-    right: &SessionCommandPayload,
-) -> bool {
+fn same_message_identity(left: &SessionCommandPayload, right: &SessionCommandPayload) -> bool {
     match (left, right) {
         (
             SessionCommandPayload::Run {
@@ -430,6 +429,7 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
+                repos: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
@@ -524,6 +524,12 @@ impl DocHost {
     pub fn retirement_probe(&self) -> Box<dyn Fn() -> bool + Send + Sync> {
         let weak = Arc::downgrade(&self.inner);
         Box::new(move || weak.upgrade().is_none())
+    }
+
+    /// Wire the repos engine (engine assembly) — worktree materialization for
+    /// Run commands carrying a [`cypher_proto::WorktreeSpec`].
+    pub fn set_repos(&self, repos: crate::repos::Repos) {
+        let _ = self.inner.repos.set(repos);
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -1985,10 +1991,14 @@ impl DocHost {
             payload: old.payload,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now,
-            based_on: handle.doc.read_entries()?.last().map(|message| CommandBasedOn {
-                turn_id: Some(message.id.clone()),
-                frontier: None,
-            }),
+            based_on: handle
+                .doc
+                .read_entries()?
+                .last()
+                .map(|message| CommandBasedOn {
+                    turn_id: Some(message.id.clone()),
+                    frontier: None,
+                }),
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
@@ -2350,12 +2360,53 @@ impl DocHost {
                 message_id,
                 agent_prompt,
             } => {
+                let mut request = request.clone();
+                // Worktree directive (WorktreeSpec): materialize on THIS host at
+                // drain time — the durable command plane replaces the sender's
+                // old blocking CreateWorktree relay RPC, whose lost reply wedged
+                // the composer on "Sending…" while the run proceeded anyway.
+                // `take()` resolves the request before dispatch, so the journal
+                // and steer→new-turn fallbacks reuse the created path instead of
+                // minting another checkout. Creation failure Rejects the command
+                // — a request for a new worktree never silently runs in the base
+                // checkout.
+                let fresh_worktree = match request.worktree.take() {
+                    Some(spec) => {
+                        let (cwd, fresh) = self
+                            .materialize_worktree(chat_id, &spec)
+                            .await
+                            .map_err(|err| {
+                                EngineError::Other(format!("worktree create failed: {err}"))
+                            })?;
+                        request.cwd = cwd;
+                        fresh
+                    }
+                    None => None,
+                };
                 // Claim-on-first-command: a run for a chat with no workspace row
                 // creates the row under our device id (we are about to host it).
                 if let Some(ws) = self.workspace() {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
+                    // A pre-existing row (the client's createChat raced ahead)
+                    // still carries the repo folder — repoint it at the fresh
+                    // worktree, and stamp the actual `cypher/<name>` branch and
+                    // checkout identity so the footer, title-rename flow, and
+                    // diff grouping see the real checkout.
+                    if let Some(wt) = &fresh_worktree {
+                        if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
+                            tracing::warn!(chat = %chat_id, error = %err, "worktree cwd stamp failed");
+                        }
+                        if let Err(err) = ws.set_chat_branch(chat_id, &wt.branch) {
+                            tracing::warn!(chat = %chat_id, error = %err, "worktree branch stamp failed");
+                        }
+                        if let Some(checkout_id) = &wt.checkout_id
+                            && let Err(err) = ws.set_chat_checkout(chat_id, checkout_id)
+                        {
+                            tracing::warn!(chat = %chat_id, error = %err, "worktree checkout stamp failed");
+                        }
+                    }
                 }
-                let harness = self.harness_for_request(chat_id, request);
+                let harness = self.harness_for_request(chat_id, &request);
                 // A row with no config renders no harness glyph (and every
                 // later dispatch falls back to the engine default), so stamp
                 // what this run actually executes with. Claimed rows and
@@ -2379,7 +2430,7 @@ impl DocHost {
                     .dispatch_augmented(
                         chat_id,
                         harness,
-                        request.clone(),
+                        request,
                         agent_prompt.clone(),
                         Some(message_id.clone()),
                     )
@@ -2511,6 +2562,59 @@ impl DocHost {
         }
     }
 
+    /// Create (or reuse) the isolated worktree a Run's
+    /// [`cypher_proto::WorktreeSpec`] asks for, returning the resolved cwd
+    /// plus the fresh worktree when one was actually created. Reuse guard: a
+    /// chat whose row already points inside a linked worktree of the same
+    /// repo keeps it — a duplicate Run (client retry after a lost ack, ledger
+    /// reset) must not mint a second checkout.
+    async fn materialize_worktree(
+        &self,
+        chat_id: &str,
+        spec: &cypher_proto::WorktreeSpec,
+    ) -> Result<(String, Option<cypher_proto::Worktree>), EngineError> {
+        let repos = self
+            .inner
+            .repos
+            .get()
+            .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
+        // Reuse: the chat already runs inside a linked worktree of this repo.
+        if let Some(ws) = self.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(cwd) = chat.cwd
+            && cwd != spec.repo_path
+            && repos
+                .workspace_checkout(
+                    std::path::Path::new(&spec.repo_path),
+                    std::path::Path::new(&cwd),
+                )
+                .await
+                .is_some()
+        {
+            tracing::info!(
+                chat = %chat_id,
+                cwd = %cwd,
+                "worktree spec: reusing the chat's existing worktree"
+            );
+            return Ok((cwd, None));
+        }
+        let worktree = repos
+            .ensure_chat_worktree(
+                std::path::Path::new(&spec.repo_path),
+                &spec.base_ref,
+                chat_id,
+                spec.name_hint.as_deref(),
+            )
+            .await?;
+        tracing::info!(
+            chat = %chat_id,
+            path = %worktree.path,
+            branch = %worktree.branch,
+            "worktree materialized for run"
+        );
+        Ok((worktree.path.clone(), Some(worktree)))
+    }
+
     /// A steer-turned-run with no in-process `last_request` (engine restarted
     /// since the last turn): rebuild the run config from the chat's workspace
     /// row — cwd from the row, model/reasoning/options/sandbox from its config
@@ -2547,6 +2651,7 @@ impl DocHost {
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
+            worktree: None,
         })
     }
 

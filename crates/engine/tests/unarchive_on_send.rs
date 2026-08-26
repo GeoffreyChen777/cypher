@@ -110,6 +110,7 @@ fn run_payload(message_id: &str) -> SessionCommandPayload {
             auto_approve: true,
             attachments: Vec::new(),
             resume: None,
+            worktree: None,
         },
         message_id: message_id.into(),
 
