@@ -584,6 +584,26 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
     );
     assert!(core.sessions.session_status(CHAT).is_none());
 
+    // A retry mints a fresh command identity but keeps the logical user
+    // message id, allowing the executor to dedupe the transcript entry.
+    let retry_id = core
+        .doc_host
+        .retry_command(CHAT, "cmd-crashed")
+        .expect("dead command can be retried");
+    assert_ne!(retry_id, "cmd-crashed");
+    wait_for(
+        || {
+            command_status(&core, &retry_id)
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Applied)
+        },
+        "retried command applied",
+    )
+    .await;
+    assert!(
+        entries(&core).iter().any(|entry| entry.id == "m-x"),
+        "retry preserves the logical user message id"
+    );
+
     // Direct ledger-evaluation check: re-evaluating a processed command = Skip.
     let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
     let commands = handle.doc().read_commands().unwrap();

@@ -200,6 +200,33 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn same_message_identity(
+    left: &SessionCommandPayload,
+    right: &SessionCommandPayload,
+) -> bool {
+    match (left, right) {
+        (
+            SessionCommandPayload::Run {
+                message_id: left, ..
+            },
+            SessionCommandPayload::Run {
+                message_id: right, ..
+            },
+        ) => left == right,
+        (
+            SessionCommandPayload::Steer {
+                message_id: Some(left),
+                ..
+            },
+            SessionCommandPayload::Steer {
+                message_id: Some(right),
+                ..
+            },
+        ) => left == right,
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct DocHost {
     inner: Arc<DocHostInner>,
@@ -1909,6 +1936,67 @@ impl DocHost {
         // for any other reason still executes it).
         self.nudge_remote_host(chat_id);
         Ok(id)
+    }
+
+    /// Re-issue a failed or expired message command as a fresh durable
+    /// attempt. The logical message id remains stable so the executor's
+    /// idempotent user-entry write cannot duplicate the transcript, while the
+    /// command id is new so the processed ledger does not suppress the retry.
+    pub fn retry_command(&self, chat_id: &str, command_id: &str) -> Result<String, EngineError> {
+        let handle = self.open(chat_id)?;
+        let commands = handle.doc.read_commands()?;
+        let old = commands
+            .iter()
+            .find(|command| command.id == command_id)
+            .cloned()
+            .ok_or_else(|| EngineError::Other("command not found".into()))?;
+        if !matches!(
+            old.status,
+            SessionCommandStatus::Rejected | SessionCommandStatus::Expired
+        ) {
+            return Err(EngineError::Other(
+                "only failed or expired commands can be retried".into(),
+            ));
+        }
+        if !matches!(
+            &old.payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        ) {
+            return Err(EngineError::Other(
+                "only message commands can be retried".into(),
+            ));
+        }
+        let has_live_attempt = |candidate: &SessionCommandEntry| {
+            commands.iter().any(|other| {
+                other.id != candidate.id
+                    && other.status == SessionCommandStatus::Pending
+                    && !self.inner.store.is_processed(&other.id).unwrap_or(false)
+                    && same_message_identity(&other.payload, &candidate.payload)
+            })
+        };
+        if has_live_attempt(&old) {
+            return Err(EngineError::Other(
+                "a retry for this message is already pending".into(),
+            ));
+        }
+        let now = now_ms();
+        let retry = SessionCommandEntry {
+            id: new_id(),
+            payload: old.payload,
+            issued_by: self.inner.config.device_id.clone(),
+            issued_at: now,
+            based_on: handle.doc.read_entries()?.last().map(|message| CommandBasedOn {
+                turn_id: Some(message.id.clone()),
+                frontier: None,
+            }),
+            expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        let retry_id = retry.id.clone();
+        handle.doc.queue_command(&retry)?;
+        self.nudge_remote_host(chat_id);
+        Ok(retry_id)
     }
 
     /// POST `{edge}/device/{host}/nudge {chatId}` when the chat's workspace row names

@@ -40,6 +40,9 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
+    /// Re-issue a failed/expired durable message command with a fresh command
+    /// id while preserving its logical message identity.
+    pub const RETRY_COMMAND: &str = "RetryCommand";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Nudge every open room client to verify liveness NOW (window focus,
     /// app foregrounded). No params; IPC-only. Each room ignores the hint

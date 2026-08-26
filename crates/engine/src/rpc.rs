@@ -108,6 +108,13 @@ struct QueueCommandParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RetryCommandParams {
+    chat_id: String,
+    command_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RepoPathParams {
     /// `repoPath` per §3.5 (the §2.1 shorthand `repo` is accepted as an alias).
     #[serde(alias = "repo")]
@@ -1109,6 +1116,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
+            | methods::RETRY_COMMAND
             | methods::WATCH_DOC_MESSAGES
             // Repos/worktrees/folders are device-local filesystem state.
             | methods::LIST_REPOS
@@ -1421,6 +1429,14 @@ impl RpcService for EngineRpc {
                 let command_id = self
                     .doc_host
                     .queue_command(&p.chat_id, p.command)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "commandId": command_id }))
+            }
+            methods::RETRY_COMMAND => {
+                let p: RetryCommandParams = parse_params(params)?;
+                let command_id = self
+                    .doc_host
+                    .retry_command(&p.chat_id, &p.command_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
@@ -2254,6 +2270,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::RETRY_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::FETCH_ALL));
     }
