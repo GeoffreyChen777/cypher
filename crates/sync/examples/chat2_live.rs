@@ -39,11 +39,14 @@ impl ChatDocSink for DocSink {
     }
     fn contains_frontier(&self, frontier: &[u8]) -> bool {
         if frontier.is_empty() {
-            return true;
+            return false;
         }
         let Ok(vv) = VersionVector::decode(frontier) else {
             return false;
         };
+        if vv.is_empty() {
+            return false;
+        }
         self.doc.lock().unwrap().oplog_vv().includes_vv(&vv)
     }
     fn advance_cursor(&self, cursor: u64) {

@@ -720,3 +720,134 @@ async fn seeded_at_zero_room_fetches_the_checkpoint() {
     );
     client.shutdown().await;
 }
+
+// ── row-gap contiguity + repair ────────────────────────────────────────────
+
+/// A live broadcast can outrun the backfill during a join, delivering seq N
+/// while seq N-1 was never received. The cursor must hold at the last
+/// contiguous sequence and request a bounded repair instead of skipping the
+/// hole.
+#[tokio::test(start_paused = true)]
+async fn live_row_gap_holds_cursor_and_repairs() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+
+    let server = tokio::spawn(async move {
+        let after = serve_join(
+            &mut end,
+            serde_json::json!({"headSeq": 1, "seqFloor": 0, "checkpointSeq": 0,
+                "checkpointSize": 0, "rowCount": 1, "rowBytes": 32}),
+            &[],
+            vec![(1, "dev-b", vec![0x01])],
+            false,
+        )
+        .await;
+        assert_eq!(after, 0);
+
+        // Live frame with a hole: seq 3 arrives, seq 2 did not.
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq": 3, "device": "dev-b", "batchId": "b3"}),
+            &[0x03],
+        )
+        .await;
+        let req = expect_kind(&mut end, frame_type::ROWS_REQ).await;
+        assert_eq!(
+            req.header["after"].as_u64().unwrap(),
+            1,
+            "repair starts at the honest cursor"
+        );
+        for (seq, bytes) in [(2u64, vec![0x02u8]), (3, vec![0x03])] {
+            send(
+                &end,
+                frame_type::ROW,
+                serde_json::json!({"seq": seq, "device": "dev-b", "batchId": format!("b{seq}")}),
+                &bytes,
+            )
+            .await;
+        }
+        send(
+            &end,
+            frame_type::ROWS_DONE,
+            serde_json::json!({"headSeq": 3}),
+            &[],
+        )
+        .await;
+        end
+    });
+
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .expect("join succeeds");
+    let _keep = server.await.unwrap();
+
+    assert_eq!(client.stats().cursor, 3);
+    assert_eq!(
+        *lock(&sink.rows),
+        vec![
+            (vec![0x01], 1),
+            (vec![0x03], 1),
+            (vec![0x02], 2),
+            (vec![0x03], 3),
+        ],
+        "cursor held through the gap and walked by the repair"
+    );
+    client.shutdown().await;
+}
+
+/// A persisted cursor over a checkpoint-less room gets amnesty to zero on
+/// the first join. This heals replicas whose prior cursor advanced while
+/// Loro silently parked causal operations.
+#[tokio::test(start_paused = true)]
+async fn checkpointless_amnesty_refetches_from_zero() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+
+    let server = tokio::spawn(async move {
+        let after = serve_join(
+            &mut end,
+            serde_json::json!({"headSeq": 3, "seqFloor": 0, "checkpointSeq": 0,
+                "checkpointSize": 0, "rowCount": 3, "rowBytes": 96}),
+            &[],
+            vec![
+                (1, "dev-b", vec![0x01]),
+                (2, "dev-b", vec![0x02]),
+                (3, "dev-b", vec![0x03]),
+            ],
+            false,
+        )
+        .await;
+        assert_eq!(after, 0, "amnesty must refetch the whole log");
+        end
+    });
+
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        3,
+        ChatTuning::default(),
+    )
+    .await
+    .expect("join succeeds");
+    let _keep = server.await.unwrap();
+
+    assert_eq!(
+        *lock(&sink.rows),
+        vec![(vec![0x01], 1), (vec![0x02], 2), (vec![0x03], 3)],
+        "all rows re-imported from zero"
+    );
+    assert_eq!(client.stats().cursor, 3);
+    client.shutdown().await;
+}

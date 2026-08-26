@@ -99,10 +99,15 @@ impl ChatDocSink for EngineChatSink {
 
     fn contains_frontier(&self, frontier: &[u8]) -> bool {
         let Some(doc) = self.doc.upgrade() else {
-            return true; // evicted: claim contained so the client idles, not refetches
+            // Eviction ends the doc's live handle; the doc host will reopen it
+            // and establish a fresh sink/client. Do not spin a checkpoint fetch
+            // that can never be applied through this dead weak reference.
+            return true;
         };
         if frontier.is_empty() {
-            return true;
+            // Empty is not a proof of containment. In particular, a fresh
+            // room may advertise a real checkpoint with an empty frontier.
+            return false;
         }
         let Ok(vv) = loro::VersionVector::decode(frontier) else {
             // Unreadable frontier → claim NOT contained: the client then
@@ -110,6 +115,11 @@ impl ChatDocSink for EngineChatSink {
             // merge), never silently skips history.
             return false;
         };
+        // A decodable but empty VV is the encoded-empty Frontier case. It is
+        // a vacuous claim just like a zero-length payload.
+        if vv.is_empty() {
+            return false;
+        }
         doc.doc().oplog_vv().includes_vv(&vv)
     }
 
@@ -216,5 +226,55 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
                 "checkpoint fetch exhausted resume attempts".into(),
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::*;
+
+    fn test_sink(name: &str) -> (EngineChatSink, Arc<SessionDoc>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "cypher-frontier-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(DocsStore::open(&dir).expect("store opens"));
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        (EngineChatSink::new(&doc, store, name), doc, dir)
+    }
+
+    #[test]
+    fn empty_frontier_is_not_contained() {
+        let (sink, _doc, dir) = test_sink("empty");
+        assert!(
+            !sink.contains_frontier(&[]),
+            "an empty frontier cannot prove checkpoint containment"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn encoded_empty_frontier_is_not_contained() {
+        let (sink, _doc, dir) = test_sink("encoded-empty");
+        let encoded_empty = loro::VersionVector::default().encode();
+        assert!(
+            !sink.contains_frontier(&encoded_empty),
+            "an encoded-empty frontier is a vacuous claim"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_empty_contained_frontier_is_contained() {
+        let (sink, doc, dir) = test_sink("contained");
+        doc.doc()
+            .get_map("meta")
+            .insert("k", "v")
+            .expect("insert");
+        doc.doc().commit();
+        let vv = doc.doc().oplog_vv().encode();
+        assert!(sink.contains_frontier(&vv));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

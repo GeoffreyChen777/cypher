@@ -268,6 +268,10 @@ struct Shared {
     /// past N≈25), and each ack immediately re-arms the clock until the
     /// queue empties.
     quota_blocked: bool,
+    /// A row or acknowledgement arrived beyond `cursor + 1`. The cursor is
+    /// a claim that every row up to it is reflected in the local doc, so a
+    /// gap must be repaired rather than skipped.
+    gap_repair: bool,
 }
 
 /// `cypher sync` surface (plan: cursor / headSeq / floorLag / pendingPushes).
@@ -399,6 +403,7 @@ impl ChatClient {
             presence_rx,
             flags: flags.clone(),
             resumed: false,
+            cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -565,6 +570,9 @@ struct Actor {
     /// continuity and skip them (the reconnect-after-offline-work path the
     /// spec optimizes).
     resumed: bool,
+    /// Once per client instance, refetch rows from the checkpoint (or zero)
+    /// when a restored cursor may have advanced over parked Loro operations.
+    cursor_amnesty_done: std::sync::atomic::AtomicBool,
 }
 
 enum SessionEnd {
@@ -688,11 +696,11 @@ impl Actor {
         use std::sync::atomic::Ordering::Relaxed;
 
         // ── hello / state ───────────────────────────────────────────────────
-        let cursor = lock(&self.shared).cursor;
+        let hello_cursor = lock(&self.shared).cursor;
         let hello = wire::encode(
             frame_type::HELLO,
             &wire::HelloHeader {
-                cursor,
+                cursor: hello_cursor,
                 device: &self.device_id,
             },
             &[],
@@ -724,6 +732,30 @@ impl Actor {
             return SessionEnd::Reconnect;
         };
         lock(&self.shared).server = Some(state);
+
+        // Cursor amnesty, once per client: a persisted cursor above the
+        // checkpoint may be lying about what the local Loro document
+        // materialized. Clamp it before planning catch-up so rows are
+        // re-read. With no checkpoint, zero is the only honest lower bound.
+        // Re-imports are idempotent and the room's compaction policy bounds
+        // the amount of history normally revisited.
+        if !self.cursor_amnesty_done.swap(true, Relaxed) {
+            let clamp_to = if state.checkpoint_size > 0 {
+                state.checkpoint_seq
+            } else {
+                0
+            };
+            let mut shared = lock(&self.shared);
+            if shared.cursor > clamp_to {
+                tracing::info!(
+                    from = shared.cursor,
+                    to = clamp_to,
+                    "chat2: cursor amnesty — refetching rows the doc may have parked"
+                );
+                shared.cursor = clamp_to;
+            }
+        }
+        let cursor = lock(&self.shared).cursor;
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
             self.flags.rejoins.fetch_add(1, Relaxed);
@@ -734,10 +766,10 @@ impl Actor {
         // treats the cursor as fresh; SURFACE the signal too — the host's
         // re-seed recovery (chat-room.ts /reset) hangs off this event, and
         // masking it was exactly how the s2 wedge class stayed invisible.
-        if cursor > state.head_seq {
+        if hello_cursor > state.head_seq {
             self.flags.server_resets.fetch_add(1, Relaxed);
             tracing::warn!(
-                cursor,
+                cursor = hello_cursor,
                 head_seq = state.head_seq,
                 "chat2: server lost state (headSeq < cursor) — treating as \
                  fresh; host should re-seed via checkpoint"
@@ -790,11 +822,11 @@ impl Actor {
                 after
             }
         };
-        // Clamp the persisted cursor into the room's honest range (server
-        // reset detection happened in plan_catch_up via after==0).
-        if after < cursor {
-            lock(&self.shared).cursor = after;
-        }
+        // The plan's `after` is the cursor for this backfill. It may move
+        // upward when a contained checkpoint covers an older cursor, or
+        // downward after a reset/amnesty. Keeping the old lower cursor would
+        // make the first row after the checkpoint look like a false gap.
+        lock(&self.shared).cursor = after;
         let rows_req = wire::encode(
             frame_type::ROWS_REQ,
             &wire::RowsReqHeader {
@@ -848,6 +880,15 @@ impl Actor {
         // ── steady state ────────────────────────────────────────────────────
         let mut last_frame = tokio::time::Instant::now();
         let mut probe_deadline: Option<tokio::time::Instant> = None;
+        // A live row can outrun the backfill and expose a hole immediately
+        // after joining. Repair it before waiting for ordinary traffic.
+        let mut gap_repairs = 0u32;
+        if !self
+            .maybe_repair_gap(&mut pipe, &mut gap_repairs)
+            .await
+        {
+            return SessionEnd::Reconnect;
+        }
         loop {
             let quiet_probe_at = last_frame + self.tuning.probe_quiet;
             let deadline_at = probe_deadline
@@ -867,6 +908,12 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     };
                     if !self.handle_frame(frame) {
+                        return SessionEnd::Reconnect;
+                    }
+                    if !self
+                        .maybe_repair_gap(&mut pipe, &mut gap_repairs)
+                        .await
+                    {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -922,6 +969,39 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Request rows from the last honest cursor after a row/ack gap. The
+    /// bound prevents a malformed or permanently truncated server log from
+    /// causing an infinite request loop; the next reconnect performs the
+    /// stronger full catch-up path.
+    async fn maybe_repair_gap(&self, pipe: &mut BinPipe, repairs: &mut u32) -> bool {
+        const MAX_GAP_REPAIRS_PER_SESSION: u32 = 3;
+        let (repair, after) = {
+            let mut shared = lock(&self.shared);
+            (std::mem::take(&mut shared.gap_repair), shared.cursor)
+        };
+        if !repair {
+            return true;
+        }
+        *repairs += 1;
+        if *repairs > MAX_GAP_REPAIRS_PER_SESSION {
+            tracing::warn!("chat2: gap repairs exhausted; redialing for a full catch-up");
+            return false;
+        }
+        tracing::info!(after, attempt = *repairs, "chat2: backfilling over a row gap");
+        let req = wire::encode(
+            frame_type::ROWS_REQ,
+            &wire::RowsReqHeader {
+                after,
+                // A repair must include own rows too: an ACK can identify an
+                // own row beyond the cursor while interleaved remote rows are
+                // still missing.
+                exclude_own: false,
+            },
+            &[],
+        );
+        pipe.tx.send(req).await.is_ok()
     }
 
     async fn send_probe(
@@ -993,10 +1073,24 @@ impl Actor {
                 // Own-device rows can still arrive (live relay of a racing
                 // second socket, or a server that ignored excludeOwn) — Loro
                 // re-import is a no-op; the cursor advance is what matters.
-                self.sink.apply_row(&frame.payload, row.seq);
-                let mut shared = lock(&self.shared);
-                shared.cursor = shared.cursor.max(row.seq);
-                drop(shared);
+                // A row beyond cursor+1 proves only that the server has it,
+                // not that this client received the missing rows. Keep the
+                // cursor honest and ask the session loop to repair the gap.
+                let effective = {
+                    let mut shared = lock(&self.shared);
+                    if row.seq > shared.cursor + 1 {
+                        shared.gap_repair = true;
+                        tracing::warn!(
+                            seq = row.seq,
+                            cursor = shared.cursor,
+                            "chat2: row gap detected; holding cursor"
+                        );
+                    } else {
+                        shared.cursor = shared.cursor.max(row.seq);
+                    }
+                    shared.cursor
+                };
+                self.sink.apply_row(&frame.payload, effective);
                 let _ = self.events.send(ChatEvent::Applied);
             }
             frame_type::ACK => {
@@ -1005,7 +1099,18 @@ impl Actor {
                 };
                 let mut shared = lock(&self.shared);
                 shared.pending.retain(|p| p.batch_id != ack.batch_id);
-                shared.cursor = shared.cursor.max(ack.seq);
+                // An ACK proves the server accepted our row at ack.seq; it
+                // does not prove that interleaved remote rows reached us.
+                if ack.seq > shared.cursor + 1 {
+                    shared.gap_repair = true;
+                    tracing::warn!(
+                        seq = ack.seq,
+                        cursor = shared.cursor,
+                        "chat2: ack gap detected; holding cursor"
+                    );
+                } else {
+                    shared.cursor = shared.cursor.max(ack.seq);
+                }
                 let cursor = shared.cursor;
                 // Quota drain: each grant immediately probes the next head
                 // batch (one-per-grant, never a full-queue burst).
