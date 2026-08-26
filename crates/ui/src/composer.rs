@@ -3753,6 +3753,7 @@ impl ComposerSideChat {
             auto_approve: false,
             resume: None,
             attachments,
+            pending_attachments: Vec::new(),
             worktree: None,
         }
     }
@@ -6236,19 +6237,32 @@ impl Composer {
                     }
                 }
 
-                // Stage every attachment on the host device (sequential — the
-                // chunks share one channel), then thread the refs into the
-                // prompt text (`with_attachments`, the persisted transport)
-                // and the paths onto the Run request (inline image blocks).
+                // Queue-first sends (a Main-transport Run with staged
+                // attachments) queue the durable command BEFORE any bytes
+                // upload: a lost relay frame can't wedge the send and the
+                // user's Run intent survives any upload hiccup. Those uploads
+                // happen after the queue in the Main branch below. Steer
+                // (refs ride the prompt text only — no separate attachments
+                // field) and Side Chat (non-durable RPC) keep the pre-upload
+                // path. Attachment-less sends have nothing to upload here.
+                let queue_first_upload = matches!(&transport, ComposerTransport::Main)
+                    && !steer_cmd
+                    && !staged.is_empty();
                 let mut content = text.clone();
                 let mut attachment_paths: Vec<String> = Vec::new();
-                if !staged.is_empty() {
+                if !staged.is_empty() && !queue_first_upload {
                     for att in &staged {
+                        // Legacy pre-upload path (Steer / Side Chat): the
+                        // upload id is internal-only (no durable command
+                        // references it) and no chat seal is needed.
+                        let upload_id = uuid::Uuid::new_v4().to_string();
                         match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
                             host_device_id.as_deref(),
                             att,
+                            &upload_id,
+                            None,
                         )
                         .await
                         {
@@ -6357,14 +6371,164 @@ impl Composer {
 
                 match &transport {
                     ComposerTransport::Main => {
-                        let command = if steer_cmd {
-                            SessionCommandPayload::Steer {
+                        if steer_cmd {
+                            // Steer: the pre-upload path already embedded the
+                            // attachment refs in `content` (Steer carries no
+                            // separate attachments field).
+                            let command = SessionCommandPayload::Steer {
                                 prompt: content.clone(),
                                 message_id: Some(message_id.clone()),
                                 agent_prompt: agent_prompt.clone(),
+                            };
+                            let command = serde_json::to_value(&command)
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                            let params = serde_json::json!({
+                                "chatId": chat_id,
+                                "command": command
+                            });
+                            engine
+                                .client()
+                                .call(methods::QUEUE_COMMAND, params)
+                                .await
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                        } else if queue_first_upload {
+                            // Queue-first Run: the durable command carries the
+                            // Run intent + PENDING attachment descriptors
+                            // (never the bytes, never pending refs in the
+                            // transcript — the prompt is the bare text). The
+                            // host holds the command at WaitForAttachments
+                            // until every upload is sealed, then resolves the
+                            // ids to final paths and appends the refs trailer.
+                            let pending_attachments: Vec<cypher_proto::PendingAttachment> =
+                                staged
+                                    .iter()
+                                    .map(|att| cypher_proto::PendingAttachment {
+                                        upload_id: uuid::Uuid::new_v4().to_string(),
+                                        file_name: att.name.clone(),
+                                    })
+                                    .collect();
+                            let command = SessionCommandPayload::Run {
+                                request: RunRequest {
+                                    prompt: content.clone(),
+                                    harness: resolved.harness,
+                                    model: resolved.model.clone(),
+                                    reasoning: resolved.reasoning,
+                                    model_options: resolved.model_options.clone(),
+                                    cwd,
+                                    sandbox: SandboxLevel::WorkspaceWrite,
+                                    auto_approve: false,
+                                    resume: None,
+                                    attachments: Vec::new(),
+                                    pending_attachments: pending_attachments.clone(),
+                                    worktree: run_worktree,
+                                },
+                                message_id: message_id.clone(),
+                                agent_prompt: agent_prompt.clone(),
+                            };
+                            let command = serde_json::to_value(&command)
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                            let params = serde_json::json!({
+                                "chatId": chat_id,
+                                "command": command
+                            });
+                            // Queue FIRST — durable by construction. A queue
+                            // failure returns Err and the outer failure path
+                            // restores the draft/stash/comments (nothing was
+                            // uploaded yet).
+                            engine
+                                .client()
+                                .call(methods::QUEUE_COMMAND, params)
+                                .await
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                            // The command is durable — now stream the bytes.
+                            // Each UploadCommit seals against this chat so the
+                            // host's drain releases the Run. An upload failure
+                            // does NOT delete the durable command: the host's
+                            // attachment grace window eventually expires it
+                            // and the user can Retry. (The optimistic echo
+                            // stays, seeded from local bytes; once the host
+                            // rejects, the ledger's failed row takes over.)
+                            for (att, pending) in staged.iter().zip(&pending_attachments) {
+                                match attachments::upload_attachment(
+                                    &engine,
+                                    cx.background_executor(),
+                                    host_device_id.as_deref(),
+                                    att,
+                                    &pending.upload_id,
+                                    Some(&chat_id),
+                                )
+                                .await
+                                {
+                                    Ok(path) => attachment_paths.push(path),
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            name = %att.name,
+                                            error = %err,
+                                            "post-queue attachment upload failed"
+                                        );
+                                        this.update(cx, |composer, cx| {
+                                            composer.sending = false;
+                                            composer.failure = Some(
+                                                "Attachments couldn't finish uploading — the message stays queued but the host will fail it unless the upload completes. Retry once the device is reachable."
+                                                    .into(),
+                                            );
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                        return Ok(());
+                                    }
+                                }
                             }
+                            // Seed the transcript cache from local bytes and
+                            // refresh the echo with the REAL refs (the queued
+                            // command's bare prompt is replaced in the doc by
+                            // the host's entry carrying the trailer).
+                            let seed_device =
+                                host_device_id.clone().unwrap_or_else(|| device_id.clone());
+                            for (path, att) in attachment_paths.iter().zip(&staged) {
+                                attachments::seed_attachment(
+                                    &seed_device,
+                                    path,
+                                    &att.name,
+                                    att.image.clone(),
+                                );
+                                if seed_device != device_id {
+                                    attachments::seed_attachment(
+                                        &device_id,
+                                        path,
+                                        &att.name,
+                                        att.image.clone(),
+                                    );
+                                }
+                            }
+                            let refreshed = SessionMessageEntry {
+                                id: message_id.clone(),
+                                role: cypher_doc::MessageRole::User,
+                                parts: vec![MessagePart::Text {
+                                    id: "t0".into(),
+                                    text: attachments::with_attachments(
+                                        &text,
+                                        &attachment_paths,
+                                    ),
+                                }],
+                                created_at,
+                                device_id: "local".into(),
+                                status: None,
+                                continuation_of: None,
+                            };
+                            let echo_chat_id = chat_id.clone();
+                            this.update(cx, |composer, cx| {
+                                composer.state.update(cx, |s, cx| {
+                                    s.remove_echo(&echo_chat_id, &message_id);
+                                    s.push_echo(&echo_chat_id, refreshed);
+                                    cx.notify();
+                                });
+                            })
+                            .ok();
                         } else {
-                            SessionCommandPayload::Run {
+                            // Plain Run (no staged attachments): prompt is the
+                            // bare text, no pending ids.
+                            let command = SessionCommandPayload::Run {
                                 request: RunRequest {
                                     prompt: content.clone(),
                                     harness: resolved.harness,
@@ -6376,21 +6540,24 @@ impl Composer {
                                     auto_approve: false,
                                     resume: None,
                                     attachments: attachment_paths,
+                                    pending_attachments: Vec::new(),
                                     worktree: run_worktree,
                                 },
                                 message_id: message_id.clone(),
                                 agent_prompt: agent_prompt.clone(),
-                            }
-                        };
-                        let command = serde_json::to_value(&command)
-                            .map_err(|e| format!("Send failed: {e}"))?;
-                        let params =
-                            serde_json::json!({ "chatId": chat_id, "command": command });
-                        engine
-                            .client()
-                            .call(methods::QUEUE_COMMAND, params)
-                            .await
-                            .map_err(|e| format!("Send failed: {e}"))?;
+                            };
+                            let command = serde_json::to_value(&command)
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                            let params = serde_json::json!({
+                                "chatId": chat_id,
+                                "command": command
+                            });
+                            engine
+                                .client()
+                                .call(methods::QUEUE_COMMAND, params)
+                                .await
+                                .map_err(|e| format!("Send failed: {e}"))?;
+                        }
                     }
                     ComposerTransport::SideChat(side) => {
                         // Send AND live steer both ride `SendSideChat` with the

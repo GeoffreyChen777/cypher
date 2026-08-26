@@ -36,6 +36,7 @@ fn run_request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     }
@@ -617,6 +618,7 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
             entries: &commands,
             current_turn_id: None,
             turn_is_past: &never_past,
+            sealed_attachment_path: &|_| None,
         },
     );
     assert_eq!(verdict, cypher_doc::CommandDisposition::Skip);
@@ -1903,6 +1905,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
         attachments: vec![path],
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     };

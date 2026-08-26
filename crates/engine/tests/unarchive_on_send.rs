@@ -109,6 +109,7 @@ fn run_payload(message_id: &str) -> SessionCommandPayload {
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
             attachments: Vec::new(),
+            pending_attachments: Vec::new(),
             resume: None,
             worktree: None,
         },

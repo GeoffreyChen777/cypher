@@ -112,12 +112,36 @@ pub struct RunRequest {
     /// content blocks. Additive + serde-defaulted for wire compat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    /// Pending attachment descriptors queued BEFORE their bytes arrive: the
+    /// composer queues the Run first (durable — a lost frame can't wedge the
+    /// send), then streams the bytes and seals each upload against this chat.
+    /// The HOST holds the Run at WaitForAttachments until every upload id is
+    /// sealed in the doc's `sealedAttachments` map, then resolves this into
+    /// [`Self::attachments`] with the final paths and runs. Pending ids never
+    /// enter the transcript. Additive + serde-defaulted for wire compat — old
+    /// JSON without the field parses (and old hosts ignore it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attachments: Vec<PendingAttachment>,
     /// Host-side isolated-worktree creation (see [`WorktreeSpec`]): when set,
     /// the HOST materializes the worktree at command-drain time and runs there
     /// instead of `cwd`. Additive + serde-defaulted for wire compat — an old
     /// host ignores it and runs in `cwd` (the repo's main checkout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSpec>,
+}
+
+/// One attachment the composer intends to upload for a queued Run, referenced
+/// by the upload id the bytes will be committed under. The descriptor is what
+/// rides the durable command (never the bytes); the host matches it against
+/// the doc's sealed-attachments map before executing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAttachment {
+    /// The upload id the composer will `UploadCommit` under (and the host
+    /// seals against the chat).
+    pub upload_id: String,
+    /// Display file name (persisted beside the sealed path).
+    pub file_name: String,
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -476,11 +500,44 @@ mod tests {
         // Populated lists round-trip.
         let req = RunRequest {
             attachments: vec!["/tmp/a.png".into()],
+            pending_attachments: Vec::new(),
             ..req
         };
         let round: RunRequest =
             serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
         assert_eq!(round.attachments, vec!["/tmp/a.png".to_string()]);
+    }
+
+    #[test]
+    fn run_request_pending_attachments_default_and_round_trip() {
+        // Old-wire JSON without the field parses (additive compat)…
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let req: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(req.pending_attachments.is_empty());
+        // …and an empty list serializes away (old readers never see it).
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("pendingAttachments").is_none());
+        // Populated descriptors round-trip camelCased.
+        let req = RunRequest {
+            pending_attachments: vec![PendingAttachment {
+                upload_id: "up-1".into(),
+                file_name: "photo.png".into(),
+            }],
+            ..req
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            value["pendingAttachments"],
+            serde_json::json!([{ "uploadId": "up-1", "fileName": "photo.png" }])
+        );
+        let round: RunRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(round.pending_attachments[0].upload_id, "up-1");
+        assert_eq!(round.pending_attachments[0].file_name, "photo.png");
+        // Coexists with the final-path field (seal resolution target).
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null,"attachments":["/x/a.png"],"pendingAttachments":[{"uploadId":"up-2","fileName":"b.png"}]}"#;
+        let req: RunRequest = serde_json::from_str(old).unwrap();
+        assert_eq!(req.attachments, vec!["/x/a.png".to_string()]);
+        assert_eq!(req.pending_attachments.len(), 1);
     }
 
     #[test]

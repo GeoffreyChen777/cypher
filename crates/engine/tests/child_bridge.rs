@@ -823,6 +823,7 @@ async fn later_child_turn_has_no_messaging_channel() {
                     resume: None,
                     worktree: None,
                     attachments: Vec::new(),
+                    pending_attachments: Vec::new(),
                 },
                 message_id: String::new(),
 

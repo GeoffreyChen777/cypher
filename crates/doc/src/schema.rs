@@ -495,6 +495,67 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Seal one attachment against this chat: record the durable final path
+    /// (and display file name) for `upload_id` in the `sealedAttachments`
+    /// map. The seal is what unblocks a Run command whose `pending_attachments`
+    /// names this upload — the host writes it when the UploadCommit lands.
+    /// Additive container: docs that never seal anything simply don't carry it.
+    /// Idempotent: re-sealing the same upload id overwrites the entry.
+    pub fn seal_attachment(
+        &self,
+        upload_id: &str,
+        path: &str,
+        file_name: &str,
+    ) -> Result<(), DocError> {
+        let map = self.doc.get_map("sealedAttachments");
+        let entry = map.insert_container(upload_id, LoroMap::new())?;
+        entry.insert("path", path)?;
+        entry.insert("fileName", file_name)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// The sealed final path + display name for `upload_id`, if any.
+    pub fn sealed_attachment(&self, upload_id: &str) -> Result<Option<(String, String)>, DocError> {
+        let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+            self.doc.get_map("sealedAttachments").get(upload_id)
+        else {
+            return Ok(None);
+        };
+        let path = match entry.get("path") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+            _ => return Ok(None),
+        };
+        let file_name = match entry.get("fileName") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+            _ => String::new(),
+        };
+        Ok(Some((path, file_name)))
+    }
+
+    /// Every sealed attachment as `(upload_id, path, file_name)` — rebuild
+    /// copy and diagnostics.
+    pub fn sealed_attachments(&self) -> Result<Vec<(String, String, String)>, DocError> {
+        let mut out = Vec::new();
+        self.doc
+            .get_map("sealedAttachments")
+            .for_each(|key, value| {
+                let loro::ValueOrContainer::Container(loro::Container::Map(entry)) = value else {
+                    return;
+                };
+                let path = match entry.get("path") {
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                    _ => return,
+                };
+                let file_name = match entry.get("fileName") {
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                    _ => String::new(),
+                };
+                out.push((key.to_string(), path, file_name));
+            });
+        Ok(out)
+    }
+
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
         self.doc
@@ -1376,6 +1437,50 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].status, SessionCommandStatus::Applied);
         assert_eq!(commands[0].payload, entry.payload);
+    }
+
+    #[test]
+    fn sealed_attachments_round_trip_and_survive_snapshot() {
+        // A fresh doc (no container) reads empty — the container is additive.
+        let doc = SessionDoc::init("chat-1").unwrap();
+        assert!(doc.sealed_attachment("up-1").unwrap().is_none());
+        assert!(doc.sealed_attachments().unwrap().is_empty());
+
+        doc.seal_attachment("up-1", "/up/1-a.png", "a.png").unwrap();
+        doc.seal_attachment("up-2", "/up/2-b.png", "b.png").unwrap();
+        assert_eq!(
+            doc.sealed_attachment("up-1").unwrap(),
+            Some(("/up/1-a.png".into(), "a.png".into()))
+        );
+        let mut sealed = doc.sealed_attachments().unwrap();
+        sealed.sort();
+        assert_eq!(
+            sealed,
+            vec![
+                ("up-1".into(), "/up/1-a.png".into(), "a.png".into()),
+                ("up-2".into(), "/up/2-b.png".into(), "b.png".into()),
+            ]
+        );
+        // Re-sealing the same id is idempotent (overwrites in place).
+        doc.seal_attachment("up-1", "/up/1-c.png", "c.png").unwrap();
+        assert_eq!(
+            doc.sealed_attachment("up-1").unwrap(),
+            Some(("/up/1-c.png".into(), "c.png".into()))
+        );
+        assert_eq!(doc.sealed_attachments().unwrap().len(), 2);
+
+        // The container crosses an export/import snapshot intact.
+        let bytes = doc.export_snapshot().unwrap();
+        let restored = SessionDoc::from_doc({
+            let d = loro::LoroDoc::new();
+            d.import(&bytes).unwrap();
+            d
+        });
+        assert_eq!(
+            restored.sealed_attachment("up-1").unwrap(),
+            Some(("/up/1-c.png".into(), "c.png".into()))
+        );
+        assert_eq!(restored.sealed_attachments().unwrap().len(), 2);
     }
 
     #[test]

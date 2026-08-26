@@ -3882,7 +3882,12 @@ mod tests {
         assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
     }
 
-    fn run_command(id: &str, message_id: &str, issued_at: i64, status: SessionCommandStatus) -> SessionCommandEntry {
+    fn run_command(
+        id: &str,
+        message_id: &str,
+        issued_at: i64,
+        status: SessionCommandStatus,
+    ) -> SessionCommandEntry {
         SessionCommandEntry {
             id: id.into(),
             payload: SessionCommandPayload::Run {
@@ -3896,6 +3901,7 @@ mod tests {
                     sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
                     auto_approve: false,
                     attachments: Vec::new(),
+                    pending_attachments: Vec::new(),
                     resume: None,
                     worktree: None,
                 },
@@ -3918,15 +3924,24 @@ mod tests {
         assert_eq!(command_send_status(&[], "m1"), None);
         // Pending first attempt = Queued.
         let queued = run_command("c1", "m1", 1, SessionCommandStatus::Pending);
-        assert_eq!(command_send_status(&[queued.clone()], "m1"), Some(CommandSendStatus::Queued));
+        assert_eq!(
+            command_send_status(&[queued.clone()], "m1"),
+            Some(CommandSendStatus::Queued)
+        );
         // Applied is resolved — nothing for the UI to show.
         let applied = run_command("c1", "m1", 1, SessionCommandStatus::Applied);
         assert_eq!(command_send_status(&[applied], "m1"), None);
         // Rejected / Expired = Failed.
         let rejected = run_command("c1", "m1", 1, SessionCommandStatus::Rejected);
-        assert_eq!(command_send_status(&[rejected.clone()], "m1"), Some(CommandSendStatus::Failed));
+        assert_eq!(
+            command_send_status(&[rejected.clone()], "m1"),
+            Some(CommandSendStatus::Failed)
+        );
         let expired = run_command("c1", "m1", 1, SessionCommandStatus::Expired);
-        assert_eq!(command_send_status(&[expired], "m1"), Some(CommandSendStatus::Failed));
+        assert_eq!(
+            command_send_status(&[expired], "m1"),
+            Some(CommandSendStatus::Failed)
+        );
         // A live pending attempt AFTER a failure = Retrying.
         let retry = run_command("c2", "m1", 2, SessionCommandStatus::Pending);
         assert_eq!(
@@ -3942,7 +3957,13 @@ mod tests {
         let rejected_again = run_command("c3", "m1", 3, SessionCommandStatus::Rejected);
         let expired_other = run_command("c4", "m2", 4, SessionCommandStatus::Expired);
         let applied_other = run_command("c5", "m3", 5, SessionCommandStatus::Applied);
-        let commands = vec![rejected, retry_pending, rejected_again, expired_other, applied_other];
+        let commands = vec![
+            rejected,
+            retry_pending,
+            rejected_again,
+            expired_other,
+            applied_other,
+        ];
         let failed = failed_commands(&commands);
         // m1: the retry is in flight (skip); m3 applied (skip); m2: expired.
         assert_eq!(failed.len(), 1);
@@ -3969,11 +3990,21 @@ mod tests {
         s.selected_chat = Some("c".into());
         s.begin_pending_send("c", "m1", now);
         // A fresh pending command keeps the echo pending + the overlay.
-        s.apply_commands(vec![run_command("c1", "m1", 1, SessionCommandStatus::Pending)]);
+        s.apply_commands(vec![run_command(
+            "c1",
+            "m1",
+            1,
+            SessionCommandStatus::Pending,
+        )]);
         assert!(s.echo_pending("m1"));
         assert!(s.send_pending("c", now));
         // The durable Rejected ends both: full-opacity echo + truthful dot.
-        s.apply_commands(vec![run_command("c1", "m1", 1, SessionCommandStatus::Rejected)]);
+        s.apply_commands(vec![run_command(
+            "c1",
+            "m1",
+            1,
+            SessionCommandStatus::Rejected,
+        )]);
         assert!(!s.echo_pending("m1"));
         assert!(!s.send_pending("c", now));
         assert_eq!(s.failed_commands().len(), 1);

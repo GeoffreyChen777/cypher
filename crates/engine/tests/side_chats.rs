@@ -195,6 +195,7 @@ async fn seed_parent(core: &EngineCore) {
                 resume: None,
                 worktree: None,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
             },
             Some("m1".into()),
         )

@@ -43,7 +43,7 @@ pub use diff_sync::{
     capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff, merge_base,
     read_diff_file_text, snapshot_tree, working_diff_base,
 };
-pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig, attachment_refs_trailer};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use registry::{

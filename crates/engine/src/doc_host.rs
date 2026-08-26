@@ -1946,6 +1946,35 @@ impl DocHost {
         }
     }
 
+    /// Host-side seal of one upload against a chat (the UploadCommit handler):
+    /// write the durable final path into the doc's `sealedAttachments` map.
+    /// The doc commit re-triggers the chat's drain, releasing any Run whose
+    /// `pending_attachments` names this upload id — the queue-first ordering's
+    /// release valve. Best-effort: a chat this device doesn't host isn't open
+    /// here (the uploader targeted the host, so this only happens when a chat
+    /// moved hosts mid-upload); the id simply stays unsealed and the Run's
+    /// grace window resolves it.
+    pub fn seal_attachment(&self, chat_id: &str, upload_id: &str, path: &str, file_name: &str) {
+        if !self.is_host(chat_id) {
+            tracing::warn!(
+                chat = %chat_id,
+                upload_id,
+                "attachment seal skipped: chat not hosted here"
+            );
+            return;
+        }
+        let handle = match self.open(chat_id) {
+            Ok(handle) => handle,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, upload_id, error = %err, "seal: open failed");
+                return;
+            }
+        };
+        if let Err(err) = handle.doc.seal_attachment(upload_id, path, file_name) {
+            tracing::warn!(chat = %chat_id, upload_id, error = %err, "seal write failed");
+        }
+    }
+
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
     /// construction — the change subscription kicks the drain, so a local host executes
     /// immediately and an offline doc simply holds the entry until it syncs.
@@ -2335,6 +2364,14 @@ impl DocHost {
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+            let sealed_path = |upload_id: &str| {
+                handle
+                    .doc
+                    .sealed_attachment(upload_id)
+                    .ok()
+                    .flatten()
+                    .map(|(path, _)| path)
+            };
             let disposition = evaluate_command(
                 &entry,
                 &EvaluationContext {
@@ -2343,8 +2380,22 @@ impl DocHost {
                     entries: &commands,
                     current_turn_id: current_turn_id.as_deref(),
                     turn_is_past: &turn_is_past,
+                    sealed_attachment_path: &sealed_path,
                 },
             );
+            // Attachments still uploading: hold WITHOUT marking processed so
+            // the seal commit (which re-triggers this drain) releases the
+            // Run; an expired grace window instead resolves Expired. The
+            // `return` (not `continue`) also keeps later commands behind this
+            // one — a newer Run must not jump a Run waiting on its uploads.
+            if matches!(disposition, CommandDisposition::WaitForAttachments) {
+                tracing::debug!(
+                    chat = %handle.chat_id,
+                    command = %entry.id,
+                    "run waiting for attachment seal"
+                );
+                return;
+            }
             // In-flight claim: a concurrent drain must not classify this
             // command as crashed while this task is between mark and resolve.
             if !lock(&self.inner.executing).insert(entry.id.clone()) {
@@ -2375,6 +2426,12 @@ impl DocHost {
                 }
                 CommandDisposition::Superseded => {
                     self.resolve_command(handle, &entry.id, SessionCommandStatus::Superseded, None);
+                }
+                // Returned above (before the processed-ledger mark) — the
+                // seal commit re-triggers this drain.
+                CommandDisposition::WaitForAttachments => {
+                    lock(&self.inner.executing).remove(&entry.id);
+                    skipped.insert(entry.id.clone());
                 }
                 CommandDisposition::Execute => {
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
@@ -2445,6 +2502,47 @@ impl DocHost {
                     }
                     None => None,
                 };
+                // Queue-first attachments: the Run was queued with PENDING
+                // upload ids (never the bytes, never pending refs in the
+                // transcript). The drain only executes after every id is
+                // sealed in the doc, so resolve them to their final paths
+                // here: `attachments` gets the paths (harness image blocks)
+                // and the visible + effective prompts get the refs trailer.
+                let pending_attachments = std::mem::take(&mut request.pending_attachments);
+                if !pending_attachments.is_empty() {
+                    let mut sealed_paths = Vec::with_capacity(pending_attachments.len());
+                    for pending in &pending_attachments {
+                        let (path, _file_name) = handle
+                            .doc
+                            .sealed_attachment(&pending.upload_id)
+                            .map_err(|err| {
+                                EngineError::Other(format!(
+                                    "attachment seal read failed for {}: {err}",
+                                    pending.upload_id
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                EngineError::Other(format!(
+                                    "attachment {} not sealed before run",
+                                    pending.upload_id
+                                ))
+                            })?;
+                        sealed_paths.push(path);
+                    }
+                    request.attachments = sealed_paths;
+                    request.prompt = attachment_refs_trailer(&request.prompt, &request.attachments);
+                }
+                // The annotated (comments/session-refs) effective prompt also
+                // needs the refs — the composer couldn't build them before the
+                // uploads sealed. Appending the same trailer keeps the agent's
+                // view identical to the visible transport.
+                let effective_agent_prompt = if !request.attachments.is_empty() {
+                    agent_prompt
+                        .as_ref()
+                        .map(|ap| attachment_refs_trailer(ap, &request.attachments))
+                } else {
+                    agent_prompt.clone()
+                };
                 // Claim-on-first-command: a run for a chat with no workspace row
                 // creates the row under our device id (we are about to host it).
                 if let Some(ws) = self.workspace() {
@@ -2493,7 +2591,7 @@ impl DocHost {
                         chat_id,
                         harness,
                         request,
-                        agent_prompt.clone(),
+                        effective_agent_prompt,
                         Some(message_id.clone()),
                     )
                     .await?;
@@ -2712,6 +2810,7 @@ impl DocHost {
                 .unwrap_or(cypher_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
             attachments: Vec::new(),
+            pending_attachments: Vec::new(),
             resume: None,
             worktree: None,
         })
@@ -2770,6 +2869,28 @@ impl DocHost {
             lock(&handle.chat2_local_sub).take();
         }
     }
+}
+
+/// The `Attached images (local files …)` trailer the host appends to a Run's
+/// visible prompt (and its effective annotated prompt) from SEALED final paths
+/// at execute time — byte-identical to the composer's `with_attachments` so
+/// existing transcript parsing/rendering keep working. Pending refs never
+/// reach this point: the composer queues the Run without a trailer, and only
+/// sealed paths enter the prompt here. Pure.
+pub fn attachment_refs_trailer(text: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return text.to_string();
+    }
+    let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
+    let body = if text.is_empty() {
+        "See the attached image(s)."
+    } else {
+        text
+    };
+    format!(
+        "{body}\n\nAttached images (local files — open them to view):\n{}",
+        refs.join("\n")
+    )
 }
 
 /// The resumed-turn prompt for answers to a question whose run died: each

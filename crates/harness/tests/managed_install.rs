@@ -44,6 +44,7 @@ async fn managed_install_reaches_session_started() {
         sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     };

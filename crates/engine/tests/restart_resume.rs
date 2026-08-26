@@ -46,6 +46,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     }
@@ -851,6 +852,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
         attachments: Vec::new(),
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     };

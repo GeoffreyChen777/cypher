@@ -269,6 +269,11 @@ struct UploadChunkParams {
 struct UploadCommitParams {
     upload_id: String,
     file_name: String,
+    /// Chat to seal the committed attachment against (queue-first sends: the
+    /// host records the durable final path so a waiting Run can execute).
+    /// Additive + defaulted — old clients commit without sealing.
+    #[serde(default)]
+    chat_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,6 +819,7 @@ impl EngineRpc {
                 resume: None,
                 worktree: None,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
             };
             if let Err(err) = self.doc_host.queue_command(
                 &child_id,
@@ -2096,6 +2102,14 @@ impl RpcService for EngineRpc {
                     .uploads
                     .commit(&p.upload_id, &p.file_name)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if let Some(chat_id) = &p.chat_id {
+                    // Queue-first send: seal against the chat so its host's
+                    // drain releases the waiting Run. Best-effort — the
+                    // durable path is already committed; an unsealable chat
+                    // just leaves the Run's grace window to expire it.
+                    self.doc_host
+                        .seal_attachment(chat_id, &p.upload_id, &path, &p.file_name);
+                }
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::READ_ATTACHMENT_CHUNK => {

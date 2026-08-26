@@ -1010,6 +1010,7 @@ impl SessionsEngine {
                             sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
                             auto_approve: false,
                             attachments: Vec::new(),
+                            pending_attachments: Vec::new(),
                             resume: None,
                             worktree: None,
                         })

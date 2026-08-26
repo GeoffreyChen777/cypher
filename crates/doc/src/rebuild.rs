@@ -74,6 +74,11 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
             commands_copied += 1;
         }
     }
+    // Sealed attachments cross verbatim: a queued Run waiting on them must
+    // keep matching after the rebuild, or its pending ids would hang forever.
+    for (upload_id, path, file_name) in source.sealed_attachments()? {
+        thin.seal_attachment(&upload_id, &path, &file_name)?;
+    }
     thin.doc().commit();
 
     Ok(ThinRebuild {
@@ -264,6 +269,19 @@ mod tests {
         let commands = rebuilt.doc.read_commands().unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].id, "c1");
+    }
+
+    #[test]
+    fn rebuild_copies_sealed_attachments() {
+        let source = SessionDoc::init("chat-w").unwrap();
+        source
+            .seal_attachment("up-1", "/up/1.png", "1.png")
+            .unwrap();
+        let rebuilt = rebuild_thin_doc(&source).unwrap();
+        assert_eq!(
+            rebuilt.doc.sealed_attachment("up-1").unwrap(),
+            Some(("/up/1.png".into(), "1.png".into()))
+        );
     }
 
     #[test]

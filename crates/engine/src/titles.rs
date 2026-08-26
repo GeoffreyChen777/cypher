@@ -171,6 +171,7 @@ impl TitleGenerator {
                 sandbox: SandboxLevel::ReadOnly,
                 auto_approve: true,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
                 resume: None,
                 worktree: None,
             };

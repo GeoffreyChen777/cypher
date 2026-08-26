@@ -10,9 +10,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use cypher_proto::{RunRequest, UserInputAnswer};
+use cypher_proto::{PendingAttachment, RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
+
+/// How long a Run carrying pending attachments may wait for its uploads to be
+/// sealed before the host expires it (aligned with the engine's staging-dir
+/// TTL, so a wedged upload can't leave the command Pending forever). Bounded
+/// wait is a product requirement: the durable queue must eventually resolve.
+pub const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +139,10 @@ pub enum CommandDisposition {
     Expired,
     /// Mark superseded.
     Superseded,
+    /// A Run whose pending attachments are not all sealed yet: hold WITHOUT
+    /// marking processed; the next seal commit re-triggers the drain. Never
+    /// permanent — past the seal grace window it degrades to [`Expired`].
+    WaitForAttachments,
     /// Mark processed BEFORE executing, then execute.
     Execute,
 }
@@ -149,6 +159,21 @@ pub struct EvaluationContext<'a> {
     pub current_turn_id: Option<&'a str>,
     /// True when the given turn id has already completed.
     pub turn_is_past: &'a dyn Fn(&str) -> bool,
+    /// Resolve a pending-upload id to its sealed final path (the doc's
+    /// `sealedAttachments` map), or `None` when not sealed yet. `None` for
+    /// any pending id is what gates [`CommandDisposition::WaitForAttachments`].
+    pub sealed_attachment_path: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// The pending-attachment descriptors of a Run command, if it carries any.
+pub fn run_pending_attachments(entry: &SessionCommandEntry) -> Option<&[PendingAttachment]> {
+    match &entry.payload {
+        SessionCommandPayload::Run { request, .. } => {
+            let pending = &request.pending_attachments;
+            (!pending.is_empty()).then_some(pending.as_slice())
+        }
+        _ => None,
+    }
 }
 
 /// Rule 3 — pure evaluation of a single pending command.
@@ -161,6 +186,22 @@ pub fn evaluate_command(
     }
     if cx.now_ms >= entry.effective_expiry() {
         return CommandDisposition::Expired;
+    }
+    // A Run whose pending attachments are not all sealed yet holds WITHOUT
+    // being marked processed (the seal commit re-triggers the drain), but
+    // only within the attachment grace window — past it the command Expires
+    // instead of sitting Pending forever. Pending ids never execute: the
+    // request only dispatches with sealed final paths.
+    if let Some(pending) = run_pending_attachments(entry) {
+        let all_sealed = pending
+            .iter()
+            .all(|p| (cx.sealed_attachment_path)(&p.upload_id).is_some());
+        if !all_sealed {
+            if cx.now_ms >= entry.issued_at + ATTACHMENT_SEAL_GRACE_MS {
+                return CommandDisposition::Expired;
+            }
+            return CommandDisposition::WaitForAttachments;
+        }
     }
     // A newer pending command of the same kind supersedes steer/interrupt.
     let kind = entry.kind();
@@ -221,7 +262,7 @@ mod tests {
         )
     }
 
-    fn cx<'a>(
+    fn eval_cx<'a>(
         entries: &'a [SessionCommandEntry],
         processed: &'a dyn Fn(&str) -> bool,
         turn_is_past: &'a dyn Fn(&str) -> bool,
@@ -234,6 +275,7 @@ mod tests {
             entries,
             current_turn_id,
             turn_is_past,
+            sealed_attachment_path: &|_| None,
         }
     }
 
@@ -244,7 +286,7 @@ mod tests {
         let e = steer("c1", 1_000);
         let entries = vec![e.clone()];
         let processed = |id: &str| id == "c1";
-        let cx = cx(&entries, &processed, &NEVER, 2_000, None);
+        let cx = eval_cx(&entries, &processed, &NEVER, 2_000, None);
         assert_eq!(evaluate_command(&e, &cx), CommandDisposition::Skip);
     }
 
@@ -252,7 +294,7 @@ mod tests {
     fn expired_commands_are_expired() {
         let e = steer("c1", 0);
         let entries = vec![e.clone()];
-        let cx = cx(&entries, &NEVER, &NEVER, COMMAND_DEFAULT_TTL_MS + 1, None);
+        let cx = eval_cx(&entries, &NEVER, &NEVER, COMMAND_DEFAULT_TTL_MS + 1, None);
         assert_eq!(evaluate_command(&e, &cx), CommandDisposition::Expired);
     }
 
@@ -261,7 +303,7 @@ mod tests {
         let older = steer("c1", 1_000);
         let newer = steer("c2", 2_000);
         let entries = vec![older.clone(), newer.clone()];
-        let cx1 = cx(&entries, &NEVER, &NEVER, 3_000, None);
+        let cx1 = eval_cx(&entries, &NEVER, &NEVER, 3_000, None);
         assert_eq!(
             evaluate_command(&older, &cx1),
             CommandDisposition::Superseded
@@ -278,10 +320,10 @@ mod tests {
         });
         let entries = vec![e.clone()];
         let past = |id: &str| id == "turn-1";
-        let cx1 = cx(&entries, &NEVER, &past, 2_000, Some("turn-2"));
+        let cx1 = eval_cx(&entries, &NEVER, &past, 2_000, Some("turn-2"));
         assert_eq!(evaluate_command(&e, &cx1), CommandDisposition::Superseded);
         // …but if that turn is still the current one, execute.
-        let cx2 = cx(&entries, &NEVER, &past, 2_000, Some("turn-1"));
+        let cx2 = eval_cx(&entries, &NEVER, &past, 2_000, Some("turn-1"));
         assert_eq!(evaluate_command(&e, &cx2), CommandDisposition::Execute);
     }
 
@@ -307,9 +349,131 @@ mod tests {
             2_000,
         );
         let entries = vec![r1.clone(), r2.clone()];
-        let cx1 = cx(&entries, &NEVER, &NEVER, 3_000, None);
+        let cx1 = eval_cx(&entries, &NEVER, &NEVER, 3_000, None);
         assert_eq!(evaluate_command(&r1, &cx1), CommandDisposition::Execute);
         assert_eq!(evaluate_command(&r2, &cx1), CommandDisposition::Execute);
+    }
+
+    fn pending_run(upload_id: &str, issued_at: i64) -> SessionCommandEntry {
+        entry(
+            "r-pending",
+            SessionCommandPayload::Run {
+                request: RunRequest {
+                    prompt: "look at this".into(),
+                    harness: None,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: "/tmp".into(),
+                    sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+                    auto_approve: false,
+                    attachments: Vec::new(),
+                    pending_attachments: vec![cypher_proto::PendingAttachment {
+                        upload_id: upload_id.into(),
+                        file_name: "photo.png".into(),
+                    }],
+                    resume: None,
+                    worktree: None,
+                },
+                message_id: "m-p".into(),
+                agent_prompt: None,
+            },
+            issued_at,
+        )
+    }
+
+    #[test]
+    fn run_with_unsealed_pending_attachments_waits_not_executes() {
+        let e = pending_run("up-1", 1_000);
+        let entries = vec![e.clone()];
+        let cx = eval_cx(&entries, &NEVER, &NEVER, 2_000, None);
+        assert_eq!(
+            evaluate_command(&e, &cx),
+            CommandDisposition::WaitForAttachments
+        );
+        // …but does NOT expire while inside the grace window.
+        let inside = eval_cx(
+            &entries,
+            &NEVER,
+            &NEVER,
+            1_000 + ATTACHMENT_SEAL_GRACE_MS - 1,
+            None,
+        );
+        assert_eq!(
+            evaluate_command(&e, &inside),
+            CommandDisposition::WaitForAttachments
+        );
+    }
+
+    #[test]
+    fn run_with_sealed_pending_attachments_executes() {
+        let e = pending_run("up-1", 1_000);
+        let entries = vec![e.clone()];
+        // All pending ids sealed → Execute (the drain resolves them to paths).
+        let cx = EvaluationContext {
+            is_processed: &NEVER,
+            now_ms: 2_000,
+            entries: &entries,
+            current_turn_id: None,
+            turn_is_past: &NEVER,
+            sealed_attachment_path: &|id| (id == "up-1").then(|| "/up/1.png".to_string()),
+        };
+        assert_eq!(evaluate_command(&e, &cx), CommandDisposition::Execute);
+        // Partial seal (one of two pending) still waits.
+        let mut both = pending_run("up-1", 1_000);
+        if let SessionCommandPayload::Run { request, .. } = &mut both.payload {
+            request
+                .pending_attachments
+                .push(cypher_proto::PendingAttachment {
+                    upload_id: "up-2".into(),
+                    file_name: "b.png".into(),
+                });
+        }
+        let cx = EvaluationContext {
+            is_processed: &NEVER,
+            now_ms: 2_000,
+            entries: &entries,
+            current_turn_id: None,
+            turn_is_past: &NEVER,
+            sealed_attachment_path: &|id| (id == "up-1").then(|| "/up/1.png".to_string()),
+        };
+        assert_eq!(
+            evaluate_command(&both, &cx),
+            CommandDisposition::WaitForAttachments
+        );
+    }
+
+    #[test]
+    fn run_past_attachment_grace_expires_instead_of_pending_forever() {
+        let e = pending_run("up-1", 1_000);
+        let entries = vec![e.clone()];
+        let cx = eval_cx(
+            &entries,
+            &NEVER,
+            &NEVER,
+            1_000 + ATTACHMENT_SEAL_GRACE_MS,
+            None,
+        );
+        assert_eq!(evaluate_command(&e, &cx), CommandDisposition::Expired);
+        // A plain run (no pending attachments) is unaffected by the grace.
+        let r = entry(
+            "r-plain",
+            SessionCommandPayload::Run {
+                request: run_request(),
+                message_id: "m1".into(),
+                agent_prompt: None,
+            },
+            1_000,
+        );
+        let entries = vec![r.clone()];
+        let cx = eval_cx(
+            &entries,
+            &NEVER,
+            &NEVER,
+            1_000 + ATTACHMENT_SEAL_GRACE_MS,
+            None,
+        );
+        assert_eq!(evaluate_command(&r, &cx), CommandDisposition::Execute);
     }
 
     #[test]
@@ -451,6 +615,7 @@ mod tests {
             sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
             auto_approve: false,
             attachments: Vec::new(),
+            pending_attachments: Vec::new(),
             resume: None,
             worktree: None,
         }

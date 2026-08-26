@@ -296,15 +296,20 @@ pub(crate) async fn call_with_timeout(
 /// Chunked upload: base64 the bytes, `UploadChunk{uploadId,seq,data}` per 60KB
 /// slice (positional `seq` makes the cheap retry idempotent), then
 /// `UploadCommit{uploadId,fileName}` → the durable absolute path on the target
-/// device. Errors return the raw cause (the composer shows friendly copy).
+/// device. `upload_id` is caller-supplied so a queue-first send can reference
+/// the SAME id in the already-queued Run's `pending_attachments`; `chat_id`
+/// (when present) makes the commit seal the attachment against that chat so
+/// the host's drain releases the waiting Run. Errors return the raw cause
+/// (the composer shows friendly copy).
 pub async fn upload_attachment(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     target_device_id: Option<&str>,
     attachment: &StagedAttachment,
+    upload_id: &str,
+    chat_id: Option<&str>,
 ) -> Result<String, String> {
     let b64 = BASE64.encode(attachment.bytes());
-    let upload_id = uuid::Uuid::new_v4().to_string();
     let mut start = 0usize;
     let mut seq = 0u64;
     loop {
@@ -346,10 +351,22 @@ pub async fn upload_attachment(
             break;
         }
     }
-    let params = with_target(
-        serde_json::json!({ "uploadId": upload_id, "fileName": attachment.name }),
-        target_device_id,
+    let mut commit = serde_json::Map::new();
+    commit.insert(
+        "uploadId".into(),
+        serde_json::Value::String(upload_id.to_string()),
     );
+    commit.insert(
+        "fileName".into(),
+        serde_json::Value::String(attachment.name.clone()),
+    );
+    if let Some(chat_id) = chat_id {
+        commit.insert(
+            "chatId".into(),
+            serde_json::Value::String(chat_id.to_string()),
+        );
+    }
+    let params = with_target(serde_json::Value::Object(commit), target_device_id);
     let reply = call_with_timeout(
         engine,
         executor,

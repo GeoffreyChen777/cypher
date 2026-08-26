@@ -123,6 +123,7 @@ async fn probe_once(print_trace: bool) -> (usize, usize, bool) {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        pending_attachments: Vec::new(),
         resume: None,
         worktree: None,
     };

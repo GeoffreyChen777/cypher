@@ -286,6 +286,7 @@ async fn seed_source(core: &EngineCore) {
                     resume: None,
                     worktree: None,
                     attachments: Vec::new(),
+                    pending_attachments: Vec::new(),
                 },
                 Some(message_id.into()),
             )
@@ -678,6 +679,7 @@ async fn live_session_is_unavailable() {
                 resume: None,
                 worktree: None,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
             },
             Some("m1".into()),
         )
@@ -1110,6 +1112,7 @@ async fn lost_reply_retry_returns_existing_even_when_source_live() {
                 resume: None,
                 worktree: None,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
             },
             Some("m1".into()),
         )
@@ -1147,6 +1150,7 @@ async fn lost_reply_retry_returns_existing_even_when_source_live() {
                 resume: None,
                 worktree: None,
                 attachments: Vec::new(),
+                pending_attachments: Vec::new(),
             },
             Some("m2".into()),
         )
