@@ -120,6 +120,13 @@ actor RegistryClient {
         await sendProbe()
     }
 
+    /// Reconnect immediately after the store detects a sequence gap. A probe
+    /// only proves liveness; it cannot repair rows that were missed.
+    func redial() {
+        guard !closed else { return }
+        scheduleReconnect(gen: generation)
+    }
+
     private func cancelTasks() {
         receiveTask?.cancel()
         pingTask?.cancel()

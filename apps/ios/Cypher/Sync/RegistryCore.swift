@@ -375,6 +375,8 @@ final class RegistryDoc {
 
     private struct Persisted: Codable {
         var v: Int
+        /// Optional for snapshots written before cursor-integrity healing.
+        var resyncEpoch: Int?
         var deviceId: String
         var serverSeq: UInt64
         var gcFloor: UInt64
@@ -384,7 +386,7 @@ final class RegistryDoc {
     }
 
     func toData() throws -> Data {
-        let state = Persisted(v: 1, deviceId: deviceId, serverSeq: serverSeq, gcFloor: gcFloor,
+        let state = Persisted(v: 1, resyncEpoch: 1, deviceId: deviceId, serverSeq: serverSeq, gcFloor: gcFloor,
                               clock: clock, rows: authoritative.values.flatMap(\.values),
                               pending: pending)
         return try JSONEncoder().encode(state)
@@ -396,7 +398,7 @@ final class RegistryDoc {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unknown registry snapshot version \(state.v)"))
         }
         let doc = RegistryDoc(deviceId: deviceId)
-        doc.serverSeq = state.serverSeq
+        doc.serverSeq = (state.resyncEpoch ?? 0) < 1 ? 0 : state.serverSeq
         doc.gcFloor = state.gcFloor
         doc.clock = state.clock
         doc.pending = state.pending
@@ -449,17 +451,20 @@ final class RegistryDoc {
     }
 
     /// Apply a `rows` broadcast (merged truth for the touched rows).
-    func applyRows(seq: UInt64, rows: [RegistryRow]) {
+    @discardableResult
+    func applyRows(seq: UInt64, rows: [RegistryRow]) -> Bool {
         generation += 1
         for row in rows { putAuthoritative(row) }
+        guard seq <= serverSeq + 1 else { return false }
         if seq > serverSeq { serverSeq = seq }
+        return true
     }
 
-    /// Retire an acked batch; the ack's seq advances the cursor.
+    /// Retire an acked batch. The ack's seq is this device's row position and
+    /// does not prove that interleaved remote rows were received.
     func ackBatch(_ batch: String, seq: UInt64) {
         let before = pending.count
         pending.removeAll { $0.batch == batch }
-        if seq > serverSeq { serverSeq = seq }
         if pending.count != before { generation += 1 }
     }
 

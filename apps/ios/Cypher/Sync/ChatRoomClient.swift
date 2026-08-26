@@ -59,6 +59,8 @@ actor ChatRoomClient {
         var applyCheckpoint: @MainActor @Sendable (Data, UInt64) -> Bool
         var applyRow: @MainActor @Sendable (Data, UInt64) -> Void
         var advanceCursor: @MainActor @Sendable (UInt64) -> Void
+        var clampCursor: @MainActor @Sendable (UInt64) -> Void
+        var setCursor: @MainActor @Sendable (UInt64) -> Void
         var event: @MainActor @Sendable (ChatRoomEvent) -> Void
     }
 
@@ -92,6 +94,12 @@ actor ChatRoomClient {
     /// server. Loro re-import is a no-op, so redownloading own bytes once is
     /// pure safety; same-process reconnects skip them.
     private var resumed = false
+    /// One-time cursor amnesty: a persisted cursor may have advanced over
+    /// Loro operations that were parked and later disappeared from export.
+    private var cursorAmnestyDone = false
+    /// A live row/ack jumped over the honest cursor; repair from that cursor.
+    private var gapRepair = false
+    private var gapRepairs = 0
     /// Transport clock — pongs count, so a healthy socket never trips it.
     private var lastInbound = DispatchTime.now()
     /// Protocol clock — only real frames count (pongs prove nothing).
@@ -190,6 +198,8 @@ actor ChatRoomClient {
         helloSentAt = nil
         backfillStartedAt = nil
         probeSentAt = nil
+        gapRepair = false
+        gapRepairs = 0
         lastProtocolRx = .now()
         for ix in pending.indices {
             pending[ix].inFlight = false
@@ -355,7 +365,15 @@ actor ChatRoomClient {
             // Own-device rows can still arrive (first-backfill redownload, a
             // racing second socket) — Loro re-import is a no-op; the cursor
             // advance is what matters.
-            await delegate.applyRow(frame.payload, seq)
+            let cursor = await delegate.cursor()
+            if seq > cursor + 1 {
+                gapRepair = true
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): row gap (seq=\(seq), cursor=\(cursor)); holding cursor")
+                await delegate.applyRow(frame.payload, cursor)
+            } else {
+                await delegate.applyRow(frame.payload, seq)
+            }
+            await maybeRepairGap(gen: gen)
 
         case ChatFrameType.rowsDone:
             guard backfillStartedAt != nil else { return }
@@ -369,15 +387,23 @@ actor ChatRoomClient {
             // Anything pending (offline writes, reconnect re-pushes) goes
             // now — the server's batchId dedupe makes replays exact no-ops.
             await pushPending()
+            await maybeRepairGap(gen: gen)
 
         case ChatFrameType.ack:
             guard let batchId = frame.header["batchId"] as? String,
                   let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
             pending.removeAll { $0.batchId == batchId }
-            await delegate.advanceCursor(seq)
+            let cursor = await delegate.cursor()
+            if seq > cursor + 1 {
+                gapRepair = true
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): ack gap (seq=\(seq), cursor=\(cursor)); holding cursor")
+            } else {
+                await delegate.advanceCursor(seq)
+            }
             // A grant after a quota rejection: drain whatever the error
             // handler un-flagged (sparse mobile queues — no livelock risk).
             await pushPending()
+            await maybeRepairGap(gen: gen)
 
         case ChatFrameType.probeOk:
             break  // liveness proven; clocks already advanced above
@@ -412,13 +438,22 @@ actor ChatRoomClient {
             // the cursor as fresh and reload from what the room has.
             roomLog.warning("chat2 \(self.chatId, privacy: .public): server lost state (headSeq=\(state.headSeq) < cursor=\(cursor)); treating as fresh")
         }
+        // Once per client, clamp a possibly dishonest persisted cursor to the
+        // checkpoint (or zero when no checkpoint exists) so parked rows are
+        // fetched again. Re-imports are idempotent and the room's compaction
+        // policy bounds the normal repair window.
+        if !cursorAmnestyDone {
+            cursorAmnestyDone = true
+            await delegate.clampCursor(state.checkpointSize > 0 ? state.checkpointSeq : 0)
+        }
         // Same presence rule as chatPlanCatchUp: SIZE, not seq — a seeded
         // room's checkpoint covers seq 0.
         var contained = state.checkpointSize == 0
         if !contained {
             contained = await delegate.containsFrontier(frame.payload)
         }
-        let plan = chatPlanCatchUp(cursor: cursor, state: state, frontierContained: contained)
+        let planCursor = await delegate.cursor()
+        let plan = chatPlanCatchUp(cursor: planCursor, state: state, frontierContained: contained)
         let after: UInt64
         switch plan {
         case .rowsOnly(let a):
@@ -439,8 +474,29 @@ actor ChatRoomClient {
             }
             after = a
         }
+        // A contained checkpoint can move the plan upward; amnesty/reset can
+        // move it downward. Persist the plan's cursor before requesting rows.
+        await delegate.setCursor(after)
         await send(ChatWire.encode(ChatFrameType.rowsReq,
                                    header: ["after": after, "excludeOwn": resumed]))
+    }
+
+    /// Request rows from the last honest cursor after a row/ack gap. The
+    /// repair budget is per socket session; exhaustion forces a reconnect and
+    /// therefore a fresh full catch-up.
+    private func maybeRepairGap(gen: Int) async {
+        guard gapRepair, gen == generation, socket != nil else { return }
+        gapRepair = false
+        gapRepairs += 1
+        guard gapRepairs <= 3 else {
+            roomLog.warning("chat2 \(self.chatId, privacy: .public): gap repairs exhausted; redialing")
+            await onSocketError(gen: gen)
+            return
+        }
+        let after = await delegate.cursor()
+        roomLog.info("chat2 \(self.chatId, privacy: .public): backfilling over a row gap (after=\(after), attempt \(self.gapRepairs))")
+        await send(ChatWire.encode(ChatFrameType.rowsReq,
+                                   header: ["after": after, "excludeOwn": false]))
     }
 
     private func handleErrorFrame(_ header: [String: Any], gen: Int) async {

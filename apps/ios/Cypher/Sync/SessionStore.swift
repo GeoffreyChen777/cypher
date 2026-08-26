@@ -147,11 +147,13 @@ final class SessionStore {
         let delegate = ChatRoomClient.Delegate(
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
-                // Empty frontier = a checkpoint of an empty doc — nothing to
-                // fetch (mirror of EngineChatSink::contains_frontier).
-                guard !frontier.isEmpty else { return true }
+                // Empty or encoded-empty frontiers are not proof of
+                // containment. A present checkpoint may carry either form,
+                // and fresh readers must fetch it rather than skip history.
+                guard !frontier.isEmpty else { return false }
                 guard let self,
                       let vv = try? VersionVector.decode(bytes: frontier) else { return false }
+                guard !vv.toHashmap().isEmpty else { return false }
                 return self.doc.oplogVv().includesVv(other: vv)
             },
             applyCheckpoint: { [weak self] bytes, seq in
@@ -163,6 +165,16 @@ final class SessionStore {
                 self.project()
                 self.saver?.poke()
                 return true
+            },
+            clampCursor: { [weak self] seq in
+                guard let self, self.cursor != seq else { return }
+                self.cursor = seq
+                self.saver?.poke()
+            },
+            setCursor: { [weak self] seq in
+                guard let self, self.cursor != seq else { return }
+                self.cursor = seq
+                self.saver?.poke()
             },
             applyRow: { [weak self] bytes, seq in
                 guard let self else { return }

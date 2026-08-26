@@ -112,9 +112,15 @@ final class WorkspaceStore {
         case .connected:
             connected = true
         case .rows(let seq, let rows):
-            doc.applyRows(seq: seq, rows: rows)
+            let contiguous = doc.applyRows(seq: seq, rows: rows)
             project()
             saver?.poke()
+            if !contiguous {
+                roomLog.warning("registry: broadcast seq gap (seq=\(seq)); redialing")
+                if let client {
+                    Task { await client.redial() }
+                }
+            }
         case .ack(let batch, let seq, _):
             // Rows for this batch already arrived (server orders rows before
             // ack), so retiring the optimistic overlay can't flicker — and if
