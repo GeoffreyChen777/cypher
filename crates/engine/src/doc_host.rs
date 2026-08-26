@@ -187,6 +187,10 @@ struct DocHostInner {
     /// on every registry change, and a long run would stack a tick loop per
     /// change without this.
     seed_waiting: Mutex<HashSet<String>>,
+    /// Command ids between the durable processed-ledger claim and their
+    /// outcome write. A pending command in the ledger but not in this set
+    /// after a restart is a dead attempt from the mark/execute crash window.
+    executing: Mutex<HashSet<String>>,
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
@@ -404,6 +408,7 @@ impl DocHost {
                 handles: Mutex::new(HashMap::new()),
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
+                executing: Mutex::new(HashSet::new()),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
@@ -2124,6 +2129,38 @@ impl DocHost {
                 }
             };
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+
+            // Dead-command recovery: a previous process may have committed
+            // the processed-ledger claim and died before writing the outcome.
+            // Without this sweep every future drain sees the entry as already
+            // processed and leaves it Pending forever. The in-memory
+            // `executing` set excludes commands currently running in this
+            // process.
+            let dead: Vec<String> = commands
+                .iter()
+                .filter(|command| {
+                    command.status == SessionCommandStatus::Pending
+                        && !skipped.contains(&command.id)
+                        && is_processed(&command.id)
+                        && !lock(&self.inner.executing).contains(&command.id)
+                })
+                .map(|command| command.id.clone())
+                .collect();
+            for command_id in dead {
+                tracing::warn!(
+                    chat = %handle.chat_id,
+                    command = %command_id,
+                    "command consumed but never resolved; marking interrupted"
+                );
+                self.resolve_command(
+                    handle,
+                    &command_id,
+                    SessionCommandStatus::Rejected,
+                    Some("interrupted before completion — retry to send again"),
+                );
+                skipped.insert(command_id);
+            }
+
             let Some(entry) = commands
                 .iter()
                 .find(|c| {
@@ -2148,11 +2185,26 @@ impl DocHost {
                     turn_is_past: &turn_is_past,
                 },
             );
+            // In-flight claim: a concurrent drain must not classify this
+            // command as crashed while this task is between mark and resolve.
+            if !lock(&self.inner.executing).insert(entry.id.clone()) {
+                skipped.insert(entry.id.clone());
+                continue;
+            }
             // Mark BEFORE executing: a crash mid-execution must never double-run a
             // command whose side effect may already have happened.
-            if let Err(err) = self.inner.store.mark_processed(&entry.id) {
-                tracing::error!(chat = %handle.chat_id, error = %err, "processed-ledger write failed; halting drain");
-                return;
+            match self.inner.store.mark_processed(&entry.id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    lock(&self.inner.executing).remove(&entry.id);
+                    skipped.insert(entry.id.clone());
+                    continue;
+                }
+                Err(err) => {
+                    lock(&self.inner.executing).remove(&entry.id);
+                    tracing::error!(chat = %handle.chat_id, error = %err, "processed-ledger write failed; halting drain");
+                    return;
+                }
             }
             match disposition {
                 CommandDisposition::Skip => {
@@ -2172,6 +2224,7 @@ impl DocHost {
                     self.resolve_command(handle, &entry.id, status, resolution.as_deref());
                 }
             }
+            lock(&self.inner.executing).remove(&entry.id);
         }
     }
 

@@ -539,7 +539,7 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
 }
 
 #[tokio::test]
-async fn processed_commands_are_skipped_on_redelivery() {
+async fn dead_processed_commands_are_terminalized_on_redelivery() {
     let dir = tempfile::tempdir().unwrap();
 
     // Simulate a crash AFTER mark-processed but BEFORE execute/outcome: the ledger has
@@ -567,16 +567,20 @@ async fn processed_commands_are_skipped_on_redelivery() {
         },
     );
 
-    // Give the drain a moment: the command must be SKIPPED — no user entry, no run.
+    // Give the drain a moment: the dead command must be terminalized — no
+    // user entry or run can be recovered from the original consumed attempt.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         entries(&core).is_empty(),
-        "skipped command must not execute"
+        "dead command must not execute"
     );
     assert_eq!(
         command_status(&core, "cmd-crashed"),
-        Some((SessionCommandStatus::Pending, None)),
-        "skip leaves the entry pending without an outcome"
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("interrupted before completion — retry to send again".into())
+        )),
+        "dead command must have a durable terminal outcome"
     );
     assert!(core.sessions.session_status(CHAT).is_none());
 
