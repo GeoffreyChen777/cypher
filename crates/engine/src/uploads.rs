@@ -232,9 +232,14 @@ impl Uploads {
                 .flatten()
                 .filter_map(|f| f.metadata().ok()?.modified().ok())
                 .max();
+            // `append` creates the directory before writing its first chunk,
+            // and parallel uploads leave a short empty window. Judge an
+            // empty directory by its own age instead of reclaiming it
+            // immediately.
+            let newest = newest.or_else(|| entry.metadata().ok()?.modified().ok());
             let expired = match newest {
                 Some(at) => at.elapsed().map(|age| age > STAGING_TTL).unwrap_or(false),
-                None => true, // empty dir — reclaim
+                None => false,
             };
             if expired {
                 let _ = std::fs::remove_dir_all(entry.path());
@@ -370,6 +375,30 @@ mod tests {
         assert_eq!(sanitize("../../etc/passwd"), "passwd");
         assert_eq!(sanitize("my photo (1).png"), "my_photo__1_.png");
         assert_eq!(sanitize(""), "upload");
+    }
+
+    #[test]
+    fn sweep_spares_fresh_empty_staging_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let racing = dir.path().join("tmp").join("upload-racing");
+        std::fs::create_dir_all(&racing).unwrap();
+
+        uploads
+            .append("upload-other", &BASE64.encode(b"hi"), Some(0))
+            .unwrap();
+        assert!(racing.exists(), "fresh empty staging dir was reclaimed");
+
+        let stale =
+            std::time::SystemTime::now() - (STAGING_TTL + std::time::Duration::from_secs(60));
+        std::fs::File::open(&racing)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        uploads
+            .append("upload-other", &BASE64.encode(b"hi"), Some(0))
+            .unwrap();
+        assert!(!racing.exists(), "abandoned empty staging dir must be swept");
     }
 
     #[test]
