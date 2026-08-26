@@ -899,8 +899,24 @@ mod tests {
 
     #[test]
     fn unknown_future_harness_keeps_chat_row_readable() {
-        let mut value = serde_json::to_value(chat("future-chat", "dev-a")).unwrap();
-        value["config"]["harness"] = serde_json::json!("future-harness");
+        // Raw workspace rows store timestamps as epoch milliseconds (the
+        // typed Chat serde representation uses RFC3339 strings), so construct
+        // the row at the wire shape rather than round-tripping Chat directly.
+        let value = serde_json::json!({
+            "id": "future-chat",
+            "deviceId": "dev-a",
+            "title": "Future chat",
+            "archived": false,
+            "cwd": "/tmp/repo",
+            "createdAt": 2_000,
+            "config": {
+                "harness": "future-harness",
+                "model": "future-model",
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            }
+        });
         let raw: RawChat = serde_json::from_value(value).expect("row envelope remains readable");
         let decoded = Chat::from(raw);
         assert_eq!(decoded.id, "future-chat");
