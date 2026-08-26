@@ -17,7 +17,9 @@
 //! The repair tick also runs the orphan sweep: a chat created concurrently
 //! with a `deleteSpace` on another device can sync in after the cascade ran,
 //! leaving a dangling `spaceId`. The HOST device deletes its own such chats
-//! (writer discipline — we never touch other devices' rows).
+//! (writer discipline — we never touch other devices' rows). The sweep waits
+//! for the registry's first authoritative state on online profiles: a missing
+//! space before that point means "not received yet", not "deleted".
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -237,6 +239,10 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
 /// Host-side repair: delete OUR chats whose `spaceId` dangles (create-vs-delete
 /// race). Chats hosted by other devices are left alone.
 fn sweep_orphans(inner: &Arc<SpacesSyncInner>) {
+    if !inner.workspace.registry_synced() {
+        tracing::debug!("spaces: orphan sweep skipped (registry not synced this boot)");
+        return;
+    }
     let spaces = inner.workspace.watch_spaces().borrow().clone();
     let live: std::collections::HashSet<&str> = spaces.iter().map(|s| s.id.as_str()).collect();
     let chats = inner.workspace.watch_chats().borrow().clone();

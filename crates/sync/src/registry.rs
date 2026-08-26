@@ -757,9 +757,16 @@ impl Actor {
         };
         match frame {
             ServerFrame::Rows { seq, rows } => {
-                lock(&self.doc).apply_rows(seq, rows);
+                let contiguous = lock(&self.doc).apply_rows(seq, rows);
                 self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
+                if !contiguous {
+                    // The frame itself is useful, but the cursor held at the
+                    // last contiguous row. Reconnect so the next hello
+                    // backfills the missing sequence range.
+                    tracing::warn!(seq, "registry: broadcast seq gap; resyncing");
+                    return false;
+                }
             }
             ServerFrame::Ack { batch, seq, .. } => {
                 lock(&self.doc).ack_batch(&batch, seq);

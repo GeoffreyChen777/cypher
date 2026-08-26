@@ -311,10 +311,18 @@ pub enum StateOutcome {
     Reseeded,
 }
 
+/// Persisted cursor-integrity epoch. Bumping this forces old snapshots to
+/// perform one full resync after upgrading from a client that could advance
+/// over unapplied registry rows.
+const CURRENT_RESYNC_EPOCH: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedState {
     v: u32,
+    /// Snapshots written before the cursor-contiguity fix default to zero.
+    #[serde(default)]
+    resync_epoch: u32,
     device_id: String,
     server_seq: u64,
     gc_floor: u64,
@@ -379,6 +387,7 @@ impl RegistryDoc {
             .collect();
         let state = PersistedState {
             v: 1,
+            resync_epoch: CURRENT_RESYNC_EPOCH,
             device_id: self.device_id.clone(),
             server_seq: self.server_seq,
             gc_floor: self.gc_floor,
@@ -398,7 +407,16 @@ impl RegistryDoc {
             )));
         }
         let mut doc = Self::new(device_id);
-        doc.server_seq = state.server_seq;
+        // One-shot healing resync: a pre-fix snapshot may have a cursor that
+        // jumped over rows this replica never applied. Resetting it forces
+        // the next hello to request the missing history; local rows remain
+        // available and the normal full-state path can re-seed local-only
+        // values.
+        doc.server_seq = if state.resync_epoch < CURRENT_RESYNC_EPOCH {
+            0
+        } else {
+            state.server_seq
+        };
         doc.gc_floor = state.gc_floor;
         doc.clock = state.clock;
         doc.pending = state.pending;
@@ -478,23 +496,33 @@ impl RegistryDoc {
     }
 
     /// Apply a `rows` broadcast (merged truth for the touched rows).
-    pub fn apply_rows(&mut self, seq: u64, rows: Vec<RegistryRow>) {
+    ///
+    /// Returns `false` when the broadcast jumped over a sequence gap. The
+    /// touched rows are still retained as useful authoritative data, but the
+    /// cursor remains at the last contiguous sequence so the transport can
+    /// reconnect and backfill the missing rows.
+    pub fn apply_rows(&mut self, seq: u64, rows: Vec<RegistryRow>) -> bool {
         self.generation += 1;
         for row in rows {
             self.put_authoritative(row);
         }
+        if seq > self.server_seq + 1 {
+            return false;
+        }
         if seq > self.server_seq {
             self.server_seq = seq;
         }
+        true
     }
 
     /// Retire an acked batch; returns whether it existed.
-    pub fn ack_batch(&mut self, batch: &str, seq: u64) -> bool {
+    ///
+    /// The ACK's sequence is the position of this device's own batch. It does
+    /// not prove that interleaved rows from other devices were received, so
+    /// it must never advance the sync cursor.
+    pub fn ack_batch(&mut self, batch: &str, _seq: u64) -> bool {
         let before = self.pending.len();
         self.pending.retain(|b| b.batch != batch);
-        if seq > self.server_seq {
-            self.server_seq = seq;
-        }
         if self.pending.len() != before {
             self.generation += 1;
             true

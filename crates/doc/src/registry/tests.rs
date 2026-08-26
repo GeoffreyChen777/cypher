@@ -237,6 +237,53 @@ fn wire_shapes_match_the_edge() {
     assert_eq!(del.op, OpKind::Delete);
 }
 
+// ── cursor integrity ───────────────────────────────────────────────────────
+
+#[test]
+fn registry_broadcast_gap_holds_cursor() {
+    let mut doc = RegistryDoc::new("dev-a");
+    assert!(
+        !doc.apply_rows(3, Vec::new()),
+        "a broadcast over seq 1 and 2 must request resync"
+    );
+    assert_eq!(doc.cursor(), 0);
+
+    assert!(doc.apply_rows(1, Vec::new()));
+    assert_eq!(doc.cursor(), 1);
+}
+
+#[test]
+fn registry_ack_does_not_jump_over_unreceived_rows() {
+    let mut doc = RegistryDoc::new("dev-a");
+    assert!(!doc.ack_batch("missing", 7));
+    assert_eq!(
+        doc.cursor(),
+        0,
+        "an ACK's sequence is not proof that intervening rows were received"
+    );
+}
+
+#[test]
+fn pre_integrity_snapshot_forces_one_full_resync_cursor() {
+    let mut doc = RegistryDoc::new("dev-a");
+    assert_eq!(
+        doc.apply_state(7, true, 0, Vec::new()),
+        StateOutcome::Replaced
+    );
+    assert_eq!(doc.cursor(), 7);
+
+    let mut old: Value = serde_json::from_slice(&doc.to_bytes().unwrap()).unwrap();
+    old["resyncEpoch"] = json!(0);
+    let old_bytes = serde_json::to_vec(&old).unwrap();
+    let restored = RegistryDoc::from_bytes(&old_bytes, "dev-a").unwrap();
+    assert_eq!(restored.cursor(), 0);
+
+    // A newly written snapshot carries the current epoch and retains its
+    // actual cursor on the next load.
+    let current = RegistryDoc::from_bytes(&restored.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(current.cursor(), 0);
+}
+
 // ── doc lifecycle ───────────────────────────────────────────────────────────
 
 fn device(id: &str, name: &str) -> Device {

@@ -20,6 +20,7 @@
 //! serves the full sidebar before any server contact; the old `ws4` rooms are
 //! simply never joined again. The legacy snapshot is kept for rollback.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use chrono::{DateTime, Utc};
@@ -177,6 +178,11 @@ struct WorkspaceHostInner {
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
     changed_tx: watch::Sender<u64>,
+    /// Latched after the first authoritative server state applies this boot.
+    /// An offline/local registry is authoritative from its first snapshot;
+    /// an online replica must not sweep apparently missing rows before this
+    /// latch is set.
+    registry_synced: AtomicBool,
     /// Freshest presence heartbeat (ms) we have EVER observed per device. The
     /// room's presence map forgets entries after its 30s TTL and starts empty
     /// on a (re)join, so without this cache a receive-side hiccup snaps a
@@ -287,6 +293,7 @@ impl WorkspaceHost {
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
         let (changed_tx, changed_rx) = watch::channel(0u64);
+        let registry_synced = config.edge.is_none();
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
@@ -299,6 +306,7 @@ impl WorkspaceHost {
                 spaces_tx,
                 room: Mutex::new(None),
                 changed_tx,
+                registry_synced: AtomicBool::new(registry_synced),
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
@@ -381,6 +389,7 @@ impl WorkspaceHost {
                         }
                         let Some(inner) = weak.upgrade() else { return };
                         *lock(&inner.room) = Some(client.clone());
+                        inner.registry_synced.store(true, Ordering::Relaxed);
                         inner.bump_changed();
                         tracing::info!(org = %org_id, "registry room joined");
                         drop(inner);
@@ -463,6 +472,13 @@ impl WorkspaceHost {
         lock(&self.inner.room)
             .as_ref()
             .is_some_and(|room| room.stats().connected)
+    }
+
+    /// Whether this boot has received an authoritative registry state. Local
+    /// profile snapshots are considered synchronized immediately; online
+    /// profiles latch this only after the first successful room state.
+    pub fn registry_synced(&self) -> bool {
+        self.inner.registry_synced.load(Ordering::Relaxed)
     }
 
     /// Probe the registry room's liveness NOW (window-focus sweep). Probes are
