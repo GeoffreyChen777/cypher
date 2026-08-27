@@ -1972,6 +1972,15 @@ impl DocHost {
         };
         if let Err(err) = handle.doc.seal_attachment(upload_id, path, file_name) {
             tracing::warn!(chat = %chat_id, upload_id, error = %err, "seal write failed");
+        } else {
+            // A newly-created top-level Loro map is not guaranteed to wake
+            // every root subscription on older runtimes. Explicitly kick the
+            // host drain as well as relying on the doc change notification so
+            // a queued Run cannot remain parked after its final upload seals.
+            let host = self.clone();
+            tokio::spawn(async move {
+                host.drain_commands(&handle).await;
+            });
         }
     }
 

@@ -13,13 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use cypher_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
-    SessionCommandStatus, SessionMessageEntry,
-};
+use cypher_doc::{MessagePart, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
 use cypher_engine::{EngineCore, HarnessRegistry};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
@@ -136,15 +134,14 @@ fn user_entry_text(core: &EngineCore, message_id: &str) -> Option<String> {
         .ok()
         .and_then(|h| h.doc().read_entries().ok())
         .and_then(|entries| {
-            entries
-                .into_iter()
-                .find(|e| e.id == message_id)
-                .map(|e| e.parts.iter().fold(String::new(), |mut acc, p| {
+            entries.into_iter().find(|e| e.id == message_id).map(|e| {
+                e.parts.iter().fold(String::new(), |mut acc, p| {
                     if let MessagePart::Text { text, .. } = p {
                         acc.push_str(text);
                     }
                     acc
-                }))
+                })
+            })
         })
 }
 
@@ -254,14 +251,27 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
         payload,
         "committed file holds the reassembled bytes"
     );
+    let handle = core.doc_host.open(CHAT).expect("open queued chat");
+    assert_eq!(
+        handle.doc().sealed_attachment(upload_id).unwrap(),
+        Some((path.clone(), "photo.png".into())),
+        "UploadCommit must seal the attachment in the chat doc"
+    );
 
     // 3. The seal releases the Run.
     wait_for(
-        || harness.requests.lock().unwrap().len() == 1,
+        || !harness.requests.lock().unwrap().is_empty(),
         "run executes after the attachment seal",
     )
     .await;
-    let req = harness.requests.lock().unwrap()[0].clone();
+    let req = harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.prompt.starts_with("look at the photo"))
+        .cloned()
+        .expect("chat run request");
     assert_eq!(
         req.attachments,
         vec![path.clone()],
@@ -276,8 +286,8 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
         "prompt carries the final-path ref trailer"
     );
     assert!(
-        !req.prompt.contains(upload_id),
-        "pending id never reaches the agent prompt"
+        !req.prompt.contains(&format!("pending/{upload_id}")),
+        "pending UI ref never reaches the agent prompt"
     );
 
     // 4. The doc user entry carries the final path (thumbnails render back),
@@ -293,12 +303,12 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
         "transcript user entry carries the real refs trailer: {text}"
     );
     assert!(
-        !text.contains(upload_id),
-        "pending id never enters the transcript"
+        !text.contains(&format!("pending/{upload_id}")),
+        "pending UI ref never enters the transcript"
     );
     assert!(
-        !transcript_contains(&core, upload_id),
-        "pending id absent from every transcript part"
+        !transcript_contains(&core, &format!("pending/{upload_id}")),
+        "pending UI ref absent from every transcript part"
     );
 
     let statuses = command_status(&core);
@@ -353,8 +363,8 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
         "an unsealed Run must never dispatch"
     );
     assert!(
-        !transcript_contains(&core, "up-dead"),
-        "pending id never entered the transcript"
+        !transcript_contains(&core, "pending/up-dead"),
+        "pending UI ref never entered the transcript"
     );
     core.shutdown().await;
 }
