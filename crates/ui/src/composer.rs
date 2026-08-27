@@ -6694,6 +6694,38 @@ impl Composer {
         }
     }
 
+    /// Retry one failed durable Run/Steer attempt. The command watch will
+    /// repaint the card as Retrying once the new pending attempt lands.
+    fn retry_failed_command(&mut self, command_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.failure = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return;
+        };
+        self.send_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::RETRY_COMMAND,
+                    serde_json::json!({
+                        "chatId": chat_id,
+                        "commandId": command_id,
+                    }),
+                )
+                .await;
+            if let Err(err) = result {
+                this.update(cx, |composer, cx| {
+                    composer.failure = Some(format!("Retry failed: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
     // ---- wizard glue ----
 
     fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
@@ -7258,6 +7290,11 @@ impl Render for Composer {
         let expanded = self.expanded_mode;
 
         let failure = self.failure.clone();
+        let failed_delivery = if matches!(self.transport, ComposerTransport::Main) {
+            self.state.read(cx).failed_commands().into_iter().next()
+        } else {
+            None
+        };
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -7324,6 +7361,70 @@ impl Render for Composer {
                         .child(div().min_w_0().child(message)),
                 )
             });
+        let container = container.when_some(failed_delivery, |el, failed| {
+            let command_id = failed.command_id.clone();
+            let resolution = failed
+                .resolution
+                .clone()
+                .unwrap_or_else(|| "The host did not complete this send.".into());
+            el.child(
+                div()
+                    .id("composer-delivery-failure")
+                    .mx(px(4.0))
+                    .mt(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_color(theme.danger.opacity(0.16))
+                    .bg(theme.danger.opacity(0.05))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.danger_muted.opacity(0.9))
+                    .child(
+                        crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                            .size(px(14.0))
+                            .text_color(theme.danger_muted.opacity(0.9)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(format!("Send failed: {}", failed.prompt)),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(resolution),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("composer-delivery-retry")
+                            .flex_none()
+                            .rounded(px(7.0))
+                            .bg(theme.danger.opacity(0.12))
+                            .px(px(9.0))
+                            .py(px(5.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.danger.opacity(0.18)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.retry_failed_command(command_id.clone(), cx);
+                            }))
+                            .child("Retry"),
+                    ),
+            )
+        });
 
         // Turn-boundary steering notice: for agents without mid-turn
         // injection (Grok over ACP today), a "steer" is queued and applies

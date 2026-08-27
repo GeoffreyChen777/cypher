@@ -2371,11 +2371,12 @@ impl Transcript {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let (selected, entries, echoes) = {
             let s = self.state.read(cx);
-            (
-                s.selected_chat.clone(),
-                s.transcript.clone(),
-                s.pending_echoes().to_vec(),
-            )
+            let echoes: Vec<(SessionMessageEntry, bool)> = s
+                .pending_echoes()
+                .iter()
+                .map(|echo| (echo.clone(), s.echo_pending(&echo.id)))
+                .collect();
+            (s.selected_chat.clone(), s.transcript.clone(), echoes)
         };
 
         let attached = selected != self.chat_id;
@@ -2414,8 +2415,8 @@ impl Transcript {
         for entry in &entries {
             new_rows.extend(self.rows_for(entry, false));
         }
-        for echo in &echoes {
-            new_rows.extend(self.rows_for(echo, true));
+        for (echo, pending) in &echoes {
+            new_rows.extend(self.rows_for(echo, *pending));
         }
 
         // Text already streamed before this (re)attach is the veil BASELINE:
