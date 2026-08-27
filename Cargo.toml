@@ -110,6 +110,8 @@ unicode-segmentation = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 ignore = "0.4"
+# fuzzy path ranking for file mentions (match_paths mode is tuned for source trees)
+nucleo-matcher = "0.3"
 
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
