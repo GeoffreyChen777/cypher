@@ -559,6 +559,11 @@ struct PendingSend {
     started: DateTime<Utc>,
 }
 
+struct UploadProgress {
+    total_bytes: u64,
+    completed_bytes: Arc<std::sync::atomic::AtomicU64>,
+}
+
 /// How long the send-in-flight overlay may hold before the synced status
 /// shows through again. Covers the queue → nudge → drain → sync round-trip
 /// to a remote host; when the host is offline the dot falls back to the
@@ -725,6 +730,7 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
+    upload_progress: Option<UploadProgress>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
@@ -825,6 +831,7 @@ impl AppState {
             commands: Vec::new(),
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
+            upload_progress: None,
             local_device_id: None,
             update: None,
             data_dir: None,
@@ -1210,6 +1217,30 @@ impl AppState {
         self.command_status_for(message_id) != Some(CommandSendStatus::Failed)
     }
 
+    pub fn begin_upload_progress(
+        &mut self,
+        total_bytes: u64,
+        completed_bytes: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        self.upload_progress = Some(UploadProgress {
+            total_bytes: total_bytes.max(1),
+            completed_bytes,
+        });
+    }
+
+    pub fn end_upload_progress(&mut self) {
+        self.upload_progress = None;
+    }
+
+    pub fn upload_progress_percent(&self) -> Option<u8> {
+        let progress = self.upload_progress.as_ref()?;
+        let completed = progress
+            .completed_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(progress.total_bytes);
+        Some(((completed.saturating_mul(100)) / progress.total_bytes) as u8)
+    }
+
     // ---- queries ----
 
     /// Non-archived, NON-CHILD chats in sidebar order. Cypher child subagent
@@ -1527,6 +1558,7 @@ impl AppState {
         self.commands.clear();
         self.echoes.clear();
         self.pending_sends.clear();
+        self.upload_progress = None;
         self.local_device_id = None;
         self.update = None;
         cx.notify();

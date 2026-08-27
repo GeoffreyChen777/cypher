@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use futures::TryStreamExt as _;
 use gpui::{
     AnyElement, BackgroundExecutor, Image, ImageFormat, ObjectFit, SharedString, Size,
     StyledImage as _, div, img, prelude::*, px,
@@ -274,6 +275,27 @@ const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(90);
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(150);
 const READ_CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
+const UPLOAD_CONCURRENCY: usize = 3;
+
+fn attachment_deadline(chunks: usize) -> Duration {
+    Duration::from_secs((120 + 15 * chunks as u64).min(900))
+}
+
+fn chunk_ranges(b64_len: usize) -> Vec<(u64, std::ops::Range<usize>)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut seq = 0u64;
+    loop {
+        let end = (start + UPLOAD_CHUNK_B64_CHARS).min(b64_len);
+        ranges.push((seq, start..end));
+        start = end;
+        seq += 1;
+        if start >= b64_len {
+            break;
+        }
+    }
+    ranges
+}
 
 /// Race an RPC against `timeout` on the gpui background executor (these
 /// futures run under `cx.spawn`, so tokio's timer reactor isn't available).
@@ -308,78 +330,106 @@ pub async fn upload_attachment(
     attachment: &StagedAttachment,
     upload_id: &str,
     chat_id: Option<&str>,
+    progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<String, String> {
-    let b64 = BASE64.encode(attachment.bytes());
-    let mut start = 0usize;
-    let mut seq = 0u64;
-    loop {
-        let end = (start + UPLOAD_CHUNK_B64_CHARS).min(b64.len());
-        let params = with_target(
-            serde_json::json!({ "uploadId": upload_id, "seq": seq, "data": &b64[start..end] }),
-            target_device_id,
-        );
-        let timeout = if seq == 0 {
-            FIRST_CHUNK_TIMEOUT
-        } else {
-            CHUNK_TIMEOUT
-        };
-        // One transient blip must not abort a ~400-chunk upload; `seq` slots
-        // are idempotent engine-side, so a blind re-send is safe (timeouts
-        // retry too, like the original's per-chunk `withTimeout` + retry ×2).
-        let mut attempt = 0u32;
-        loop {
-            match call_with_timeout(
-                engine,
-                executor,
-                methods::UPLOAD_CHUNK,
-                params.clone(),
-                timeout,
-            )
-            .await
-            {
-                Ok(_) => break,
-                Err(err) if attempt < 2 => {
-                    attempt += 1;
-                    tracing::debug!(error = %err, seq, "upload chunk retry");
+    let b64 = Arc::new(BASE64.encode(attachment.bytes()));
+    let ranges = chunk_ranges(b64.len());
+    let deadline = executor.timer(attachment_deadline(ranges.len()));
+    let upload = async {
+        futures::stream::iter(ranges.iter().cloned().map(Ok::<_, String>))
+            .try_for_each_concurrent(UPLOAD_CONCURRENCY, |(seq, range)| {
+                let progress = progress.clone();
+                let b64 = b64.clone();
+                async move {
+                    let params = with_target(
+                        serde_json::json!({
+                            "uploadId": upload_id,
+                            "seq": seq,
+                            "data": &b64[range.clone()],
+                        }),
+                        target_device_id,
+                    );
+                    let timeout = if seq < UPLOAD_CONCURRENCY as u64 {
+                        FIRST_CHUNK_TIMEOUT
+                    } else {
+                        CHUNK_TIMEOUT
+                    };
+                    let mut attempt = 0u32;
+                    loop {
+                        match call_with_timeout(
+                            engine,
+                            executor,
+                            methods::UPLOAD_CHUNK,
+                            params.clone(),
+                            timeout,
+                        )
+                        .await
+                        {
+                            Ok(_) => break,
+                            Err(err) if attempt < 2 => {
+                                attempt += 1;
+                                tracing::debug!(error = %err, seq, "upload chunk retry");
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    if let Some(progress) = progress {
+                        progress.fetch_add(
+                            (range.len() * 3 / 4) as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    Ok(())
                 }
-                Err(err) => return Err(err),
-            }
-        }
-        start = end;
-        seq += 1;
-        if start >= b64.len() {
-            break;
-        }
-    }
-    let mut commit = serde_json::Map::new();
-    commit.insert(
-        "uploadId".into(),
-        serde_json::Value::String(upload_id.to_string()),
-    );
-    commit.insert(
-        "fileName".into(),
-        serde_json::Value::String(attachment.name.clone()),
-    );
-    if let Some(chat_id) = chat_id {
+            })
+            .await?;
+        let mut commit = serde_json::Map::new();
         commit.insert(
-            "chatId".into(),
-            serde_json::Value::String(chat_id.to_string()),
+            "uploadId".into(),
+            serde_json::Value::String(upload_id.to_string()),
+        );
+        commit.insert(
+            "fileName".into(),
+            serde_json::Value::String(attachment.name.clone()),
+        );
+        if let Some(chat_id) = chat_id {
+            commit.insert(
+                "chatId".into(),
+                serde_json::Value::String(chat_id.to_string()),
+            );
+        }
+        let params = with_target(serde_json::Value::Object(commit), target_device_id);
+        let reply = call_with_timeout(
+            engine,
+            executor,
+            methods::UPLOAD_COMMIT,
+            params,
+            COMMIT_TIMEOUT,
+        )
+        .await?;
+        reply
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "upload commit returned no path".to_string())
+    };
+    futures::pin_mut!(upload);
+    let result = match futures::future::select(upload, deadline).await {
+        futures::future::Either::Left((result, _)) => result,
+        futures::future::Either::Right(_) => Err(format!(
+            "attachment upload exceeded {}s",
+            attachment_deadline(ranges.len()).as_secs()
+        )),
+    };
+    if result.is_ok()
+        && let Some(progress) = &progress
+    {
+        progress.store(
+            attachment.bytes().len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
         );
     }
-    let params = with_target(serde_json::Value::Object(commit), target_device_id);
-    let reply = call_with_timeout(
-        engine,
-        executor,
-        methods::UPLOAD_COMMIT,
-        params,
-        COMMIT_TIMEOUT,
-    )
-    .await?;
-    reply
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| "upload commit returned no path".to_string())
+    result
 }
 
 /// A transcript image read back from the owning device.
@@ -817,5 +867,26 @@ mod tests {
         assert_eq!(retry_delay(2), Duration::from_millis(8_000));
         assert_eq!(retry_delay(3), Duration::from_millis(15_000));
         assert_eq!(retry_delay(9), Duration::from_millis(15_000));
+    }
+
+    #[test]
+    fn upload_chunks_are_bounded_and_cover_the_payload() {
+        assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);
+        assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
+        let ranges = chunk_ranges(UPLOAD_CHUNK_B64_CHARS + 7);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].0, 0);
+        assert_eq!(ranges[0].1, 0..UPLOAD_CHUNK_B64_CHARS);
+        assert_eq!(ranges[1].0, 1);
+        assert_eq!(
+            ranges[1].1,
+            UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS + 7
+        );
+    }
+
+    #[test]
+    fn upload_deadline_is_bounded() {
+        assert_eq!(attachment_deadline(1), Duration::from_secs(135));
+        assert_eq!(attachment_deadline(1_000), Duration::from_secs(900));
     }
 }

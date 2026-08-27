@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -6263,6 +6264,7 @@ impl Composer {
                             att,
                             &upload_id,
                             None,
+                            None,
                         )
                         .await
                         {
@@ -6440,6 +6442,19 @@ impl Composer {
                                 .call(methods::QUEUE_COMMAND, params)
                                 .await
                                 .map_err(|e| format!("Send failed: {e}"))?;
+                            let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                            let total_bytes = staged
+                                .iter()
+                                .map(|attachment| attachment.bytes().len() as u64)
+                                .sum();
+                            let progress_for_state = progress.clone();
+                            this.update(cx, |composer, cx| {
+                                composer.state.update(cx, |state, cx| {
+                                    state.begin_upload_progress(total_bytes, progress_for_state);
+                                    cx.notify();
+                                });
+                            })
+                            .ok();
                             // The command is durable — now stream the bytes.
                             // Each UploadCommit seals against this chat so the
                             // host's drain releases the Run. An upload failure
@@ -6456,6 +6471,7 @@ impl Composer {
                                     att,
                                     &pending.upload_id,
                                     Some(&chat_id),
+                                    Some(progress.clone()),
                                 )
                                 .await
                                 {

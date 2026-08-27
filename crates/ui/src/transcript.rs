@@ -2853,7 +2853,7 @@ impl Transcript {
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs) = {
+        let (sending, elapsed_secs, upload_percent) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
@@ -2868,12 +2868,14 @@ impl Transcript {
             let elapsed = turn_started
                 .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                 .unwrap_or(0);
-            (sending, elapsed)
+            (sending, elapsed, state.upload_progress_percent())
         };
-        let word = if sending {
-            "Sending"
+        let word = if let Some(percent) = upload_percent {
+            format!("Uploading {percent}%")
+        } else if sending {
+            "Sending".to_string()
         } else {
-            flavour_word(flavour_seed(&chat_id), elapsed_secs)
+            flavour_word(flavour_seed(&chat_id), elapsed_secs).to_string()
         };
         let theme = Theme::of(cx).clone();
         Some(
@@ -2897,7 +2899,7 @@ impl Transcript {
                         .text_color(theme.text_muted)
                         .child(SharedString::from(format!("{word}…"))),
                 )
-                .when(!sending, |el| {
+                .when(upload_percent.is_none() && !sending, |el| {
                     el.child(
                         div()
                             .text_color(theme.text_faint)
