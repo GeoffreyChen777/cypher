@@ -515,14 +515,21 @@ impl AgentAccounts {
             .root_dir()
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
-        let mut child = match tokio::process::Command::new("codex")
+        let mut command = tokio::process::Command::new("codex");
+        command
             .arg("login")
             .env("CODEX_HOME", &home)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::piped());
+        // `codex login` opens the authorization page itself, while the app
+        // opens the URL returned by this flow. Suppress the CLI-side open so
+        // one login attempt cannot create two identical browser tabs.
+        #[cfg(unix)]
+        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop_browser);
+        }
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
                 let _ = std::fs::remove_dir_all(&home);
@@ -537,8 +544,7 @@ impl AgentAccounts {
         };
 
         // codex prints the authorize URL (to stderr as of 0.142 — scan both
-        // streams) and usually opens the browser itself; grab it so the app can
-        // open it too.
+        // streams); the app owns the single browser open.
         let output = Arc::new(Mutex::new(String::new()));
         for pipe in [
             child
@@ -1442,6 +1448,21 @@ fn scan_openai_url(output: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// A no-op browser command for Codex's internal `webbrowser` call. The app
+/// opens the one authorization URL itself after receiving the login start
+/// response.
+#[cfg(unix)]
+fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
+    const SCRIPT: &str = "#!/bin/sh\nexit 0\n";
+    let path = root.join(".noop-browser");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::write(&path, SCRIPT).ok()?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(path)
+}
+
 /// Minimal percent-encoding for OAuth query params (matches `encodeURIComponent`
 /// for the constant inputs used here).
 fn urlencode(input: &str) -> String {
@@ -1518,6 +1539,23 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noop_browser_script_is_stable_and_executable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = ensure_noop_browser(root.path()).expect("script");
+        assert!(path.ends_with(".noop-browser"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(path.metadata().unwrap().permissions().mode() & 0o111 != 0);
+        }
+        assert_eq!(ensure_noop_browser(root.path()), Some(path));
     }
 
     #[test]

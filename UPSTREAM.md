@@ -9,6 +9,25 @@ infrastructure, authentication, Side Chat, `@Session`, and Session Fork. Do not
 use this list as justification for merging `upstream/main` or bulk
 cherry-picking it.
 
+## Current implementation status
+
+The P0 and P1 work described by this inventory has now been implemented
+against Cypher's Rust/gpui/Loro architecture. The upstream commit IDs remain
+historical references; they are not commits to merge.
+
+| Area | Status | Cypher evidence |
+| --- | --- | --- |
+| P0 data integrity and crash recovery | **Complete** | Chat2 frontier/cursor/gap repair (`b749a54`), Registry cursor/orphan protection (`1427757`), dead-command recovery (`d6bec99`), retry identity (`aa229a2`), future-config decoding (`3bee7b3`), and upload staging guard (`b828a6d`). |
+| P1 durable delivery | **Complete** | Durable worktrees (`2451f0d`, `33979ae`), queue-first attachments and seal wake-up (`9c2b305`, `9439123`), delivery state and retry UI (`9448d2f`, `2bcbc37`), parallel transfer progress (`4add0f2`), indexed file search (`24cd7b9`), and session cycling (`b7d9f88`). |
+| Batch 3 diff reconcile churn | **Equivalent and regression-covered** | Reconcile identity memoization, serialized passes, orphan grace, blocking watcher setup, debounce, and checksum suppression are present in `crates/engine/src/diff_sync.rs`; see `crates/engine/tests/diff_sync_churn.rs`. |
+| Batch 3 Composer/Transcript checks | **Mostly equivalent; selective fixes landed** | Composer wheel clamping, stream anchoring, viewport/runway handling, entry copy, and streaming row tests are Cypher-native. Soft-wrap decoration ranges and duplicate Codex auth-tab suppression are covered by current fixes/tests. |
+| P2 architecture projects | **Not started** | Pull-first HTTPS/reconnect, native Claude/Codex, PR status, custom paths, and other major projects remain separate design work. |
+
+The detailed P0/P1 sections below preserve the original audit rationale and
+acceptance criteria. Where their older prose says that a vulnerability is
+still present or that a port is pending, the status table above is
+authoritative for the current tree.
+
 ## Current Cypher product decision
 
 This section is the authoritative product decision for the inventory below. It
@@ -41,9 +60,9 @@ be replaced by upstream equivalents:
 
 | Decision | Meaning | Main contents |
 | --- | --- | --- |
-| **Port now — P0** | A current Cypher correctness or data-loss risk is confirmed. | Chat2 cursor/frontier/gap handling; Registry cursor integrity and orphan-sweep gating; dead-command recovery and retry identity; forward-compatible config decoding; upload staging mtime guard. |
-| **Port next — P1** | A valuable durability or product capability is missing, but it depends on the P0 command/delivery semantics. | Durable worktree specification; queue-first attachments and real progress; explicit Failed/Retry/outbox delivery; indexed file search; Ctrl+Tab navigation. |
-| **Verify, then port selectively** | The upstream problem may already be prevented by Cypher's different implementation. | Diff reconcile churn; Composer redraw/overscroll; stream anchoring; transcript copy/viewport; duplicate Codex auth tabs; decorated ranges. |
+| **Completed — P0** | The P0 correctness and recovery ports are implemented and covered by Cypher tests. | Chat2 cursor/frontier/gap handling; Registry cursor integrity and orphan-sweep gating; dead-command recovery and retry identity; forward-compatible config decoding; upload staging mtime guard. |
+| **Completed — P1** | The P1 durability and delivery work is implemented against the command journal and current UI. | Durable worktree specification; queue-first attachments and real progress; explicit Failed/Retry/outbox delivery; indexed file search; Ctrl+Tab navigation. |
+| **Batch 3 — verified / ported selectively** | Cypher-native implementations were tested first; only reproduced gaps were ported. | Diff reconcile churn is regression-covered; Composer redraw/overscroll, stream anchoring, transcript copy/viewport, duplicate Codex auth tabs, and decorated ranges are implemented or covered by current Cypher tests. |
 | **Evaluate later — P2** | A coherent protocol or major subsystem project, not an incremental reliability patch. | Pull-first HTTPS and reconnect architecture; native Claude/Codex; first-class Reasoning; large model picker; side-by-side diff; PR status; custom paths; native OpenCode/Cursor; future Linux UI work. |
 | **Already equivalent / no work item** | Cypher already has the invariant or a deliberate stronger/different implementation. | Stable account ordering; MCP credential preservation; sibling-dial backoff reset; Comments/comment-only steers; atomic new-chat restoration; connection truth; Pi/Side Chat/`@Session`/Session Fork/Child Chats. |
 | **Do not bring over** | Product-specific, architecturally incompatible, unsafe, or explicitly out of scope. | Upstream subagent document/right-tab model; ACP retirement; Zeron branding/releases/TestFlight; upstream GPUI fork; forced Codex full-access policy; bulk merge/cherry-pick. |

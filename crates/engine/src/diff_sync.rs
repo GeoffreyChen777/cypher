@@ -108,10 +108,13 @@ struct CheckoutEntry {
     chats: Mutex<Vec<Chat>>,
     /// Last published checksum — unchanged snapshots publish nothing.
     checksum: Mutex<Option<String>>,
+    /// A missing chat-watch emission must not immediately tear down a live
+    /// entry. Keep the entry until absence has lasted through the grace period.
+    orphaned_since: Mutex<Option<std::time::Instant>>,
     /// Kick channel into the entry's debounce/sync task.
     kick_tx: mpsc::UnboundedSender<()>,
     /// Keeps the recursive fs watchers alive; dropped on entry close.
-    _watchers: Vec<notify::RecommendedWatcher>,
+    watchers: Mutex<Vec<notify::RecommendedWatcher>>,
 }
 
 /// Working-tree snapshot recorded when a chat's turn dispatches — the diff
@@ -133,6 +136,12 @@ struct DiffSyncInner {
     edge: Option<EdgeConfig>,
     http: reqwest::Client,
     entries: Mutex<HashMap<String, Arc<CheckoutEntry>>>,
+    /// Prevent concurrent reconcile passes from replacing the same entry.
+    reconcile_gate: tokio::sync::Mutex<()>,
+    /// cwd → checkout identity. Chat row changes use this memo; repair passes
+    /// revalidate it against git.
+    identities: Mutex<HashMap<String, CheckoutIdentity>>,
+    orphan_grace: Duration,
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
@@ -160,6 +169,17 @@ impl CheckoutDiffSync {
         device_id: &str,
         edge: Option<EdgeConfig>,
     ) -> Self {
+        Self::start_with_orphan_grace(repos, workspace, device_id, edge, REPAIR_INTERVAL)
+    }
+
+    #[doc(hidden)]
+    pub fn start_with_orphan_grace(
+        repos: Repos,
+        workspace: WorkspaceHost,
+        device_id: &str,
+        edge: Option<EdgeConfig>,
+        orphan_grace: Duration,
+    ) -> Self {
         let (diffs_tx, _) = watch::channel(Vec::new());
         let sync = Self {
             inner: Arc::new(DiffSyncInner {
@@ -169,6 +189,9 @@ impl CheckoutDiffSync {
                 edge,
                 http: reqwest::Client::new(),
                 entries: Mutex::new(HashMap::new()),
+                reconcile_gate: tokio::sync::Mutex::new(()),
+                identities: Mutex::new(HashMap::new()),
+                orphan_grace,
                 diffs_tx,
                 turn_trees: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
@@ -205,7 +228,14 @@ impl CheckoutDiffSync {
     /// Public for tests (the background task calls it on every chat change).
     pub async fn reconcile_now(&self) {
         let chats = self.inner.workspace.watch_chats().borrow().clone();
-        reconcile(&self.inner, chats).await;
+        reconcile(&self.inner, chats, false).await;
+    }
+
+    #[doc(hidden)]
+    pub async fn repair_now(&self) {
+        let chats = self.inner.workspace.watch_chats().borrow().clone();
+        reconcile(&self.inner, chats, true).await;
+        self.sync_all();
     }
 
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
@@ -258,9 +288,42 @@ impl CheckoutDiffSync {
 // Reconcile: chats ⇄ checkout entries
 // ---------------------------------------------------------------------------
 
-async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>) {
+async fn resolve_identity(
+    inner: &Arc<DiffSyncInner>,
+    cwd: &str,
+    fresh: bool,
+) -> Option<CheckoutIdentity> {
+    if !fresh {
+        if let Some(identity) = lock(&inner.identities).get(cwd).cloned() {
+            return Some(identity);
+        }
+    }
+    match inner.repos.checkout_identity(Path::new(cwd)).await {
+        Ok(identity) => {
+            lock(&inner.identities).insert(cwd.to_string(), identity.clone());
+            Some(identity)
+        }
+        Err(err) => {
+            if !Path::new(cwd).exists() {
+                lock(&inner.identities).remove(cwd);
+                tracing::debug!(cwd = %cwd, error = %err, "diff-sync: checkout gone");
+                return None;
+            }
+            let cached = lock(&inner.identities).get(cwd).cloned();
+            if cached.is_some() {
+                tracing::debug!(cwd = %cwd, error = %err,
+                    "diff-sync: identity resolve failed; keeping memoized identity");
+            }
+            cached
+        }
+    }
+}
+
+async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
+    let _gate = inner.reconcile_gate.lock().await;
     // Group this device's cwd-bearing chats by canonical checkout identity.
     let mut groups: HashMap<String, (CheckoutIdentity, Vec<Chat>)> = HashMap::new();
+    let mut resolved: HashMap<String, Option<CheckoutIdentity>> = HashMap::new();
     for chat in chats {
         if chat.device_id != inner.device_id {
             continue;
@@ -268,13 +331,15 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>) {
         let Some(cwd) = chat.cwd.clone() else {
             continue;
         };
-        let identity = match inner.repos.checkout_identity(Path::new(&cwd)).await {
-            Ok(identity) => identity,
-            Err(err) => {
-                tracing::debug!(cwd = %cwd, error = %err, "diff-sync: not a checkout");
-                continue;
+        let identity = match resolved.get(&cwd) {
+            Some(identity) => identity.clone(),
+            None => {
+                let identity = resolve_identity(inner, &cwd, fresh).await;
+                resolved.insert(cwd.clone(), identity.clone());
+                identity
             }
         };
+        let Some(identity) = identity else { continue };
         // Stamp the row's checkoutId so every device groups this chat correctly.
         if chat.checkout_id.as_deref() != Some(identity.id.as_str())
             && let Err(err) = inner.workspace.set_chat_checkout(&chat.id, &identity.id)
@@ -288,14 +353,25 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>) {
             .push(chat);
     }
 
-    // Close entries whose checkout no longer has chats; drop their published diff.
+    // Do not tear down an entry after one transiently incomplete chat watch.
     let removed: Vec<String> = {
+        let now = std::time::Instant::now();
         let mut entries = lock(&inner.entries);
-        let removed: Vec<String> = entries
-            .keys()
-            .filter(|id| !groups.contains_key(*id))
-            .cloned()
-            .collect();
+        let mut removed = Vec::new();
+        for (id, entry) in entries.iter() {
+            if groups.contains_key(id) {
+                *lock(&entry.orphaned_since) = None;
+                continue;
+            }
+            let mut orphaned = lock(&entry.orphaned_since);
+            match *orphaned {
+                None => *orphaned = Some(now),
+                Some(since) if now.duration_since(since) >= inner.orphan_grace => {
+                    removed.push(id.clone());
+                }
+                Some(_) => {}
+            }
+        }
         for id in &removed {
             entries.remove(id); // dropping the entry drops watchers + ends its task
         }
@@ -392,12 +468,42 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
     let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+    let entry = Arc::new(CheckoutEntry {
+        identity,
+        chats: Mutex::new(chats),
+        checksum: Mutex::new(None),
+        orphaned_since: Mutex::new(None),
+        kick_tx: kick_tx.clone(),
+        watchers: Mutex::new(Vec::new()),
+    });
+    lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
+    tokio::spawn(entry_task(
+        Arc::downgrade(inner),
+        Arc::downgrade(&entry),
+        kick_rx,
+        inner.cancel.clone(),
+    ));
+    let _ = kick_tx.send(());
 
-    // Recursive watchers on the worktree root (budget permitting) and the git
-    // dir — HEAD/index churn and file edits both land here. Failures are fine:
-    // the initial + repair sync still keep the snapshot correct.
+    // Watcher setup can walk thousands of directories and block in FSEvents.
+    // Keep it off the async runtime; the initial kick covers the attachment
+    // window and the second kick closes it.
+    let weak = Arc::downgrade(&entry);
+    let identity = entry.identity.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(entry) = weak.upgrade() else { return };
+        let watchers = build_watchers(&identity, &kick_tx);
+        *lock(&entry.watchers) = watchers;
+        let _ = kick_tx.send(());
+    });
+}
+
+fn build_watchers(
+    identity: &CheckoutIdentity,
+    kick_tx: &mpsc::UnboundedSender<()>,
+) -> Vec<notify::RecommendedWatcher> {
     let mut watchers = Vec::new();
-    for target in watch_targets(&identity) {
+    for target in watch_targets(identity) {
         let tx = kick_tx.clone();
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
@@ -418,22 +524,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
             Err(err) => tracing::debug!(error = %err, "diff-sync: watcher create failed"),
         }
     }
-
-    let entry = Arc::new(CheckoutEntry {
-        identity,
-        chats: Mutex::new(chats),
-        checksum: Mutex::new(None),
-        kick_tx: kick_tx.clone(),
-        _watchers: watchers,
-    });
-    lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
-    tokio::spawn(entry_task(
-        Arc::downgrade(inner),
-        Arc::downgrade(&entry),
-        kick_rx,
-        inner.cancel.clone(),
-    ));
-    let _ = kick_tx.send(()); // initial snapshot
+    watchers
 }
 
 /// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
@@ -600,12 +691,12 @@ async fn diff_sync_task(
                 }
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow_and_update().clone();
-                reconcile(&inner, chats).await;
+                reconcile(&inner, chats, false).await;
             }
             _ = repair.tick() => {
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow().clone();
-                reconcile(&inner, chats).await;
+                reconcile(&inner, chats, true).await;
                 for entry in lock(&inner.entries).values() {
                     let _ = entry.kick_tx.send(());
                 }
