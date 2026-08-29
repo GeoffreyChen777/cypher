@@ -5,8 +5,12 @@
 import { LoroDoc } from "loro-crdt";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
 const base = process.argv[2];
+if (!base) throw new Error("usage: node crosscheck.mjs <baseUrl>");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const wsBase = base.replace(/^http/, "ws");
 const user = "e2e-cross-user";
 const chat = `cross-${randomUUID().slice(0, 12)}`;
@@ -88,7 +92,7 @@ await peer.wait(FRAME.ack);
 const out = execFileSync(
   "cargo",
   ["run", "-q", "-p", "cypher-sync", "--example", "chat2_live", "--", base, chat, user, "rust-dev"],
-  { cwd: "/home/ubuntu/GitHub/cypher", encoding: "utf8", timeout: 120000 }
+  { cwd: repoRoot, encoding: "utf8", timeout: 120000 }
 );
 const result = JSON.parse(out.split("\n").find((l) => l.startsWith("RESULT:")).slice(7));
 console.log("rust client:", JSON.stringify(result));

@@ -88,7 +88,8 @@ async fn main() {
     let (base, chat, token, device) = (&args[1], &args[2], &args[3], &args[4]);
     let ws_url = format!(
         "{}/chat2/{}/ws?device={}&token={}",
-        base.replace("https://", "wss://"),
+        base.replace("https://", "wss://")
+            .replace("http://", "ws://"),
         chat,
         device,
         token
