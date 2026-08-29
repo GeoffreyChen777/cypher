@@ -21,7 +21,8 @@ historical references; they are not commits to merge.
 | P1 durable delivery | **Complete** | Durable worktrees (`2451f0d`, `33979ae`), queue-first attachments and seal wake-up (`9c2b305`, `9439123`), delivery state and retry UI (`9448d2f`, `2bcbc37`), parallel transfer progress (`4add0f2`), indexed file search (`24cd7b9`), and session cycling (`b7d9f88`). |
 | Batch 3 diff reconcile churn | **Equivalent and regression-covered** | Reconcile identity memoization, serialized passes, orphan grace, blocking watcher setup, debounce, and checksum suppression are present in `crates/engine/src/diff_sync.rs`; see `crates/engine/tests/diff_sync_churn.rs`. |
 | Batch 3 Composer/Transcript checks | **Mostly equivalent; selective fixes landed** | Composer wheel clamping, stream anchoring, viewport/runway handling, entry copy, and streaming row tests are Cypher-native. Soft-wrap decoration ranges and duplicate Codex auth-tab suppression are covered by current fixes/tests. |
-| P2 architecture projects | **Not started** | Pull-first HTTPS/reconnect, native Claude/Codex, PR status, custom paths, and other major projects remain separate design work. |
+| Pull-first HTTPS/reconnect | **In progress — first transport batch landed** | Edge Chat2/Registry pull-push twins, Bearer-only HTTP requests, local-first Rust clients, iOS HTTP polling, and bounded response handling are implemented; cross-device live Edge rollout tests remain. |
+| Other P2 architecture projects | **Not started** | Native Claude/Codex, PR status, custom paths, and other major projects remain separate design work. |
 
 The detailed P0/P1 sections below preserve the original audit rationale and
 acceptance criteria. Where their older prose says that a vulnerability is

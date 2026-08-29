@@ -46,6 +46,9 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const PRESENCE_TTL: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Registry pulls are JSON and buffered in memory. The Edge endpoint returns
+/// the current table, so refuse an unexpectedly large body before decoding.
+const MAX_HTTP_PULL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Quiet-room probe cadence default. The workspace registry is one room per
 /// engine, so a fixed 15min cadence costs ~100 DO wakes/day total.
@@ -77,6 +80,12 @@ pub enum RegistryEvent {
     Applied,
     /// A remote device's presence beat arrived.
     Presence,
+}
+
+/// Plain-HTTPS pull/push transport used when the WebSocket is unavailable.
+pub trait RegistryTransport: Send + Sync + 'static {
+    fn fetch(&self, since: u64) -> BoxFuture<'static, Result<String, SyncError>>;
+    fn push(&self, body: String) -> BoxFuture<'static, Result<String, SyncError>>;
 }
 
 // ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
@@ -225,6 +234,7 @@ async fn pump(
 #[derive(Default)]
 struct Stats {
     connected: std::sync::atomic::AtomicBool,
+    server_known: std::sync::atomic::AtomicBool,
     last_pushed_ms: std::sync::atomic::AtomicI64,
     last_ack_ms: std::sync::atomic::AtomicI64,
     rejoins: std::sync::atomic::AtomicU64,
@@ -239,6 +249,7 @@ impl Stats {
         use std::sync::atomic::Ordering::Relaxed;
         RoomStatsSnapshot {
             connected: self.connected.load(Relaxed),
+            server_known: self.server_known.load(Relaxed),
             last_pushed_ms: self.last_pushed_ms.load(Relaxed),
             last_ack_ms: self.last_ack_ms.load(Relaxed),
             rejoins: self.rejoins.load(Relaxed),
@@ -313,11 +324,51 @@ impl RegistryClient {
         Self::connect_with_tuned(connector, doc, device_id, tuning).await
     }
 
+    /// Start local-first with an HTTPS pull/push path alongside WebSocket.
+    pub async fn connect_via_transport(
+        provider: Arc<dyn UrlProvider>,
+        doc: Arc<Mutex<RegistryDoc>>,
+        device_id: &str,
+        transport: Arc<dyn RegistryTransport>,
+    ) -> Result<Self, SyncError> {
+        let connector = Arc::new(WsTextConnector { url: provider });
+        Self::connect_with_transport(
+            connector,
+            doc,
+            device_id,
+            RegistryTuning::default(),
+            Some(transport),
+        )
+        .await
+    }
+
+    /// Tunable variant used by the engine's long-lived registry supervisor.
+    pub async fn connect_via_transport_tuned(
+        provider: Arc<dyn UrlProvider>,
+        doc: Arc<Mutex<RegistryDoc>>,
+        device_id: &str,
+        tuning: RegistryTuning,
+        transport: Arc<dyn RegistryTransport>,
+    ) -> Result<Self, SyncError> {
+        let connector = Arc::new(WsTextConnector { url: provider });
+        Self::connect_with_transport(connector, doc, device_id, tuning, Some(transport)).await
+    }
+
     pub(crate) async fn connect_with_tuned(
         connector: Arc<dyn TextConnector>,
         doc: Arc<Mutex<RegistryDoc>>,
         device_id: &str,
         tuning: RegistryTuning,
+    ) -> Result<Self, SyncError> {
+        Self::connect_with_transport(connector, doc, device_id, tuning, None).await
+    }
+
+    pub(crate) async fn connect_with_transport(
+        connector: Arc<dyn TextConnector>,
+        doc: Arc<Mutex<RegistryDoc>>,
+        device_id: &str,
+        tuning: RegistryTuning,
+        transport: Option<Arc<dyn RegistryTransport>>,
     ) -> Result<Self, SyncError> {
         let (events, _) = broadcast::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -342,6 +393,8 @@ impl RegistryClient {
             presence_rx,
             presence: presence.clone(),
             stats: stats.clone(),
+            transport,
+            sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -444,6 +497,8 @@ struct Actor {
     presence_rx: mpsc::Receiver<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     stats: Arc<Stats>,
+    transport: Option<Arc<dyn RegistryTransport>>,
+    sync_busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 enum SessionEnd {
@@ -465,6 +520,12 @@ impl Actor {
     async fn run(mut self, ready: oneshot::Sender<Result<(), SyncError>>) {
         let mut ready = Some(ready);
         let mut backoff = BACKOFF_BASE;
+        if self.transport.is_some() {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Ok(()));
+            }
+            self.spawn_offline_sync();
+        }
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
         // network still waited out the full accumulated delay.
@@ -483,6 +544,7 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, "registry dial failed; backing off");
+                    self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -496,6 +558,7 @@ impl Actor {
                         return;
                     }
                     tracing::warn!("registry dial timed out; backing off");
+                    self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -531,6 +594,7 @@ impl Actor {
                     if joined {
                         backoff = BACKOFF_BASE;
                     }
+                    self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -539,6 +603,97 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Flush pending registry ops and then pull the server delta over HTTPS.
+    /// The server applies the same LWW/sequence semantics as the WS path.
+    fn spawn_offline_sync(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        if self.sync_busy.swap(true, Relaxed) {
+            return;
+        }
+        let doc = self.doc.clone();
+        let events = self.events.clone();
+        let presence = self.presence.clone();
+        let stats = self.stats.clone();
+        let busy = self.sync_busy.clone();
+        tokio::spawn(async move {
+            let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
+            let mut push_failed = false;
+            for batch in batches {
+                let body = serde_json::json!({
+                    "batch": batch.batch,
+                    "ops": batch.ops
+                })
+                .to_string();
+                match transport.push(body).await {
+                    Ok(ack) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&ack)
+                            && let (Some(batch), Some(seq)) =
+                                (value["batch"].as_str(), value["seq"].as_u64())
+                        {
+                            lock(&doc).ack_batch(batch, seq);
+                            stats.last_ack_ms.store(epoch_ms(), Relaxed);
+                            let _ = events.send(RegistryEvent::Applied);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::debug!(error = %err, "registry HTTPS push failed");
+                        push_failed = true;
+                        break;
+                    }
+                }
+            }
+            if push_failed {
+                lock(&doc).mark_disconnected();
+            }
+            let since = lock(&doc).cursor();
+            match transport.fetch(since).await {
+                Ok(body) => {
+                    if body.len() > MAX_HTTP_PULL_BYTES {
+                        tracing::warn!(
+                            bytes = body.len(),
+                            "registry HTTPS pull response too large"
+                        );
+                        busy.store(false, Relaxed);
+                        return;
+                    }
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct PullBody {
+                        seq: u64,
+                        full: bool,
+                        gc_floor: u64,
+                        rows: Vec<RegistryRow>,
+                        #[serde(default)]
+                        presence: HashMap<String, i64>,
+                    }
+                    match serde_json::from_str::<PullBody>(&body) {
+                        Ok(pull) => {
+                            let mut registry = lock(&doc);
+                            registry.apply_state(pull.seq, pull.full, pull.gc_floor, pull.rows);
+                            drop(registry);
+                            let now = tokio::time::Instant::now();
+                            let mut map = lock(&presence);
+                            for (device, at) in pull.presence {
+                                map.insert(device, (at, now));
+                            }
+                            stats.server_known.store(true, Relaxed);
+                            stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+                            let _ = events.send(RegistryEvent::Applied);
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "registry HTTPS pull body malformed")
+                        }
+                    }
+                }
+                Err(err) => tracing::debug!(error = %err, "registry HTTPS pull failed"),
+            }
+            busy.store(false, Relaxed);
+        });
     }
 
     /// Sleep out one backoff, cut short by system wake, a sibling dial
@@ -637,6 +792,7 @@ impl Actor {
             }
         }
         self.stats.connected.store(true, Relaxed);
+        self.stats.server_known.store(true, Relaxed);
         self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
         if ready.is_none() {
             self.stats.rejoins.fetch_add(1, Relaxed);
@@ -792,6 +948,7 @@ impl Actor {
                 let mut doc = lock(&self.doc);
                 doc.apply_state(seq, full, gc_floor, rows);
                 drop(doc);
+                self.stats.server_known.store(true, Relaxed);
                 let now = tokio::time::Instant::now();
                 let mut map = lock(&self.presence);
                 for (device, at) in presence {

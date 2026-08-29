@@ -31,7 +31,7 @@ use cypher_proto::{
     Chat, ChatConfig, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel, Session,
     Space, SubagentRunMode,
 };
-use cypher_sync::{DocsStore, RegistryClient, RegistryTuning};
+use cypher_sync::{DocsStore, RegistryClient, RegistryTransport, RegistryTuning, SyncError};
 
 use crate::doc_host::EdgeConfig;
 use crate::{EngineError, now_ms};
@@ -109,6 +109,93 @@ async fn token_revoked(token: &Option<Arc<dyn cypher_rpc::TokenSource>>) -> bool
         Some(token) => token.token().await.is_none(),
         // Fixed test/dev URLs have no revocable credential source.
         None => false,
+    }
+}
+
+/// Plain-HTTPS registry pull/push. This intentionally owns the EdgeConfig
+/// instead of deriving requests from the WebSocket URL: HTTP credentials must
+/// stay in `Authorization: Bearer`, never leak into query strings or logs.
+struct EdgeRegistryTransport {
+    http: reqwest::Client,
+    edge: EdgeConfig,
+    org_id: String,
+}
+
+impl EdgeRegistryTransport {
+    fn endpoint(&self, leaf: &str) -> String {
+        format!(
+            "{}/registry/{}/{leaf}",
+            self.edge.url.trim_end_matches('/'),
+            self.org_id
+        )
+    }
+}
+
+impl RegistryTransport for EdgeRegistryTransport {
+    fn fetch(&self, since: u64) -> futures::future::BoxFuture<'static, Result<String, SyncError>> {
+        let http = self.http.clone();
+        let edge = self.edge.clone();
+        let url = self.endpoint("rows");
+        let device = edge.device_id.clone();
+        Box::pin(async move {
+            let bearer = edge
+                .bearer()
+                .await
+                .ok_or_else(|| SyncError::Auth("signed out".into()))?;
+            let response = http
+                .get(url)
+                .query(&[
+                    ("since", since.to_string()),
+                    ("device", device),
+                    ("beat", "1".to_string()),
+                ])
+                .bearer_auth(bearer)
+                .send()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))?;
+            if !response.status().is_success() {
+                return Err(SyncError::Protocol(format!(
+                    "registry pull HTTP {}",
+                    response.status()
+                )));
+            }
+            response
+                .text()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))
+        })
+    }
+
+    fn push(&self, body: String) -> futures::future::BoxFuture<'static, Result<String, SyncError>> {
+        let http = self.http.clone();
+        let edge = self.edge.clone();
+        let url = self.endpoint("push");
+        let device = edge.device_id.clone();
+        Box::pin(async move {
+            let bearer = edge
+                .bearer()
+                .await
+                .ok_or_else(|| SyncError::Auth("signed out".into()))?;
+            let response = http
+                .post(url)
+                .query(&[("device", device)])
+                .header("content-type", "application/json")
+                .bearer_auth(bearer)
+                .body(body)
+                .send()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))?;
+            if !response.status().is_success() {
+                return Err(SyncError::Protocol(format!(
+                    "registry push HTTP {}",
+                    response.status()
+                )));
+            }
+            response
+                .text()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))
+        })
     }
 }
 
@@ -372,14 +459,39 @@ impl WorkspaceHost {
                 let tuning = RegistryTuning {
                     probe_quiet: REGISTRY_PROBE_QUIET,
                 };
-                match RegistryClient::connect_via_tuned(
-                    url.clone(),
-                    reg.clone(),
-                    &device_id,
-                    tuning,
-                )
-                .await
-                {
+                let client_result = if let Some(inner) = weak.upgrade() {
+                    let transport = inner.config.edge.clone().map(|edge| {
+                        Arc::new(EdgeRegistryTransport {
+                            http: reqwest::Client::new(),
+                            edge,
+                            org_id: org_id.clone(),
+                        }) as Arc<dyn RegistryTransport>
+                    });
+                    match transport {
+                        Some(transport) => {
+                            RegistryClient::connect_via_transport_tuned(
+                                url.clone(),
+                                reg.clone(),
+                                &device_id,
+                                tuning,
+                                transport,
+                            )
+                            .await
+                        }
+                        None => {
+                            RegistryClient::connect_via_tuned(
+                                url.clone(),
+                                reg.clone(),
+                                &device_id,
+                                tuning,
+                            )
+                            .await
+                        }
+                    }
+                } else {
+                    return;
+                };
+                match client_result {
                     Ok(client) => {
                         let client = Arc::new(client);
                         client.set_presence(now_ms());
@@ -389,7 +501,13 @@ impl WorkspaceHost {
                         }
                         let Some(inner) = weak.upgrade() else { return };
                         *lock(&inner.room) = Some(client.clone());
-                        inner.registry_synced.store(true, Ordering::Relaxed);
+                        // A transport-backed client is ready local-first,
+                        // before either HTTP or WS has returned server truth.
+                        // Do not open the orphan-sweep gate until the first
+                        // state response has actually been applied.
+                        if client.stats().server_known {
+                            inner.registry_synced.store(true, Ordering::Relaxed);
+                        }
                         inner.bump_changed();
                         tracing::info!(org = %org_id, "registry room joined");
                         drop(inner);
@@ -405,6 +523,12 @@ impl WorkspaceHost {
                                     Ok(cypher_sync::RegistryEvent::Applied)
                                     | Ok(cypher_sync::RegistryEvent::Connected) => {
                                         let Some(inner) = weak.upgrade() else { return };
+                                        if lock(&inner.room)
+                                            .as_ref()
+                                            .is_some_and(|room| room.stats().server_known)
+                                        {
+                                            inner.registry_synced.store(true, Ordering::Relaxed);
+                                        }
                                         inner.bump_changed();
                                     }
                                     Ok(cypher_sync::RegistryEvent::Presence) => {

@@ -1,5 +1,5 @@
 //! cypher-sync — the edge room clients (registry rows + chat2 row protocol over
-//! WebSocket against the TS edge) and the local `DocsStore` (SQLite snapshots +
+//! WebSocket/HTTPS pull-push against the TS edge) and the local `DocsStore` (SQLite snapshots +
 //! processed-command ledger).
 //!
 //! - [`ChatClient`]: joins a ChatRoom DO (`wss://…/chat2/{chatId}/ws?token=`),
@@ -19,8 +19,9 @@ mod types;
 pub mod wake;
 
 pub use chat_client::{
-    ChatClient, ChatDocSink, ChatEvent, ChatStatsSnapshot, ChatTuning, CheckpointFetcher,
+    ChatClient, ChatDocSink, ChatEvent, ChatStatsSnapshot, ChatTransport, ChatTuning,
+    CheckpointFetcher,
 };
-pub use registry::{RegistryClient, RegistryEvent, RegistryTuning};
+pub use registry::{RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning};
 pub use store::{DocsStore, StoreError};
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};

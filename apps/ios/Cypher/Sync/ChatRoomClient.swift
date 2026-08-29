@@ -45,6 +45,8 @@ actor ChatRoomClient {
     static let backoffCapMs = 30_000
     /// Re-push cadence after a `quota` rejection (server window is 60s).
     static let quotaRetryNs: UInt64 = 5_000_000_000
+    /// Polling interval while the WebSocket is unavailable.
+    static let httpPollNs: UInt64 = 20_000_000_000
     /// Client-side push cap: the DO's per-row cap (1 MiB) minus frame-header
     /// headroom — the runtime closes WS messages at 1 MiB BEFORE the DO runs,
     /// so an over-cap payload would die with no error frame to retire it.
@@ -76,6 +78,8 @@ actor ChatRoomClient {
     private let device: String
     private let urlProvider: @Sendable () async -> URL?
     private let checkpointRequest: @Sendable () async -> URLRequest?
+    private let rowsRequest: @Sendable (UInt64) async -> URLRequest?
+    private let pushRequest: @Sendable (String) async -> URLRequest?
     private let delegate: Delegate
 
     private var socket: URLSessionWebSocketTask?
@@ -83,6 +87,7 @@ actor ChatRoomClient {
     private var pingTask: Task<Void, Never>?
     private var livenessTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
+    private var pullTask: Task<Void, Never>?
     private var pending: [PendingPush] = []
     private var joined = false
     private var closed = false
@@ -112,11 +117,15 @@ actor ChatRoomClient {
          device: String,
          urlProvider: @escaping @Sendable () async -> URL?,
          checkpointRequest: @escaping @Sendable () async -> URLRequest?,
+         rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
+         pushRequest: @escaping @Sendable (String) async -> URLRequest?,
          delegate: Delegate) {
         self.chatId = chatId
         self.device = device
         self.urlProvider = urlProvider
         self.checkpointRequest = checkpointRequest
+        self.rowsRequest = rowsRequest
+        self.pushRequest = pushRequest
         self.delegate = delegate
     }
 
@@ -125,12 +134,129 @@ actor ChatRoomClient {
     func start() {
         closed = false
         connect()
+        pullTask?.cancel()
+        pullTask = Task { [weak self] in
+            await self?.pullSync()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: ChatRoomClient.httpPollNs)
+                guard let self, !Task.isCancelled else { return }
+                if await self.shouldPoll() {
+                    await self.pullSync()
+                }
+            }
+        }
+    }
+
+    /// HTTPS fallback/parallel convergence path. Pushes are retried
+    /// idempotently by batch id, then the framed pull is applied through the
+    /// same state/row/checkpoint rules as the WebSocket path.
+    func pullSync() async {
+        guard !closed else { return }
+        for push in pending {
+            guard var request = await pushRequest(push.batchId) else { break }
+            request.httpBody = push.bytes
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { break }
+            if http.statusCode == 200,
+               let ack = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let seq = (ack["seq"] as? NSNumber)?.uint64Value {
+                pending.removeAll { $0.batchId == push.batchId }
+                // A Chat2 ACK is not permission to skip an interleaved row.
+                let cursor = await delegate.cursor()
+                if seq == cursor + 1 {
+                    await delegate.advanceCursor(seq)
+                }
+            } else if (400...499).contains(http.statusCode) {
+                // Retire only a parsed permanent edge verdict. An arbitrary
+                // proxy/captive-portal response must not discard the update.
+                let code = (try? JSONSerialization.jsonObject(with: data))
+                    .flatMap { $0 as? [String: Any] }?["error"] as? String
+                if ["bad_push", "too_large", "empty"].contains(code) {
+                    pending.removeAll { $0.batchId == push.batchId }
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        let after = await delegate.cursor()
+        guard let request = await rowsRequest(after),
+              let (body, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        var frames: [ChatWireFrame] = []
+        var offset = 0
+        while offset + 4 <= body.count {
+            let length = body[offset..<(offset + 4)].withUnsafeBytes {
+                Int($0.loadUnaligned(as: UInt32.self).littleEndian)
+            }
+            offset += 4
+            guard length > 0, offset + length <= body.count else { return }
+            guard let frame = ChatWire.decode(body.subdata(in: offset..<(offset + length))) else {
+                return
+            }
+            frames.append(frame)
+            offset += length
+        }
+        guard offset == body.count else { return }
+        guard let stateFrame = frames.first,
+              stateFrame.kind == ChatFrameType.state,
+              let state = ChatStateHeader(stateFrame.header) else { return }
+        let contained = state.checkpointSize == 0
+            || await delegate.containsFrontier(stateFrame.payload)
+        let plan = chatPlanCatchUp(cursor: after, state: state,
+                                   frontierContained: contained)
+        let plannedAfter: UInt64
+        switch plan {
+        case .checkpointThenRows(let checkpointAfter):
+            guard let bytes = await fetchCheckpoint(),
+                  await delegate.applyCheckpoint(bytes, state.checkpointSeq) else { return }
+            plannedAfter = checkpointAfter
+        case .rowsOnly(let cursor):
+            plannedAfter = cursor
+        }
+        if plannedAfter != after {
+            await delegate.setCursor(plannedAfter)
+        }
+        guard !closed else { return }
+        for frame in frames.dropFirst()
+        where frame.kind == ChatFrameType.row || frame.kind == ChatFrameType.rowsDone {
+            await applyPullFrame(frame)
+        }
+    }
+
+    private func shouldPoll() -> Bool {
+        !closed && !joined
+    }
+
+    private func applyPullFrame(_ frame: ChatWireFrame) async {
+        switch frame.kind {
+        case ChatFrameType.row:
+            guard let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
+            let cursor = await delegate.cursor()
+            if seq > cursor + 1 {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): HTTPS row gap (seq=\(seq), cursor=\(cursor))")
+                await delegate.applyRow(frame.payload, cursor)
+                return
+            }
+            await delegate.applyRow(frame.payload, seq)
+        case ChatFrameType.rowsDone:
+            // An HTTPS pull completed, but it must not mark the WebSocket as
+            // joined: polling continues until the socket itself reaches its
+            // protocol state, otherwise one successful pull would disable
+            // future polling on a WS-hostile network.
+            await delegate.event(.connected)
+        default:
+            break
+        }
     }
 
     func stop() {
         closed = true
         generation += 1
         cancelTasks()
+        pullTask?.cancel()
+        pullTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         joined = false

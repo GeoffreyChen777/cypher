@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use cypher_doc::SessionDoc;
-use cypher_sync::chat_client::{ChatDocSink, CheckpointFetcher};
+use cypher_sync::chat_client::{ChatDocSink, ChatTransport, CheckpointFetcher};
 use cypher_sync::{DocsStore, SyncError};
 use futures::future::BoxFuture;
 
@@ -225,6 +225,112 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
             Err(SyncError::Protocol(
                 "checkpoint fetch exhausted resume attempts".into(),
             ))
+        })
+    }
+}
+
+/// Plain-HTTPS Chat2 pull/push transport. The URL is derived from the same
+/// EdgeConfig as the WebSocket and checkpoint fetcher; each request obtains a
+/// fresh bearer so token refresh and reconnect share one auth source.
+pub struct EdgeChatTransport {
+    http: reqwest::Client,
+    edge: EdgeConfig,
+    chat_id: String,
+    device_id: String,
+}
+
+impl EdgeChatTransport {
+    pub fn new(
+        http: reqwest::Client,
+        edge: EdgeConfig,
+        chat_id: impl Into<String>,
+        device_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            http,
+            edge,
+            chat_id: chat_id.into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!(
+            "{}/chat2/{}/rows",
+            self.edge.url.trim_end_matches('/'),
+            self.chat_id
+        )
+    }
+}
+
+impl ChatTransport for EdgeChatTransport {
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let http = self.http.clone();
+        let edge = self.edge.clone();
+        let url = self.url();
+        let device = self.device_id.clone();
+        Box::pin(async move {
+            let bearer = edge
+                .bearer()
+                .await
+                .ok_or_else(|| SyncError::Auth("signed out".into()))?;
+            let response = http
+                .get(url)
+                .query(&[
+                    ("after", after.to_string()),
+                    ("device", device),
+                    ("excludeOwn", "0".to_string()),
+                ])
+                .bearer_auth(bearer)
+                .send()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))?;
+            if !response.status().is_success() {
+                return Err(SyncError::Protocol(format!(
+                    "chat pull HTTP {}",
+                    response.status()
+                )));
+            }
+            response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|err| SyncError::WebSocket(err.to_string()))
+        })
+    }
+
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>> {
+        let http = self.http.clone();
+        let edge = self.edge.clone();
+        let url = self.url();
+        let device = self.device_id.clone();
+        Box::pin(async move {
+            let bearer = edge
+                .bearer()
+                .await
+                .ok_or_else(|| SyncError::Auth("signed out".into()))?;
+            let response = http
+                .post(url)
+                .query(&[("batchId", batch_id), ("device", device)])
+                .bearer_auth(bearer)
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))?;
+            if !response.status().is_success() {
+                return Err(SyncError::Protocol(format!(
+                    "chat push HTTP {}",
+                    response.status()
+                )));
+            }
+            response
+                .text()
+                .await
+                .map_err(|err| SyncError::WebSocket(err.to_string()))
         })
     }
 }

@@ -22,7 +22,8 @@
  *   GET  /workspace/:orgId/tail       — workspace-doc tail JSON
  *   GET  /registry/:orgId/ws          — workspace registry room `reg1/{orgId}/{user}` (wss)
  *   GET  /registry/:orgId/stats       — registry seq/rows/attribution
- *   GET  /registry/:orgId/rows        — registry full-table repair read
+ *   GET  /registry/:orgId/rows        — registry delta/full HTTPS pull
+ *   POST /registry/:orgId/push        — registry HTTPS push
  *   POST /registry/:orgId/reset       — registry operator wipe (self-healing)
  *   GET  /device/:deviceId/ws?role=   — device-room byte pipe (§8)
  *   GET  /device/:deviceId/sidecar/:name
@@ -32,6 +33,8 @@
  *   GET  /blob/:chatId/:partId
  *   GET  /chat2/:chatId/ws            — chat2 log-relay room (wss, chat2-sync B)
  *   GET|POST /chat2/:chatId/checkpoint — client-built doc snapshot (Range-resumable GET)
+ *   GET  /chat2/:chatId/rows           — HTTPS pull (framed state/rows)
+ *   POST /chat2/:chatId/rows           — HTTPS push (batch-id deduped)
  *   GET|PUT  /chat2/:chatId/tail      — host-published sidecars, served verbatim
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
@@ -220,6 +223,7 @@ export default {
       }
       const routes: Record<string, string[]> = {
         checkpoint: ["GET", "POST"],
+        rows: ["GET", "POST"],
         tail: ["GET", "PUT"],
         diff: ["GET", "PUT"],
         stats: ["GET"],
@@ -321,7 +325,10 @@ export default {
       }
       // Repair/inspection read: the full current row table.
       if (parts[2] === "rows" && request.method === "GET") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/rows", "");
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/rows", url.search);
+      }
+      if (parts[2] === "push" && request.method === "POST") {
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", url.search);
       }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table

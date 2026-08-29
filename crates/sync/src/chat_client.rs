@@ -55,6 +55,10 @@ const QUOTA_RETRY: Duration = Duration::from_secs(5);
 /// enqueue: a batch the server can never accept must not enter the replay
 /// queue.
 pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
+/// Upper bound for a buffered HTTPS pull response. The Edge endpoint itself
+/// truncates at 4 MiB; this larger client guard protects against a buggy or
+/// incompatible server before frame parsing allocates more state.
+const MAX_HTTP_PULL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Per-client tuning.
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +121,20 @@ pub trait ChatDocSink: Send + Sync + 'static {
 /// resumability is the point of checkpoint-over-HTTP vs export-per-join.
 pub trait CheckpointFetcher: Send + Sync + 'static {
     fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>>;
+}
+
+/// Plain-HTTPS pull/push transport for networks where a WebSocket upgrade is
+/// unavailable or slow. Chat pulls use the same binary frames as the socket:
+/// a length-prefixed `state`, zero or more `row` frames, and `rowsDone`.
+/// Pushes return the JSON acknowledgement body. Implementations must use a
+/// fresh bearer per request and treat delivery as at-least-once.
+pub trait ChatTransport: Send + Sync + 'static {
+    fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>>;
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>>;
 }
 
 // ── catch-up planning (pure — the client-side precision rule) ───────────────
@@ -278,6 +296,10 @@ struct Shared {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatStatsSnapshot {
     pub connected: bool,
+    /// A state response was received from the server (WS hello or HTTPS pull).
+    /// Until this is true, server counters are only local zero-value
+    /// placeholders and consumers must not make recovery decisions from them.
+    pub server_known: bool,
     pub cursor: u64,
     pub head_seq: u64,
     pub seq_floor: u64,
@@ -367,6 +389,30 @@ impl ChatClient {
         .await
     }
 
+    /// Start a local-first membership with HTTPS pull/push alongside the
+    /// WebSocket. The returned client is ready immediately; the HTTP worker
+    /// converges the document while the socket attempts its normal join.
+    pub async fn connect_via_transport(
+        provider: Arc<dyn UrlProvider>,
+        sink: Arc<dyn ChatDocSink>,
+        fetcher: Arc<dyn CheckpointFetcher>,
+        device_id: &str,
+        initial_cursor: u64,
+        transport: Arc<dyn ChatTransport>,
+    ) -> Result<Self, SyncError> {
+        let connector = Arc::new(WsBinConnector { url: provider });
+        Self::connect_with_transport(
+            connector,
+            sink,
+            fetcher,
+            device_id,
+            initial_cursor,
+            ChatTuning::default(),
+            Some(transport),
+        )
+        .await
+    }
+
     pub(crate) async fn connect_with_tuned(
         connector: Arc<dyn BinConnector>,
         sink: Arc<dyn ChatDocSink>,
@@ -374,6 +420,27 @@ impl ChatClient {
         device_id: &str,
         initial_cursor: u64,
         tuning: ChatTuning,
+    ) -> Result<Self, SyncError> {
+        Self::connect_with_transport(
+            connector,
+            sink,
+            fetcher,
+            device_id,
+            initial_cursor,
+            tuning,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_transport(
+        connector: Arc<dyn BinConnector>,
+        sink: Arc<dyn ChatDocSink>,
+        fetcher: Arc<dyn CheckpointFetcher>,
+        device_id: &str,
+        initial_cursor: u64,
+        tuning: ChatTuning,
+        transport: Option<Arc<dyn ChatTransport>>,
     ) -> Result<Self, SyncError> {
         let (events, _) = broadcast::channel(256);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -404,6 +471,8 @@ impl ChatClient {
             flags: flags.clone(),
             resumed: false,
             cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
+            transport,
+            http_sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -507,6 +576,7 @@ impl ChatClient {
         });
         ChatStatsSnapshot {
             connected: self.flags.connected.load(Relaxed),
+            server_known: shared.server.is_some(),
             cursor: shared.cursor,
             // The server's honest view — deliberately NOT clamped to the
             // cursor: cursor > headSeq is the reset signal and must stay
@@ -573,6 +643,10 @@ struct Actor {
     /// Once per client instance, refetch rows from the checkpoint (or zero)
     /// when a restored cursor may have advanced over parked Loro operations.
     cursor_amnesty_done: std::sync::atomic::AtomicBool,
+    /// Optional plain-HTTPS fallback/parallel convergence path.
+    transport: Option<Arc<dyn ChatTransport>>,
+    /// Prevent overlapping pull cycles from racing one another.
+    http_sync_busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 enum SessionEnd {
@@ -592,6 +666,14 @@ impl Actor {
     async fn run(mut self, ready: oneshot::Sender<Result<(), SyncError>>) {
         let mut ready = Some(ready);
         let mut backoff = BACKOFF_BASE;
+        if self.transport.is_some() {
+            // HTTPS is the bootstrap path: callers can render the local doc
+            // immediately while both transports converge in the background.
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Ok(()));
+            }
+            self.spawn_http_sync();
+        }
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
         // network still waited out the full accumulated delay.
@@ -610,6 +692,7 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, "chat2 dial failed; backing off");
+                    self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -623,6 +706,7 @@ impl Actor {
                         return;
                     }
                     tracing::warn!("chat2 dial timed out; backing off");
+                    self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -652,6 +736,7 @@ impl Actor {
                     if joined {
                         backoff = BACKOFF_BASE;
                     }
+                    self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -660,6 +745,38 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Run one bounded HTTPS synchronization cycle. The endpoint returns
+    /// length-prefixed WS-compatible frames, so state/frontier/checkpoint
+    /// decisions and row application stay on the same P0 code paths.
+    fn spawn_http_sync(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        if self.http_sync_busy.swap(true, Relaxed) {
+            return;
+        }
+        let shared = self.shared.clone();
+        let sink = self.sink.clone();
+        let fetcher = self.fetcher.clone();
+        let events = self.events.clone();
+        let busy = self.http_sync_busy.clone();
+        tokio::spawn(async move {
+            let result = http_sync_once(
+                transport.as_ref(),
+                &shared,
+                sink.as_ref(),
+                fetcher.as_ref(),
+                &events,
+            )
+            .await;
+            if let Err(err) = result {
+                tracing::debug!(error = %err, "chat2 HTTPS sync failed; WS/retry will continue");
+            }
+            busy.store(false, Relaxed);
+        });
     }
 
     /// Sleep out one backoff, cut short by system wake, a sibling dial
@@ -918,6 +1035,7 @@ impl Actor {
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
+                    self.spawn_http_sync();
                 }
                 beat = self.presence_rx.recv() => {
                     if let Some((at, payload)) = beat {
@@ -1186,6 +1304,148 @@ impl Actor {
         }
         true
     }
+}
+
+/// Apply one HTTPS pull response without weakening the Chat2 cursor invariant.
+/// The response is a sequence of length-prefixed WS frames. A truncated or
+/// malformed response is retryable; rows after a hole are not applied and do
+/// not advance the cursor.
+async fn http_sync_once(
+    transport: &dyn ChatTransport,
+    shared: &Arc<Mutex<Shared>>,
+    sink: &dyn ChatDocSink,
+    fetcher: &dyn CheckpointFetcher,
+    events: &broadcast::Sender<ChatEvent>,
+) -> Result<(), SyncError> {
+    // POST pending rows first. A successful ACK retires only that batch; its
+    // sequence number is not allowed to jump the receive cursor over
+    // interleaved remote rows (the Chat2 P0 invariant).
+    let pending: Vec<(String, Vec<u8>)> = lock(shared)
+        .pending
+        .iter()
+        .map(|push| (push.batch_id.clone(), push.bytes.clone()))
+        .collect();
+    for (batch_id, bytes) in pending {
+        let ack = transport.push(batch_id, bytes).await?;
+        let value = serde_json::from_str::<serde_json::Value>(&ack)
+            .map_err(|e| SyncError::Protocol(format!("chat push bad ack: {e}")))?;
+        let ack_batch = value["batchId"]
+            .as_str()
+            .ok_or_else(|| SyncError::Protocol("chat push ack missing batchId".into()))?;
+        if let Some(seq) = value["seq"].as_u64() {
+            lock(shared)
+                .pending
+                .retain(|push| push.batch_id != ack_batch);
+            // Only advance when the ACK is the next contiguous row. If it
+            // outruns the cursor, the subsequent pull repairs the missing
+            // rows first and then reaches the ACK's sequence.
+            let current = lock(shared).cursor;
+            if seq == current + 1 {
+                lock(shared).cursor = seq;
+                sink.advance_cursor(seq);
+            }
+        } else {
+            return Err(SyncError::Protocol("chat push ack missing seq".into()));
+        }
+        let _ = events.send(ChatEvent::Applied);
+    }
+
+    let mut cursor = lock(shared).cursor;
+    let body = transport.fetch_rows(cursor).await?;
+    if body.len() > MAX_HTTP_PULL_BYTES {
+        return Err(SyncError::Protocol("chat pull response too large".into()));
+    }
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    while offset < body.len() {
+        if body.len() - offset < 4 {
+            return Err(SyncError::Protocol(
+                "chat pull truncated frame length".into(),
+            ));
+        }
+        let len = u32::from_le_bytes([
+            body[offset],
+            body[offset + 1],
+            body[offset + 2],
+            body[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if len == 0 || len > body.len() - offset {
+            return Err(SyncError::Protocol("chat pull truncated frame".into()));
+        }
+        let frame = wire::decode(&body[offset..offset + len])
+            .ok_or_else(|| SyncError::Protocol("chat pull malformed frame".into()))?;
+        frames.push(frame);
+        offset += len;
+    }
+    let Some(state_frame) = frames.first() else {
+        return Err(SyncError::Protocol("chat pull missing state".into()));
+    };
+    if state_frame.kind != frame_type::STATE {
+        return Err(SyncError::Protocol("chat pull state is not first".into()));
+    }
+    let state = serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
+        .map_err(|e| SyncError::Protocol(format!("chat pull bad state: {e}")))?;
+    lock(shared).server = Some(state);
+    if cursor > state.head_seq {
+        lock(shared).cursor = 0;
+        cursor = 0;
+        let _ = events.send(ChatEvent::ServerReset);
+    }
+    let contained = state.checkpoint_size == 0 || sink.contains_frontier(&state_frame.payload);
+    let plan = plan_catch_up(cursor, &state, contained);
+    let after = match plan {
+        CatchUpPlan::RowsOnly { after } => after,
+        CatchUpPlan::CheckpointThenRows { after } => {
+            let bytes = tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch())
+                .await
+                .map_err(|_| SyncError::Protocol("chat checkpoint pull timed out".into()))??;
+            sink.apply_checkpoint(&bytes, state.checkpoint_seq)
+                .map_err(SyncError::Loro)?;
+            let mut shared_state = lock(shared);
+            shared_state.cursor = shared_state.cursor.max(state.checkpoint_seq);
+            drop(shared_state);
+            let _ = events.send(ChatEvent::Applied);
+            after
+        }
+    };
+    if lock(shared).cursor < after {
+        lock(shared).cursor = after;
+        // A contained checkpoint may let us skip older rows. Persist that
+        // cursor movement with the unchanged local document so restart does
+        // not repeat the same HTTP pull forever.
+        sink.advance_cursor(after);
+    }
+    let mut applied = false;
+    for frame in frames.into_iter().skip(1) {
+        if frame.kind == frame_type::ROWS_DONE {
+            continue;
+        }
+        if frame.kind != frame_type::ROW {
+            continue;
+        }
+        let row = serde_json::from_value::<wire::RowHeader>(frame.header)
+            .map_err(|e| SyncError::Protocol(format!("chat pull bad row: {e}")))?;
+        let current = lock(shared).cursor;
+        if row.seq <= current {
+            continue;
+        }
+        if row.seq != current + 1 {
+            tracing::warn!(
+                cursor = current,
+                seq = row.seq,
+                "chat HTTPS pull found a row gap"
+            );
+            break;
+        }
+        sink.apply_row(&frame.payload, row.seq);
+        lock(shared).cursor = row.seq;
+        applied = true;
+    }
+    if applied {
+        let _ = events.send(ChatEvent::Applied);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

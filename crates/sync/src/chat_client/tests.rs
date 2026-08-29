@@ -74,6 +74,34 @@ struct FixedFetcher {
     calls: Arc<std::sync::atomic::AtomicU64>,
 }
 
+struct FixedChatTransport {
+    body: Vec<u8>,
+    pushes: Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl ChatTransport for FixedChatTransport {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let body = self.body.clone();
+        Box::pin(async move { Ok(body) })
+    }
+
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>> {
+        lock(&self.pushes).push((batch_id.clone(), bytes));
+        Box::pin(async move {
+            Ok(serde_json::json!({
+                "batchId": batch_id,
+                "seq": 1,
+                "dup": false
+            })
+            .to_string())
+        })
+    }
+}
+
 impl CheckpointFetcher for FixedFetcher {
     fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         self.calls
@@ -98,6 +126,64 @@ async fn expect_kind(end: &mut ServerEnd, kind: u8) -> wire::WireFrame {
 
 async fn send(end: &ServerEnd, kind: u8, header: serde_json::Value, payload: &[u8]) {
     end.tx.send(encode(kind, &header, payload)).await.unwrap();
+}
+
+fn framed_pull(frames: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut body = Vec::new();
+    for frame in frames {
+        body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        body.extend_from_slice(&frame);
+    }
+    body
+}
+
+#[tokio::test]
+async fn https_pull_applies_only_contiguous_rows() {
+    let sink = Arc::new(RecordingSink::default());
+    let transport = Arc::new(FixedChatTransport {
+        body: framed_pull(vec![
+            encode(
+                frame_type::STATE,
+                &serde_json::json!({
+                    "headSeq": 3,
+                    "seqFloor": 0,
+                    "checkpointSeq": 0,
+                    "checkpointSize": 0,
+                    "rowCount": 3,
+                    "rowBytes": 3
+                }),
+                &[],
+            ),
+            encode(
+                frame_type::ROW,
+                &serde_json::json!({"seq": 1, "device": "a", "batchId": "a"}),
+                b"1",
+            ),
+            encode(
+                frame_type::ROW,
+                &serde_json::json!({"seq": 3, "device": "b", "batchId": "b"}),
+                b"3",
+            ),
+        ]),
+        pushes: Mutex::new(Vec::new()),
+    });
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let (events, _) = broadcast::channel(16);
+    let fetcher = Arc::new(FixedFetcher {
+        bytes: Vec::new(),
+        calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    });
+    http_sync_once(
+        transport.as_ref(),
+        &shared,
+        sink.as_ref(),
+        fetcher.as_ref(),
+        &events,
+    )
+    .await
+    .unwrap();
+    assert_eq!(lock(&shared).cursor, 1);
+    assert_eq!(lock(&sink.rows).as_slice(), &[(b"1".to_vec(), 1)]);
 }
 
 /// Answer hello with `state`, then serve the rows request with `rows`.

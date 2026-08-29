@@ -46,16 +46,24 @@ actor RegistryClient {
     static let livenessTickNs: UInt64 = 1_000_000_000
     static let backoffBaseMs = 250
     static let backoffCapMs = 30_000
+    static let httpPollNs: UInt64 = 20_000_000_000
+    static let maxHttpPullBytes = 8 * 1024 * 1024
 
     /// MainActor-isolated bridge to the store's RegistryDoc.
     struct Delegate: Sendable {
         var helloCursor: @MainActor @Sendable () -> UInt64?
         var takePushable: @MainActor @Sendable () -> [RegistryPendingBatch]
+        /// Clear HTTP in-flight marks after a transient request failure so
+        /// the next poll can safely retry the same batch.
+        var resetPushable: @MainActor @Sendable () -> Void
+        var acknowledge: @MainActor @Sendable (String, UInt64) -> Void
         var event: @MainActor @Sendable (RegistryEvent) -> Void
     }
 
     private let device: String
     private let urlProvider: @Sendable () async -> URL?
+    private let rowsRequest: @Sendable (UInt64?) async -> URLRequest?
+    private let pushRequest: @Sendable () async -> URLRequest?
     private let delegate: Delegate
 
     private var socket: URLSessionWebSocketTask?
@@ -63,6 +71,7 @@ actor RegistryClient {
     private var pingTask: Task<Void, Never>?
     private var presenceTask: Task<Void, Never>?
     private var livenessTask: Task<Void, Never>?
+    private var pullTask: Task<Void, Never>?
     private var joined = false
     private var closed = false
     private var generation = 0
@@ -74,11 +83,33 @@ actor RegistryClient {
     private var helloSentAt: DispatchTime?
     private var probeSentAt: DispatchTime?
 
+    private struct HTTPPull: Decodable {
+        let seq: UInt64
+        let full: Bool
+        let gcFloor: UInt64
+        let rows: [RegistryRow]
+        let presence: [String: Int64]
+    }
+
+    private struct PushBody: Encodable {
+        let batch: String
+        let ops: [RegistryOp]
+    }
+
+    private struct HTTPAck: Decodable {
+        let batch: String
+        let seq: UInt64
+    }
+
     init(device: String,
          urlProvider: @escaping @Sendable () async -> URL?,
+         rowsRequest: @escaping @Sendable (UInt64?) async -> URLRequest?,
+         pushRequest: @escaping @Sendable () async -> URLRequest?,
          delegate: Delegate) {
         self.device = device
         self.urlProvider = urlProvider
+        self.rowsRequest = rowsRequest
+        self.pushRequest = pushRequest
         self.delegate = delegate
     }
 
@@ -87,12 +118,63 @@ actor RegistryClient {
     func start() {
         closed = false
         connect()
+        pullTask?.cancel()
+        pullTask = Task { [weak self] in
+            await self?.pullSync()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: RegistryClient.httpPollNs)
+                guard let self, !Task.isCancelled else { return }
+                if await self.shouldPoll() { await self.pullSync() }
+            }
+        }
+    }
+
+    private func shouldPoll() -> Bool {
+        !closed && !joined
+    }
+
+    /// HTTPS fallback: POST pending LWW batches, then GET the server delta.
+    /// The response uses the same JSON state semantics as the WebSocket hello.
+    func pullSync() async {
+        guard !closed else { return }
+        let batches = await delegate.takePushable()
+        for batch in batches {
+            guard var request = await pushRequest() else { break }
+            guard let bytes = try? JSONEncoder().encode(PushBody(batch: batch.batch, ops: batch.ops)) else {
+                break
+            }
+            request.httpBody = bytes
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else {
+                await delegate.resetPushable()
+                break
+            }
+            if http.statusCode != 200 {
+                await delegate.resetPushable()
+                break
+            }
+            guard let ack = try? JSONDecoder().decode(HTTPAck.self, from: data) else {
+                await delegate.resetPushable()
+                break
+            }
+            await delegate.acknowledge(ack.batch, ack.seq)
+        }
+        guard let request = await rowsRequest(await delegate.helloCursor()),
+              let (data, response) = try? await URLSession.shared.data(for: request),
+              data.count <= RegistryClient.maxHttpPullBytes,
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let frame = try? JSONDecoder().decode(HTTPPull.self, from: data) else { return }
+        await delegate.event(.state(seq: frame.seq, full: frame.full,
+                                    gcFloor: frame.gcFloor, rows: frame.rows,
+                                    presence: frame.presence))
     }
 
     func stop() {
         closed = true
         generation += 1
         cancelTasks()
+        pullTask?.cancel()
+        pullTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         joined = false

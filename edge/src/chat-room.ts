@@ -128,11 +128,9 @@ export class ChatRoom implements DurableObject {
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
-    // Everything below reads a claimed room.
-    if (!owner) return json({ error: "not_found" }, 404);
-    if (owner !== userId) return json({ error: "forbidden" }, 403);
-
     if (url.pathname === "/checkpoint" && request.method === "GET") {
+      if (!owner) return json({ error: "not_found" }, 404);
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
       const bytes = this.blobs.get(CHECKPOINT_BLOB);
       if (!bytes) return json({ error: "not_found" }, 404);
       // Range-resumable (bytes=N- only): a 1MB load over a 1.2Mbps link that
@@ -160,7 +158,113 @@ export class ChatRoom implements DurableObject {
       return new Response(body, { status: range !== null ? 206 : 200, headers });
     }
 
+    if (url.pathname === "/rows" && request.method === "GET") {
+      // HTTPS is a first-contact transport too. Claim before reading so a
+      // network that cannot complete WebSocket can still bootstrap a new chat.
+      if (!owner) setMeta(sql, "owner", userId);
+      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      // Plain HTTPS pull collapses the WS connect → hello → state →
+      // rows-request → backfill sequence into one request. The response is
+      // length-prefixed chat frames so clients reuse the WS decoder.
+      const afterRaw = Number(url.searchParams.get("after") ?? "0");
+      const after = Number.isInteger(afterRaw) && afterRaw >= 0 ? afterRaw : 0;
+      const device = url.searchParams.get("device") ?? "";
+      const exclude =
+        url.searchParams.get("excludeOwn") === "1" && device !== "" ? device : undefined;
+      const stats = logStats(sql);
+      const frontier = this.blobs.get(FRONTIER_BLOB) ?? new Uint8Array(0);
+      const frames: Uint8Array[] = [
+        encodeFrame(
+          FRAME.state,
+          {
+            headSeq: stats.headSeq,
+            seqFloor: stats.seqFloor,
+            checkpointSeq: stats.checkpointSeq,
+            checkpointSize: stats.checkpointSize,
+            rowCount: stats.rowCount,
+            rowBytes: stats.rowBytes
+          },
+          frontier
+        )
+      ];
+      // This endpoint buffers its response, unlike the WS path. Stop before
+      // the response becomes unbounded; omitting rowsDone makes the client
+      // resume from its last contiguous cursor on the next pull.
+      const ROWS_BODY_CAP = 4 * 1024 * 1024;
+      let bodyBytes = 0;
+      let truncated = false;
+      for (const row of rowsAfter(sql, after, exclude)) {
+        const frame = encodeFrame(
+          FRAME.row,
+          { seq: row.seq, device: row.device, batchId: row.batchId },
+          row.bytes
+        );
+        bodyBytes += 4 + frame.length;
+        if (bodyBytes > ROWS_BODY_CAP) {
+          truncated = true;
+          break;
+        }
+        frames.push(frame);
+      }
+      if (!truncated) frames.push(encodeFrame(FRAME.rowsDone, { headSeq: headSeq(sql) }));
+      const total = frames.reduce((n, frame) => n + 4 + frame.length, 0);
+      const body = new Uint8Array(total);
+      const view = new DataView(body.buffer);
+      let offset = 0;
+      for (const frame of frames) {
+        view.setUint32(offset, frame.length, true);
+        body.set(frame, offset + 4);
+        offset += 4 + frame.length;
+      }
+      return new Response(body, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": String(body.byteLength)
+        }
+      });
+    }
+
+    if (url.pathname === "/rows" && request.method === "POST") {
+      if (!owner) setMeta(sql, "owner", userId);
+      else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      // Plain HTTPS push is the WS push twin. The unique batch id makes
+      // retries exactly-once in effect.
+      const device = url.searchParams.get("device") ?? "";
+      const batchId = url.searchParams.get("batchId") ?? "";
+      if (batchId === "" || batchId.length > 128) {
+        this.recordPush(device, false);
+        return json({ error: "bad_push" }, 400);
+      }
+      const declared = Number(request.headers.get("content-length") ?? "0");
+      if (declared > MAX_ROW_BYTES + 4096) {
+        this.recordPush(device, false);
+        return json({ error: "too_large" }, 413);
+      }
+      const payload = new Uint8Array(await request.arrayBuffer());
+      if (!this.admitQuota(device, payload.byteLength)) {
+        this.recordPush(device, false);
+        return json({ error: "quota" }, 429);
+      }
+      const outcome = appendRow(sql, device, batchId, payload, Date.now());
+      if (!outcome.ok) {
+        this.recordPush(device, false);
+        return json({ error: outcome.error }, outcome.error === "too_large" ? 413 : 400);
+      }
+      this.recordPush(device, true);
+      if (!outcome.dup) {
+        this.markBackupDirty();
+        for (const socket of this.ctx.getWebSockets()) {
+          const socketState = socket.deserializeAttachment() as SocketState | null;
+          if (!socketState?.ready) continue;
+          send(socket, FRAME.row, { seq: outcome.seq, device, batchId }, payload);
+        }
+      }
+      return json({ batchId, seq: outcome.seq, dup: outcome.dup });
+    }
+
     if ((url.pathname === "/tail" || url.pathname === "/diff") && request.method === "PUT") {
+      if (!owner) return json({ error: "not_found" }, 404);
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
       const name = url.pathname === "/tail" ? "sidecar-tail" : "sidecar-diff";
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > MAX_SIDECAR_BYTES) return json({ error: "too_large" }, 413);
@@ -170,6 +274,8 @@ export class ChatRoom implements DurableObject {
     }
 
     if ((url.pathname === "/tail" || url.pathname === "/diff") && request.method === "GET") {
+      if (!owner) return json({ error: "not_found" }, 404);
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
       const name = url.pathname === "/tail" ? "sidecar-tail" : "sidecar-diff";
       const bytes = this.blobs.get(name);
       if (!bytes) return json({ error: "not_found" }, 404);
@@ -182,6 +288,8 @@ export class ChatRoom implements DurableObject {
     }
 
     if (url.pathname === "/stats" && request.method === "GET") {
+      if (!owner) return json({ error: "not_found" }, 404);
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
       this.sweepPresence();
       return json({
         ...logStats(sql),
@@ -198,6 +306,8 @@ export class ChatRoom implements DurableObject {
     }
 
     if (url.pathname === "/reset" && request.method === "POST") {
+      if (!owner) return json({ error: "not_found" }, 404);
+      if (owner !== userId) return json({ error: "forbidden" }, 403);
       // Operator wipe. Recovery is host-driven: the host detects
       // `headSeq < cursor` on its next hello and re-seeds via checkpoint —
       // same shape as the registry reset recipe.

@@ -1203,9 +1203,9 @@ impl DocHost {
     }
 
     /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
-    /// capped jittered backoff, wake redial — and the client resolves only
-    /// after full catch-up (checkpoint + rows), so "joined" here means
-    /// "transcript converged".
+    /// capped jittered backoff, wake redial. With pull-first transport the
+    /// client is returned local-first while HTTPS/WS convergence continues;
+    /// `server_known` remains the gate for any server-truth recovery action.
     fn spawn_chat2_join(&self, edge: EdgeConfig, handle: &Arc<ChatDocHandle>, cursor: u64) {
         let chat = handle.chat_id.clone();
         let doc = handle.doc.clone();
@@ -1222,9 +1222,15 @@ impl DocHost {
             // task's own strong ref dies when the join resolves.
             drop(doc);
             let fetcher = Arc::new(crate::chat2_host::EdgeCheckpointFetcher::new(
+                http.clone(),
+                edge.clone(),
+                chat.clone(),
+            ));
+            let transport = Arc::new(crate::chat2_host::EdgeChatTransport::new(
                 http,
                 edge.clone(),
                 chat.clone(),
+                device.clone(),
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = cypher_sync::wake::subscribe();
@@ -1235,12 +1241,13 @@ impl DocHost {
                 }
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    cypher_sync::ChatClient::connect_via(
+                    cypher_sync::ChatClient::connect_via_transport(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
                         &device,
                         cursor,
+                        transport.clone(),
                     ),
                 )
                 .await;
@@ -1285,9 +1292,14 @@ impl DocHost {
                             host.clone().spawn_worker(async move {
                                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                 let Some(handle) = weak.upgrade() else { return };
-                                let no_checkpoint = lock(&handle.chat2)
-                                    .as_ref()
-                                    .is_some_and(|c| c.stats().checkpoint_size == 0);
+                                let no_checkpoint = lock(&handle.chat2).as_ref().is_some_and(|c| {
+                                    let stats = c.stats();
+                                    // Pull-first construction is intentionally
+                                    // local-first. Never bootstrap-heal from
+                                    // placeholder zero stats before HTTP/WS
+                                    // has supplied authoritative room state.
+                                    stats.server_known && stats.checkpoint_size == 0
+                                });
                                 let has_content = handle
                                     .doc
                                     .read_entries()

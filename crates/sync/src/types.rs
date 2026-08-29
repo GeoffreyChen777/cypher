@@ -50,6 +50,10 @@ impl UrlProvider for StaticUrl {
 pub struct RoomStatsSnapshot {
     /// A join is currently established.
     pub connected: bool,
+    /// A server state response has been received (WS hello or HTTPS pull).
+    /// This is distinct from `connected`: HTTPS pull is allowed to converge
+    /// while the WebSocket is still unavailable.
+    pub server_known: bool,
     /// Epoch ms of the last SERVER-PUSHED frame (broadcast, backfill,
     /// join answer) — 0 = never. The deaf-socket tell: fresh acks + stale
     /// pushes.

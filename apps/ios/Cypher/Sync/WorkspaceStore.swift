@@ -59,10 +59,25 @@ final class WorkspaceStore {
         let delegate = RegistryClient.Delegate(
             helloCursor: { [weak self] in self?.doc.helloCursor ?? nil },
             takePushable: { [weak self] in self?.doc.takePushable() ?? [] },
+            resetPushable: { [weak self] in
+                self?.doc.markDisconnected()
+            },
+            acknowledge: { [weak self] batch, seq in
+                guard let self else { return }
+                self.doc.ackBatch(batch, seq: seq)
+                self.project()
+                self.saver?.poke()
+            },
             event: { [weak self] event in self?.handle(event) }
         )
         let client = RegistryClient(device: config.deviceId,
                                     urlProvider: { [config] in await config.registrySocketURL() },
+                                    rowsRequest: { [config] since in
+                                        await config.registryRowsRequest(since: since)
+                                    },
+                                    pushRequest: { [config] in
+                                        await config.registryPushRequest()
+                                    },
                                     delegate: delegate)
         self.client = client
         Task { await client.start() }

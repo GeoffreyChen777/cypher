@@ -185,8 +185,48 @@ export class RegistryRoom implements DurableObject {
     }
 
     if (url.pathname === "/rows" && request.method === "GET") {
-      // Repair/inspection read: the full current table.
-      return json({ seq: this.seq(), gcFloor: this.gcFloor(), rows: this.rowsSince(0) });
+      // Pull over plain HTTPS. `since` follows the same full/delta decision
+      // as the WebSocket hello; without it this remains the full repair read.
+      const sinceRaw = url.searchParams.get("since");
+      const sinceNumber = sinceRaw === null ? NaN : Number(sinceRaw);
+      const cursor = Number.isInteger(sinceNumber) && sinceNumber >= 0 ? sinceNumber : null;
+      const device = url.searchParams.get("device") ?? "";
+      if (device !== "" && url.searchParams.get("beat") === "1") {
+        const at = Date.now();
+        this.presence.set(device, at);
+        for (const socket of this.ctx.getWebSockets()) {
+          const socketState = socket.deserializeAttachment() as SocketState | null;
+          if (!socketState?.ready) continue;
+          send(socket, { t: "presence", device, at });
+        }
+      }
+      const seq = this.seq();
+      const gcFloor = this.gcFloor();
+      const full = cursor === null || cursor < gcFloor || cursor > seq;
+      return json({
+        seq,
+        full,
+        gcFloor,
+        rows: full ? this.rowsSince(0) : this.rowsSince(cursor),
+        presence: Object.fromEntries(this.presence)
+      });
+    }
+
+    if (url.pathname === "/push" && request.method === "POST") {
+      // The HTTPS push twin shares the exact validation and atomic apply path
+      // with the WS protocol. LWW clocks make retries safe.
+      const device = url.searchParams.get("device") ?? "";
+      const declared = Number(request.headers.get("content-length") ?? "0");
+      if (declared > 2 * 1024 * 1024) return json({ error: "too_large" }, 413);
+      let frame: Record<string, unknown>;
+      try {
+        frame = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return json({ error: "bad_push", message: "malformed body" }, 400);
+      }
+      const outcome = this.applyPushBatch(device, frame);
+      if (!outcome.ok) return json({ error: outcome.code, message: outcome.message }, 400);
+      return json({ batch: outcome.batch, seq: outcome.seq, applied: outcome.applied });
     }
 
     if (url.pathname === "/reset" && request.method === "POST") {
@@ -286,11 +326,30 @@ export class RegistryRoom implements DurableObject {
       send(ws, { t: "error", code: "bad_push", message: "hello first / malformed push" });
       return;
     }
+    const outcome = this.applyPushBatch(state.device, frame);
+    if (!outcome.ok) {
+      send(ws, { t: "error", code: outcome.code, message: outcome.message });
+      return;
+    }
+    send(ws, { t: "ack", batch: outcome.batch, seq: outcome.seq, applied: outcome.applied });
+  }
+
+  /** Validate, apply, broadcast, and return the result for either WS or HTTP. */
+  private applyPushBatch(
+    device: string,
+    frame: Record<string, unknown>
+  ):
+    | { ok: false; code: string; message: string }
+    | { ok: true; batch: string; seq: number; applied: number } {
+    const batch = typeof frame.batch === "string" ? frame.batch : "";
+    if (batch === "" || !Array.isArray(frame.ops)) {
+      this.recordPush(device, false);
+      return { ok: false, code: "bad_push", message: "malformed push" };
+    }
     const ops = frame.ops as WireOp[];
     if (ops.length === 0 || ops.length > MAX_BATCH_OPS) {
-      this.recordPush(state.device, false);
-      send(ws, { t: "error", code: "bad_push", message: `batch of ${ops.length} ops` });
-      return;
+      this.recordPush(device, false);
+      return { ok: false, code: "bad_push", message: `batch of ${ops.length} ops` };
     }
     for (const op of ops) {
       const invalid = validateOp(op);
@@ -298,9 +357,8 @@ export class RegistryRoom implements DurableObject {
         // Reject the WHOLE batch: batches are transactional (cascade deletes)
         // and a client that builds one bad op is a client bug to surface, not
         // to partially apply. Rejections are attributed per device on /stats.
-        this.recordPush(state.device, false);
-        send(ws, { t: "error", code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}` });
-        return;
+        this.recordPush(device, false);
+        return { ok: false, code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}` };
       }
     }
 
@@ -323,7 +381,7 @@ export class RegistryRoom implements DurableObject {
       this.setMeta("seq", String(nextSeq));
       this.markBackupDirty();
     }
-    this.recordPush(state.device, true);
+    this.recordPush(device, true);
     const seq = applied > 0 ? nextSeq : this.seq();
     if (applied > 0) {
       // Merged full rows to EVERY ready socket (sender included — its op may
@@ -338,7 +396,7 @@ export class RegistryRoom implements DurableObject {
         send(socket, { t: "rows", seq, rows });
       }
     }
-    send(ws, { t: "ack", batch, seq, applied });
+    return { ok: true, batch, seq, applied };
   }
 
   private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {

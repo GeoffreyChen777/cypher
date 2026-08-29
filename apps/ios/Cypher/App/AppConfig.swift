@@ -162,6 +162,66 @@ final class AppConfig: @unchecked Sendable {
         return request
     }
 
+    /// GET /chat2/{chatId}/rows?after= — the HTTPS pull twin of the Chat2
+    /// backfill. Authentication stays in the Bearer header; unlike the
+    /// WebSocket URL, the token never enters the query string.
+    func chat2RowsRequest(chatId: String, after: UInt64) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [
+            URLQueryItem(name: "after", value: String(after)),
+            URLQueryItem(name: "device", value: deviceId)
+        ])
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// POST /chat2/{chatId}/rows?batchId= — raw update push with server-side
+    /// batch dedupe, used when the WebSocket upgrade is unavailable.
+    func chat2PushRequest(chatId: String, batchId: String) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [
+            URLQueryItem(name: "batchId", value: batchId),
+            URLQueryItem(name: "device", value: deviceId)
+        ])
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    /// GET /registry/{orgId}/rows?since= — delta pull and HTTP presence beat.
+    func registryRowsRequest(since: UInt64?) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "registry/\(orgId)/rows")
+        var query = [
+            URLQueryItem(name: "device", value: deviceId),
+            URLQueryItem(name: "beat", value: "1")
+        ]
+        if let since {
+            query.append(URLQueryItem(name: "since", value: String(since)))
+        }
+        url.append(queryItems: query)
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// POST /registry/{orgId}/push — JSON op batch push with LWW-safe retries.
+    func registryPushRequest() async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "registry/\(orgId)/push")
+        url.append(queryItems: [URLQueryItem(name: "device", value: deviceId)])
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
     /// Decode the JWT payload's `exp` (60s early-refresh margin). Unparseable
     /// tokens read as non-expired — the server is the arbiter.
     private static func isExpired(jwt: String) -> Bool {
