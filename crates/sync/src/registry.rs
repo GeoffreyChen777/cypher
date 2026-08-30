@@ -46,6 +46,7 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const PRESENCE_TTL: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+const HTTP_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Registry pulls are JSON and buffered in memory. The Edge endpoint returns
 /// the current table, so refuse an unexpectedly large body before decoding.
 const MAX_HTTP_PULL_BYTES: usize = 8 * 1024 * 1024;
@@ -59,12 +60,16 @@ const PROBE_QUIET_DEFAULT: Duration = Duration::from_secs(900);
 pub struct RegistryTuning {
     /// Send a liveness probe after this much protocol-frame silence.
     pub probe_quiet: Duration,
+    /// Bound one HTTPS push/pull operation so a stalled socket cannot wedge
+    /// the single-flight gate forever.
+    pub http_timeout: Duration,
 }
 
 impl Default for RegistryTuning {
     fn default() -> Self {
         Self {
             probe_quiet: PROBE_QUIET_DEFAULT,
+            http_timeout: HTTP_SYNC_TIMEOUT,
         }
     }
 }
@@ -286,6 +291,7 @@ pub struct RegistryClient {
     nudge: mpsc::Sender<()>,
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
+    sync_now: mpsc::Sender<()>,
     presence_out: mpsc::Sender<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     stats: Arc<Stats>,
@@ -376,6 +382,7 @@ impl RegistryClient {
         let (nudge_tx, nudge_rx) = mpsc::channel(1);
         let (probe_tx, probe_rx) = mpsc::channel(1);
         let (redial_tx, redial_rx) = mpsc::channel(1);
+        let (sync_tx, sync_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let presence = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(Stats::default());
@@ -395,6 +402,9 @@ impl RegistryClient {
             stats: stats.clone(),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_again: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_tx: sync_tx.clone(),
+            sync_rx,
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -406,6 +416,7 @@ impl RegistryClient {
                 nudge: nudge_tx,
                 probe: probe_tx,
                 redial: redial_tx,
+                sync_now: sync_tx,
                 presence_out: presence_tx,
                 presence,
                 stats,
@@ -433,6 +444,7 @@ impl RegistryClient {
     /// Local writes were enqueued — push pending batches now.
     pub fn nudge(&self) {
         let _ = self.nudge.try_send(());
+        let _ = self.sync_now.try_send(());
     }
 
     /// Publish this device's presence beat (epoch ms).
@@ -499,6 +511,9 @@ struct Actor {
     stats: Arc<Stats>,
     transport: Option<Arc<dyn RegistryTransport>>,
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    sync_again: Arc<std::sync::atomic::AtomicBool>,
+    sync_tx: mpsc::Sender<()>,
+    sync_rx: mpsc::Receiver<()>,
 }
 
 enum SessionEnd {
@@ -513,6 +528,8 @@ enum Waited {
     Elapsed,
     /// System wake or a sibling dial succeeded: redial NOW on fresh backoff.
     Woke,
+    /// A local write requested an HTTPS sync while the socket was offline.
+    Nudge,
     Shutdown,
 }
 
@@ -535,10 +552,26 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
-            let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
+            let dial = self.connector.connect();
+            tokio::pin!(dial);
+            let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
+            tokio::pin!(deadline);
+            let dial = loop {
+                tokio::select! {
+                    result = &mut dial => break Some(result),
+                    _ = self.nudge_rx.recv() => self.spawn_offline_sync(),
+                    _ = self.sync_rx.recv() => self.spawn_offline_sync(),
+                    _ = &mut deadline => break None,
+                    _ = self.shutdown.changed() => {
+                        if *self.shutdown.borrow() {
+                            return;
+                        }
+                    }
+                }
+            };
             let pipe = match dial {
-                Ok(Ok(pipe)) => pipe,
-                Ok(Err(err)) => {
+                Some(Ok(pipe)) => pipe,
+                Some(Err(err)) => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
@@ -547,12 +580,13 @@ impl Actor {
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_offline_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
                     continue;
                 }
-                Err(_) => {
+                None => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(SyncError::WebSocket("connect timeout".into())));
                         return;
@@ -561,6 +595,7 @@ impl Actor {
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_offline_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -597,6 +632,7 @@ impl Actor {
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_offline_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -613,6 +649,7 @@ impl Actor {
             return;
         };
         if self.sync_busy.swap(true, Relaxed) {
+            self.sync_again.store(true, Relaxed);
             return;
         }
         let doc = self.doc.clone();
@@ -620,6 +657,9 @@ impl Actor {
         let presence = self.presence.clone();
         let stats = self.stats.clone();
         let busy = self.sync_busy.clone();
+        let sync_again = self.sync_again.clone();
+        let sync_tx = self.sync_tx.clone();
+        let http_timeout = self.tuning.http_timeout;
         tokio::spawn(async move {
             let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
             let mut push_failed = false;
@@ -629,70 +669,90 @@ impl Actor {
                     "ops": batch.ops
                 })
                 .to_string();
-                match transport.push(body).await {
-                    Ok(ack) => {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&ack)
-                            && let (Some(batch), Some(seq)) =
-                                (value["batch"].as_str(), value["seq"].as_u64())
-                        {
-                            lock(&doc).ack_batch(batch, seq);
-                            stats.last_ack_ms.store(epoch_ms(), Relaxed);
-                            let _ = events.send(RegistryEvent::Applied);
-                        }
+                match tokio::time::timeout(http_timeout, transport.push(body)).await {
+                    Err(_) => {
+                        tracing::debug!("registry HTTPS push timed out");
+                        push_failed = true;
+                        break;
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         tracing::debug!(error = %err, "registry HTTPS push failed");
                         push_failed = true;
                         break;
                     }
+                    Ok(Ok(ack)) => match serde_json::from_str::<serde_json::Value>(&ack) {
+                        Ok(value) => {
+                            if let (Some(batch), Some(seq)) =
+                                (value["batch"].as_str(), value["seq"].as_u64())
+                            {
+                                lock(&doc).ack_batch(batch, seq);
+                                stats.last_ack_ms.store(epoch_ms(), Relaxed);
+                                let _ = events.send(RegistryEvent::Applied);
+                            } else {
+                                tracing::debug!("registry HTTPS push ACK missing batch/seq");
+                                push_failed = true;
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::debug!(error = %err, "registry HTTPS push ACK malformed");
+                            push_failed = true;
+                            break;
+                        }
+                    },
                 }
             }
             if push_failed {
                 lock(&doc).mark_disconnected();
             }
             let since = lock(&doc).cursor();
-            match transport.fetch(since).await {
-                Ok(body) => {
+            match tokio::time::timeout(http_timeout, transport.fetch(since)).await {
+                Err(_) => tracing::debug!("registry HTTPS pull timed out"),
+                Ok(Err(err)) => tracing::debug!(error = %err, "registry HTTPS pull failed"),
+                Ok(Ok(body)) => {
                     if body.len() > MAX_HTTP_PULL_BYTES {
                         tracing::warn!(
                             bytes = body.len(),
                             "registry HTTPS pull response too large"
                         );
-                        busy.store(false, Relaxed);
-                        return;
+                        // Keep the single-flight cleanup below on all paths.
                     }
-                    #[derive(Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct PullBody {
-                        seq: u64,
-                        full: bool,
-                        gc_floor: u64,
-                        rows: Vec<RegistryRow>,
-                        #[serde(default)]
-                        presence: HashMap<String, i64>,
-                    }
-                    match serde_json::from_str::<PullBody>(&body) {
-                        Ok(pull) => {
-                            let mut registry = lock(&doc);
-                            registry.apply_state(pull.seq, pull.full, pull.gc_floor, pull.rows);
-                            drop(registry);
-                            let now = tokio::time::Instant::now();
-                            let mut map = lock(&presence);
-                            for (device, at) in pull.presence {
-                                map.insert(device, (at, now));
-                            }
-                            stats.server_known.store(true, Relaxed);
-                            stats.last_pushed_ms.store(epoch_ms(), Relaxed);
-                            let _ = events.send(RegistryEvent::Applied);
+                    if body.len() <= MAX_HTTP_PULL_BYTES {
+                        #[derive(Deserialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct PullBody {
+                            seq: u64,
+                            full: bool,
+                            gc_floor: u64,
+                            rows: Vec<RegistryRow>,
+                            #[serde(default)]
+                            presence: HashMap<String, i64>,
                         }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "registry HTTPS pull body malformed")
+                        match serde_json::from_str::<PullBody>(&body) {
+                            Ok(pull) => {
+                                let mut registry = lock(&doc);
+                                registry.apply_state(pull.seq, pull.full, pull.gc_floor, pull.rows);
+                                drop(registry);
+                                let now = tokio::time::Instant::now();
+                                let mut map = lock(&presence);
+                                for (device, at) in pull.presence {
+                                    map.insert(device, (at, now));
+                                }
+                                stats.server_known.store(true, Relaxed);
+                                stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+                                let _ = events.send(RegistryEvent::Applied);
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "registry HTTPS pull body malformed")
+                            }
                         }
                     }
                 }
-                Err(err) => tracing::debug!(error = %err, "registry HTTPS pull failed"),
             }
             busy.store(false, Relaxed);
+            if sync_again.swap(false, Relaxed) {
+                let _ = sync_tx.try_send(());
+            }
         });
     }
 
@@ -712,6 +772,8 @@ impl Actor {
             _ = tokio::time::sleep(wait) => Waited::Elapsed,
             _ = wake.recv() => Waited::Woke,
             _ = online.recv() => Waited::Woke,
+            _ = self.nudge_rx.recv() => Waited::Nudge,
+            _ = self.sync_rx.recv() => Waited::Nudge,
             _ = self.shutdown.changed() => {
                 if *self.shutdown.borrow() {
                     Waited::Shutdown
@@ -830,6 +892,10 @@ impl Actor {
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
+                    self.spawn_offline_sync();
+                }
+                _ = self.sync_rx.recv() => {
+                    self.spawn_offline_sync();
                 }
                 at = self.presence_rx.recv() => {
                     if let Some(at) = at {

@@ -458,11 +458,16 @@ impl WorkspaceHost {
                 }
                 let tuning = RegistryTuning {
                     probe_quiet: REGISTRY_PROBE_QUIET,
+                    ..RegistryTuning::default()
                 };
                 let client_result = if let Some(inner) = weak.upgrade() {
                     let transport = inner.config.edge.clone().map(|edge| {
                         Arc::new(EdgeRegistryTransport {
-                            http: reqwest::Client::new(),
+                            http: reqwest::Client::builder()
+                                .connect_timeout(std::time::Duration::from_secs(10))
+                                .timeout(std::time::Duration::from_secs(30))
+                                .build()
+                                .expect("registry HTTP client"),
                             edge,
                             org_id: org_id.clone(),
                         }) as Arc<dyn RegistryTransport>
