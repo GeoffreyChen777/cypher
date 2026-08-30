@@ -59,17 +59,22 @@ pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
 /// truncates at 4 MiB; this larger client guard protects against a buggy or
 /// incompatible server before frame parsing allocates more state.
 const MAX_HTTP_PULL_BYTES: usize = 8 * 1024 * 1024;
+const HTTP_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Per-client tuning.
 #[derive(Clone, Copy, Debug)]
 pub struct ChatTuning {
     pub probe_quiet: Duration,
+    /// Bound one HTTPS sync cycle so a stalled request cannot wedge the
+    /// single-flight gate forever.
+    pub http_timeout: Duration,
 }
 
 impl Default for ChatTuning {
     fn default() -> Self {
         Self {
             probe_quiet: PROBE_QUIET_DEFAULT,
+            http_timeout: HTTP_SYNC_TIMEOUT,
         }
     }
 }
@@ -448,6 +453,7 @@ impl ChatClient {
         let (nudge_tx, nudge_rx) = mpsc::channel(1);
         let (probe_tx, probe_rx) = mpsc::channel(1);
         let (redial_tx, redial_rx) = mpsc::channel(1);
+        let (sync_tx, sync_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let shared = Arc::new(Mutex::new(Shared {
             cursor: initial_cursor,
@@ -473,6 +479,9 @@ impl ChatClient {
             cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
             transport,
             http_sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_sync_again: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_sync_tx: sync_tx.clone(),
+            http_sync_rx: sync_rx,
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -647,6 +656,9 @@ struct Actor {
     transport: Option<Arc<dyn ChatTransport>>,
     /// Prevent overlapping pull cycles from racing one another.
     http_sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    http_sync_again: Arc<std::sync::atomic::AtomicBool>,
+    http_sync_tx: mpsc::Sender<()>,
+    http_sync_rx: mpsc::Receiver<()>,
 }
 
 enum SessionEnd {
@@ -659,6 +671,8 @@ enum Waited {
     Elapsed,
     /// System wake or a sibling dial succeeded: redial NOW on fresh backoff.
     Woke,
+    /// A local write requested HTTPS sync while the socket was offline.
+    Nudge,
     Shutdown,
 }
 
@@ -683,10 +697,26 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
-            let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
+            let dial = self.connector.connect();
+            tokio::pin!(dial);
+            let deadline = tokio::time::sleep(CONNECT_TIMEOUT);
+            tokio::pin!(deadline);
+            let dial = loop {
+                tokio::select! {
+                    result = &mut dial => break Some(result),
+                    _ = self.nudge_rx.recv() => self.spawn_http_sync(),
+                    _ = self.http_sync_rx.recv() => self.spawn_http_sync(),
+                    _ = &mut deadline => break None,
+                    _ = self.shutdown.changed() => {
+                        if *self.shutdown.borrow() {
+                            return;
+                        }
+                    }
+                }
+            };
             let pipe = match dial {
-                Ok(Ok(pipe)) => pipe,
-                Ok(Err(err)) => {
+                Some(Ok(pipe)) => pipe,
+                Some(Err(err)) => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
@@ -695,12 +725,13 @@ impl Actor {
                     self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_http_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
                     continue;
                 }
-                Err(_) => {
+                None => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(SyncError::WebSocket("connect timeout".into())));
                         return;
@@ -709,6 +740,7 @@ impl Actor {
                     self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_http_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -739,6 +771,7 @@ impl Actor {
                     self.spawn_http_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
+                        Waited::Nudge => self.spawn_http_sync(),
                         Waited::Woke => backoff = BACKOFF_BASE,
                         Waited::Elapsed => backoff = (backoff * 2).min(BACKOFF_CAP),
                     }
@@ -756,6 +789,7 @@ impl Actor {
             return;
         };
         if self.http_sync_busy.swap(true, Relaxed) {
+            self.http_sync_again.store(true, Relaxed);
             return;
         }
         let shared = self.shared.clone();
@@ -763,19 +797,30 @@ impl Actor {
         let fetcher = self.fetcher.clone();
         let events = self.events.clone();
         let busy = self.http_sync_busy.clone();
+        let sync_again = self.http_sync_again.clone();
+        let sync_tx = self.http_sync_tx.clone();
+        let http_timeout = self.tuning.http_timeout;
         tokio::spawn(async move {
-            let result = http_sync_once(
-                transport.as_ref(),
-                &shared,
-                sink.as_ref(),
-                fetcher.as_ref(),
-                &events,
+            let result = tokio::time::timeout(
+                http_timeout,
+                http_sync_once(
+                    transport.as_ref(),
+                    &shared,
+                    sink.as_ref(),
+                    fetcher.as_ref(),
+                    &events,
+                ),
             )
-            .await;
+            .await
+            .map_err(|_| SyncError::Protocol("chat HTTPS sync timed out".into()))
+            .and_then(|result| result);
             if let Err(err) = result {
                 tracing::debug!(error = %err, "chat2 HTTPS sync failed; WS/retry will continue");
             }
             busy.store(false, Relaxed);
+            if sync_again.swap(false, Relaxed) {
+                let _ = sync_tx.try_send(());
+            }
         });
     }
 
@@ -795,6 +840,8 @@ impl Actor {
             _ = tokio::time::sleep(wait) => Waited::Elapsed,
             _ = wake.recv() => Waited::Woke,
             _ = online.recv() => Waited::Woke,
+            _ = self.nudge_rx.recv() => Waited::Nudge,
+            _ = self.http_sync_rx.recv() => Waited::Nudge,
             _ = self.shutdown.changed() => {
                 if *self.shutdown.borrow() {
                     Waited::Shutdown
@@ -1035,6 +1082,9 @@ impl Actor {
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
+                    self.spawn_http_sync();
+                }
+                _ = self.http_sync_rx.recv() => {
                     self.spawn_http_sync();
                 }
                 beat = self.presence_rx.recv() => {

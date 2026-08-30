@@ -5,9 +5,11 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::chat_frames::{decode, encode, frame_type};
+use tokio::sync::Notify;
 
 // ── plumbing: linked pipes + scripted connector ─────────────────────────────
 
@@ -109,6 +111,87 @@ impl CheckpointFetcher for FixedFetcher {
         let bytes = self.bytes.clone();
         Box::pin(async move { Ok(bytes) })
     }
+}
+
+struct GatedChatTransport {
+    body: Vec<u8>,
+    pushes: AtomicUsize,
+    first_push_started: Arc<Notify>,
+    release_first_push: Arc<Notify>,
+    hang: bool,
+}
+
+impl GatedChatTransport {
+    fn new(body: Vec<u8>, hang: bool) -> Arc<Self> {
+        Arc::new(Self {
+            body,
+            pushes: AtomicUsize::new(0),
+            first_push_started: Arc::new(Notify::new()),
+            release_first_push: Arc::new(Notify::new()),
+            hang,
+        })
+    }
+}
+
+impl ChatTransport for GatedChatTransport {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let body = self.body.clone();
+        Box::pin(async move { Ok(body) })
+    }
+
+    fn push(
+        &self,
+        batch_id: String,
+        _bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>> {
+        let index = self.pushes.fetch_add(1, Ordering::SeqCst);
+        if index == 0 {
+            self.first_push_started.notify_one();
+        }
+        if self.hang {
+            return Box::pin(std::future::pending());
+        }
+        if index == 0 {
+            let release = self.release_first_push.clone();
+            return Box::pin(async move {
+                release.notified().await;
+                Ok(serde_json::json!({
+                    "batchId": batch_id,
+                    "seq": 1
+                })
+                .to_string())
+            });
+        }
+        Box::pin(async move {
+            Ok(serde_json::json!({
+                "batchId": batch_id,
+                "seq": index as u64 + 1
+            })
+            .to_string())
+        })
+    }
+}
+
+fn empty_chat_pull(head_seq: u64) -> Vec<u8> {
+    framed_pull(vec![
+        encode(
+            frame_type::STATE,
+            &serde_json::json!({
+                "headSeq": head_seq,
+                "seqFloor": 0,
+                "checkpointSeq": 0,
+                "checkpointSize": 0,
+                "rowCount": 0,
+                "rowBytes": 0
+            }),
+            &[],
+        ),
+        encode(
+            frame_type::ROWS_DONE,
+            &serde_json::json!({ "headSeq": head_seq }),
+            &[],
+        ),
+    ])
 }
 
 // ── server-side script helpers ──────────────────────────────────────────────
@@ -935,5 +1018,85 @@ async fn checkpointless_amnesty_refetches_from_zero() {
         "all rows re-imported from zero"
     );
     assert_eq!(client.stats().cursor, 3);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn https_nudge_during_ws_failure_retries_after_inflight_sync() {
+    let sink = Arc::new(RecordingSink::default());
+    let fetcher = Arc::new(FixedFetcher {
+        bytes: Vec::new(),
+        calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    });
+    let transport = GatedChatTransport::new(empty_chat_pull(2), false);
+    let client = ChatClient::connect_via_transport(
+        Arc::new(StaticUrl("ws://127.0.0.1:9/chat2/test/ws".into())),
+        sink,
+        fetcher,
+        "dev-a",
+        0,
+        transport.clone(),
+    )
+    .await
+    .expect("local-first client starts");
+
+    client.enqueue_update(vec![0x01]);
+    transport.first_push_started.notified().await;
+    client.enqueue_update(vec![0x02]);
+    transport.release_first_push.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if transport.pushes.load(Ordering::SeqCst) >= 2 && client.stats().pending_pushes == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second HTTPS push was not scheduled");
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn https_timeout_releases_chat_single_flight_for_retry() {
+    let sink = Arc::new(RecordingSink::default());
+    let fetcher = Arc::new(FixedFetcher {
+        bytes: Vec::new(),
+        calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    });
+    let transport = GatedChatTransport::new(empty_chat_pull(0), true);
+    let tuning = ChatTuning {
+        probe_quiet: Duration::from_secs(60),
+        http_timeout: Duration::from_millis(20),
+    };
+    let client = ChatClient::connect_with_transport(
+        Arc::new(WsBinConnector {
+            url: Arc::new(StaticUrl("ws://127.0.0.1:9/chat2/test/ws".into())),
+        }),
+        sink,
+        fetcher,
+        "dev-a",
+        0,
+        tuning,
+        Some(transport.clone()),
+    )
+    .await
+    .expect("local-first client starts");
+
+    client.enqueue_update(vec![0x01]);
+    transport.first_push_started.notified().await;
+    client.enqueue_update(vec![0x02]);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if transport.pushes.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed-out HTTPS sync did not allow a retry");
     client.shutdown().await;
 }
