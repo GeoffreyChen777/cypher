@@ -189,10 +189,9 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 7] = [
+    pub const ALL: [SettingsSection; 6] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
-        SettingsSection::Agents,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,

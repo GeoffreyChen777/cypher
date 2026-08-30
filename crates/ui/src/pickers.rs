@@ -3655,25 +3655,18 @@ fn mock_harness_enabled() -> bool {
     cypher_env::var("HARNESS").as_deref().map(str::trim) == Some("mock")
 }
 
-/// Production pickers AND chip resolution hide the mock harness — the
-/// registry always lists it, but it must never surface in real UI (neither in
-/// the picker rail nor as the eager default the chips resolve against).
-/// `CYPHER_HARNESS=mock` shows it; otherwise it only remains when it's
-/// literally all there is (a dev build with no real harness registered).
+/// Production currently supports only Pi. Keep Mock available for the
+/// explicit e2e/dev rig, but never surface the other harnesses in user-facing
+/// pickers.
 pub fn visible_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     visible_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
-    if allow_mock {
-        return list.to_vec();
-    }
-    let real: Vec<HarnessDescriptor> = list
-        .iter()
-        .filter(|d| d.id != HarnessId::Mock)
+    list.iter()
+        .filter(|d| d.id == HarnessId::Pi || (allow_mock && d.id == HarnessId::Mock))
         .cloned()
-        .collect();
-    if real.is_empty() { list.to_vec() } else { real }
+        .collect()
 }
 
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
@@ -4310,16 +4303,18 @@ mod tests {
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
             descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Pi, "Pi"),
         ];
-        // Env-independent core: mock hidden in production…
+        // Production exposes only Pi…
         let visible = visible_harnesses_impl(&mixed, false);
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].id, HarnessId::ClaudeCode);
+        assert_eq!(visible[0].id, HarnessId::Pi);
         let only_mock = vec![descriptor(HarnessId::Mock, "Mock")];
-        assert_eq!(visible_harnesses_impl(&only_mock, false).len(), 1);
-        // …and opted back in by CYPHER_HARNESS=mock (the e2e rig).
+        assert_eq!(visible_harnesses_impl(&only_mock, false).len(), 0);
+        // …and opted back in by CYPHER_HARNESS=mock (the e2e rig), alongside Pi.
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);
+        assert_eq!(visible_harnesses_impl(&mixed, true)[1].id, HarnessId::Pi);
     }
 
     #[test]
@@ -4341,29 +4336,27 @@ mod tests {
                 descriptor(HarnessId::Grok, "Grok", grok),
             ]
         };
-        // A catalog from an engine predating the flag (all None) falls back
-        // to default-set membership: Claude Code + Codex only.
+        // Unsupported harnesses remain hidden even when the catalog predates
+        // the enabled flag.
         let offered = offered_harnesses_impl(&catalog(None, None, None), false);
-        assert_eq!(
-            offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Codex]
-        );
-        // The device's flags win: Grok on, Codex off; catalog order holds.
+        assert!(offered.is_empty());
+        // Non-Pi enablement flags cannot make unsupported harnesses visible.
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), Some(true)), false);
-        assert_eq!(
-            offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Grok]
-        );
-        // The dev-rig mock opt-in survives the enabled filter.
+        assert!(offered.is_empty());
+        // The dev-rig mock opt-in survives the supported-harness filter.
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), None), true);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::Mock, HarnessId::ClaudeCode]
+            vec![HarnessId::Mock]
         );
-        // Nothing enabled falls back to the visible list, not an empty rail.
-        let offered =
-            offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
-        assert_eq!(offered.len(), 3);
+        let pi = descriptor(HarnessId::Pi, "Pi", Some(true));
+        assert_eq!(
+            offered_harnesses_impl(&[pi], false)
+                .iter()
+                .map(|d| d.id)
+                .collect::<Vec<_>>(),
+            vec![HarnessId::Pi]
+        );
     }
 
     #[test]

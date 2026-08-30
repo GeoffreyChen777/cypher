@@ -41,10 +41,11 @@ fn default_installed() -> bool {
     true
 }
 
-/// The out-of-the-box enabled set: Claude Code and Codex only; every other
-/// harness is opt-in from Settings → Agents.
+/// The out-of-the-box enabled set. Pi is currently the only supported
+/// production harness; legacy harness definitions remain registered for
+/// compatibility and tests but are not offered by the UI.
 pub fn default_enabled() -> Vec<HarnessId> {
-    vec![HarnessId::ClaudeCode, HarnessId::Codex]
+    vec![HarnessId::Pi]
 }
 
 /// A descriptor's effective enabled flag ([`default_enabled`] membership when
@@ -646,7 +647,7 @@ mod tests {
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
     /// fields must keep deserializing — installed, and enabled per the
-    /// default-set fallback (Claude Code yes, Grok no).
+    /// default-set fallback (Pi yes, Claude Code no).
     #[test]
     fn descriptor_without_new_fields_parses_with_fallbacks() {
         let parse = |id: &str| -> HarnessDescriptor {
@@ -661,10 +662,11 @@ mod tests {
             ))
             .unwrap()
         };
-        let claude = parse("claude-code");
-        assert!(claude.installed);
-        assert_eq!(claude.enabled, None);
-        assert!(descriptor_enabled(&claude));
+        let pi = parse("pi");
+        assert!(pi.installed);
+        assert_eq!(pi.enabled, None);
+        assert!(descriptor_enabled(&pi));
+        assert!(!descriptor_enabled(&parse("claude-code")));
         assert!(!descriptor_enabled(&parse("grok")));
     }
 
@@ -698,8 +700,9 @@ mod tests {
         test_slot(&registry, HarnessId::Codex, true);
         test_slot(&registry, HarnessId::Grok, true);
         test_slot(&registry, HarnessId::Hermes, false);
+        test_slot(&registry, HarnessId::Pi, true);
 
-        // Default set stamped: Claude Code + Codex on, the rest off.
+        // Default set stamped: Pi on, legacy harnesses off.
         let flags: Vec<(HarnessId, Option<bool>)> = registry
             .descriptors()
             .into_iter()
@@ -708,29 +711,30 @@ mod tests {
         assert_eq!(
             flags,
             vec![
-                (HarnessId::ClaudeCode, Some(true)),
-                (HarnessId::Codex, Some(true)),
+                (HarnessId::ClaudeCode, Some(false)),
+                (HarnessId::Codex, Some(false)),
                 (HarnessId::Grok, Some(false)),
                 (HarnessId::Hermes, Some(false)),
+                (HarnessId::Pi, Some(true)),
             ]
         );
 
         // The gate: a missing CLI can't be enabled; unknown ids refuse.
         assert!(registry.set_enabled(HarnessId::Hermes, true).is_err());
-        assert!(registry.set_enabled(HarnessId::Pi, true).is_err());
+        assert!(registry.set_enabled(HarnessId::Pi, true).is_ok());
         // Installed CLIs toggle both ways; no-op flips are fine.
         registry.set_enabled(HarnessId::Grok, true).unwrap();
         registry.set_enabled(HarnessId::Grok, true).unwrap();
         registry.set_enabled(HarnessId::Codex, false).unwrap();
         registry.set_enabled(HarnessId::ClaudeCode, false).unwrap();
-        // Grok is the last one standing — refusing keeps the composer usable.
-        assert!(registry.set_enabled(HarnessId::Grok, false).is_err());
-        assert_eq!(registry.enabled_set(), vec![HarnessId::Grok]);
+        // Pi remains the required last enabled harness.
+        assert!(registry.set_enabled(HarnessId::Grok, false).is_ok());
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Pi]);
 
         // A fresh registry over the same data dir reads the persisted set.
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
-        assert_eq!(reloaded.enabled_set(), vec![HarnessId::Grok]);
+        assert_eq!(reloaded.enabled_set(), vec![HarnessId::Pi]);
     }
 
     /// The Codex lazy descriptor must be indistinguishable from `describe()`

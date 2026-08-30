@@ -1,5 +1,4 @@
-//! Settings → Agents: enable/disable harnesses (the t3code models-page
-//! arrangement — one card row per agent with a trailing toggle).
+//! Settings → Agents: the supported coding harness (currently Pi).
 //!
 //! The state is PER-DEVICE and lives on the engine (`harness-prefs.json` in
 //! its data dir): CLI installs are per-device, so enablement is too. The
@@ -7,12 +6,8 @@
 //! `ListHarnesses` probe and the `SetHarnessEnabled` writes at any registered
 //! device over the relay-forwarded RPCs.
 //!
-//! Only Claude Code and Codex ship enabled; the rest are opt-in. A harness
-//! whose CLI is missing on the target device renders dimmed with an install
-//! hint and its toggle inert — enabling an agent that can't run would only
-//! manufacture NotInstalled errors at send time. The engine enforces the same
-//! gate (plus "can't disable the last enabled harness") where the state
-//! lives, so a raced or stale toggle self-corrects from the RPC reply.
+//! The UI filters the catalog to the currently supported harness, while the
+//! engine keeps legacy harness definitions available for compatibility/tests.
 
 use gpui::{
     AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
@@ -452,9 +447,7 @@ impl Render for HarnessesPage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "Choose which coding agents the composer offers. The setting is per \
-                             device — switch devices in the header. Agents whose CLI isn't \
-                             installed on a device can't be enabled there.",
+                            "Pi is currently the only supported coding agent.",
                         )
                         .max_w(px(512.0))
                         .line_height(px(20.0)),

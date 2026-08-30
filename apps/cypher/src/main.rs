@@ -203,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                 workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
                 edge_token,
                 org_id: cypher_env::var("ORG_ID"),
-                default_harness: cypher_ui::HarnessId::ClaudeCode,
+                default_harness: cypher_ui::HarnessId::Pi,
             });
             Ok(())
         }
@@ -240,17 +240,13 @@ fn engine_config_from_env() -> cypher_engine::EngineConfig {
     }
 }
 
-/// `CYPHER_HARNESS` (kebab-case id) picks the default harness for chats without a
-/// config row — `mock` powers the e2e smoke; default `claude-code`.
+/// `CYPHER_HARNESS` picks the default harness for chats without a config row.
+/// Production supports Pi; `mock` remains available for e2e/dev smoke tests.
 fn harness_from_env() -> cypher_engine::HarnessId {
     match cypher_env::var("HARNESS").as_deref().map(str::trim) {
         Some("mock") => cypher_engine::HarnessId::Mock,
-        Some("codex") => cypher_engine::HarnessId::Codex,
-        Some("cursor") => cypher_engine::HarnessId::Cursor,
-        Some("grok") => cypher_engine::HarnessId::Grok,
-        Some("hermes") => cypher_engine::HarnessId::Hermes,
         Some("pi") => cypher_engine::HarnessId::Pi,
-        _ => cypher_engine::HarnessId::ClaudeCode,
+        _ => cypher_engine::HarnessId::Pi,
     }
 }
 
