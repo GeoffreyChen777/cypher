@@ -114,6 +114,14 @@ pub trait Harness: Send + Sync {
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
     }
+    /// Run one extension slash command in a short-lived child (no chat).
+    /// Used by Settings → MCP so OAuth goes through the same Pi plugin path
+    /// as the TUI. Default: unsupported.
+    async fn run_slash(&self, _prompt: &str) -> Result<String, HarnessError> {
+        Err(HarnessError::Protocol(
+            "slash execution is unsupported for this harness".into(),
+        ))
+    }
     /// Drop cached model/command discovery so the next probe reflects a
     /// changed agent config (Pi package enablement). No-op for harnesses
     /// without a cache.

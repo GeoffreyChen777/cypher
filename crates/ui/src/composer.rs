@@ -4085,7 +4085,8 @@ pub struct Composer {
     /// maps 1:1 — the pickers' model-menu pattern).
     slash_scroll: ScrollHandle,
     /// Advertised commands per harness. Refetched when Settings → Agents
-    /// toggles a Pi package (`HarnessCatalogChanged`).
+    /// toggles a Pi package (`HarnessCatalogChanged`). Settings → Commands
+    /// hide/show filters this list in [`Self::refilter_slash`].
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
     current_key: String,
     sending: bool,
@@ -4140,6 +4141,7 @@ pub struct Composer {
     _observe: Subscription,
     _pickers_observe: Subscription,
     _catalog_observe: Subscription,
+    _hidden_slash_observe: Subscription,
     _input_events: Subscription,
 }
 
@@ -4228,6 +4230,15 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        let hidden_slash_observe = cx.observe_global::<crate::settings::commands::HiddenSlashCommands>(
+            |this: &mut Self, cx| {
+                if this.slash.token.is_some() {
+                    this.refilter_slash(cx);
+                } else {
+                    cx.notify();
+                }
+            },
+        );
         let catalog_observe =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Self, cx| {
                 this.slash_cache.clear();
@@ -4328,6 +4339,7 @@ impl Composer {
             _observe: observe,
             _pickers_observe: pickers_observe,
             _catalog_observe: catalog_observe,
+            _hidden_slash_observe: hidden_slash_observe,
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
@@ -5649,8 +5661,20 @@ impl Composer {
             .and_then(|h| self.slash_cache.get(&h))
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        self.slash.filtered = crate::popover::filter_indices(&query, &names);
+        let visible: Vec<usize> = commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| !crate::settings::commands::hides_in_app(cx, &command.name))
+            .map(|(index, _)| index)
+            .collect();
+        let names: Vec<&str> = visible
+            .iter()
+            .filter_map(|&index| commands.get(index).map(|command| command.name.as_str()))
+            .collect();
+        self.slash.filtered = crate::popover::filter_indices(&query, &names)
+            .into_iter()
+            .filter_map(|ranked| visible.get(ranked).copied())
+            .collect();
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
         self.sync_mention_controls(cx);
         cx.notify();
@@ -5751,6 +5775,10 @@ impl Composer {
                     .child(error),
             );
         } else if self.slash.filtered.is_empty() {
+            let all_hidden = !commands.is_empty()
+                && commands
+                    .iter()
+                    .all(|command| crate::settings::commands::hides_in_app(cx, &command.name));
             card = card.child(
                 div()
                     .px(px(12.0))
@@ -5759,6 +5787,8 @@ impl Composer {
                     .text_color(theme.text_muted)
                     .child(if commands.is_empty() {
                         "This agent has no slash commands"
+                    } else if all_hidden {
+                        "All slash commands are hidden in Settings"
                     } else {
                         "No matching commands"
                     }),

@@ -41,6 +41,10 @@ pub mod methods {
     pub const INSTALL_PI: &str = "InstallPi";
     pub const INSTALL_PI_PACKAGE: &str = "InstallPiPackage";
     pub const SET_PI_PACKAGE_ENABLED: &str = "SetPiPackageEnabled";
+    pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
+    pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
+    pub const START_MCP_AUTH: &str = "StartMcpAuth";
+    pub const LOGOUT_MCP_SERVER: &str = "LogoutMcpServer";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";

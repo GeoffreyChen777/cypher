@@ -38,6 +38,8 @@ use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
+use crate::settings::commands::{CommandsEvent, CommandsPage};
+use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
@@ -189,6 +191,8 @@ pub enum SettingsSection {
     Harnesses,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
+    Commands,
+    Mcp,
     Appearance,
     Notifications,
     Shortcuts,
@@ -196,9 +200,11 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 6] = [
+    pub const ALL: [SettingsSection; 8] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
+        SettingsSection::Commands,
+        SettingsSection::Mcp,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
@@ -212,6 +218,8 @@ impl SettingsSection {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Agents => "Accounts",
+            SettingsSection::Commands => "Commands",
+            SettingsSection::Mcp => "MCP",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
@@ -925,6 +933,9 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    commands_page: Option<Entity<CommandsPage>>,
+    commands_sub: Option<Subscription>,
+    mcp_page: Option<Entity<McpPage>>,
     setup_page: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
@@ -1128,6 +1139,7 @@ impl Shell {
         let comment_popup = cx.new(crate::comments::CommentPopup::new);
         let transcript =
             cx.new(|cx| Transcript::new(state.clone(), comment_popup.clone().downgrade(), cx));
+        crate::settings::commands::publish_hidden(None, cx);
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // Every send glides the prompt to the viewport top and reserves the
@@ -1217,6 +1229,10 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
+        crate::settings::commands::publish_hidden(
+            settings.hidden_slash_commands.clone(),
+            cx,
+        );
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
@@ -1228,6 +1244,8 @@ impl Shell {
             }
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
+            Some("settings/commands") => Route::Settings(SettingsSection::Commands),
+            Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
@@ -1289,6 +1307,9 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            commands_page: None,
+            commands_sub: None,
+            mcp_page: None,
             setup_page: None,
             setup_sub: None,
             setup_dismissed: false,
@@ -2688,6 +2709,12 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        if section == SettingsSection::Commands {
+            self.commands_page = None;
+        }
+        if section == SettingsSection::Mcp {
+            self.mcp_page = None;
+        }
         self.dismiss_comment_popup(cx);
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
@@ -2767,6 +2794,38 @@ impl Shell {
                     self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
                 }
                 match &self.accounts_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Commands => {
+                if self.commands_page.is_none() {
+                    let state = self.state.clone();
+                    let hidden = self.settings.hidden_slash_commands.clone();
+                    let page = cx.new(|cx| CommandsPage::new(state, hidden, cx));
+                    self.commands_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &CommandsEvent, cx| {
+                            let CommandsEvent::Changed(hidden) = event;
+                            this.settings.hidden_slash_commands = Some(hidden.clone());
+                            crate::settings::commands::publish_hidden(Some(hidden.clone()), cx);
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.commands_page = Some(page);
+                }
+                match &self.commands_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Mcp => {
+                if self.mcp_page.is_none() {
+                    let state = self.state.clone();
+                    self.mcp_page = Some(cx.new(|cx| McpPage::new(state, cx)));
+                }
+                match &self.mcp_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -3800,6 +3859,8 @@ impl Shell {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
+            SettingsSection::Commands => icons::COMMAND,
+            SettingsSection::Mcp => icons::GLOBAL,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,

@@ -461,7 +461,8 @@ const SYNTHESIZED_COMMANDS: [(&str, &str, &str); 2] = [
 
 /// Append the synthesized built-ins to the discovered commands, skipping any
 /// whose name a discovered extension/prompt/skill command already owns. The
-/// synthesized entries land at the tail.
+/// synthesized entries land at the tail. Hide/show for the composer `/` menu
+/// is a UI preference (Settings → Commands), not a harness filter.
 fn synthesize_commands(discovered: &[SlashCommand]) -> Vec<SlashCommand> {
     let mut commands = discovered.to_vec();
     for (name, description, hint) in SYNTHESIZED_COMMANDS {
@@ -485,6 +486,23 @@ fn rotate(id: &mut String) -> (String, String) {
 
 async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEvent) -> bool {
     tx.send(Ok(ev)).await.is_ok()
+}
+
+/// Every Cypher-spawned Pi needs this: the login keychain rejects writes/reads
+/// from these children, so MCP OAuth is stored in ~/.pi/agent/mcp-oauth and
+/// served through a keyring shim.
+fn inject_mcp_keyring_preload(cmd: &mut Command) {
+    let preload = std::env::temp_dir().join("cypher-mcp-keyring-preload.cjs");
+    if std::fs::write(&preload, include_str!("mcp_keyring_preload.cjs")).is_err() {
+        return;
+    }
+    let mut node_options = std::env::var("NODE_OPTIONS").unwrap_or_default();
+    if !node_options.is_empty() {
+        node_options.push(' ');
+    }
+    node_options.push_str("--require ");
+    node_options.push_str(&preload.display().to_string());
+    cmd.env("NODE_OPTIONS", node_options);
 }
 
 /// Resolve the pi CLI: `PI_EXECUTABLE` override, then PATH + login-shell PATH
@@ -665,6 +683,7 @@ impl PiHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
+        inject_mcp_keyring_preload(&mut cmd);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -801,6 +820,107 @@ impl PiHarness {
             Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
         }
     }
+
+    /// Run `/command` through a short-lived `pi --mode rpc` child so extension
+    /// handlers (MCP OAuth, etc.) execute inside Pi, the same path as the TUI.
+    pub async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
+        // Same plugin path as the TUI (`pi --mode rpc` + `/mcp-auth`).
+        let mut cmd = self.spawn_command(None, &RunHostContext::default(), None)?;
+        if let Some(home) = std::env::var_os("HOME") {
+            cmd.env(
+                "CYPHER_MCP_AUTH_DUMP",
+                std::path::PathBuf::from(home).join(".pi/agent/.cypher-mcp-auth-dump.jsonl"),
+            );
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HarnessError::NotInstalled("pi".into())
+            } else {
+                HarnessError::Io(e)
+            }
+        })?;
+        let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
+            _ => {
+                shutdown_child(&mut child, self.kill_grace).await;
+                return Err(HarnessError::Protocol("pi child has no stdio".into()));
+            }
+        };
+        let mut params = Map::new();
+        params.insert("message".into(), Value::String(prompt.to_owned()));
+        let prompt_client = client.clone();
+        let mut prompt_fut = Box::pin(async move { prompt_client.request("prompt", params).await });
+        let mut prompt_done = false;
+        let mut output = String::new();
+        let mut error: Option<String> = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        loop {
+            tokio::select! {
+                biased;
+                res = &mut prompt_fut, if !prompt_done => {
+                    prompt_done = true;
+                    match res {
+                        Ok(_) => {}
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            break;
+                        }
+                    }
+                }
+                inc = incoming.recv() => match inc {
+                    Some(Incoming::UiRequest { id, method, payload }) => {
+                        match method.as_str() {
+                            "notify" => {
+                                let message = payload
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                let is_error = payload
+                                    .get("notifyType")
+                                    .and_then(Value::as_str)
+                                    == Some("error");
+                                if is_error {
+                                    error = Some(message.to_owned());
+                                } else if !message.is_empty() {
+                                    if !output.is_empty() {
+                                        output.push('\n');
+                                    }
+                                    output.push_str(message);
+                                }
+                            }
+                            // Do NOT cancel input/select: `/mcp-auth` races
+                            // `ui.input` (paste callback URL) against the
+                            // localhost OAuth callback. Cancelling input
+                            // wins that race and aborts sign-in. Leave the
+                            // dialog unanswered; the callback completes it.
+                            "select" | "input" | "editor" | "confirm" => {
+                                let _ = (id, payload);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(Incoming::Event(_)) => {}
+                    Some(Incoming::Eof) | None => break,
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    error = Some("The MCP sign-in timed out.".into());
+                    break;
+                }
+            }
+            if prompt_done {
+                break;
+            }
+        }
+        shutdown_child(&mut child, self.kill_grace).await;
+        match error {
+            Some(message) if !message.is_empty() => Err(HarnessError::Protocol(message)),
+            _ => Ok(output),
+        }
+    }
 }
 
 #[async_trait]
@@ -864,6 +984,10 @@ impl Harness for PiHarness {
         if let Ok(mut slot) = self.models_cache.lock() {
             *slot = None;
         }
+    }
+
+    async fn run_slash(&self, prompt: &str) -> Result<String, HarnessError> {
+        self.run_slash_command(prompt).await
     }
 
     /// Session Fork (v1): Pi implements it natively (a separate
@@ -2213,6 +2337,19 @@ mod tests {
         let empty = synthesize_commands(&[]);
         let names: Vec<&str> = empty.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["compact", "export-html"]);
+    }
+
+    #[test]
+    fn discovered_extension_commands_are_advertised() {
+        // Settings → Commands owns hide/show; the harness returns everything.
+        let probe = vec![SlashCommand {
+            name: "compact-ui-config".into(),
+            description: "Interactive compact-ui settings".into(),
+            input_hint: None,
+        }];
+        let commands = synthesize_commands(&probe);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["compact-ui-config", "compact", "export-html"]);
     }
 
     #[test]

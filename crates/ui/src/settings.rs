@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+pub mod commands;
 pub mod composer;
 pub mod devices;
 pub mod harnesses;
+pub mod mcp;
 pub mod notifications;
 pub mod setup;
 pub mod shortcuts;
@@ -103,6 +105,10 @@ pub struct UiSettings {
     /// written before this screen existed — those load as `false` so the
     /// setup still appears once.
     pub setup_completed: bool,
+    /// Slash commands hidden from the composer `/` menu. `None` means the
+    /// user hasn't customized yet — [`commands::default_hides`] applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_slash_commands: Option<Vec<String>>,
 }
 
 impl Default for UiSettings {
@@ -126,6 +132,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             setup_completed: false,
+            hidden_slash_commands: None,
         }
     }
 }
@@ -455,6 +462,7 @@ mod tests {
             },
             appearance: crate::appearance::AppearanceMode::Light,
             setup_completed: true,
+            hidden_slash_commands: Some(vec!["compact-ui-config".into()]),
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

@@ -1137,6 +1137,10 @@ fn forwardable(method: &str) -> bool {
             | methods::INSTALL_PI
             | methods::INSTALL_PI_PACKAGE
             | methods::SET_PI_PACKAGE_ENABLED
+            | methods::LIST_MCP_SERVERS
+            | methods::SET_MCP_SERVER_ENABLED
+            | methods::START_MCP_AUTH
+            | methods::LOGOUT_MCP_SERVER
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
@@ -1443,6 +1447,31 @@ impl RpcService for EngineRpc {
                 crate::pi_packages::set_package_enabled(p).map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&crate::pi_packages::list())
+            }
+            methods::LIST_MCP_SERVERS => RpcReply::value(&crate::mcp::list()),
+            methods::SET_MCP_SERVER_ENABLED => {
+                let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
+                let snapshot = crate::mcp::set_enabled(p).map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&snapshot)
+            }
+            methods::START_MCP_AUTH => {
+                let p: crate::mcp::McpServerName = parse_params(params)?;
+                let harness = self
+                    .registry
+                    .resolve(cypher_proto::HarnessId::Pi)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let snapshot = crate::mcp::authenticate(&p.name, harness.as_ref())
+                    .await
+                    .map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&snapshot)
+            }
+            methods::LOGOUT_MCP_SERVER => {
+                let p: crate::mcp::McpServerName = parse_params(params)?;
+                let snapshot = crate::mcp::logout(&p.name).map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&snapshot)
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
