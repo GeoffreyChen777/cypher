@@ -114,6 +114,10 @@ pub trait Harness: Send + Sync {
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
     }
+    /// Drop cached model/command discovery so the next probe reflects a
+    /// changed agent config (Pi package enablement). No-op for harnesses
+    /// without a cache.
+    fn invalidate_discovery(&self) {}
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,

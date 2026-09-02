@@ -329,8 +329,9 @@ impl SideChatPanel {
             .size_full()
             .flex()
             .flex_col()
-            // The imported-selection preview and lifecycle actions share one
-            // compact rounded bar. The full selection remains engine-side.
+            // Imported-selection preview: rounded wash + the same leading
+            // quote rail as the comment editor, plus the promote action.
+            // The full selection remains engine-side.
             .child(
                 div().px(px(8.0)).py(px(6.0)).child(
                     div()
@@ -343,6 +344,7 @@ impl SideChatPanel {
                         .py(px(5.0))
                         .rounded(px(8.0))
                         .bg(crate::theme::ink(0.035))
+                        .child(crate::comments::quote_rail(&theme))
                         .child(
                             div()
                                 .flex_1()
@@ -358,11 +360,13 @@ impl SideChatPanel {
                                 .px(px(8.0))
                                 .py(px(3.0))
                                 .rounded(px(6.0))
-                                .bg(theme.accent.opacity(0.12))
                                 .text_size(px(10.5))
-                                .text_color(theme.accent)
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
                                 .cursor_pointer()
-                                .hover(|style| style.bg(theme.accent.opacity(0.18)))
+                                .hover(|style| {
+                                    style.bg(crate::theme::ink(0.08)).text_color(theme.text)
+                                })
                                 .on_click(cx.listener(|this, _, _, cx| this.promote(cx)))
                                 .child(SharedString::from("Open as Chat")),
                         ),

@@ -22,6 +22,7 @@ pub mod diff_sync;
 pub mod doc_host;
 pub mod instance_lock;
 pub mod local_import;
+pub mod pi_packages;
 pub mod profile;
 pub mod registry;
 pub mod repos;
@@ -798,6 +799,21 @@ impl Engine {
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
         cypher_harness::acp::prewarm_managed_adapters();
+        // First `/` in the composer waits on a short-lived `pi --mode rpc`
+        // that loads every extension. Kick that probe off at boot so the
+        // popup is a cache hit.
+        {
+            use cypher_harness::Harness;
+            let registry = core.registry.clone();
+            tokio::spawn(async move {
+                let Ok(harness) = registry.resolve(HarnessId::Pi) else {
+                    return;
+                };
+                if let Err(err) = harness.commands().await {
+                    tracing::debug!(error = %err, "prewarm pi commands failed");
+                }
+            });
+        }
 
         let host_relay = edge.as_ref().map(|edge| {
             let links = cypher_rpc::LinkCache::new(cypher_rpc::LinkCacheConfig::new(

@@ -741,6 +741,19 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     fnv1a(&acc)
 }
 
+fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
+    let text: String = entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::composer::slash_command_label(&text).is_some()
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -904,6 +917,12 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
+                        if !*resolved {
+                            // The composer wizard is the interaction. A pending
+                            // "Awaiting your answer…" chip makes slash-command
+                            // settings read as the model asking a question.
+                            continue;
+                        }
                         // Model-generated header onto the one-line chip.
                         let header: SharedString = single_line(
                             &questions
@@ -2412,11 +2431,26 @@ impl Transcript {
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
+        let mut after_slash_command = false;
         for entry in &entries {
-            new_rows.extend(self.rows_for(entry, false));
+            if entry.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(entry);
+            }
+            let mut rows = self.rows_for(entry, false);
+            if after_slash_command && entry.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
-            new_rows.extend(self.rows_for(echo, *pending));
+            if echo.role == MessageRole::User {
+                after_slash_command = user_entry_is_slash_command(echo);
+            }
+            let mut rows = self.rows_for(echo, *pending);
+            if after_slash_command && echo.role != MessageRole::User {
+                rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
+            }
+            new_rows.extend(rows);
         }
 
         // Text already streamed before this (re)attach is the veil BASELINE:
@@ -2858,6 +2892,40 @@ impl Transcript {
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
             }
+            // Slash-command settings: don't show the "model thinking"
+            // flavour spinner while waiting for a picker or after cancel.
+            let slash_quiet = {
+                let last_user_slash = state
+                    .pending_echoes()
+                    .iter()
+                    .rev()
+                    .chain(state.transcript.iter().rev())
+                    .find(|e| e.role == MessageRole::User)
+                    .is_some_and(|e| {
+                        let text: String = e
+                            .parts
+                            .iter()
+                            .filter_map(|p| match p {
+                                MessagePart::Text { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        crate::composer::slash_command_label(&text).is_some()
+                    });
+                let assistant_working = state.transcript.iter().rev().any(|e| {
+                    e.role == MessageRole::Assistant
+                        && e.parts.iter().any(|p| match p {
+                            MessagePart::Text { text, .. } => !text.trim().is_empty(),
+                            MessagePart::Tool { .. } => true,
+                            _ => false,
+                        })
+                });
+                last_user_slash && !assistant_working
+            };
+            if slash_quiet {
+                return None;
+            }
             // During the send→turn window the session row's `started_at`
             // still belongs to the PREVIOUS turn — a timer based on the send
             // counted the round-trip and then restarted when the turn
@@ -3014,35 +3082,64 @@ impl Transcript {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
                 }
                 if !text.is_empty() {
-                    // `min_w_0` is load-bearing: gpui text answers min/max-content
-                    // probes with its UNWRAPPED width, so without it the bubble's
-                    // automatic min-size is the full single-line width — the flex
-                    // item can't shrink, `justify_end` pushes the overflow off the
-                    // left edge, and long prompts render as one clipped line
-                    // instead of wrapping inside the 80% column cap.
-                    column = column.child(
-                        div().w_full().flex().justify_end().child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(MAX_CONTENT_WIDTH * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
-                                .rounded(px(Theme::BUBBLE_RADIUS))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .text_size(px(14.0))
-                                .line_height(px(22.0))
-                                .text_color(theme.text)
-                                .when(pending, |el| el.opacity(0.65))
-                                .child(user_bubble_text(
-                                    &row.id,
-                                    text,
-                                    mentions,
-                                    &theme,
-                                    self.scope,
-                                    Some(self.selection_ui_for(&row.id, cx)),
-                                )),
-                        ),
-                    );
+                    if crate::composer::slash_command_label(&text).is_some()
+                        && mentions.is_empty()
+                        && attachments.is_empty()
+                    {
+                        // Slash-command settings: a quiet action chip, not a
+                        // user bubble that reads as a prompt to the model.
+                        column = column.child(
+                            div().w_full().flex().justify_start().child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .when(pending, |el| el.opacity(0.65))
+                                    .child(
+                                        crate::icons::icon(crate::icons::COMMAND)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text_muted)
+                                            .child(text),
+                                    ),
+                            ),
+                        );
+                    } else {
+                        // `min_w_0` is load-bearing: gpui text answers min/max-content
+                        // probes with its UNWRAPPED width, so without it the bubble's
+                        // automatic min-size is the full single-line width — the flex
+                        // item can't shrink, `justify_end` pushes the overflow off the
+                        // left edge, and long prompts render as one clipped line
+                        // instead of wrapping inside the 80% column cap.
+                        column = column.child(
+                            div().w_full().flex().justify_end().child(
+                                div()
+                                    .min_w_0()
+                                    .max_w(px(MAX_CONTENT_WIDTH * 0.8))
+                                    .bg(crate::theme::user_bubble_bg())
+                                    .rounded(px(Theme::BUBBLE_RADIUS))
+                                    .px(px(16.0))
+                                    .py(px(10.0))
+                                    .text_size(px(14.0))
+                                    .line_height(px(22.0))
+                                    .text_color(theme.text)
+                                    .when(pending, |el| el.opacity(0.65))
+                                    .child(user_bubble_text(
+                                        &row.id,
+                                        text,
+                                        mentions,
+                                        &theme,
+                                        self.scope,
+                                        Some(self.selection_ui_for(&row.id, cx)),
+                                    )),
+                            ),
+                        );
+                    }
                 }
                 column.into_any_element()
             }
@@ -3147,7 +3244,10 @@ impl Transcript {
         // a RESERVED 16px lane under the entry's last row — the label only
         // flips opacity, so revealing it never shifts the virtualizer's
         // layout. User entries align end (under the bubble), assistant start.
-        let is_user_row = matches!(row.kind, RowKind::User { .. });
+        let is_user_row = match &row.kind {
+            RowKind::User { text, .. } => crate::composer::slash_command_label(text).is_none(),
+            _ => false,
+        };
         let hovered = self
             .hovered_entry
             .as_ref()

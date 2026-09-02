@@ -21,6 +21,7 @@ actions!(
     cypher,
     [
         About,
+        OpenSettings,
         Quit,
         Hide,
         HideOthers,
@@ -88,6 +89,7 @@ pub fn bind_keys(cx: &mut App) {
 fn macos_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
@@ -105,6 +107,8 @@ pub fn app_menus() -> Vec<Menu> {
     let mut app_items = vec![
         // Placeholder until a real about dialog exists (explicitly disabled).
         MenuItem::action("About Cypher", About).disabled(true),
+        MenuItem::separator(),
+        MenuItem::action("Settings…", OpenSettings),
         MenuItem::separator(),
     ];
     if macos {
@@ -264,6 +268,7 @@ mod tests {
         };
         let combo = |source: &str| vec![Keystroke::parse(source).unwrap()];
         assert_eq!(find(Quit.name()), Some(combo("cmd-q")));
+        assert_eq!(find(OpenSettings.name()), Some(combo("cmd-,")));
         assert_eq!(find(CloseWindow.name()), Some(combo("cmd-w")));
         assert_eq!(find(Minimize.name()), Some(combo("cmd-m")));
     }

@@ -37,8 +37,15 @@ while read -r line; do
     ;;
 
   *'"type":"get_available_models"'*)
-    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\",\"reasoning\":true,\"contextWindow\":200000},{\"id\":\"gpt-4o-mini\",\"name\":\"GPT-4o Mini\",\"provider\":\"openai\",\"reasoning\":false,\"contextWindow\":128000}]}}"
-    exit 0
+    # A marker in --session-dir makes the FIRST snapshot empty (real pi's RPC
+    # catalog is empty until the async refresh finishes). Discovery must poll.
+    if [ -f "$SESSION_DIR/.empty-models-once" ]; then
+      rm -f "$SESSION_DIR/.empty-models-once"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[]}}"
+    else
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\",\"reasoning\":true,\"contextWindow\":200000},{\"id\":\"gpt-4o-mini\",\"name\":\"GPT-4o Mini\",\"provider\":\"openai\",\"reasoning\":false,\"contextWindow\":128000}]}}"
+      exit 0
+    fi
     ;;
 
   *'"type":"get_state"'*)
@@ -364,6 +371,23 @@ while read -r line; do
       emit '{"type":"extension_ui_request","id":"u-1","method":"select","title":"Pick a runtime","options":["tokio","smol"]}'
       read -r ans || exit 1
       if has "$ans" '"type":"extension_ui_response"' && has "$ans" '"id":"u-1"' && has "$ans" '"value":"tokio"'; then
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"answered"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"answered"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      exit 1
+      ;;
+    *scenario:ui-select-before-ack*)
+      # Real pi: extension commands ACK the prompt only AFTER the handler
+      # returns, and `/subagent-config` blocks on ctx.ui.select first. The
+      # harness must drain the UI request while the prompt RPC is still in
+      # flight or the run deadlocks (Working forever, no question panel).
+      emit '{"type":"extension_ui_request","id":"u-1","method":"select","title":"Pick a runtime","options":["tokio","smol"]}'
+      read -r ans || exit 1
+      if has "$ans" '"type":"extension_ui_response"' && has "$ans" '"id":"u-1"' && has "$ans" '"value":"tokio"'; then
+        emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
         emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"answered"}}'
         emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"answered"}],"stopReason":"stop"}}'

@@ -101,6 +101,12 @@ struct SetHarnessEnabledParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PiPackageParams {
+    source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueueCommandParams {
     chat_id: String,
     command: SessionCommandPayload,
@@ -519,6 +525,13 @@ impl EngineRpc {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
+    }
+
+    /// Pi packages changed: rediscover slash commands/models and recycle
+    /// parked sessions so the next turn loads the new settings.json.
+    async fn reload_pi_runtime(&self) {
+        self.registry.invalidate_discovery(HarnessId::Pi);
+        self.sessions.recycle_idle_sessions().await;
     }
 
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
@@ -1120,6 +1133,10 @@ fn forwardable(method: &str) -> bool {
         method,
         methods::LIST_HARNESSES
             | methods::SET_HARNESS_ENABLED
+            | methods::LIST_PI_PACKAGES
+            | methods::INSTALL_PI
+            | methods::INSTALL_PI_PACKAGE
+            | methods::SET_PI_PACKAGE_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
@@ -1405,6 +1422,27 @@ impl RpcService for EngineRpc {
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
+            }
+            methods::LIST_PI_PACKAGES => RpcReply::value(&crate::pi_packages::list()),
+            methods::INSTALL_PI => {
+                crate::pi_packages::install_pi()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&crate::pi_packages::list())
+            }
+            methods::INSTALL_PI_PACKAGE => {
+                let p: PiPackageParams = parse_params(params)?;
+                crate::pi_packages::install_package(&p.source)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&crate::pi_packages::list())
+            }
+            methods::SET_PI_PACKAGE_ENABLED => {
+                let p: crate::pi_packages::SetPackageEnabled = parse_params(params)?;
+                crate::pi_packages::set_package_enabled(p).map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&crate::pi_packages::list())
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;

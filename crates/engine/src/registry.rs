@@ -250,6 +250,15 @@ impl HarnessRegistry {
         }
     }
 
+    /// Drop cached model/command discovery for an already-resolved harness.
+    /// Lazy slots are left untouched — they have nothing cached yet.
+    pub fn invalidate_discovery(&self, id: HarnessId) {
+        let slots = self.slots();
+        if let Some(Slot::Ready(harness)) = slots.get(&id) {
+            harness.invalidate_discovery();
+        }
+    }
+
     pub fn resolve(&self, id: HarnessId) -> Result<Arc<dyn Harness>, HarnessError> {
         let mut slots = self.slots();
         match slots.get(&id) {

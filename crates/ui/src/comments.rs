@@ -141,6 +141,18 @@ pub fn normalize_quote(raw: &str) -> String {
     raw.trim().replace('\u{a0}', " ")
 }
 
+/// Short rounded leading rail for a quoted excerpt — the same solid plate
+/// as primary buttons. Shared by the comment editor and the Side Chat header
+/// so both quote the selection the same way.
+pub fn quote_rail(theme: &Theme) -> gpui::Div {
+    div()
+        .w(px(3.0))
+        .h(px(10.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.solid)
+}
+
 /// The shared floating Comment pill / editor, anchored at a settled
 /// selection endpoint (window coordinates via gpui `anchored().position`).
 /// The shell renders it above every clipped surface.
@@ -491,19 +503,20 @@ impl CommentPopup {
         let theme = Theme::of(cx).clone();
         let anchor = Self::resolved_anchor(&editor.head, editor.anchor);
         let has_text = !self.comment_input.read(cx).text().trim().is_empty();
+        // `solid`/`on_solid` is the primary-button pair (near-black plate +
+        // near-white label in light mode). Pairing `on_solid` with `theme.text`
+        // as the fill made Save unreadable on light: the label is tuned for
+        // the solid plate, not body text.
         let save = div()
             .id("comment-save")
             .px(px(10.0))
             .py(px(4.0))
             .rounded(px(8.0))
-            .bg(theme.text)
+            .bg(theme.solid)
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(if has_text {
-                theme.on_solid
-            } else {
-                theme.text_faint
-            })
+            .text_color(theme.on_solid)
+            .opacity(if has_text { 1.0 } else { 0.4 })
             .cursor_pointer()
             .child(SharedString::from("Save"))
             .when(has_text, |el| {
@@ -541,19 +554,29 @@ impl CommentPopup {
             .gap(px(8.0))
             .occlude()
             .child(
+                // Quote: rounded wash plus a short leading rail (same plate
+                // as primary buttons), not a full-height accent hairline.
                 div()
-                    .max_h(px(64.0))
-                    .overflow_hidden()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.03))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
                     .px(px(8.0))
                     .py(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(Self::quote_preview(&editor.quote))),
+                    .rounded(px(6.0))
+                    .bg(crate::theme::ink(0.03))
+                    .child(quote_rail(&theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .max_h(px(64.0))
+                            .overflow_hidden()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(Self::quote_preview(&editor.quote))),
+                    ),
             )
             .child(self.comment_input.clone())
             .child(

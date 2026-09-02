@@ -39,6 +39,7 @@ use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
+use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
@@ -171,6 +172,12 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // Fixed: ⌘K summons the add-space palette (the ⌘K chip in its search
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
+        // Fixed: ⌘, opens Settings (macOS convention).
+        KeyBinding::new(
+            &platform_combo("mod-,"),
+            crate::app_menus::OpenSettings,
+            None,
+        ),
     ]);
 }
 
@@ -918,6 +925,12 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    setup_page: Option<Entity<SetupPage>>,
+    setup_sub: Option<Subscription>,
+    /// Continue/Skip dismissed the overlay for this process.
+    setup_dismissed: bool,
+    /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
+    debug_setup: bool,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
@@ -1229,10 +1242,12 @@ impl Shell {
         // More capture knobs of the same kind: `CYPHER_OPEN_DIALOG=rename|delete`
         // opens that dialog for the first chat once chats land; `=model` pops
         // the combined harness/model menu once the shell is Ready;
-        // `CYPHER_FORCE_GATE=signin|org|failed` renders that gate regardless of
-        // real auth state (display-only — for styling passes).
+        // `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that gate
+        // regardless of real auth state (display-only — for styling passes).
         let debug_dialog = cypher_env::var("OPEN_DIALOG");
-        let debug_gate = match cypher_env::var("FORCE_GATE").as_deref() {
+        let force_gate = cypher_env::var("FORCE_GATE");
+        let debug_setup = force_gate.as_deref() == Some("setup");
+        let debug_gate = match force_gate.as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
@@ -1274,6 +1289,10 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            setup_page: None,
+            setup_sub: None,
+            setup_dismissed: false,
+            debug_setup,
             shortcuts_sub: None,
             notifications_sub: None,
             chat_menu: popover::Popup::default(),
@@ -2605,6 +2624,62 @@ impl Shell {
     fn dismiss_comment_popup(&mut self, cx: &mut Context<Self>) {
         self.comment_popup
             .update(cx, |popup, cx| popup.dismiss_and_clear(cx));
+    }
+
+    fn showing_setup(&self) -> bool {
+        crate::settings::setup::setup_should_show(
+            self.settings.setup_completed,
+            self.debug_setup,
+            self.setup_dismissed,
+        )
+    }
+
+    fn ensure_setup_page(&mut self, cx: &mut Context<Self>) {
+        if self.setup_page.is_some() {
+            return;
+        }
+        let state = self.state.clone();
+        let page = cx.new(|cx| SetupPage::new(state, cx));
+        self.setup_sub = Some(cx.subscribe(&page, |this, _, _: &SetupEvent, cx| {
+            this.complete_setup(cx);
+        }));
+        self.setup_page = Some(page);
+    }
+
+    fn complete_setup(&mut self, cx: &mut Context<Self>) {
+        self.settings.setup_completed = true;
+        self.setup_dismissed = true;
+        self.setup_page = None;
+        self.setup_sub = None;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn render_setup_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_setup_page(cx);
+        let theme = Theme::of(cx).clone();
+        let inner = match &self.setup_page {
+            Some(page) => page.clone().into_any_element(),
+            None => Empty.into_any_element(),
+        };
+        div()
+            .id("setup-overlay")
+            .absolute()
+            .inset_0()
+            .size_full()
+            .occlude()
+            .bg(theme.bg)
+            .child(grid_backdrop(&theme))
+            .child(
+                div()
+                    .id("setup-overlay-body")
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .min_h_0()
+                    .child(inner),
+            )
+            .into_any_element()
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
@@ -5042,6 +5117,10 @@ impl Shell {
             }
         });
 
+        if self.showing_setup() {
+            overlays.push(self.render_setup_overlay(cx));
+        }
+
         overlays
     }
 
@@ -6903,18 +6982,21 @@ impl Render for Shell {
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 match this.route {
-                    Route::Chat => window.focus(&this.composer.focus_handle(cx), cx),
+                    Route::Chat if !this.showing_setup() => {
+                        window.focus(&this.composer.focus_handle(cx), cx)
+                    }
                     // No composer here — clear the stale handle so `focused()`
                     // reads None (the render hook below re-lands focus when the
                     // route returns to Chat; a lingering unmounted handle would
                     // otherwise dead-end keyboard dispatch for good).
-                    Route::Settings(_) => window.blur(),
+                    Route::Chat | Route::Settings(_) => window.blur(),
                 }
             }));
         }
         if !restart_required
             && matches!(gate, GatePhase::Ready)
             && matches!(self.route, Route::Chat)
+            && !self.showing_setup()
             && window.focused(cx).is_none()
         {
             window.focus(&self.composer.focus_handle(cx), cx);
@@ -6955,6 +7037,11 @@ impl Render for Shell {
                     this.toggle_right_pane(cx)
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::app_menus::OpenSettings, _, cx| {
+                    this.open_settings(SettingsSection::Devices, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
                     this.add_space = None;

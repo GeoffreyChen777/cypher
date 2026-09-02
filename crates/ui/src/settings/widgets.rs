@@ -181,9 +181,8 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
         .gap(px(14.0))
 }
 
-/// The identity tile on a row: `size-9 rounded-[10px] border bg-white/[0.03]`
-/// around a 16px icon.
-pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
+/// Shared chrome for identity tiles: `size-9 rounded-[10px] border bg-white/[0.03]`.
+fn row_tile_frame(theme: &Theme) -> gpui::Div {
     div()
         .flex_none()
         .size(px(36.0))
@@ -194,11 +193,25 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        )
+}
+
+/// The identity tile on a row: frame around a 16px icon.
+pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
+    row_tile_frame(theme).child(
+        crate::icons::icon(icon_path)
+            .size(px(16.0))
+            .text_color(theme.text_muted),
+    )
+}
+
+/// Identity tile for an unknown package: the same frame, with a letter instead
+/// of a glyph so third-party extensions stay distinct without fake semantics.
+pub fn row_tile_letter(theme: &Theme, letter: impl Into<SharedString>) -> gpui::Div {
+    row_tile_frame(theme)
+        .text_size(px(13.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(letter.into())
 }
 
 /// Row title: `text-[13.5px] font-medium leading-tight`.

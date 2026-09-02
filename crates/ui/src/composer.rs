@@ -723,21 +723,40 @@ async fn read_session_reset(
 pub fn pending_input_request(
     transcript: &[SessionMessageEntry],
 ) -> Option<(String, Vec<UserInputQuestion>)> {
-    transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role == MessageRole::Assistant)
-        .and_then(|entry| {
-            entry.parts.iter().find_map(|part| match part {
-                MessagePart::Input {
-                    request_id,
-                    questions,
-                    resolved: false,
-                    ..
-                } => Some((request_id.clone(), questions.clone())),
-                _ => None,
-            })
-        })
+    for entry in transcript.iter().rev() {
+        if entry.role != MessageRole::Assistant {
+            continue;
+        }
+        if let Some(found) = entry.parts.iter().find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } => Some((request_id.clone(), questions.clone())),
+            _ => None,
+        }) {
+            return Some(found);
+        }
+        // A later assistant that actually said something supersedes an
+        // unanswered question. An empty placeholder (parked-turn Steered
+        // rotation) must NOT — slash-command `ui.select` often lands on the
+        // previous segment, and treating the new empty entry as "moved on"
+        // hides the picker while Pi waits forever.
+        if assistant_entry_has_content(entry) {
+            return None;
+        }
+    }
+    None
+}
+
+fn assistant_entry_has_content(entry: &SessionMessageEntry) -> bool {
+    entry.parts.iter().any(|part| match part {
+        MessagePart::Text { text, .. } => !text.trim().is_empty(),
+        MessagePart::Tool { .. } => true,
+        MessagePart::Input { resolved: true, .. } => true,
+        _ => false,
+    })
 }
 
 /// Whether the transcript shows `request_id` explicitly resolved (here or on
@@ -778,6 +797,9 @@ pub struct Wizard {
     pub request_id: String,
     pub questions: Vec<UserInputQuestion>,
     pub page: usize,
+    /// When set, this picker came from a slash-command extension (e.g.
+    /// `/subagent-config`), not an in-turn agent question.
+    pub slash: Option<SharedString>,
     picked: Vec<Vec<usize>>,
     typed: Vec<String>,
 }
@@ -789,9 +811,15 @@ impl Wizard {
             request_id,
             questions,
             page: 0,
+            slash: None,
             picked: vec![Vec::new(); n],
             typed: vec![String::new(); n],
         }
+    }
+
+    pub fn for_slash(mut self, command: impl Into<SharedString>) -> Self {
+        self.slash = Some(command.into());
+        self
     }
 
     pub fn counter(&self) -> String {
@@ -3839,6 +3867,17 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
+/// The leading `/command` token of a whole-prompt slash send, if any.
+/// Used to restyle settings-style extension menus (not agent questions).
+pub fn slash_command_label(text: &str) -> Option<&str> {
+    let t = text.trim();
+    if !t.starts_with('/') || t.starts_with("//") {
+        return None;
+    }
+    let cmd = t.split_whitespace().next().unwrap_or(t);
+    (cmd.len() >= 2).then_some(cmd)
+}
+
 /// Slash-command completion state: like [`MentionState`] but the
 /// candidate list is fetched once per harness (`ListCommands`) and filtered
 /// locally per keystroke — no RPC, debounce, or skeleton churn while typing.
@@ -4038,13 +4077,15 @@ pub struct Composer {
     mention_task: Option<Task<()>>,
     mention: MentionState,
     slash_task: Option<Task<()>>,
+    /// Background ListCommands so the first `/` is not a cold Pi spawn.
+    slash_prefetch: Option<Task<()>>,
     slash: SlashState,
     /// Scroll position of the `/` popup's command list (rows are the scroll
     /// container's direct children, so keyboard `scroll_to_item(active)`
     /// maps 1:1 — the pickers' model-menu pattern).
     slash_scroll: ScrollHandle,
-    /// Advertised commands per harness (one `ListCommands` per harness per
-    /// composer lifetime; the engine caches discovery on its side too).
+    /// Advertised commands per harness. Refetched when Settings → Agents
+    /// toggles a Pi package (`HarnessCatalogChanged`).
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
     current_key: String,
     sending: bool,
@@ -4098,6 +4139,7 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    _catalog_observe: Subscription,
     _input_events: Subscription,
 }
 
@@ -4186,6 +4228,22 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        let catalog_observe =
+            cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Self, cx| {
+                this.slash_cache.clear();
+                this.slash_prefetch = None;
+                if this.slash.token.is_some() {
+                    this.slash.harness = None;
+                    let (text, cursor) = {
+                        let input = this.input.read(cx);
+                        (input.text().to_string(), input.cursor_offset())
+                    };
+                    this.update_slash(&text, cursor, cx);
+                } else {
+                    this.prefetch_slash_commands(cx);
+                }
+                cx.notify();
+            });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
@@ -4240,6 +4298,7 @@ impl Composer {
             mention_task: None,
             mention: MentionState::default(),
             slash_task: None,
+            slash_prefetch: None,
             slash: SlashState::default(),
             slash_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
@@ -4268,6 +4327,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            _catalog_observe: catalog_observe,
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
@@ -4304,6 +4364,7 @@ impl Composer {
                     .extend(staged);
             }
         }
+        composer.prefetch_slash_commands(cx);
         composer
     }
 
@@ -5439,6 +5500,48 @@ impl Composer {
 
     // ---- slash commands ---------------------------------------------------
 
+    /// Warm [`Self::slash_cache`] without opening the popup, so the first `/`
+    /// is not a cold `pi --mode rpc` spawn.
+    fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
+            return;
+        };
+        if self.slash_cache.contains_key(&harness) || self.slash_prefetch.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat_row()
+                .map(|chat| chat.device_id.clone())
+                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
+        };
+        self.slash_prefetch = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::json!({ "harness": harness });
+            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
+                object.insert("targetDeviceId".into(), target.clone().into());
+            }
+            let result = engine.client().call(methods::LIST_COMMANDS, params).await;
+            this.update(cx, |composer, cx| {
+                composer.slash_prefetch = None;
+                if let Ok(value) = result
+                    && let Ok(commands) = serde_json::from_value::<Vec<SlashCommand>>(value)
+                {
+                    composer.slash_cache.insert(harness, commands);
+                    if composer.slash.token.is_some() {
+                        composer.slash.loading = false;
+                        composer.refilter_slash(cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on first open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
@@ -5477,6 +5580,11 @@ impl Composer {
         };
         if self.slash_cache.contains_key(&harness) {
             self.slash.loading = false;
+            self.refilter_slash(cx);
+            return;
+        }
+        if self.slash_prefetch.is_some() {
+            self.slash.loading = true;
             self.refilter_slash(cx);
             return;
         }
@@ -5792,11 +5900,45 @@ impl Composer {
                     .is_some_and(|w| w.request_id == request_id);
                 if !same {
                     self.reset_mention(None, cx);
-                    self.wizard = Some(Wizard::new(request_id, questions));
+                    let slash = {
+                        let state = self.state.read(cx);
+                        state
+                            .pending_echoes()
+                            .iter()
+                            .rev()
+                            .chain(state.transcript.iter().rev())
+                            .find(|e| e.role == MessageRole::User)
+                            .and_then(|e| {
+                                let text: String = e
+                                    .parts
+                                    .iter()
+                                    .filter_map(|p| match p {
+                                        MessagePart::Text { text, .. } => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                slash_command_label(&text).map(str::to_string)
+                            })
+                    };
+                    let pick_only = questions
+                        .first()
+                        .is_some_and(|q| !q.options.is_empty() && !q.multi_select);
+                    let mut wizard = Wizard::new(request_id, questions);
+                    if let Some(cmd) = slash {
+                        wizard = wizard.for_slash(cmd);
+                    }
+                    self.wizard = Some(wizard);
                     self.advance_task = None;
-                    // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
+                        input.set_placeholder(
+                            if pick_only {
+                                ""
+                            } else {
+                                "Type your own answer, or pick an option above"
+                            },
+                            cx,
+                        )
                     });
                 }
             }
@@ -5824,6 +5966,7 @@ impl Composer {
                 }
             }
         }
+        self.prefetch_slash_commands(cx);
         cx.notify();
     }
 
@@ -6748,19 +6891,26 @@ impl Composer {
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
+        let pick_only = wizard
+            .current()
+            .is_some_and(|q| !q.options.is_empty() && !q.multi_select);
+        let last_page = wizard.page + 1 >= wizard.questions.len();
         let step = wizard.select(option_ix);
-        let has_pick = wizard.page_has_pick();
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
-                cx,
-            )
-        });
+        if !pick_only {
+            let has_pick = wizard.page_has_pick();
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder(
+                    if has_pick {
+                        "Type your own answer, or leave this blank to use the selected option"
+                    } else {
+                        "Type your own answer, or pick an option above"
+                    },
+                    cx,
+                )
+            });
+        }
         match step {
+            WizardStep::AutoAdvance if pick_only && last_page => self.wizard_advance(cx),
             WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
             WizardStep::Stay => {}
@@ -6797,6 +6947,23 @@ impl Composer {
             wizard.back();
             cx.notify();
         }
+    }
+
+    /// Dismiss a slash-command picker: empty answers map to Pi's
+    /// `cancelled: true`, so the extension handler returns and the run ends.
+    fn wizard_cancel(&mut self, cx: &mut Context<Self>) {
+        let Some(wizard) = self.wizard.as_ref() else {
+            return;
+        };
+        let answers = wizard
+            .questions
+            .iter()
+            .map(|q| UserInputAnswer {
+                question_id: q.id.clone(),
+                labels: Vec::new(),
+            })
+            .collect();
+        self.wizard_finish(answers, cx);
     }
 
     /// Submit RespondInput and retire the panel.
@@ -6914,7 +7081,16 @@ impl Composer {
                 cx.stop_propagation();
             }
         } else if key == "escape" && (!input_focused || input_empty) {
-            self.wizard_back(cx);
+            let cancel = self.wizard.as_ref().is_some_and(|w| {
+                w.page == 0
+                    && w.current()
+                        .is_some_and(|q| !q.options.is_empty() && !q.multi_select)
+            });
+            if cancel {
+                self.wizard_cancel(cx);
+            } else {
+                self.wizard_back(cx);
+            }
             cx.stop_propagation();
         }
     }
@@ -6939,27 +7115,33 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty;
-
+        let pick_only = !question.options.is_empty() && !question.multi_select;
+        let compact = pick_only;
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
             // (typed answers win — zeron question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
+            let (pad_x, pad_y, radius, text, kbd) = if compact {
+                // 8px matches sidebar session rows (`rounded(px(8.0))`).
+                (8.0, 5.0, 8.0, 12.5, 16.0)
+            } else {
+                (14.0, 10.0, 12.0, 13.5, 22.0)
+            };
             div()
                 .id(("wizard-option", ix))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(12.0))
-                .px(px(14.0))
-                .py(px(10.0))
-                .rounded(px(12.0))
+                .gap(px(if compact { 8.0 } else { 12.0 }))
+                .px(px(pad_x))
+                .py(px(pad_y))
+                .rounded(px(radius))
                 .border_1()
                 .border_color(if picked {
                     crate::theme::ink(0.16)
                 } else {
                     gpui::transparent_black()
                 })
-                // zeron question-panel.tsx option rows: `transition-colors`.
                 .bg(if picked {
                     crate::theme::ink(0.09)
                 } else {
@@ -6976,7 +7158,7 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.5))
+                        .text_size(px(text))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(if picked {
                             theme.text
@@ -6987,20 +7169,19 @@ impl Composer {
                 )
                 .when(ix < 9, |el| {
                     el.child(
-                        // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
                             .flex_none()
-                            .size(px(22.0))
+                            .size(px(kbd))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.0))
+                            .rounded(px(if compact { 4.0 } else { 6.0 }))
                             .bg(if picked {
                                 crate::theme::ink(0.16)
                             } else {
                                 crate::theme::ink(0.05)
                             })
-                            .text_size(px(11.0))
+                            .text_size(px(if compact { 10.0 } else { 11.0 }))
                             .text_color(if picked {
                                 theme.text
                             } else {
@@ -7017,7 +7198,7 @@ impl Composer {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
-            .rounded(px(26.0))
+            .rounded(px(if pick_only { 8.0 } else { 26.0 }))
             .border_1()
             .border_color(theme.border)
             .bg(theme.input_glass_bg())
@@ -7026,51 +7207,134 @@ impl Composer {
             .flex_col()
             .child(
                 div()
-                    .px(px(16.0))
-                    .pt(px(16.0))
+                    .px(px(if pick_only { 10.0 } else { 16.0 }))
+                    .pt(px(if pick_only { 10.0 } else { 16.0 }))
+                    .when(pick_only, |el| el.pb(px(10.0)))
                     .flex()
                     .flex_col()
-                    // Header: tracked uppercase + counter chip when paged.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
+                    .when(pick_only, |el| {
+                        let title = if question.question.is_empty() {
+                            question.header.clone()
+                        } else {
+                            question.question.clone()
+                        };
+                        el.when_some(wizard.slash.clone(), |el, cmd| {
+                            el.child(
                                 div()
-                                    .text_size(px(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
-                                    ))),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
+                                        crate::icons::icon(crate::icons::TUNING)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text_muted)
+                                            .child(cmd),
+                                    ),
                             )
-                            .when(wizard.questions.len() > 1, |el| {
-                                el.child(
+                        })
+                        .child(
+                            div()
+                                .when(wizard.slash.is_some(), |el| el.mt(px(4.0)))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
                                     div()
-                                        .h(px(20.0))
-                                        .px(px(6.0))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(13.0))
+                                        .line_height(px(17.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(title)),
+                                )
+                                .when(wizard.questions.len() > 1, |el| {
+                                    el.child(
+                                        div()
+                                            .h(px(18.0))
+                                            .px(px(6.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
+                                            .bg(crate::theme::ink(0.06))
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text_muted.opacity(0.6))
+                                            .child(SharedString::from(counter.clone())),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id("wizard-cancel")
+                                        .flex_none()
+                                        .size(px(20.0))
+                                        .rounded(px(6.0))
                                         .flex()
                                         .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(crate::theme::ink(0.06))
-                                        .text_size(px(10.0))
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(crate::theme::ink(0.06)))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.wizard_cancel(cx)),
+                                        )
+                                        .child(
+                                            crate::icons::icon(crate::icons::CLOSE)
+                                                .size(px(12.0))
+                                                .text_color(theme.text_muted),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(!pick_only, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(counter)),
+                                        .child(SharedString::from(crate::popover::tracked_upper(
+                                            &question.header,
+                                        ))),
                                 )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(px(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                                .when(wizard.questions.len() > 1, |el| {
+                                    el.child(
+                                        div()
+                                            .h(px(20.0))
+                                            .px(px(6.0))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
+                                            .bg(crate::theme::ink(0.06))
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text_muted.opacity(0.6))
+                                            .child(SharedString::from(counter)),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(px(15.0))
+                                .line_height(px(20.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(question.question.clone())),
+                        )
+                    })
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
@@ -7082,50 +7346,55 @@ impl Composer {
                     })
                     .child(
                         div()
-                            .mt(px(12.0))
+                            .mt(px(if compact { 6.0 } else { 12.0 }))
                             .flex()
                             .flex_col()
-                            .gap(px(4.0))
+                            .gap(px(if compact { 1.0 } else { 4.0 }))
                             .children(options),
                     )
-                    // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    .when(!pick_only, |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .border_t_1()
+                                .border_color(crate::theme::hairline(0.06))
+                                .pt(px(12.0))
+                                .pb(px(4.0))
+                                .px(px(4.0))
+                                .child(self.input.clone()),
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .px(px(16.0))
-                    .pb(px(16.0))
-                    .pt(px(4.0))
-                    .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
-                    } else {
-                        gpui::Empty.into_any_element()
-                    })
-                    .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+            .when(!pick_only, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .px(px(16.0))
+                        .pb(px(16.0))
+                        .pt(px(4.0))
+                        .child(if page > 0 {
+                            crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                                .id("wizard-back")
+                                .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                                .into_any_element()
+                        } else {
+                            gpui::Empty.into_any_element()
+                        })
+                        .child(
+                            crate::popover::btn_primary(
+                                &theme,
+                                if last { "Submit" } else { "Next" },
+                            )
                             .id("wizard-submit")
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                    ),
-            )
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -7837,6 +8106,18 @@ mod tests {
         assert!(!block_slash_with_comments(false, "/compact"));
         assert!(!block_slash_with_comments(true, "run /compact"));
         assert!(!block_slash_with_comments(true, ""));
+    }
+
+    #[test]
+    fn slash_command_label_reads_the_leading_token() {
+        assert_eq!(
+            slash_command_label("/subagent-config"),
+            Some("/subagent-config")
+        );
+        assert_eq!(slash_command_label("  /mcp reconnect foo"), Some("/mcp"));
+        assert_eq!(slash_command_label("hello"), None);
+        assert_eq!(slash_command_label("// comment"), None);
+        assert_eq!(slash_command_label("/"), None);
     }
 
     #[test]
@@ -9413,6 +9694,28 @@ mod tests {
             pending_input_request(&t).map(|(id, _)| id),
             Some("r1".into()),
             "question survives entries appended behind the streaming entry"
+        );
+
+        // Parked slash-command select: Steered opens a newer empty assistant
+        // entry; the Input part stayed on the previous segment. Still show
+        // the picker.
+        let empty_next = SessionMessageEntry {
+            id: "m-steer".into(),
+            role: MessageRole::Assistant,
+            parts: vec![],
+            created_at: 3,
+            device_id: "d".into(),
+            status: Some(MessageStatus::Streaming),
+            continuation_of: None,
+        };
+        let t = vec![
+            entry(Some(MessageStatus::Complete), vec![input_part.clone()]),
+            empty_next,
+        ];
+        assert_eq!(
+            pending_input_request(&t).map(|(id, _)| id),
+            Some("r1".into()),
+            "empty steer placeholder does not hide the picker"
         );
 
         // Latch release: only an explicitly resolved matching part releases.

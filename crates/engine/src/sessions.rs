@@ -18,6 +18,7 @@
 //! spawn failure, stream error, engine-restart recovery).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -148,6 +149,9 @@ struct Inner {
     /// The Sender is retained here so late subscribers still see the last
     /// transition; entries are removed on promote/dispose.
     ephemeral_tx: Mutex<HashMap<String, watch::Sender<Option<Session>>>>,
+    /// Bumped when Pi packages change. A live turn that started on an older
+    /// epoch does not park: the next send respawns against the new config.
+    plugin_epoch: AtomicU64,
 }
 
 /// Host-local messaging channel for one child chat's INITIAL run (see
@@ -198,6 +202,7 @@ impl SessionsEngine {
                 turn_listener: OnceLock::new(),
                 ephemeral: Mutex::new(HashSet::new()),
                 ephemeral_tx: Mutex::new(HashMap::new()),
+                plugin_epoch: AtomicU64::new(0),
             }),
         }
     }
@@ -910,6 +915,42 @@ impl SessionsEngine {
         )))
     }
 
+    /// Pi package enablement changed: drop parked children so the next send
+    /// respawns against the new settings, and mark live turns so they do not
+    /// park when they finish. Clean end — no aborted stamp on the transcript.
+    pub async fn recycle_idle_sessions(&self) {
+        self.inner.plugin_epoch.fetch_add(1, Ordering::SeqCst);
+        let idle: Vec<(String, CancellationToken, String)> = {
+            let statuses = lock(&self.inner.statuses);
+            lock(&self.inner.runs)
+                .iter()
+                .filter_map(|(id, handle)| {
+                    statuses
+                        .get(id)
+                        .is_some_and(|session| session.status == SessionStatus::Idle)
+                        .then(|| {
+                            (
+                                id.clone(),
+                                handle.interrupt_token.clone(),
+                                handle.run_id.clone(),
+                            )
+                        })
+                })
+                .collect()
+        };
+        for (chat_id, token, run_id) in idle {
+            // Idle-reaper path: cancel the harness child only. Do not flip the
+            // engine cancel watch — that would stamp the parked turn aborted.
+            token.cancel();
+            for _ in 0..500 {
+                if !self.is_live(&chat_id, &run_id) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
     /// mid-stream), stamp this device's abandoned `streaming` doc entries `aborted`
     /// with a VISIBLE "Run interrupted by engine restart" error part, close the
@@ -1558,6 +1599,7 @@ async fn drive_run(
     resume_state: RunResumeState,
 ) {
     let device_id = inner.device_id.clone();
+    let plugin_epoch = inner.plugin_epoch.load(Ordering::SeqCst);
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
@@ -1924,18 +1966,28 @@ async fn drive_run(
                         idle_since = None;
                     }
                     // A question with NO turn behind it (post-turn permission
-                    // noise): answer it empty right here. Un-parking into
-                    // AwaitingInput would disarm the idle reaper with no Done
-                    // ever coming — stranded status, leaked warm child.
+                    // noise): answer it empty. But a routed send already flipped
+                    // Working — `/subagent-config` and friends ARE the turn,
+                    // and auto-declining them hangs the extension handler.
                     AgentEvent::InputRequested { request_id, .. } => {
-                        let resolver = lock(&inner.runs)
-                            .get(&chat_id)
-                            .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
-                            let _ = tx.send(Vec::new());
+                        let live = lock(&inner.statuses).get(&chat_id).is_some_and(|s| {
+                            matches!(
+                                s.status,
+                                SessionStatus::Working | SessionStatus::AwaitingInput
+                            )
+                        });
+                        if live {
+                            idle_since = None;
+                        } else {
+                            let resolver = lock(&inner.runs)
+                                .get(&chat_id)
+                                .and_then(|h| lock(&h.pending_inputs).remove(request_id));
+                            if let Some(tx) = resolver {
+                                let _ = tx.send(Vec::new());
+                            }
+                            tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
+                            continue;
                         }
-                        tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
-                        continue;
                     }
                     // A stale answer settling after its turn already closed:
                     // nothing is running — stay parked.
@@ -2198,7 +2250,16 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
+            // A Pi-package change mid-turn bumps `plugin_epoch`: skip the park
+            // so the next send respawns against the new settings.json.
             if *status == DoneStatus::Completed && steerable && !interrupted {
+                if inner.plugin_epoch.load(Ordering::SeqCst) != plugin_epoch {
+                    tracing::info!(
+                        chat = %chat_id,
+                        "ending session so the next turn loads updated Pi packages"
+                    );
+                    break SessionStatus::Idle;
+                }
                 folded.clear();
                 dirty = false;
                 entry_id = new_id();

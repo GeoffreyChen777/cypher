@@ -51,10 +51,10 @@ pub struct HarnessCatalogChanged;
 impl gpui::Global for HarnessCatalogChanged {}
 
 /// Notify all composers that some device's harness catalog changed. The
-/// global carries no data — `default_global` pushes the observer effect, and
-/// the observers re-fetch from the engine (the source of truth).
+/// global carries no data — `set_global` notifies observers each time, and
+/// they re-fetch from the engine (the source of truth).
 pub fn bump_harness_catalog(cx: &mut App) {
-    cx.default_global::<HarnessCatalogChanged>();
+    cx.set_global(HarnessCatalogChanged);
 }
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ pub mod fork;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -402,6 +403,38 @@ fn models_from_response(resp: &Value) -> Vec<Model> {
         .collect()
 }
 
+/// Build the picker catalog from pi's model directory response, falling back
+/// to the model currently selected in `get_state` when the directory is empty.
+///
+/// pi can have a valid configured provider/model (including custom providers)
+/// while `get_available_models` returns `{ models: [] }`. In that case the
+/// current state is still enough to offer a concrete model rather than leaving
+/// the Cypher picker empty.
+fn models_from_responses(available: &Value, state: &Value) -> Vec<Model> {
+    let models = models_from_response(available);
+    if !models.is_empty() {
+        return models;
+    }
+    state
+        .get("model")
+        .and_then(model_from_wire)
+        .into_iter()
+        .collect()
+}
+
+/// Result of a short-lived pi model probe. `from_catalog` is false when the
+/// directory snapshot stayed empty and we fell back to `get_state.model` —
+/// that fallback must not be cached, or the picker would keep a single row
+/// even after the catalog finishes loading.
+struct DiscoveredModels {
+    models: Vec<Model>,
+    from_catalog: bool,
+}
+
+/// Pause between empty `get_available_models` snapshots. 200ms is well under
+/// the catalog refresh we measured (~3s) without spinning the child.
+const MODEL_CATALOG_POLL: Duration = Duration::from_millis(200);
+
 fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -478,6 +511,10 @@ pub struct PiHarness {
     /// no agent activity at all (e.g. an extension command whose handler
     /// only notifies) must never sit "Working" forever.
     no_activity_grace: Duration,
+    /// How long model discovery waits for `get_available_models` to become
+    /// non-empty. pi's RPC snapshot is empty until the catalog refresh
+    /// finishes (`--list-models` awaits that refresh; RPC does not).
+    model_catalog_wait: Duration,
     /// Local engine IPC WebSocket URL (`ws://127.0.0.1:<ipc_port>`) — injected
     /// into every pi child as `CYPHER_ENGINE_WS_URL` so the subagents
     /// extension can reach the engine's `StartSubagent`/`WatchAgentEvents`
@@ -485,13 +522,14 @@ pub struct PiHarness {
     /// knows `ipc_port`); `None` in bare tests and edge-less engines.
     engine_ws_url: Option<String>,
     /// Discovery result cache: the RAW `get_commands` probe result (extension /
-    /// prompt / skill commands) survives across calls. It stays the
-    /// interception authority — `commands()` appends the synthesized built-ins
-    /// per call, so a populated cache carrying a same-name command disables
-    /// the harness-side dispatch in `run`.
-    commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
+    /// prompt / skill commands) survives across calls until
+    /// [`Self::invalidate_discovery`]. It stays the interception authority —
+    /// `commands()` appends the synthesized built-ins per call, so a populated
+    /// cache carrying a same-name command disables the harness-side dispatch
+    /// in `run`.
+    commands: Mutex<Option<Vec<SlashCommand>>>,
     /// Model discovery cache: only a successful, non-empty probe is cached.
-    models_cache: tokio::sync::OnceCell<Vec<Model>>,
+    models_cache: Mutex<Option<Vec<Model>>>,
 }
 
 impl PiHarness {
@@ -503,9 +541,10 @@ impl PiHarness {
             kill_grace: Duration::from_secs(3),
             handshake_timeout: Duration::from_secs(120),
             no_activity_grace: Duration::from_secs(2),
+            model_catalog_wait: Duration::from_secs(8),
             engine_ws_url: None,
-            commands: tokio::sync::OnceCell::new(),
-            models_cache: tokio::sync::OnceCell::new(),
+            commands: Mutex::new(None),
+            models_cache: Mutex::new(None),
         }
     }
 
@@ -543,6 +582,13 @@ impl PiHarness {
         self
     }
 
+    /// Test seam: how long discovery polls an empty `get_available_models`
+    /// snapshot before falling back to `get_state.model`.
+    pub fn with_model_catalog_wait(mut self, wait: Duration) -> Self {
+        self.model_catalog_wait = wait;
+        self
+    }
+
     /// Test seam: the program `run` would spawn (the pi CLI itself).
     #[doc(hidden)]
     pub fn launch_program(&self) -> Result<PathBuf, HarnessError> {
@@ -569,6 +615,10 @@ impl PiHarness {
                     .into(),
             )),
         }
+    }
+
+    fn cached_commands(&self) -> Option<Vec<SlashCommand>> {
+        self.commands.lock().ok().and_then(|g| g.clone())
     }
 
     /// Test seam: the `std::process::Command` a run would spawn — CLI args,
@@ -677,9 +727,14 @@ impl PiHarness {
     }
 
     /// Short-lived discovery run for [`Harness::models`]: `get_state` (a
-    /// liveness probe — the child is up and serving) then
-    /// `get_available_models`, mapping the wire entries onto [`Model`]s.
-    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
+    /// liveness probe — the child is up and serving) then poll
+    /// `get_available_models` until the catalog snapshot is non-empty.
+    ///
+    /// pi's RPC handler returns `modelRuntime.getAvailableSnapshot()` with no
+    /// await; `--list-models` instead awaits `getAvailable()`. A probe that
+    /// reads the snapshot immediately after spawn therefore sees `[]` even
+    /// when the CLI lists dozens of models a moment later.
+    async fn discover_models(&self) -> Result<DiscoveredModels, HarnessError> {
         let (mut child, _stderr) = self
             .spawn_child(None, &RunHostContext::default(), None)
             .await?;
@@ -690,12 +745,31 @@ impl PiHarness {
                 return Err(HarnessError::Protocol("pi child has no stdio".into()));
             }
         };
+        let wait = self.model_catalog_wait;
         let discovery = async {
-            client.request("get_state", Map::new()).await?;
-            let resp = client.request("get_available_models", Map::new()).await?;
-            Ok::<Vec<Model>, HarnessError>(models_from_response(&resp))
+            let state = client.request("get_state", Map::new()).await?;
+            let deadline = Instant::now() + wait;
+            loop {
+                let available = client.request("get_available_models", Map::new()).await?;
+                let models = models_from_response(&available);
+                if !models.is_empty() {
+                    return Ok(DiscoveredModels {
+                        models,
+                        from_catalog: true,
+                    });
+                }
+                if Instant::now() >= deadline {
+                    return Ok(DiscoveredModels {
+                        models: models_from_responses(&available, &state),
+                        from_catalog: false,
+                    });
+                }
+                tokio::time::sleep(MODEL_CATALOG_POLL).await;
+            }
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        // Outer bound is wait + one RPC round-trip + poll slack, so a hung
+        // child still cannot pin discovery past the picker timeout.
+        let result = tokio::time::timeout(wait + Duration::from_secs(2), discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -760,22 +834,36 @@ impl Harness for PiHarness {
     /// surfaces as NotInstalled.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_program()?;
-        if let Some(models) = self.models_cache.get() {
-            return Ok(models.clone());
+        if let Some(models) = self.models_cache.lock().ok().and_then(|g| g.clone()) {
+            return Ok(models);
         }
-        let models = self.discover_models().await?;
-        if !models.is_empty() {
-            let _ = self.models_cache.set(models.clone());
+        let discovered = self.discover_models().await?;
+        if discovered.from_catalog && !discovered.models.is_empty() {
+            if let Ok(mut slot) = self.models_cache.lock() {
+                *slot = Some(discovered.models.clone());
+            }
         }
-        Ok(models)
+        Ok(discovered.models)
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let discovered = self
-            .commands
-            .get_or_try_init(|| self.discover_commands())
-            .await?;
-        Ok(synthesize_commands(discovered))
+        if let Some(discovered) = self.cached_commands() {
+            return Ok(synthesize_commands(&discovered));
+        }
+        let discovered = self.discover_commands().await?;
+        if let Ok(mut slot) = self.commands.lock() {
+            *slot = Some(discovered.clone());
+        }
+        Ok(synthesize_commands(&discovered))
+    }
+
+    fn invalidate_discovery(&self) {
+        if let Ok(mut slot) = self.commands.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.models_cache.lock() {
+            *slot = None;
+        }
     }
 
     /// Session Fork (v1): Pi implements it natively (a separate
@@ -838,8 +926,8 @@ impl Harness for PiHarness {
         // pi (extension wins); an unpopulated cache intercepts — popup
         // selections already passed through `commands()` dedup, so a matching
         // prompt can only be the built-in.
-        let intercept = match self.commands.get() {
-            Some(discovered) => BuiltinIntercept::from_probe(discovered),
+        let intercept = match self.cached_commands() {
+            Some(discovered) => BuiltinIntercept::from_probe(&discovered),
             None => BuiltinIntercept::all(),
         };
         tokio::spawn(run_session(Session {
@@ -1345,35 +1433,20 @@ async fn run_session(session: Session) {
         InterceptOutcome::Passthrough => {}
     }
 
-    // The prompt: message + inline images. Its response only means the prompt
-    // was ACCEPTED — later failures ride the event stream (extension_error,
-    // an errored stopReason, or a crash). A rejected prompt (success:false)
-    // is the one case nothing will ever stream for, so it ends the run. The
-    // attachments are inlined ONLY on this first prompt: routed mailbox
-    // messages (parked restarts) carry no attachments, and the first turn's
-    // images are already in pi's session context — re-sending them would
-    // duplicate the first turn's images into every later turn.
+    // The first prompt is dispatched FROM the main loop (same path as a
+    // parked restart). Real pi only ACKs an extension command after its
+    // handler returns — and handlers like `/subagent-config` block on
+    // `ctx.ui.select` first. Awaiting the ACK here would deadlock: the
+    // select arrives as `Incoming::UiRequest`, which is only drained in
+    // the loop. Attachments are inlined ONLY on this first prompt: routed
+    // mailbox messages carry none, and re-sending them would duplicate.
     let attachments_images = inline_images(&request.attachments);
     let mut prompt_params = Map::new();
     prompt_params.insert("message".into(), Value::String(request.prompt.clone()));
     if let Some(images) = &attachments_images {
         prompt_params.insert("images".into(), images.clone());
     }
-    match client.request("prompt", prompt_params).await {
-        Ok(_) => {}
-        Err(e) => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(e.to_string()),
-                    session_id: Some(session_file.clone()),
-                }))
-                .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
-        }
-    }
+    let first_prompt_client = client.clone();
 
     // ---- main loop --------------------------------------------------------
     // The last assistant message's stopReason ("stop"/"length"/"error"/
@@ -1405,11 +1478,18 @@ async fn run_session(session: Session) {
     // plus followers awaiting their turn.
     let mut steer_call: Option<BoxFuture<'static, (String, Result<Value, HarnessError>)>> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
-    // A parked-turn restart in flight: the `prompt` request for a mailbox
-    // message that arrived while idle. Serialized with steer calls (never
-    // both in flight); followers queue in `prompt_backlog` until the turn
-    // settles and the next one dispatches.
-    let mut idle_prompt: Option<BoxFuture<'static, Result<Value, HarnessError>>> = None;
+    // In-flight `prompt` RPC: the first turn starts here, and parked-turn
+    // restarts reuse the same slot. Serialized with steer calls (never both
+    // in flight); followers queue in `prompt_backlog` until the turn settles.
+    let mut idle_prompt: Option<BoxFuture<'static, Result<Value, HarnessError>>> =
+        Some(Box::pin(async move {
+            first_prompt_client.request("prompt", prompt_params).await
+        }));
+    // True if a select/notify/confirm landed while the prompt RPC was in
+    // flight. Real pi only ACKs extension commands after the handler returns,
+    // so an ACK with UI and no agent lifecycle means the command is done —
+    // do not wait the 2s no-activity grace (that spin after closing a picker).
+    let mut had_ui = false;
     let mut prompt_backlog: VecDeque<String> = VecDeque::new();
     // Interrupt escalation: abort, then SIGTERM → SIGKILL if the agent
     // doesn't wind down.
@@ -1475,6 +1555,7 @@ async fn run_session(session: Session) {
             // streams (the confirmed parked-session wedge).
             params.insert("streamingBehavior".into(), Value::String("steer".into()));
             let client = client.clone();
+            had_ui = false;
             idle_prompt = Some(Box::pin(
                 async move { client.request("prompt", params).await },
             ));
@@ -1549,7 +1630,18 @@ async fn run_session(session: Session) {
                         // branch); a genuinely inert (notify-only) turn gets
                         // a fresh grace window from here — never a stale
                         // timer from the previous turn.
-                        no_activity = Box::pin(tokio::time::sleep(no_activity_grace));
+                        // Extension commands ACK only after the handler
+                        // returns. If UI already happened and no agent
+                        // started, skip the 2s wait (close-picker spin).
+                        // Zero-sleep still yields to `incoming` first
+                        // (biased select) so a ui-select-then-ACK-then-text
+                        // burst is not cut off.
+                        let grace = if had_ui && !agent_started {
+                            Duration::ZERO
+                        } else {
+                            no_activity_grace
+                        };
+                        no_activity = Box::pin(tokio::time::sleep(grace));
                     }
                     Err(e) => {
                         done_sent = true;
@@ -1827,6 +1919,7 @@ async fn run_session(session: Session) {
                     }
                 }
                 Some(Incoming::UiRequest { id, method, payload }) => {
+                    had_ui = true;
                     match method.as_str() {
                         // Dialog methods block the agent until answered.
                         "select" | "input" | "editor" | "confirm" => {
@@ -2287,6 +2380,39 @@ mod tests {
         // A provider-less entry still composes an id.
         let bare = json!({ "models": [{ "id": "x", "name": "X" }] });
         assert_eq!(models_from_response(&bare)[0].id, "pi/x");
+    }
+
+    #[test]
+    fn models_fall_back_to_current_state_when_directory_is_empty() {
+        let available = json!({ "models": [] });
+        let state = json!({
+            "model": {
+                "id": "grok-4.6",
+                "name": "Grok 4.6",
+                "provider": "mvp-lab",
+                "reasoning": true,
+                "contextWindow": 500000,
+            },
+        });
+        let models = models_from_responses(&available, &state);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "mvp-lab/grok-4.6");
+        assert_eq!(models[0].label, "Grok 4.6");
+        assert_eq!(
+            models[0].description.as_deref(),
+            Some("mvp-lab · 500k context")
+        );
+        assert_eq!(models[0].reasoning_levels, FULL_LADDER.to_vec());
+
+        // A non-empty directory remains authoritative.
+        let available = json!({
+            "models": [{ "id": "configured", "name": "Configured", "provider": "custom" }]
+        });
+        let models = models_from_responses(&available, &state);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["custom/configured"]
+        );
     }
 
     #[test]

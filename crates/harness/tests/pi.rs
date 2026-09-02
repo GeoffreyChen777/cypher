@@ -190,6 +190,25 @@ async fn models_and_commands_are_discovered_from_the_probe() {
     assert_eq!(commands[2].input_hint.as_deref(), Some("output path"));
     let again = harness.commands().await.expect("cached commands");
     assert_eq!(again, commands);
+    harness.invalidate_discovery();
+    let refreshed = harness.commands().await.expect("rediscovered commands");
+    assert_eq!(refreshed, commands);
+}
+
+#[tokio::test]
+async fn models_retry_when_first_catalog_snapshot_is_empty() {
+    let dir = tempfile::tempdir().expect("session dir");
+    std::fs::write(dir.path().join(".empty-models-once"), b"").expect("marker");
+    let harness = PiHarness::new(dir.path().to_path_buf()).with_executable(fixture_path());
+    let models = harness
+        .models()
+        .await
+        .expect("model discovery after empty snapshot");
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o-mini"],
+        "{models:?}"
+    );
 }
 
 #[tokio::test]
@@ -877,6 +896,21 @@ async fn extension_select_round_trips_through_the_input_bridge() {
     // The fixture refuses unless the harness relayed the user's "tokio" pick
     // as an extension_ui_response — the answer it streams proves the round
     // trip.
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "answered".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn extension_select_before_prompt_ack_does_not_deadlock() {
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(
+        &harness(),
+        request("scenario:ui-select-before-ack"),
+        controls,
+    )
+    .await;
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "answered".into()
     }));

@@ -17,6 +17,7 @@ pub mod composer;
 pub mod devices;
 pub mod harnesses;
 pub mod notifications;
+pub mod setup;
 pub mod shortcuts;
 pub mod widgets;
 
@@ -98,6 +99,10 @@ pub struct UiSettings {
     pub keymap: KeymapConfig,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// First-run Pi/extensions setup has been dismissed. Missing on files
+    /// written before this screen existed — those load as `false` so the
+    /// setup still appears once.
+    pub setup_completed: bool,
 }
 
 impl Default for UiSettings {
@@ -120,6 +125,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
+            setup_completed: false,
         }
     }
 }
@@ -448,6 +454,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             appearance: crate::appearance::AppearanceMode::Light,
+            setup_completed: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -493,6 +500,10 @@ mod tests {
         assert!(
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
+        );
+        assert!(
+            !loaded.setup_completed,
+            "pre-setup files still show first-run setup"
         );
     }
 
