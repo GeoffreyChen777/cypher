@@ -161,10 +161,18 @@ impl TitleGenerator {
              for a coding session that begins with this request:\n\n{prompt}"
         );
         for attempt in 0..=RETRY_DELAYS_MS.len() {
+            // Last attempt leaves the model unset so Pi uses its default.
+            // The cheap-tier name heuristic can pick uncallable catalog
+            // variants (e.g. `gpt-5.4-mini-openai-compact`).
+            let model = if attempt == RETRY_DELAYS_MS.len() {
+                None
+            } else {
+                cheap.clone()
+            };
             let request = RunRequest {
                 prompt: title_prompt.clone(),
                 harness: Some(harness_id),
-                model: cheap.clone(),
+                model,
                 reasoning: Some(ReasoningLevel::Minimal),
                 model_options: serde_json::Map::new(),
                 cwd: cwd.to_string(),
@@ -183,8 +191,12 @@ impl TitleGenerator {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!(attempt = attempt + 1, error = %err,
-                        "automatic chat title generation attempt failed");
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        model = cheap.as_deref().unwrap_or("default"),
+                        error = %err,
+                        "automatic chat title generation attempt failed"
+                    );
                 }
             }
             if let Some(delay) = RETRY_DELAYS_MS.get(attempt) {
@@ -202,13 +214,20 @@ fn cheapest_model(models: &[Model]) -> Option<String> {
     if models.is_empty() {
         return None;
     }
-    let small = models.iter().find(|m| {
-        let haystack = format!("{} {}", m.id, m.label).to_lowercase();
-        ["haiku", "mini", "nano", "flash", "small", "lite"]
-            .iter()
-            .any(|tier| haystack.contains(tier))
-    });
+    let small = models.iter().find(|m| is_callable_small_tier(m));
     small.or(models.last()).map(|m| m.id.clone())
+}
+
+fn is_callable_small_tier(model: &Model) -> bool {
+    let haystack = format!("{} {}", model.id, model.label).to_lowercase();
+    // Catalog variants like `gpt-5.4-mini-openai-compact` match "mini" but
+    // are not callable as a standalone model.
+    if haystack.contains("compact") || haystack.contains("internal") {
+        return false;
+    }
+    ["haiku", "mini", "nano", "flash", "small", "lite"]
+        .iter()
+        .any(|tier| haystack.contains(tier))
 }
 
 /// First line, stripped of quote/heading dressing, capped at 60 chars.
@@ -289,6 +308,18 @@ mod tests {
         let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
         assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
         assert_eq!(cheapest_model(&[]), None);
+        let with_compact = vec![
+            model(
+                "mvp-lab/gpt-5.4-mini-openai-compact",
+                "GPT 5.4 Mini Compact",
+            ),
+            model("mvp-lab/deepseek-v4-flash-0731", "DeepSeek Flash"),
+            model("mvp-lab/grok-4.6", "Grok"),
+        ];
+        assert_eq!(
+            cheapest_model(&with_compact).as_deref(),
+            Some("mvp-lab/deepseek-v4-flash-0731")
+        );
     }
 
     #[test]

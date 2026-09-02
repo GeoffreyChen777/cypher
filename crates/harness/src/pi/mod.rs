@@ -1576,6 +1576,7 @@ async fn run_session(session: Session) {
     // The last assistant message's stopReason ("stop"/"length"/"error"/
     // "aborted"); Completed for anything but error/aborted.
     let mut last_stop_reason = "stop".to_owned();
+    let mut last_error_message: Option<String> = None;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut done_sent = false;
@@ -1660,6 +1661,7 @@ async fn run_session(session: Session) {
             // and activity tracking all belong to the new turn.
             last_assistant_text.clear();
             last_stop_reason = "stop".to_owned();
+            last_error_message = None;
             agent_started = false;
             done_sent = false;
             in_turn = true;
@@ -1866,12 +1868,16 @@ async fn run_session(session: Session) {
                         }
                         "message_end" => {
                             if message_is_assistant(ev.get("message")) {
-                                if let Some(stop) = ev
-                                    .get("message")
-                                    .and_then(|m| m.get("stopReason"))
-                                    .and_then(Value::as_str)
-                                {
-                                    last_stop_reason = stop.to_owned();
+                                if let Some(message) = ev.get("message") {
+                                    if let Some(stop) = message.get("stopReason").and_then(Value::as_str)
+                                    {
+                                        last_stop_reason = stop.to_owned();
+                                    }
+                                    if let Some(err) =
+                                        message.get("errorMessage").and_then(Value::as_str)
+                                    {
+                                        last_error_message = Some(err.to_owned());
+                                    }
                                 }
                                 // Journal boundary marker: the doc fold treats
                                 // this as a no-op (one segment per turn until
@@ -1996,11 +2002,18 @@ async fn run_session(session: Session) {
                                 match last_stop_reason.as_str() {
                                     "error" => (
                                         DoneStatus::Errored,
-                                        Some(if last_assistant_text.is_empty() {
-                                            "The agent reported an error.".into()
-                                        } else {
-                                            last_assistant_text.clone()
-                                        }),
+                                        Some(
+                                            last_error_message
+                                                .clone()
+                                                .filter(|m| !m.trim().is_empty())
+                                                .or_else(|| {
+                                                    (!last_assistant_text.is_empty())
+                                                        .then(|| last_assistant_text.clone())
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    "The agent reported an error.".into()
+                                                }),
+                                        ),
                                     ),
                                     "aborted" => (DoneStatus::Interrupted, None),
                                     _ => (DoneStatus::Completed, None),
