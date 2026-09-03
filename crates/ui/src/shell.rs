@@ -36,9 +36,9 @@ use crate::rail;
 use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
+use crate::settings::commands::{CommandsEvent, CommandsPage};
 use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
-use crate::settings::commands::{CommandsEvent, CommandsPage};
 use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::setup::{SetupEvent, SetupPage};
@@ -1229,10 +1229,7 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
-        crate::settings::commands::publish_hidden(
-            settings.hidden_slash_commands.clone(),
-            cx,
-        );
+        crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots

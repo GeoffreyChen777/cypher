@@ -5,8 +5,8 @@
 //! typed. Until the user customizes, [`DEFAULT_HIDDEN`] applies.
 
 use gpui::{
-    App, Context, Entity, EventEmitter, Global, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    App, Context, Entity, EventEmitter, Global, Render, SharedString, Task, Window, div,
+    prelude::*, px,
 };
 
 use cypher_proto::{HarnessId, SlashCommand};
@@ -46,10 +46,7 @@ pub fn hides(stored: Option<&[String]>, name: &str) -> bool {
     }
 }
 
-pub fn materialize_hidden(
-    commands: &[SlashCommand],
-    stored: Option<&[String]>,
-) -> Vec<String> {
+pub fn materialize_hidden(commands: &[SlashCommand], stored: Option<&[String]>) -> Vec<String> {
     match stored {
         Some(list) => list.to_vec(),
         None => commands

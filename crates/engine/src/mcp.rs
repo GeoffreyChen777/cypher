@@ -165,7 +165,10 @@ fn keychain_payload(account: &str) -> Option<String> {
 }
 
 fn legacy_payload(account: &str) -> Option<String> {
-    let path = agent_dir()?.join("mcp-oauth").join(account).join("tokens.json");
+    let path = agent_dir()?
+        .join("mcp-oauth")
+        .join(account)
+        .join("tokens.json");
     std::fs::read_to_string(path).ok()
 }
 
@@ -321,7 +324,10 @@ fn security_ok(args: &[&str]) -> Result<(), String> {
     }
     let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(if err.is_empty() {
-        format!("security {} failed", args.first().copied().unwrap_or_default())
+        format!(
+            "security {} failed",
+            args.first().copied().unwrap_or_default()
+        )
     } else {
         err
     })
@@ -386,7 +392,13 @@ fn prepend_keychain_search(path: &PathBuf) -> Result<(), String> {
     if existing.iter().any(|item| item == &ours) {
         return Ok(());
     }
-    let mut args = vec!["list-keychains".into(), "-d".into(), "user".into(), "-s".into(), ours];
+    let mut args = vec![
+        "list-keychains".into(),
+        "-d".into(),
+        "user".into(),
+        "-s".into(),
+        ours,
+    ];
     args.extend(existing);
     let status = std::process::Command::new("security")
         .args(&args)

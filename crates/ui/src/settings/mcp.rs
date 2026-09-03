@@ -1,8 +1,6 @@
 //! Settings → MCP: configured Pi MCP servers, OAuth sign-in, enable/disable.
 
-use gpui::{
-    Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*, px,
-};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*, px};
 
 use cypher_engine::mcp::{McpAuthKind, McpAuthStatus, McpServer, McpSnapshot};
 use cypher_rpc::methods;
@@ -188,16 +186,13 @@ impl McpPage {
             );
 
         let needs_auth = server.enabled
-            && matches!(
-                server.auth_kind,
-                McpAuthKind::Oauth
-            )
+            && matches!(server.auth_kind, McpAuthKind::Oauth)
             && matches!(
                 server.auth_status,
                 McpAuthStatus::NeedsAuth | McpAuthStatus::Expired
             );
-        let signed_in = server.auth_kind == McpAuthKind::Oauth
-            && server.auth_status == McpAuthStatus::SignedIn;
+        let signed_in =
+            server.auth_kind == McpAuthKind::Oauth && server.auth_status == McpAuthStatus::SignedIn;
 
         if needs_auth {
             let label = if busy { "Signing in…" } else { "Sign in" };
@@ -278,17 +273,19 @@ impl Render for McpPage {
                         .child(SharedString::from("Retry")),
                 )
                 .into_any_element(),
-            Loadable::Ready(snapshot) if snapshot.servers.is_empty() => widgets::section_card(&theme)
-                .p(px(16.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "No MCP servers in ~/.pi/agent/mcp.json yet.",
-                        )),
-                )
-                .into_any_element(),
+            Loadable::Ready(snapshot) if snapshot.servers.is_empty() => {
+                widgets::section_card(&theme)
+                    .p(px(16.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(
+                                "No MCP servers in ~/.pi/agent/mcp.json yet.",
+                            )),
+                    )
+                    .into_any_element()
+            }
             Loadable::Ready(snapshot) => {
                 let mut content = div().flex().flex_col();
                 if !snapshot.adapter_installed {

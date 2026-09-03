@@ -1,8 +1,8 @@
 //! First-run setup: install Pi, then pick recommended extensions.
 
 use gpui::{
-    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Task, Window, div,
+    prelude::*, px,
 };
 
 use cypher_engine::pi_packages::{PiPackage, PiPackagesSnapshot};
@@ -378,20 +378,16 @@ impl Render for SetupPage {
                     "Skip for now"
                 };
                 content = content.child(
-                    div()
-                        .mt(px(28.0))
-                        .flex()
-                        .justify_end()
-                        .child(
-                            popover::btn_primary(&theme, continue_label)
-                                .id("setup-continue")
-                                .when(busy, |el| el.opacity(0.5))
-                                .when(!busy, |el| {
-                                    el.on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(SetupEvent::Continue);
-                                    }))
-                                }),
-                        ),
+                    div().mt(px(28.0)).flex().justify_end().child(
+                        popover::btn_primary(&theme, continue_label)
+                            .id("setup-continue")
+                            .when(busy, |el| el.opacity(0.5))
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(SetupEvent::Continue);
+                                }))
+                            }),
+                    ),
                 );
                 content.into_any_element()
             }

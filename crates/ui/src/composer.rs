@@ -4230,15 +4230,16 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
-        let hidden_slash_observe = cx.observe_global::<crate::settings::commands::HiddenSlashCommands>(
-            |this: &mut Self, cx| {
-                if this.slash.token.is_some() {
-                    this.refilter_slash(cx);
-                } else {
-                    cx.notify();
-                }
-            },
-        );
+        let hidden_slash_observe = cx
+            .observe_global::<crate::settings::commands::HiddenSlashCommands>(
+                |this: &mut Self, cx| {
+                    if this.slash.token.is_some() {
+                        this.refilter_slash(cx);
+                    } else {
+                        cx.notify();
+                    }
+                },
+            );
         let catalog_observe =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Self, cx| {
                 this.slash_cache.clear();
