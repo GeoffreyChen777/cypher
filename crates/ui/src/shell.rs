@@ -22,7 +22,7 @@ use gpui::{
 };
 
 use cypher_engine::InstanceLock;
-use cypher_proto::{AuthState, WorkspaceScope};
+use cypher_proto::{AuthState, ChatIndicator, WorkspaceScope};
 use cypher_rpc::methods;
 use gpui_tokio::Tokio;
 
@@ -3956,11 +3956,12 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One compact session row: agent mark + title on the left, relative time
-    /// on the right. The row is inset from the project-card edge; click
-    /// selects and right-click opens the context menu. The branch is NOT
-    /// repeated per row — it lives in the branch/worktree group header above
-    /// (see [`spaces`](crate::shell::spaces)).
+    /// One compact session row: agent mark + title on the left, status corner
+    /// on the right (mini spinner while working, emerald check for unseen
+    /// finished turns, relative time otherwise). The row is inset from the
+    /// project-card edge; click selects and right-click opens the context
+    /// menu. The branch is NOT repeated per row — it lives in the
+    /// branch/worktree group header above (see [`spaces`](crate::shell::spaces)).
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
         &self,
@@ -3968,15 +3969,37 @@ impl Shell {
         title: SharedString,
         time_ago: SharedString,
         harness: Option<cypher_proto::HarnessId>,
+        status: ChatIndicator,
         selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let corner = div()
-            .flex_none()
-            .text_size(px(10.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .child(time_ago);
+        // Status corner shares the relative-time slot so the compact row's
+        // width stays stable: spinner while working, emerald check for an
+        // unseen finished turn ("ready for you"), time otherwise. The pulse
+        // clock drives the spinner while it stays mounted.
+        let corner: AnyElement = match status {
+            ChatIndicator::Working => div()
+                .flex_none()
+                .child(loaders::mini_gradient_spinner(
+                    format!("chat-working-{id}"),
+                    2.0,
+                    cx.entity_id(),
+                    cx,
+                ))
+                .into_any_element(),
+            ChatIndicator::Completed => icon(icons::CHECK)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(theme.success.opacity(0.9))
+                .into_any_element(),
+            _ => div()
+                .flex_none()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(time_ago)
+                .into_any_element(),
+        };
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = theme.text_muted.opacity(0.5);
@@ -4059,7 +4082,7 @@ impl Shell {
                             .child(title),
                     ),
             )
-            // The relative time stays fixed at the row's right edge.
+            // Status corner: spinner / unread check / relative time.
             .child(div().text_color(subline).child(corner))
             .into_any_element()
     }

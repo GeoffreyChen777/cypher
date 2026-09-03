@@ -459,7 +459,7 @@ impl Shell {
                         cx,
                     ));
                     if !group_collapsed {
-                        elements.extend(chat_group.chats.iter().map(|(_, chat)| {
+                        elements.extend(chat_group.chats.iter().map(|(status, chat)| {
                             let time_ago: SharedString = format_time_ago(
                                 chat.last_message_at.unwrap_or(chat.created_at),
                                 now,
@@ -475,6 +475,7 @@ impl Shell {
                                 .into(),
                                 time_ago,
                                 harness,
+                                *status,
                                 is_selected,
                                 theme,
                                 cx,
