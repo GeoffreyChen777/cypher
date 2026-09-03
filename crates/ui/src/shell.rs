@@ -59,7 +59,7 @@ use crate::transcript::{self, Transcript};
 mod spaces;
 mod tabs;
 
-use spaces::{AddSpaceFlow, RenameSpaceDialog};
+use spaces::{AddSpaceFlow, OrphanWorktree, RenameSpaceDialog};
 
 actions!(
     shell,
@@ -951,6 +951,8 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Follow-up after the last session of a linked worktree was deleted.
+    delete_worktree_confirm: Option<OrphanWorktree>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -989,6 +991,7 @@ pub struct Shell {
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
+    delete_worktree_task: Option<Task<()>>,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
     runtime_change_error: Option<SharedString>,
@@ -1318,6 +1321,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            delete_worktree_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
@@ -1335,6 +1339,7 @@ impl Shell {
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
+            delete_worktree_task: None,
             auth_task: None,
             runtime_change_task: None,
             runtime_change_error: None,
@@ -2987,6 +2992,10 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        let orphan = {
+            let state = self.state.read(cx);
+            spaces::orphan_worktree_after_delete(&state.chats, &state.spaces, &chat_id)
+        };
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
             self.state.update(cx, |s, cx| s.select_chat(None, cx));
         }
@@ -2996,6 +3005,40 @@ impl Shell {
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
             cx,
         );
+        // Last session of a linked worktree: ask whether to remove the
+        // checkout too. Captured before the mutate so the row is still in
+        // the local list; children of this chat cascade and don't count.
+        self.delete_worktree_confirm = orphan;
+        cx.notify();
+    }
+
+    fn delete_worktree(&mut self, orphan: OrphanWorktree, cx: &mut Context<Self>) {
+        self.delete_worktree_confirm = None;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let mut params = serde_json::Map::new();
+        params.insert("repoPath".into(), orphan.repo_path.into());
+        params.insert("worktreePath".into(), orphan.worktree_path.into());
+        if local.as_deref() != Some(orphan.device_id.as_str()) {
+            params.insert("targetDeviceId".into(), orphan.device_id.into());
+        }
+        self.delete_worktree_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(err) = engine
+                .client()
+                .call(methods::DELETE_WORKTREE, serde_json::Value::Object(params))
+                .await
+            {
+                this.update(cx, |shell, cx| {
+                    shell.sidebar_notice = Some(format!("{err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
         cx.notify();
     }
 
@@ -5186,6 +5229,43 @@ impl Shell {
                 )
                 .into_any_element();
             overlays.push(popover::modal("delete-chat-dialog", viewport, card));
+        }
+
+        if let Some(orphan) = self.delete_worktree_confirm.clone() {
+            let label = orphan.label.clone();
+            let card = popover::dialog_card(&theme)
+                .child(popover::dialog_title(&theme, "Delete worktree too?"))
+                .child(div().mt(px(6.0)).child(popover::dialog_body(
+                    &theme,
+                    format!(
+                        "No other sessions are using the \u{201C}{label}\u{201D} worktree. Delete it as well? This can\u{2019}t be undone."
+                    ),
+                )))
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            popover::btn_ghost(&theme, "Keep", "delete-worktree-keep")
+                                .id("delete-worktree-keep")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.delete_worktree_confirm = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            popover::btn_danger(&theme, "Delete")
+                                .id("delete-worktree-confirm")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.delete_worktree(orphan.clone(), cx)
+                                })),
+                        ),
+                )
+                .into_any_element();
+            overlays.push(popover::modal("delete-worktree-dialog", viewport, card));
         }
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {

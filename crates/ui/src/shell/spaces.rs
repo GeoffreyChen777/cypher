@@ -122,21 +122,82 @@ fn normalize_worktree_path(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
 }
 
-fn group_chats(chats: Vec<(ChatIndicator, Chat)>, space_path: Option<&str>) -> Vec<ChatGroup> {
-    fn is_worktree(cwd: Option<&str>, space_path: Option<&str>) -> bool {
-        let (Some(cwd), Some(path)) = (cwd, space_path) else {
-            return false;
-        };
-        normalize_worktree_path(cwd) != normalize_worktree_path(path)
-    }
+fn is_worktree_cwd(cwd: Option<&str>, space_path: Option<&str>) -> bool {
+    let (Some(cwd), Some(path)) = (cwd, space_path) else {
+        return false;
+    };
+    normalize_worktree_path(cwd) != normalize_worktree_path(path)
+}
 
+/// Target of the follow-up "delete the worktree too?" dialog shown after the
+/// last session using a linked worktree is removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OrphanWorktree {
+    pub repo_path: String,
+    pub worktree_path: String,
+    pub device_id: String,
+    /// Sidebar group label (branch, else "Current checkout") so the dialog
+    /// names the same checkout the user just emptied.
+    pub label: String,
+}
+
+/// If deleting `chat_id` would leave its linked worktree with no remaining
+/// sessions (including archived ones; excluding children of this chat, which
+/// cascade with the parent), return that worktree so the shell can ask
+/// whether to delete it too.
+pub(super) fn orphan_worktree_after_delete(
+    chats: &[Chat],
+    spaces: &[Space],
+    chat_id: &str,
+) -> Option<OrphanWorktree> {
+    let chat = chats.iter().find(|c| c.id == chat_id)?;
+    let cwd = chat.cwd.as_deref()?;
+    let space = chat
+        .space_id
+        .as_deref()
+        .and_then(|id| spaces.iter().find(|s| s.id == id))?;
+    if !is_worktree_cwd(Some(cwd), Some(space.path.as_str())) {
+        return None;
+    }
+    let cwd_key = normalize_worktree_path(cwd);
+    let others_remain = chats.iter().any(|other| {
+        if other.id == chat_id || other.parent_chat_id() == Some(chat_id) {
+            return false;
+        }
+        if other.device_id != chat.device_id {
+            return false;
+        }
+        other
+            .cwd
+            .as_deref()
+            .is_some_and(|path| normalize_worktree_path(path) == cwd_key)
+    });
+    if others_remain {
+        return None;
+    }
+    let label = chat
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Current checkout".into());
+    Some(OrphanWorktree {
+        repo_path: space.path.clone(),
+        worktree_path: cwd.to_string(),
+        device_id: chat.device_id.clone(),
+        label,
+    })
+}
+
+fn group_chats(chats: Vec<(ChatIndicator, Chat)>, space_path: Option<&str>) -> Vec<ChatGroup> {
     let mut groups: Vec<ChatGroup> = Vec::new();
     // (worktree, worktree path, label) — worktrees also key on their
     // NORMALIZED checkout path so two same-label detached worktrees never
     // merge, while `/wt` and `/wt/` (one checkout) do.
     let mut index: HashMap<(bool, Option<String>, String), usize> = HashMap::new();
     for (status, chat) in chats {
-        let worktree = is_worktree(chat.cwd.as_deref(), space_path);
+        let worktree = is_worktree_cwd(chat.cwd.as_deref(), space_path);
         // Normalized actual branch (trimmed, blank → None). The visible label
         // keeps the stable "Current checkout" fallback; the actual branch is
         // carried for targeting new sessions.
@@ -2177,5 +2238,149 @@ mod tests {
         // bare path (whitespace is never trimmed).
         let spaced = Shell::branch_group_key("s:1", true, "detached", Some("/repo/.worktrees/wt "));
         assert_ne!(a, spaced);
+    }
+
+    fn space(id: &str, path: &str) -> Space {
+        Space {
+            id: id.into(),
+            device_id: "dev".into(),
+            path: path.into(),
+            name: None,
+            git_detected: true,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn session(id: &str, space_id: &str, cwd: &str, branch: Option<&str>) -> Chat {
+        let mut row = chat(id, branch, Some(cwd)).1;
+        row.space_id = Some(space_id.into());
+        row
+    }
+
+    fn child_of(mut row: Chat, parent_id: &str) -> Chat {
+        row.child = Some(cypher_proto::ChildChat {
+            parent_chat_id: parent_id.into(),
+            parent_run_id: "run".into(),
+            agent: "helper".into(),
+            task: "task".into(),
+            mode: cypher_proto::SubagentRunMode::Async,
+            tool_call_id: None,
+            profile: cypher_proto::ChildAgentProfile {
+                system_prompt: String::new(),
+                tools: vec![],
+                model: None,
+                thinking: None,
+            },
+        });
+        row
+    }
+
+    #[test]
+    fn orphan_worktree_when_last_session_on_linked_checkout() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [session("a", "s1", "/repo/.worktrees/feat", Some("feat"))];
+        let orphan = orphan_worktree_after_delete(&chats, &spaces, "a").unwrap();
+        assert_eq!(orphan.repo_path, "/repo");
+        assert_eq!(orphan.worktree_path, "/repo/.worktrees/feat");
+        assert_eq!(orphan.device_id, "dev");
+        assert_eq!(orphan.label, "feat");
+    }
+
+    #[test]
+    fn orphan_worktree_skips_root_checkout_sessions() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [session("a", "s1", "/repo", Some("main"))];
+        assert_eq!(orphan_worktree_after_delete(&chats, &spaces, "a"), None);
+    }
+
+    #[test]
+    fn orphan_worktree_skips_when_sibling_session_shares_path() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/feat", Some("feat")),
+            session("b", "s1", "/repo/.worktrees/feat/", Some("feat")),
+        ];
+        assert_eq!(orphan_worktree_after_delete(&chats, &spaces, "a"), None);
+    }
+
+    #[test]
+    fn orphan_worktree_counts_archived_siblings() {
+        let spaces = [space("s1", "/repo")];
+        let mut archived = session("b", "s1", "/repo/.worktrees/feat", Some("feat"));
+        archived.archived = true;
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/feat", Some("feat")),
+            archived,
+        ];
+        assert_eq!(orphan_worktree_after_delete(&chats, &spaces, "a"), None);
+    }
+
+    #[test]
+    fn orphan_worktree_ignores_cascaded_children_of_the_deleted_chat() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/feat", Some("feat")),
+            child_of(
+                session("child", "s1", "/repo/.worktrees/feat", Some("feat")),
+                "a",
+            ),
+        ];
+        assert!(orphan_worktree_after_delete(&chats, &spaces, "a").is_some());
+    }
+
+    #[test]
+    fn orphan_worktree_counts_someone_elses_child_on_the_same_path() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/feat", Some("feat")),
+            child_of(
+                session("child", "s1", "/repo/.worktrees/feat", Some("feat")),
+                "other-parent",
+            ),
+        ];
+        assert_eq!(orphan_worktree_after_delete(&chats, &spaces, "a"), None);
+    }
+
+    #[test]
+    fn orphan_worktree_distinct_worktrees_do_not_block_each_other() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/one", Some("one")),
+            session("b", "s1", "/repo/.worktrees/two", Some("two")),
+        ];
+        let orphan = orphan_worktree_after_delete(&chats, &spaces, "a").unwrap();
+        assert_eq!(orphan.worktree_path, "/repo/.worktrees/one");
+        assert_eq!(orphan.label, "one");
+    }
+
+    #[test]
+    fn orphan_worktree_unknown_chat_is_none() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [session("a", "s1", "/repo/.worktrees/feat", Some("feat"))];
+        assert_eq!(
+            orphan_worktree_after_delete(&chats, &spaces, "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn orphan_worktree_same_path_on_another_device_does_not_block() {
+        let spaces = [space("s1", "/repo")];
+        let mut other = session("b", "s1", "/repo/.worktrees/feat", Some("feat"));
+        other.device_id = "other-dev".into();
+        let chats = [
+            session("a", "s1", "/repo/.worktrees/feat", Some("feat")),
+            other,
+        ];
+        assert!(orphan_worktree_after_delete(&chats, &spaces, "a").is_some());
+    }
+
+    #[test]
+    fn orphan_worktree_projectless_chat_is_none() {
+        let spaces = [space("s1", "/repo")];
+        let chats = [chat("a", Some("feat"), Some("/repo/.worktrees/feat")).1];
+        assert_eq!(orphan_worktree_after_delete(&chats, &spaces, "a"), None);
     }
 }
