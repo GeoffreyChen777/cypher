@@ -2,7 +2,7 @@
 // host (crates/doc/src/registry.rs + crates/engine WorkspaceHost). Joins the
 // per-user `/registry/{orgId}/ws` room, projects the row table into typed
 // rows, and performs the writes the writer discipline allows a viewer device:
-// chat creates, archives, renames and seen marks. iOS is a viewport, not an
+// chat creates, archives, renames, seen marks, and device/space deletes. iOS is a viewport, not an
 // engine device, so it owns no device row; it does publish a presence beat
 // (registry presence replaced the old ws room's ephemeral store).
 //
@@ -487,6 +487,14 @@ final class WorkspaceStore {
         }
         keys.append(("spaces", spaceId))
         doc.deleteRows(keys)
+        afterLocalWrite()
+    }
+
+    /// Unpair a device: tombstone the device row only. Spaces and chats stay
+    /// so that machine can keep its work after it drops to local-only. The
+    /// local (this) device is the caller's responsibility to refuse.
+    func deleteDevice(deviceId: String) {
+        doc.deleteRows([("devices", deviceId)])
         afterLocalWrite()
     }
 

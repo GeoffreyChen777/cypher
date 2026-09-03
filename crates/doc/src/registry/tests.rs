@@ -741,6 +741,57 @@ fn delete_space_cascades_and_converges() {
 }
 
 #[test]
+fn delete_device_unpairs_without_touching_spaces_or_chats() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "laptop")).unwrap();
+    a.upsert_device(&device("dev-b", "vps")).unwrap();
+    a.upsert_space(&space("sp-b", "dev-b", "/tmp/b")).unwrap();
+    let mut hosted = chat("chat-b", "dev-b");
+    hosted.space_id = Some("sp-b".into());
+    a.upsert_chat(&hosted).unwrap();
+    a.upsert_session(&session("chat-b", "dev-b", SessionStatus::Working))
+        .unwrap();
+    let mut b = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_all().unwrap(), b.read_all().unwrap());
+
+    let deleted = a.delete_device("dev-b").unwrap();
+    assert!(deleted.existed);
+    assert_eq!(a.read_devices().unwrap().len(), 1);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    for ws in [&a, &b] {
+        let state = ws.read_all().unwrap();
+        assert_eq!(
+            state
+                .devices
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dev-a"]
+        );
+        assert_eq!(state.spaces.len(), 1);
+        assert_eq!(state.chats.len(), 1);
+        assert_eq!(state.sessions.len(), 1);
+    }
+    assert!(b.device_is_tombstoned("dev-b"));
+    let again = b.delete_device("dev-b").unwrap();
+    assert!(!again.existed);
+}
+
+#[test]
+fn drop_pending_device_writes_prevents_revival() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_device(&device("dev-a", "laptop")).unwrap();
+    assert_eq!(doc.pending_len(), 1);
+    doc.drop_pending_device_writes("dev-a");
+    assert_eq!(doc.pending_len(), 0);
+    assert!(doc.read_devices().unwrap().is_empty());
+}
+
+#[test]
 fn persistence_round_trips_rows_pending_and_cursor() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();

@@ -1,6 +1,9 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! a Rename dialog (Mutate renameDevice), and in synced workspaces a Remove
+//! action that unpairs another machine (Mutate deleteDevice): that machine
+//! signs out of sync and continues in local-only mode. This device cannot be
+//! removed from here.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -49,9 +52,28 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     match scope {
         Some(WorkspaceScope::Local) => "Manage device details stored in this local workspace.",
-        Some(WorkspaceScope::Synced) => "Manage device names and inspect synced device metadata.",
-        Some(WorkspaceScope::Development) | None => "Manage device names for this workspace.",
+        Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
+            "Rename devices or remove machines you no longer use."
+        }
+        None => "Manage device names for this workspace.",
     }
+}
+
+/// Remove is a synced-workspace action against *other* machines. Local-only
+/// profiles have a single device (this one), and this device re-upserts on boot.
+pub fn can_remove_device(scope: Option<WorkspaceScope>, is_local: bool) -> bool {
+    !is_local
+        && matches!(
+            scope,
+            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
+        )
+}
+
+/// Confirm-dialog body. Pure so the wording is unit-tested.
+pub fn delete_device_copy(name: &str) -> String {
+    format!(
+        "Removing \u{201c}{name}\u{201d} signs that machine out of this account. It will continue in local-only mode. Signing in again there will re-pair it."
+    )
 }
 
 struct RenameDialog {
@@ -63,6 +85,8 @@ struct RenameDialog {
 pub struct DevicesPage {
     state: Entity<AppState>,
     rename: Option<RenameDialog>,
+    /// Device id waiting on the remove confirmation dialog.
+    delete_confirm: Option<String>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
@@ -77,6 +101,7 @@ impl DevicesPage {
         Self {
             state,
             rename: None,
+            delete_confirm: None,
             copied: None,
             error: None,
             task: None,
@@ -86,6 +111,7 @@ impl DevicesPage {
     }
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
+        self.delete_confirm = None;
         let input = cx.new(|cx| ComposerInput::new("Device name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
@@ -123,6 +149,36 @@ impl DevicesPage {
             this.update(cx, |page, cx| {
                 if let Err(err) = result {
                     page.error = Some(format!("Rename failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn open_delete(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.rename = None;
+        self.delete_confirm = Some(device_id);
+        cx.notify();
+    }
+
+    fn submit_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(device_id) = self.delete_confirm.take() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({
+            "op": "deleteDevice",
+            "deviceId": device_id,
+        });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(format!("Remove failed: {err}").into());
                 }
                 cx.notify();
             })
@@ -186,6 +242,51 @@ impl DevicesPage {
             .into_any_element();
         Some(popover::modal("rename-device-dialog", viewport, card))
     }
+
+    fn render_delete_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let device_id = self.delete_confirm.clone()?;
+        let name = {
+            let state = self.state.read(cx);
+            state
+                .devices
+                .iter()
+                .find(|device| device.id == device_id)
+                .map(|device| device.name.clone())
+                .unwrap_or_else(|| "this machine".into())
+        };
+        let copy = delete_device_copy(&name);
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, "Remove device?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "delete-device-cancel")
+                            .id("delete-device-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove")
+                            .id("delete-device-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_delete(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("delete-device-dialog", viewport, card))
+    }
 }
 
 /// Human platform label (zeron settings.devices.tsx `platformLabel`).
@@ -224,7 +325,9 @@ impl Render for DevicesPage {
             )
         };
         let copied = self.copied.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let viewport = window.viewport_size();
+        let dialog = self.render_rename_dialog(viewport, cx);
+        let delete_dialog = self.render_delete_dialog(viewport, cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
 
@@ -238,6 +341,8 @@ impl Render for DevicesPage {
                 let copy_id = device.id.clone();
                 let rename_id = device.id.clone();
                 let rename_name = device.name.clone();
+                let remove_id = device.id.clone();
+                let show_remove = can_remove_device(workspace_scope, is_local);
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -375,6 +480,27 @@ impl Render for DevicesPage {
                             )
                             .child(SharedString::from("Rename")),
                     )
+                    .when(show_remove, |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("device-remove", ix))
+                                .opacity(0.7)
+                                .hover(|s| {
+                                    s.opacity(1.0)
+                                        .bg(theme.danger.opacity(0.08))
+                                        .text_color(theme.danger)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_delete(remove_id.clone(), cx);
+                                }))
+                                .child(
+                                    crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
+                                        .size(px(14.0))
+                                        .text_color(theme.danger),
+                                )
+                                .child(SharedString::from("Remove")),
+                        )
+                    })
                     .into_any_element()
             })
             .collect();
@@ -423,6 +549,7 @@ impl Render for DevicesPage {
                     .child(card),
             )
             .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(delete_dialog, |el, dialog| el.child(dialog))
     }
 }
 
@@ -469,5 +596,30 @@ mod tests {
         let copy = devices_subtitle(Some(WorkspaceScope::Local));
         assert!(copy.contains("local workspace"));
         assert!(!copy.contains("synced"));
+        assert!(!copy.contains("remove"));
+    }
+
+    #[test]
+    fn synced_subtitle_mentions_removal() {
+        let copy = devices_subtitle(Some(WorkspaceScope::Synced));
+        assert!(copy.contains("remove"));
+    }
+
+    #[test]
+    fn remove_is_only_for_other_devices_in_synced_workspaces() {
+        assert!(!can_remove_device(Some(WorkspaceScope::Local), false));
+        assert!(!can_remove_device(Some(WorkspaceScope::Synced), true));
+        assert!(can_remove_device(Some(WorkspaceScope::Synced), false));
+        assert!(can_remove_device(Some(WorkspaceScope::Development), false));
+        assert!(!can_remove_device(None, false));
+    }
+
+    #[test]
+    fn delete_copy_explains_local_only() {
+        let copy = delete_device_copy("vps");
+        assert!(copy.contains("vps"));
+        assert!(copy.contains("local-only"));
+        assert!(copy.contains("re-pair"));
+        assert!(!copy.contains("deletes"));
     }
 }
