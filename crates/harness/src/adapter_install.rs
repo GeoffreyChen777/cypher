@@ -97,7 +97,7 @@ pub(crate) fn installed_entry(pin: &NpmPin, bin_name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn find_npm() -> Option<PathBuf> {
-    crate::acp::find_on_paths("npm", Vec::new())
+    crate::resolve_cli("npm")
 }
 
 /// How to spawn an installed entry: JS entries (the overwhelming npm norm,

@@ -505,13 +505,13 @@ fn inject_mcp_keyring_preload(cmd: &mut Command) {
     cmd.env("NODE_OPTIONS", node_options);
 }
 
-/// Resolve the pi CLI: `PI_EXECUTABLE` override, then PATH + login-shell PATH
-/// + npm-global bins + node-version-manager bins (`acp::find_on_paths`).
+/// Resolve the pi CLI: `PI_EXECUTABLE` override, then the shared CLI resolver
+/// (PATH + login-shell PATH + npm-global bins + node-version-manager bins).
 fn resolve_executable() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PI_EXECUTABLE").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    crate::acp::find_on_paths("pi", crate::acp::npm_global_bins("pi"))
+    crate::resolve_cli("pi")
 }
 
 /// The native pi harness. Construct with [`PiHarness::new`]; tests point it at

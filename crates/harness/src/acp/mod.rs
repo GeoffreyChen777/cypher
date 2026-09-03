@@ -242,14 +242,10 @@ fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
 /// Fixed npm-global bin locations for a CLI name (`npm i -g` installs). Also
 /// used by the pi harness's executable resolution.
 pub(crate) fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        dirs.push(home.join(".local").join("bin").join(exe));
-        dirs.push(home.join(".npm-global").join("bin").join(exe));
-    }
-    dirs.push(PathBuf::from("/opt/homebrew/bin").join(exe));
-    dirs.push(PathBuf::from("/usr/local/bin").join(exe));
-    dirs
+    crate::well_known_cli_dirs()
+        .into_iter()
+        .map(|dir| dir.join(exe))
+        .collect()
 }
 
 fn grok_install_paths() -> Vec<PathBuf> {

@@ -200,12 +200,35 @@ pub(crate) fn node_version_manager_bins() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Fixed npm-global / Homebrew / `~/.local` bin dirs. `find_on_paths` looks
+/// here after PATH + the login-shell snapshot; `compose_child_path` puts the
+/// same dirs on the child so `spawn("npm")` can see what resolution saw.
+pub(crate) fn well_known_cli_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".npm-global").join("bin"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs
+}
+
+/// Resolve a CLI the way every harness does: process PATH, the login-shell
+/// PATH snapshot (zshrc/zprofile, including pnpm), well-known npm-global
+/// bins, and node version-manager bins (fnm/nvm/volta/pnpm/bun).
+pub fn resolve_cli(name: &str) -> Option<std::path::PathBuf> {
+    crate::acp::find_on_paths(name, crate::acp::npm_global_bins(name))
+}
+
 /// Compose the child's PATH: the resolved executable's directory first, then
-/// our own PATH, then the login-shell PATH snapshot — deduped. npm-shim CLIs
+/// our own PATH, then the login-shell PATH snapshot, then the same well-known
+/// and version-manager dirs `resolve_cli` searches — deduped. npm-shim CLIs
 /// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the
 /// version manager's bin dir, and the CLIs themselves shell out to tools
-/// (git, rg, node) that a GUI/service launch's own PATH may lack.
-pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Path) {
+/// (git, rg, node, npm) that a GUI/service launch's own PATH may lack.
+pub fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Path) {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     if let Some(dir) = exe.parent().filter(|d| !d.as_os_str().is_empty()) {
         paths.push(dir.to_path_buf());
@@ -216,6 +239,8 @@ pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::p
     if let Some(shell_path) = shell_env::login_shell_path() {
         paths.extend(std::env::split_paths(shell_path));
     }
+    paths.extend(well_known_cli_dirs());
+    paths.extend(node_version_manager_bins());
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));
     if let Ok(joined) = std::env::join_paths(paths) {

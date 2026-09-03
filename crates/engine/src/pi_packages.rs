@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -111,28 +111,12 @@ fn package_dir(name: &str) -> Option<PathBuf> {
     }
 }
 
-fn program(name: &str) -> Option<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path));
-    }
-    paths.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        home()?.join(".local/bin"),
-    ]);
-    paths
-        .into_iter()
-        .map(|p| p.join(name))
-        .find(|p| p.is_file())
-}
-
 fn npm() -> Option<PathBuf> {
-    program("npm")
+    cypher_harness::resolve_cli("npm")
 }
 
 fn pi() -> Option<PathBuf> {
-    program("pi")
+    cypher_harness::resolve_cli("pi")
 }
 
 fn configured_packages() -> Vec<Value> {
@@ -230,7 +214,8 @@ pub fn list() -> PiPackagesSnapshot {
     }
 }
 
-async fn run(mut command: Command) -> Result<(), String> {
+async fn run(exe: &Path, mut command: Command) -> Result<(), String> {
+    cypher_harness::compose_child_path(&mut command, exe);
     let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
         .await
         .map_err(|_| "The installation timed out. Check your network and try again.".to_string())?
@@ -243,27 +228,25 @@ async fn run(mut command: Command) -> Result<(), String> {
     Err(if !stderr.is_empty() { stderr } else { stdout })
 }
 
+const TOOLCHAIN_HINT: &str = "searched PATH, your login shell, Homebrew, and fnm/nvm/volta/pnpm";
+
 pub async fn install_pi() -> Result<(), String> {
-    let npm = npm().ok_or_else(|| "npm was not found. Install Node.js/npm first.".to_string())?;
-    run({
-        let mut command = Command::new(npm);
-        command.args(["install", "-g", "--ignore-scripts", PI_PACKAGE]);
-        command
-    })
-    .await
+    let npm = npm().ok_or_else(|| {
+        format!("npm was not found ({TOOLCHAIN_HINT}). Install Node.js/npm first.")
+    })?;
+    let mut command = Command::new(&npm);
+    command.args(["install", "-g", "--ignore-scripts", PI_PACKAGE]);
+    run(&npm, command).await
 }
 
 pub async fn install_package(source: &str) -> Result<(), String> {
     if !source.starts_with("npm:") {
         return Err("Only npm Pi packages can be installed from this page.".into());
     }
-    let pi = pi().ok_or_else(|| "Pi is not installed yet.".to_string())?;
-    run({
-        let mut command = Command::new(pi);
-        command.args(["install", source]);
-        command
-    })
-    .await
+    let pi = pi().ok_or_else(|| format!("Pi is not installed yet ({TOOLCHAIN_HINT})."))?;
+    let mut command = Command::new(&pi);
+    command.args(["install", source]);
+    run(&pi, command).await
 }
 
 fn write_settings(value: Value) -> Result<(), String> {
