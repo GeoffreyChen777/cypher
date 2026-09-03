@@ -234,6 +234,7 @@ impl EngineCore {
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
+                allow_device_rejoin: crate::auth::consume_sync_rejoin(data_dir),
             },
         )?;
         let side_chats = SideChats::new(sessions.clone(), doc_host.clone(), workspace.clone());
@@ -747,6 +748,7 @@ impl Engine {
         // headless and headed modes). Test-only `EngineCore::assemble` keeps
         // `None` — it never serves IPC.
         let engine_ws_url = Some(format!("ws://127.0.0.1:{}", config.ipc_port));
+        let synced_scope = profile.scope() == WorkspaceScope::Synced;
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
@@ -769,6 +771,22 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
+        if synced_scope {
+            let mut evicted = core.workspace.watch_evicted();
+            let auth_for_evict = auth.clone();
+            tokio::spawn(async move {
+                loop {
+                    if *evicted.borrow() {
+                        tracing::warn!("this device was unpaired; signing out of sync");
+                        auth_for_evict.sign_out();
+                        return;
+                    }
+                    if evicted.changed().await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
         // Release checker: polls {edge}/releases on a 6h cadence; headless
         // installs with CYPHER_AUTO_UPDATE=1 apply + restart themselves — gated
         // on quiescence so a restart never lands under a live run or open PTY.

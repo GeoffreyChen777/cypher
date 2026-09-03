@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use cypher_proto::{Chat, ChatConfig, Device, Session, Space};
 
 use crate::schema::DocError;
-use crate::workspace::{DeletedSpace, WorkspaceState};
+use crate::workspace::{DeletedDevice, DeletedSpace, WorkspaceState};
 
 /// Row kinds — the four sidebar tables.
 pub const KIND_DEVICES: &str = "devices";
@@ -715,6 +715,34 @@ impl RegistryDoc {
             fields([("name", json!(name))]),
         );
         Ok(true)
+    }
+
+    /// Unpair a device: tombstone the device row only. Spaces and chats stay
+    /// so the machine can keep its work after it drops to local-only.
+    pub fn delete_device(&mut self, device_id: &str) -> Result<DeletedDevice, DocError> {
+        let existed = self.row_exists(KIND_DEVICES, device_id);
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
+        Ok(DeletedDevice { existed })
+    }
+
+    /// Server's tombstone for this device (authoritative, ignoring overlay).
+    /// Used to refuse a boot-time re-announce after another device unpaired us.
+    pub fn device_is_tombstoned(&self, device_id: &str) -> bool {
+        self.authoritative
+            .get(KIND_DEVICES)
+            .and_then(|m| m.get(device_id))
+            .is_some_and(|row| row.deleted)
+    }
+
+    /// Drop unacked writes that would revive `device_id` (a pending upsert
+    /// with a newer HLC would otherwise beat the tombstone on the next push).
+    pub fn drop_pending_device_writes(&mut self, device_id: &str) {
+        self.pending.retain_mut(|batch| {
+            batch
+                .ops
+                .retain(|op| !(op.kind == KIND_DEVICES && op.id == device_id));
+            !batch.ops.is_empty()
+        });
     }
 
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only —

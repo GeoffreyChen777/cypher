@@ -62,6 +62,13 @@ pub struct DeletedSpace {
     pub chat_ids: Vec<String>,
 }
 
+/// Result of unpairing a device: the registry row is tombstoned. Spaces and
+/// chats stay put — the machine is kicked out of sync and continues locally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeletedDevice {
+    pub existed: bool,
+}
+
 /// A workspace doc handle: typed access over a LoroDoc with the schema above.
 pub struct WorkspaceDoc {
     doc: LoroDoc,
@@ -120,6 +127,16 @@ impl WorkspaceDoc {
         row.insert("name", name)?;
         self.doc.commit();
         Ok(true)
+    }
+
+    /// Unpair a device: tombstone the device row only. Spaces and chats stay
+    /// so the machine can keep its work after it drops to local-only.
+    pub fn delete_device(&self, device_id: &str) -> Result<DeletedDevice, DocError> {
+        let devices = self.doc.get_map("devices");
+        let existed = devices.get(device_id).is_some();
+        devices.delete(device_id)?;
+        self.doc.commit();
+        Ok(DeletedDevice { existed })
     }
 
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only — periodic
@@ -1152,6 +1169,46 @@ mod tests {
         let again = b.delete_space("sp-1").unwrap();
         assert!(!again.existed);
         assert!(again.chat_ids.is_empty());
+    }
+
+    #[test]
+    fn delete_device_unpairs_without_touching_spaces_or_chats() {
+        let a = WorkspaceDoc::new();
+        a.upsert_device(&device("dev-a", "laptop")).unwrap();
+        a.upsert_device(&device("dev-b", "vps")).unwrap();
+        a.upsert_space(&space("sp-b", "dev-b", "/tmp/b")).unwrap();
+        let mut hosted = chat("chat-b", "dev-b");
+        hosted.space_id = Some("sp-b".into());
+        a.upsert_chat(&hosted).unwrap();
+        a.upsert_session(&session("chat-b", "dev-b", SessionStatus::Working))
+            .unwrap();
+
+        let b = WorkspaceDoc::from_doc({
+            let d = LoroDoc::new();
+            d.import(&a.export_snapshot().unwrap()).unwrap();
+            d
+        });
+
+        let deleted = a.delete_device("dev-b").unwrap();
+        assert!(deleted.existed);
+        cross_sync(&a, &b);
+
+        for ws in [&a, &b] {
+            let state = ws.read_all().unwrap();
+            assert_eq!(
+                state
+                    .devices
+                    .iter()
+                    .map(|d| d.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["dev-a"]
+            );
+            assert_eq!(state.spaces.len(), 1);
+            assert_eq!(state.chats.len(), 1);
+            assert_eq!(state.sessions.len(), 1);
+        }
+        let again = b.delete_device("dev-b").unwrap();
+        assert!(!again.existed);
     }
 
     #[test]

@@ -7,8 +7,11 @@
 //! WatchChats/WatchDevices/WatchSessions RPC streams are fed from.
 //!
 //! Writer discipline (kept from the doc schema): this host writes its own device row,
-//! its own session-status rows, and rows for chats it hosts; renames/archives are LWW
-//! sets accepted from any device (the Mutate surface).
+//! its own session-status rows, and rows for chats it hosts; renames/archives and
+//! device/space deletes are LWW sets accepted from any device (the Mutate surface).
+//! Unpairing another device tombstones its registry row; that machine observes the
+//! tombstone, signs out, and continues in local-only mode. Deleting THIS device is
+//! refused — sign out is the way to leave.
 //!
 //! Liveness: `lastSeenAt` is a row write on boot/shutdown ONLY — the periodic 15s
 //! heartbeat rides the room's presence frames (memory-only on the DO), so staying
@@ -26,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
-use cypher_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
+use cypher_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use cypher_proto::{
     Chat, ChatConfig, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel, Session,
     Space, SubagentRunMode,
@@ -251,6 +254,9 @@ pub struct WorkspaceHostConfig {
     /// When present, the host joins `/registry/{orgId}/ws`. `None` = fully offline
     /// (local snapshots only; the registry still drives everything device-side).
     pub edge: Option<EdgeConfig>,
+    /// Fresh sign-in this process: revive a tombstoned device row instead of
+    /// treating the tombstone as an eviction. Consumed once at first reconcile.
+    pub allow_device_rejoin: bool,
 }
 
 struct WorkspaceHostInner {
@@ -270,6 +276,12 @@ struct WorkspaceHostInner {
     /// an online replica must not sweep apparently missing rows before this
     /// latch is set.
     registry_synced: AtomicBool,
+    /// This device was unpaired (our registry row is tombstoned). The engine
+    /// signs out so the machine continues in local-only mode.
+    evicted: AtomicBool,
+    /// Boot announce already ran (or was skipped because we were evicted).
+    announced: AtomicBool,
+    evicted_tx: watch::Sender<bool>,
     /// Freshest presence heartbeat (ms) we have EVER observed per device. The
     /// room's presence map forgets entries after its 30s TTL and starts empty
     /// on a (re)join, so without this cache a receive-side hiccup snaps a
@@ -350,29 +362,12 @@ impl WorkspaceHost {
         // Destructive-break hygiene: the pre-spaces row stays unreachable.
         store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
-        // Boot: upsert our own device row. A user-set name (RenameDevice is LWW from
-        // any device) survives restarts. The old fallback sentinel is repaired with
-        // the platform-resolved name because it was never a user-selected name.
-        let now = Utc::now();
-        let existing = doc
-            .read_devices()?
-            .into_iter()
-            .find(|d| d.id == config.device_id);
-        doc.upsert_device(&Device {
-            id: config.device_id.clone(),
-            name: device_name_on_boot(
-                existing.as_ref().map(|device| device.name.as_str()),
-                &config.device_name,
-            ),
-            platform: config.platform.clone(),
-            last_seen_at: Some(now),
-            // First registration stamps `createdAt`; restarts keep the original
-            // (the Devices page "Added …" fragment).
-            created_at: existing.and_then(|d| d.created_at).or(Some(now)),
-            // Every boot restamps the running binary's version (fleet staleness
-            // on the Devices page; workspace version — same for every crate).
-            version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        })?;
+        // Boot: announce our device row immediately when there's no edge (local
+        // / tests). Synced runtimes wait for the first authoritative registry
+        // state: a tombstone means we were unpaired and must NOT revive the row.
+        if config.edge.is_none() {
+            announce_device(&mut doc, &config)?;
+        }
 
         let state = doc.read_all()?;
         let (chats_tx, _) = watch::channel(state.chats);
@@ -380,7 +375,9 @@ impl WorkspaceHost {
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
         let (changed_tx, changed_rx) = watch::channel(0u64);
+        let (evicted_tx, _) = watch::channel(false);
         let registry_synced = config.edge.is_none();
+        let announced = config.edge.is_none();
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
@@ -394,6 +391,9 @@ impl WorkspaceHost {
                 room: Mutex::new(None),
                 changed_tx,
                 registry_synced: AtomicBool::new(registry_synced),
+                evicted: AtomicBool::new(false),
+                announced: AtomicBool::new(announced),
+                evicted_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
@@ -512,6 +512,7 @@ impl WorkspaceHost {
                         // state response has actually been applied.
                         if client.stats().server_known {
                             inner.registry_synced.store(true, Ordering::Relaxed);
+                            inner.reconcile_own_device();
                         }
                         inner.bump_changed();
                         tracing::info!(org = %org_id, "registry room joined");
@@ -533,6 +534,7 @@ impl WorkspaceHost {
                                             .is_some_and(|room| room.stats().server_known)
                                         {
                                             inner.registry_synced.store(true, Ordering::Relaxed);
+                                            inner.reconcile_own_device();
                                         }
                                         inner.bump_changed();
                                     }
@@ -1277,6 +1279,26 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    /// Unpair another device: tombstone its registry row so it drops out of
+    /// sync. Refuses to delete THIS device — sign out is the way to leave.
+    pub fn delete_device(&self, device_id: &str) -> Result<DeletedDevice, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other("cannot delete this device".into()));
+        }
+        Ok(self.mutate(|doc| doc.delete_device(device_id))?)
+    }
+
+    /// True once this device's registry row was tombstoned and we accepted eviction.
+    pub fn watch_evicted(&self) -> watch::Receiver<bool> {
+        self.inner.evicted_tx.subscribe()
+    }
+
+    /// Re-check the server tombstone for THIS device. Synced runtimes call this
+    /// after each authoritative apply; tests call it to simulate that.
+    pub fn reconcile_own_device(&self) {
+        self.inner.reconcile_own_device();
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
@@ -1317,6 +1339,51 @@ impl WorkspaceHost {
 impl WorkspaceHostInner {
     fn bump_changed(&self) {
         self.changed_tx.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    fn mark_evicted(&self) {
+        if self.evicted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        tracing::warn!(
+            device = %self.config.device_id,
+            "this device was unpaired from the account; dropping out of sync"
+        );
+        self.evicted_tx.send_replace(true);
+    }
+
+    /// After authoritative registry state: if we were unpaired, drop any
+    /// pending revival and evict; otherwise announce this device once.
+    fn reconcile_own_device(&self) {
+        if self.evicted.load(Ordering::Relaxed) {
+            return;
+        }
+        let device_id = self.config.device_id.clone();
+        let (tombstoned, live) = {
+            let doc = lock(&self.reg);
+            (
+                doc.device_is_tombstoned(&device_id),
+                doc.read_devices()
+                    .ok()
+                    .is_some_and(|devices| devices.iter().any(|d| d.id == device_id)),
+            )
+        };
+        let unpaired = tombstoned || (self.announced.load(Ordering::Relaxed) && !live);
+        if unpaired && !self.config.allow_device_rejoin {
+            lock(&self.reg).drop_pending_device_writes(&device_id);
+            self.mark_evicted();
+            self.bump_changed();
+            return;
+        }
+        if self.announced.swap(true, Ordering::Relaxed) && !unpaired {
+            return;
+        }
+        if let Err(err) = announce_device(&mut lock(&self.reg), &self.config) {
+            tracing::warn!(error = %err, "device announce failed");
+            self.announced.store(false, Ordering::Relaxed);
+            return;
+        }
+        self.bump_changed();
     }
 
     fn publish(&self) {
@@ -1634,6 +1701,26 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
     }
 }
 
+fn announce_device(doc: &mut RegistryDoc, config: &WorkspaceHostConfig) -> Result<(), EngineError> {
+    let now = Utc::now();
+    let existing = doc
+        .read_devices()?
+        .into_iter()
+        .find(|d| d.id == config.device_id);
+    doc.upsert_device(&Device {
+        id: config.device_id.clone(),
+        name: device_name_on_boot(
+            existing.as_ref().map(|device| device.name.as_str()),
+            &config.device_name,
+        ),
+        platform: config.platform.clone(),
+        last_seen_at: Some(now),
+        created_at: existing.and_then(|d| d.created_at).or(Some(now)),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })?;
+    Ok(())
+}
+
 fn device_name_on_boot(existing_name: Option<&str>, detected_name: &str) -> String {
     existing_name
         .filter(|name| {
@@ -1682,6 +1769,7 @@ mod tests {
                 org_id: "org".into(),
                 user_id: "user".into(),
                 edge: None,
+                allow_device_rejoin: false,
             },
         )
         .unwrap();
@@ -1700,6 +1788,94 @@ mod tests {
             .signed_duration_since(devices[0].last_seen_at.unwrap())
             .num_seconds();
         assert!(age <= 1, "local presence should be fresh, age={age}s");
+    }
+
+    fn open_host(dir: &std::path::Path, device_id: &str, allow_rejoin: bool) -> WorkspaceHost {
+        WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir).unwrap()),
+            WorkspaceHostConfig {
+                device_id: device_id.into(),
+                device_name: "Local".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                allow_device_rejoin: allow_rejoin,
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn delete_device_refuses_self_and_keeps_peer_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "local-device", false);
+
+        host.mutate(|doc| {
+            doc.upsert_device(&Device {
+                id: "dev-b".into(),
+                name: "vps".into(),
+                platform: "linux".into(),
+                last_seen_at: None,
+                created_at: Some(Utc::now()),
+                version: None,
+            })
+        })
+        .unwrap();
+        host.create_space("sp-b", "dev-b", "/tmp/b", None, false)
+            .unwrap();
+        host.create_chat("chat-b", Some("sp-b"), None, None, None)
+            .unwrap();
+
+        let err = host.delete_device("local-device").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot delete this device"),
+            "{err}"
+        );
+        assert_eq!(host.read_devices().unwrap().len(), 2);
+
+        let deleted = host.delete_device("dev-b").unwrap();
+        assert!(deleted.existed);
+        let devices = host.read_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "local-device");
+        assert_eq!(host.read_spaces().unwrap().len(), 1);
+        assert_eq!(host.read_chats().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unpaired_device_evicts_instead_of_reannouncing() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "local-device", false);
+        assert!(!*host.watch_evicted().borrow());
+
+        host.mutate(|doc| doc.delete_device("local-device"))
+            .unwrap();
+        host.reconcile_own_device();
+        assert!(*host.watch_evicted().borrow());
+        assert!(
+            !host
+                .read_devices()
+                .unwrap()
+                .iter()
+                .any(|d| d.id == "local-device")
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_sign_in_may_revive_a_tombstoned_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "local-device", true);
+        host.mutate(|doc| doc.delete_device("local-device"))
+            .unwrap();
+        host.reconcile_own_device();
+        assert!(!*host.watch_evicted().borrow());
+        assert!(
+            host.read_devices()
+                .unwrap()
+                .iter()
+                .any(|d| d.id == "local-device")
+        );
     }
 
     #[test]

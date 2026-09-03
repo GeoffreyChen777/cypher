@@ -22,7 +22,7 @@
 //!   runs an org-scoped refresh and the state follows the returned token's `org_id`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -931,6 +931,7 @@ impl Auth {
             org_id: org_id.clone(),
         };
         self.persist(Some(&session));
+        mark_sync_rejoin(&self.inner.config.data_dir);
         *lock(&self.inner.stored) = Some(session);
         tracing::info!(email = %result.user.email, org = org_id.as_deref().unwrap_or("<none>"),
             "auth: signed in");
@@ -1627,6 +1628,30 @@ fn pkce_s256_challenge(verifier: &str) -> String {
 /// treated as retryable: a transient hiccup must never clear a session.
 fn is_permanent_refresh_rejection(code: &str) -> bool {
     matches!(code, "invalid_grant" | "refresh_token_invalid")
+}
+
+const SYNC_REJOIN_MARKER: &str = "sync-rejoin";
+
+/// Written on a successful sign-in so the next synced runtime may revive a
+/// tombstoned device row (the user is explicitly re-pairing this machine).
+pub(crate) fn mark_sync_rejoin(data_dir: &Path) {
+    if let Err(err) = std::fs::write(data_dir.join(SYNC_REJOIN_MARKER), b"1") {
+        tracing::warn!(error = %err, "auth: failed to write sync-rejoin marker");
+    }
+}
+
+/// Consume the one-shot rejoin marker. `true` = this boot should announce
+/// even if the registry still has a tombstone for this device.
+pub(crate) fn consume_sync_rejoin(data_dir: &Path) -> bool {
+    let path = data_dir.join(SYNC_REJOIN_MARKER);
+    match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            tracing::warn!(error = %err, "auth: failed to consume sync-rejoin marker");
+            false
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
