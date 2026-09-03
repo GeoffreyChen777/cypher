@@ -296,7 +296,7 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 /// The floating-menu surface (zeron `.glass-surface` + `menuSurface`):
 /// `rounded-xl border border-white/[0.1] p-1` over the frosted glass tint —
 /// the real recipe now that the fork paints backdrop blur: the
-/// [`Theme::glass_overlay`] tint (`oklch(0.33 0 0 / 34%)` on dark) over the
+/// [`Theme::glass_overlay`] tint (`oklch(0.40 0 0 / 38%)` on dark) over the
 /// [`crate::frost::MENU_BLUR`] blur from the mount helpers below, plus the
 /// same hairline + baked-in shadow. Opaque platforms keep the near-opaque
 /// tone the reference composites to on the dark panels (~#161616).

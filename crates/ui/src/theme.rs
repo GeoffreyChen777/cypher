@@ -289,7 +289,7 @@ pub struct Theme {
     pub appearance: Appearance,
 
     // ---- paint: neutral surfaces ----
-    /// Main content panel. Dark: the deepest plane (#060606). Light: pure white —
+    /// Main content panel. Dark: the deepest plane (#161616). Light: pure white —
     /// long-form content reads best on an unbroken white field.
     pub bg: Hsla,
     /// Shell / sidebar surface. Dark: one step *up* from `bg`. Light: one step
@@ -473,15 +473,15 @@ impl Theme {
     pub const SPACE_LG: f32 = 16.0;
 
     /// The frost tint painted over the blurred window background (macOS glass).
-    /// Dark: darker than `surface`, matched to the reference vibrancy scrim
-    /// `hsl(0 0% 3%)`. Light: a near-white frost run heavier than dark's — see
+    /// Dark: darker than `surface`, a charcoal frost over the blurred desktop.
+    /// Light: a near-white frost run heavier than dark's — see
     /// [`Self::GLASS_ALPHA_LIGHT`]. On opaque platforms this IS the surface
     /// tone (no tint swap).
     pub fn glass(&self) -> Hsla {
         match self.appearance {
             Appearance::Dark => {
                 if Self::GLASS_ALPHA < 1.0 {
-                    grey(8).opacity(Self::GLASS_ALPHA)
+                    grey(24).opacity(Self::GLASS_ALPHA)
                 } else {
                     self.surface
                 }
@@ -526,19 +526,14 @@ impl Theme {
     }
 
     /// The translucent tint floating cards paint over their backdrop blur
-    /// (see [`crate::frost::frosted`]). Dark: the reference zeron
-    /// `.glass-surface` menu tint verbatim — `oklch(0.33 0 0 / 34%)`. The
-    /// previous `surface_overlay` at 65% was tuned back when the tint had to
-    /// *approximate* the composited recipe without a real blur; kept over the
-    /// blur it buried the backdrop's colour and menus read as flat grey slabs
-    /// next to the hue-inheriting chrome (user report). At 34% the blurred
-    /// backdrop carries the card and the mid-grey only lifts it off the
-    /// plane. Light: heavier — a translucent white tint left menu text
-    /// ghosting over whatever sat behind the popover, so light coverage
+    /// (see [`crate::frost::frosted`]). Dark: a mid-charcoal frost
+    /// (`oklch(0.40 0 0 / 38%)`) so menus lift off the panel without reading
+    /// as black slabs. Light: heavier — a translucent white tint left menu
+    /// text ghosting over whatever sat behind the popover, so light coverage
     /// steps up to keep rows on a known background.
     pub fn glass_overlay(&self) -> Hsla {
         match self.appearance {
-            Appearance::Dark => oklch(0.33, 0.0, 0.0).opacity(0.34),
+            Appearance::Dark => oklch(0.40, 0.0, 0.0).opacity(0.38),
             Appearance::Light => self.surface_overlay.opacity(0.85),
         }
     }
@@ -547,7 +542,7 @@ impl Theme {
     /// white (the elevation ladder on an opaque page) — over glass it read as
     /// a solid slab in front of the frosted blur, so it thins to a
     /// translucent tint there (0.6 and then 0.45 both still read too bright
-    /// over the 0.80 frost — lowered on user request). Dark's 3% white wash
+    /// over the 0.80 frost — lowered on user request). Dark's 5% white wash
     /// is already glass-native.
     pub fn input_glass_bg(&self) -> Hsla {
         if self.is_glass() && matches!(self.appearance, Appearance::Light) {
@@ -593,25 +588,25 @@ impl Theme {
         }
     }
 
-    /// Build the dark theme. The surface tones are sampled straight from the
-    /// reference screenshots of the original app (docs/reference): main panel
-    /// `#060606`, shell/sidebar `#0d0d0d`.
+    /// Build the dark theme. Surfaces sit a step up from OLED black so the
+    /// window reads as charcoal rather than a void; the elevation ladder is
+    /// the same shape as before, just lifted.
     pub fn dark() -> Self {
         Self {
             appearance: Appearance::Dark,
-            bg: grey(6),       // main panel — sampled #060606
-            surface: grey(13), // shell / sidebar — sampled #0d0d0d
-            surface_raised: neutral(0.235),
-            surface_card: grey(0x0e),
-            surface_dialog: grey(0x10),
-            surface_overlay: grey(0x16),
+            bg: grey(22),      // main panel — #161616
+            surface: grey(28), // shell / sidebar — #1c1c1c
+            surface_raised: grey(0x3c),
+            surface_card: grey(0x1e),
+            surface_dialog: grey(0x22),
+            surface_overlay: grey(0x2a),
             element_hover: hsla(0.0, 0.0, 0.92, 0.11),
             element_active: hsla(0.0, 0.0, 0.92, 0.16),
             border: hsla(0.0, 0.0, 1.0, 0.08),
             border_strong: hsla(0.0, 0.0, 1.0, 0.14),
-            text: neutral(0.922),       // ~neutral-200
-            text_muted: neutral(0.708), // ~neutral-400
-            text_faint: neutral(0.556), // ~neutral-500
+            text: neutral(0.96),
+            text_muted: neutral(0.74),
+            text_faint: neutral(0.59),
             text_dim: grey(0x98),
             solid: neutral(0.922),                       // near-white plate
             on_solid: grey(0x0e),                        // near-black label
@@ -625,16 +620,16 @@ impl Theme {
             success: oklch(0.765, 0.177, 163.223),     // emerald-400
             busy: oklch(0.718, 0.202, 349.761),        // pink-400
             success_muted: oklch(0.845, 0.143, 164.978), // emerald-300
-            surface_raised_hover: neutral(0.29),
+            surface_raised_hover: grey(0x4a),
             band: band_for(Appearance::Dark),
-            input_bg: hsla(0.0, 0.0, 1.0, 0.03),
+            input_bg: hsla(0.0, 0.0, 1.0, 0.05),
             selection: hsla(0.66, 0.6, 0.55, 0.35),
             cursor: hsla(0.0, 0.0, 1.0, 0.35),
             caret: hsla(0.66, 0.7, 0.7, 1.0),
             danger_strong: oklch(0.58, 0.16, 25.0),
             code_text: oklch(0.811, 0.111, 293.571), // violet-300
             code_wash: oklch(0.702, 0.183, 293.541).opacity(0.12), // violet-400/12
-            syntax: SyntaxPalette::dark(neutral(0.922), neutral(0.60), oklch(0.704, 0.191, 22.216)),
+            syntax: SyntaxPalette::dark(neutral(0.96), neutral(0.62), oklch(0.704, 0.191, 22.216)),
             diff_add: oklch(0.765, 0.177, 163.223), // emerald-400
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
@@ -1199,7 +1194,7 @@ mod tests {
     ///
     /// `text_faint` is held to a lower floor on purpose. It is placeholder and
     /// disabled-control copy only, which WCAG 1.4.3 exempts, and the *existing
-    /// dark palette* already measures ~4.2:1 there (neutral-500 on #060606). The
+    /// dark palette* already measures ~4.2:1 there (neutral-500 on the panel). The
     /// light tone is matched to that inherited number rather than raised past it,
     /// so the two appearances stay siblings; raising the floor is a palette
     /// decision for both modes at once, not something light mode should do alone.

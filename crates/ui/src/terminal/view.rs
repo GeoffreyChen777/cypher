@@ -1,7 +1,7 @@
 //! Terminal paint + input encoding.
 //!
 //! - the ANSI palette on the terminal background (feature-inventory §1.10) —
-//!   `#090909` dark, `#fafafa` light — and the 256-color cube/grayscale
+//!   `#191919` dark, `#fafafa` light — and the 256-color cube/grayscale
 //!   resolution, both resolved per [`Appearance`];
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
 //!   escape sequences, Ctrl- combos, Alt prefixing);
@@ -40,7 +40,7 @@ pub const RESIZE_DEBOUNCE_MS: u64 = 80;
 
 /// Terminal background for an appearance.
 ///
-/// Dark is `#090909`, one small step *up* from the app's `#060606` content
+/// Dark is `#191919`, one small step *up* from the app's `#161616` content
 /// plane — the terminal reads as its own pane without becoming a lighter box.
 /// Light mirrors that relationship rather than inverting the literal value:
 /// the content plane is already pure white, so the terminal steps one notch
@@ -49,7 +49,7 @@ pub const RESIZE_DEBOUNCE_MS: u64 = 80;
 /// as separation on near-black disappears entirely on white.
 pub fn terminal_bg_for(appearance: Appearance) -> Hsla {
     match appearance {
-        Appearance::Dark => rgb8(0x09, 0x09, 0x09),
+        Appearance::Dark => rgb8(0x19, 0x19, 0x19),
         Appearance::Light => rgb8(0xfa, 0xfa, 0xfa),
     }
 }
@@ -99,7 +99,7 @@ pub fn terminal_selection_for(appearance: Appearance) -> Hsla {
 /// The 16 ANSI colors tuned for the near-black background (indexes 0-7 normal,
 /// 8-15 bright).
 const ANSI16_DARK: [(u8, u8, u8); 16] = [
-    (0x24, 0x24, 0x24), // black — visible against #090909
+    (0x32, 0x32, 0x32), // black — visible against #191919
     (0xf8, 0x71, 0x71), // red
     (0x4a, 0xde, 0x80), // green
     (0xfa, 0xcc, 0x15), // yellow

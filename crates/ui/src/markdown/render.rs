@@ -533,7 +533,7 @@ pub struct FlatText {
 
 /// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
 /// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
-/// — violet-300 text over a violet-400 wash, readable on the #060606 panel.
+/// — violet-300 text over a violet-400 wash, readable on the dark panel.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
     theme.code_text // violet-300
 }

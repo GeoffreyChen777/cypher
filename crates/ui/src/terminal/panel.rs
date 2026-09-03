@@ -1352,7 +1352,7 @@ impl TerminalPanel {
         let bar_chat = chat_owned.clone();
         let drop_chat = chat_owned.clone();
         // Zeron terminal-panel.tsx: `flex h-10 items-center border-b
-        // border-white/[0.07] pl-2 pr-1.5` on the #090909 panel — no separate
+        // border-white/[0.07] pl-2 pr-1.5` on the #191919 panel — no separate
         // bar fill.
         div()
             .id("terminal-tab-bar")
