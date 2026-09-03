@@ -148,7 +148,7 @@ pub enum GatePhase {
     Failed(String),
     /// Engine up, but signed out — show the sign-in card.
     SignIn,
-    /// Signed in but no organization selected — "Create your workspace".
+    /// Signed in but no organization selected — provision or select one.
     OrgGate,
     /// Render the shell.
     Ready,

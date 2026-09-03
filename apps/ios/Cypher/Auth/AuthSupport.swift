@@ -1,6 +1,6 @@
-// Pure auth helpers: RFC 7636 PKCE, sign-in org routing, and workspace-name
-// validation. Foundation-only so the unit tests can pin them without a UI
-// target — the iOS side of the PKCE flow the edge already enforces
+// Pure auth helpers: RFC 7636 PKCE and sign-in org routing. Foundation-only
+// so the unit tests can pin them without a UI target — the iOS side of the
+// PKCE flow the edge already enforces
 // (`PKCE_VERIFIER_RE` + `codeVerifier` in edge/src/auth-routes.ts).
 
 import CryptoKit
@@ -54,8 +54,8 @@ enum OrgSelection: Equatable {
         case autoSelect(AuthOrg)
         /// Multiple memberships — show the org picker.
         case pick([AuthOrg])
-        /// No memberships — first-user onboarding (create a workspace).
-        case createOrg
+        /// No memberships — provision the hidden personal organization.
+        case autoCreate
     }
 
     static func route(for orgs: [AuthOrg]) -> Route {
@@ -63,20 +63,8 @@ enum OrgSelection: Equatable {
             return .autoSelect(only)
         }
         if orgs.isEmpty {
-            return .createOrg
+            return .autoCreate
         }
         return .pick(orgs)
-    }
-}
-
-/// Local workspace-name validation for first-user onboarding — the same
-/// trim-then-1-80 rule the edge enforces on POST /auth/orgs.
-enum OrgNameValidator {
-    /// The trimmed name when it is a valid 1–80 char workspace name, else nil
-    /// (the caller shows the error inline).
-    static func normalize(_ raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 80 else { return nil }
-        return trimmed
     }
 }

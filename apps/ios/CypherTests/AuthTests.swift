@@ -1,5 +1,5 @@
 // Phase B auth tests: RFC 7636 PKCE helpers, exchange body wiring, sign-in
-// org routing, workspace-name validation, AuthError permanence, and the
+// org routing, automatic personal-org provisioning, AuthError permanence, and the
 // single-flight refresh guarantee (exactly one /auth/refresh per expired
 // token, rotated tokens persist once, transient failures preserve the refresh
 // token, permanent rejections clear every credential).
@@ -229,8 +229,8 @@ final class AuthOrgRoutingTests: XCTestCase {
         AuthOrg(id: id, organizationId: id, name: id)
     }
 
-    func testZeroOrgsRoutesToCreate() {
-        XCTAssertEqual(OrgSelection.route(for: []), .createOrg)
+    func testZeroOrgsRoutesToAutomaticCreation() {
+        XCTAssertEqual(OrgSelection.route(for: []), .autoCreate)
     }
 
     func testOneOrgAutoSelectsIt() {
@@ -243,13 +243,6 @@ final class AuthOrgRoutingTests: XCTestCase {
         XCTAssertEqual(OrgSelection.route(for: orgs), .pick(orgs))
     }
 
-    func testOrgNameValidatorTrimsAndEnforcesRange() {
-        XCTAssertEqual(OrgNameValidator.normalize("  My Workspace  "), "My Workspace")
-        XCTAssertNil(OrgNameValidator.normalize("   "))
-        XCTAssertNil(OrgNameValidator.normalize(""))
-        XCTAssertEqual(OrgNameValidator.normalize(String(repeating: "a", count: 80)).map(\.count), 80)
-        XCTAssertNil(OrgNameValidator.normalize(String(repeating: "a", count: 81)))
-    }
 }
 
 final class AuthRefreshSingleFlightTests: XCTestCase {

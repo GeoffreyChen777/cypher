@@ -49,7 +49,7 @@ use crate::settings::{
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
-    format_time_ago, org_name_valid, parse_orgs, sort_memberships,
+    OrgSetup, format_time_ago, org_setup, parse_orgs,
 };
 use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
@@ -865,14 +865,16 @@ fn sync_flow_after_auth(
     }
 }
 
-/// The "Create your workspace" gate (feature-inventory §1.2 OrgGate).
+const DEFAULT_PERSONAL_ORG_NAME: &str = "Personal";
+
+/// Organization setup gate. A first personal organization is provisioned
+/// automatically; the UI is only interactive when an account belongs to
+/// multiple organizations and needs a selection.
 struct OrgGateUi {
-    name_input: Entity<ComposerInput>,
     orgs: Loadable<Vec<OrgRow>>,
     submitting: bool,
     error: Option<SharedString>,
     task: Option<Task<()>>,
-    _events: Subscription,
 }
 
 pub struct Shell {
@@ -3439,19 +3441,11 @@ impl Shell {
         if self.org.is_some() {
             return;
         }
-        let name_input = cx.new(|cx| ComposerInput::new("Workspace name", cx));
-        let events = cx.subscribe(&name_input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.create_org(cx);
-            }
-        });
         self.org = Some(OrgGateUi {
-            name_input,
             orgs: Loadable::Idle,
-            submitting: false,
+            submitting: true,
             error: None,
             task: None,
-            _events: events,
         });
         self.load_orgs(cx);
     }
@@ -3462,54 +3456,62 @@ impl Shell {
         };
         let Some(org) = self.org.as_mut() else { return };
         org.orgs = Loadable::Loading;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_ORGS, serde_json::json!({}))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.orgs = match result {
-                        Ok(value) => Loadable::Ready(sort_memberships(parse_orgs(&value))),
-                        Err(err) => Loadable::Error(err.to_string()),
-                    };
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn create_org(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(org) = self.org.as_mut() else { return };
-        if org.submitting {
-            return;
-        }
-        let name = org.name_input.read(cx).text().trim().to_string();
-        if !org_name_valid(&name) {
-            org.error = Some("Enter a workspace name".into());
-            cx.notify();
-            return;
-        }
         org.submitting = true;
         org.error = None;
         org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::CREATE_ORG, serde_json::json!({ "name": name }))
-                .await;
+            let result: Result<Option<Vec<OrgRow>>, String> = async {
+                let value = engine
+                    .client()
+                    .call(methods::LIST_ORGS, serde_json::json!({}))
+                    .await
+                    .map_err(|err| err.to_string())?;
+                match org_setup(parse_orgs(&value)) {
+                    OrgSetup::AutoCreate => {
+                        engine
+                            .client()
+                            .call(
+                                methods::CREATE_ORG,
+                                serde_json::json!({ "name": DEFAULT_PERSONAL_ORG_NAME }),
+                            )
+                            .await
+                            .map_err(|err| err.to_string())?;
+                        Ok(None)
+                    }
+                    OrgSetup::AutoSelect(organization_id) => {
+                        engine
+                            .client()
+                            .call(
+                                methods::SELECT_ORG,
+                                serde_json::json!({
+                                    "organizationId": organization_id
+                                }),
+                            )
+                            .await
+                            .map_err(|err| err.to_string())?;
+                        Ok(None)
+                    }
+                    OrgSetup::Pick(rows) => Ok(Some(rows)),
+                }
+            }
+            .await;
             this.update(cx, |shell, cx| {
                 if let Some(org) = shell.org.as_mut() {
-                    org.submitting = false;
-                    if let Err(err) = result {
-                        org.error = Some(format!("{err}").into());
+                    match result {
+                        Ok(Some(rows)) => {
+                            org.orgs = Loadable::Ready(rows);
+                            org.submitting = false;
+                        }
+                        Ok(None) => {
+                            // CREATE_ORG and SELECT_ORG both re-scope auth. Keep
+                            // the progress state visible until AuthStatus flips
+                            // to SignedIn and removes the gate.
+                            org.orgs = Loadable::Loading;
+                        }
+                        Err(err) => {
+                            org.orgs = Loadable::Error(err);
+                            org.submitting = false;
+                        }
                     }
-                    // Success: the AuthStatus stream flips to SignedIn and the
-                    // gate falls away on its own.
                 }
                 cx.notify();
             })
@@ -6550,7 +6552,6 @@ impl Shell {
         };
         let submitting = org.submitting;
         let error = org.error.clone();
-        let name_input = org.name_input.clone();
         let orgs = org.orgs.clone();
 
         let email: Option<SharedString> = self
@@ -6595,16 +6596,6 @@ impl Shell {
                     .mt(px(24.0))
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .pb(px(8.0))
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from(
-                                "Or continue in a workspace you belong to",
-                            )),
-                    )
                     .child(div().flex().flex_col().gap(px(4.0)).children(
                         rows.iter().enumerate().map(|(ix, row)| {
                             let org_id = row.organization_id.clone();
@@ -6630,18 +6621,19 @@ impl Shell {
                     .into_any_element(),
             };
 
-        // zeron App.tsx OrgGate: w-400 card on the grid — logo, headline,
-        // explainer (+ signed-in email), name form with a white Create button,
-        // then existing memberships and the account escape hatch.
-        let blurb: SharedString = match email {
-            Some(email) => format!(
-                "Cypher is organized around workspaces — create one for yourself or your team. Signed in as {email}."
-            )
-            .into(),
-            None => {
-                "Cypher is organized around workspaces — create one for yourself or your team."
-                    .into()
+        let choosing = matches!(&orgs, Loadable::Ready(rows) if !rows.is_empty());
+        let title = if choosing {
+            "Choose a workspace"
+        } else {
+            "Setting up sync"
+        };
+        let blurb: SharedString = match (choosing, email) {
+            (true, Some(email)) => {
+                format!("Choose where to continue. Signed in as {email}.").into()
             }
+            (true, None) => "Choose where to continue.".into(),
+            (false, Some(email)) => format!("Preparing your synced workspace for {email}.").into(),
+            (false, None) => "Preparing your synced workspace.".into(),
         };
         let card = div()
             .w(px(400.0))
@@ -6661,59 +6653,15 @@ impl Shell {
                     .text_size(px(18.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("Create your workspace")),
+                    .child(SharedString::from(title)),
             )
             .child(
                 div()
                     .mt(px(6.0))
-                    .mb(px(24.0))
                     .text_size(px(13.0))
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(blurb),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(36.0))
-                            .flex()
-                            .items_center()
-                            .px(px(12.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg)
-                            .text_size(px(13.0))
-                            .child(name_input),
-                    )
-                    .child(
-                        div()
-                            .id("create-org")
-                            .h(px(36.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .bg(theme.text)
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.on_solid)
-                            .when(submitting, |el| el.opacity(0.5))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.9))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
-                            .child(SharedString::from(if submitting {
-                                "Creating…"
-                            } else {
-                                "Create"
-                            })),
-                    ),
             )
             .child(memberships)
             .when_some(error, |el, message| {

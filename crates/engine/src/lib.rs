@@ -946,11 +946,13 @@ pub async fn serve_ipc(
     )))
 }
 
+const DEFAULT_PERSONAL_ORG_NAME: &str = "Personal";
+
 /// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the
 /// headless (paste-code) sign-in URL, read the pasted `state.code` from stdin, and
-/// run workspace onboarding (create / auto-join / numbered picker). Off a TTY this
-/// errors immediately — a daemon under systemd/launchd must load the session that
-/// `cypher login` persisted, never wait on a prompt nobody can see.
+/// run workspace onboarding (auto-provision / auto-join / numbered picker). Off a
+/// TTY this errors immediately — a daemon under systemd/launchd must load the
+/// session that `cypher login` persisted, never wait on a prompt nobody can see.
 pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal();
@@ -975,9 +977,9 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     )));
                 }
                 if org_reader.is_none() {
-                    // Workspace onboarding on the TTY (old zeron's
-                    // `backend login` flow): create if none, auto-join a
-                    // single membership, numbered picker otherwise.
+                    // Workspace onboarding on the TTY: provision a personal
+                    // organization if none exists, auto-join a single
+                    // membership, or show a numbered picker otherwise.
                     println!("Signed in as {}.", user.email);
                     org_reader = Some(tokio::spawn(run_org_onboarding(auth.clone())));
                 }
@@ -1060,10 +1062,10 @@ async fn read_stdin_line() -> Option<String> {
     .flatten()
 }
 
-/// TTY workspace onboarding for an org-less session (ports old zeron's
-/// `backend login` flow): no memberships → prompt a name and create; exactly
-/// one → auto-join; several → numbered picker. Success flips the auth state to
-/// `SignedIn`, which ends [`wait_for_sign_in`]'s wait (and aborts this task).
+/// TTY workspace onboarding for an org-less session: no memberships →
+/// automatically provision `Personal`; exactly one → auto-join; several →
+/// numbered picker. Success flips the auth state to `SignedIn`, which ends
+/// [`terminal_sign_in`]'s wait (and aborts this task).
 async fn run_org_onboarding(auth: Auth) {
     let orgs = match auth.list_orgs().await {
         Ok(orgs) => orgs,
@@ -1076,19 +1078,9 @@ async fn run_org_onboarding(auth: Auth) {
     };
     match orgs.len() {
         0 => {
-            println!("No workspaces yet — name your new workspace and press enter:");
-            loop {
-                let Some(line) = read_stdin_line().await else {
-                    return;
-                };
-                let name = line.trim();
-                if name.is_empty() {
-                    continue;
-                }
-                match auth.create_org(name).await {
-                    Ok(()) => return,
-                    Err(err) => println!("Creating workspace failed: {err}"),
-                }
+            println!("Preparing your synced workspace…");
+            if let Err(err) = auth.create_org(DEFAULT_PERSONAL_ORG_NAME).await {
+                println!("Creating workspace failed: {err}");
             }
         }
         1 => {

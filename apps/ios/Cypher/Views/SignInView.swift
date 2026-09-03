@@ -277,17 +277,12 @@ struct OrgPickerView: View {
     let orgs: [AuthOrg]
     @State private var busy = false
     @State private var error: String?
-    @State private var newOrgName = ""
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
             VStack(spacing: 20) {
-                if orgs.isEmpty {
-                    onboardingForm
-                } else {
-                    pickerList
-                }
+                pickerList
                 if let error {
                     Text(error).font(Theme.sans(12)).foregroundStyle(Theme.danger)
                 }
@@ -302,7 +297,7 @@ struct OrgPickerView: View {
 
     private var pickerList: some View {
         VStack(spacing: 20) {
-            Text("Choose an organization")
+            Text("Choose a workspace")
                 .font(Theme.sans(16, weight: .semibold))
                 .foregroundStyle(Theme.text)
             VStack(spacing: 8) {
@@ -326,66 +321,6 @@ struct OrgPickerView: View {
                     .disabled(busy)
                 }
             }
-        }
-    }
-
-    /// First-user onboarding: no memberships yet, so ask for the workspace
-    /// name (validated locally — trim, 1–80) and create it on submit.
-    private var onboardingForm: some View {
-        VStack(spacing: 20) {
-            Text("Create your workspace")
-                .font(Theme.sans(16, weight: .semibold))
-                .foregroundStyle(Theme.text)
-            VStack(spacing: 8) {
-                Text("Your account has no workspaces yet. Name the first one to get started.")
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.textMuted)
-                    .multilineTextAlignment(.center)
-                TextField("Workspace name", text: $newOrgName)
-                    .font(Theme.sans(14))
-                    .foregroundStyle(Theme.text)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 16)
-                    .frame(height: 48)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border, lineWidth: 1))
-            }
-            Button {
-                createOrg()
-            } label: {
-                Group {
-                    if busy {
-                        ProgressView().tint(Theme.bg)
-                    } else {
-                        Text("Create workspace")
-                            .font(Theme.sans(14, weight: .semibold))
-                            .foregroundStyle(Theme.bg)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 46)
-                .background(Theme.text, in: RoundedRectangle(cornerRadius: 14))
-            }
-            .buttonStyle(.plain)
-            .disabled(busy || newOrgName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .opacity(busy ? 0.6 : 1)
-        }
-    }
-
-    private func createOrg() {
-        guard let name = OrgNameValidator.normalize(newOrgName) else {
-            error = "Workspace name must be 1–80 characters"
-            return
-        }
-        busy = true
-        error = nil
-        Task {
-            do {
-                try await model.createOrg(name: name, tokens: tokens)
-            } catch {
-                self.error = error.localizedDescription
-            }
-            busy = false
         }
     }
 

@@ -527,10 +527,21 @@ pub fn parse_orgs(value: &serde_json::Value) -> Vec<OrgRow> {
     serde_json::from_value(list.clone()).unwrap_or_default()
 }
 
-/// Workspace names must be non-empty (trimmed) and reasonably short.
-pub fn org_name_valid(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 64
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrgSetup {
+    AutoCreate,
+    AutoSelect(String),
+    Pick(Vec<OrgRow>),
+}
+
+/// Decide organization setup after normalizing the membership list.
+pub fn org_setup(rows: Vec<OrgRow>) -> OrgSetup {
+    let rows = sort_memberships(rows);
+    match rows.as_slice() {
+        [] => OrgSetup::AutoCreate,
+        [only] => OrgSetup::AutoSelect(only.organization_id.clone()),
+        _ => OrgSetup::Pick(rows),
+    }
 }
 
 /// Memberships sorted by name (case-insensitive), deduped by organization id.
@@ -3886,11 +3897,14 @@ mod tests {
 
     #[test]
     fn org_gate_reducers() {
-        assert!(org_name_valid("Acme"));
-        assert!(org_name_valid("  padded  "));
-        assert!(!org_name_valid(""));
-        assert!(!org_name_valid("   "));
-        assert!(!org_name_valid(&"x".repeat(65)));
+        assert_eq!(org_setup(vec![]), OrgSetup::AutoCreate);
+        assert_eq!(
+            org_setup(vec![OrgRow {
+                organization_id: "only".into(),
+                name: "Personal".into(),
+            }]),
+            OrgSetup::AutoSelect("only".into())
+        );
 
         let rows = parse_orgs(&serde_json::json!({ "orgs": [
             { "id": "m2", "organizationId": "o2", "name": "beta" },
@@ -3905,6 +3919,13 @@ mod tests {
             ["Alpha", "beta"],
             "case-insensitive sort + dedupe by org id"
         );
+        let rows = parse_orgs(&serde_json::json!({ "orgs": [
+            { "organizationId": "o2", "name": "beta" },
+            { "organizationId": "o1", "name": "Alpha" },
+        ]}));
+        assert!(matches!(org_setup(rows), OrgSetup::Pick(rows) if
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>() == ["Alpha", "beta"]
+        ));
         // Bare-array replies parse too; garbage yields empty.
         assert_eq!(
             parse_orgs(&serde_json::json!([{ "id": "m", "organizationId": "o", "name": "n" }]))
