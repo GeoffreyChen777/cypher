@@ -11,7 +11,7 @@ while read -r line; do
   [ -z "$line" ] && continue
   case "$line" in
   *'"type":"get_state"'*)
-    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionFile\":\"/tmp/pi-test/session.jsonl\",\"model\":null}}"
+    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionFile\":\"/tmp/pi-test/session.jsonl\",\"model\":{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\"},\"thinkingLevel\":\"medium\"}}"
     ;;
   *'"type":"set_model"'*|*'"type":"set_thinking_level"'*|*'"type":"switch_session"'*)
     emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"x\",\"success\":true}"

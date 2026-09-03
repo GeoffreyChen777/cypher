@@ -16,13 +16,37 @@ has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 # default session file) land INSIDE the managed root the controller validates
 # against — real pi stores every session under its --session-dir.
 SESSION_DIR=""
+CURRENT_PROVIDER="anthropic"
+CURRENT_MODEL="claude-sonnet-4-20250514"
+CURRENT_NAME="Claude Sonnet 4"
+CURRENT_THINKING="medium"
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "--session-dir" ]; then SESSION_DIR="$arg"; fi
+  if [ "$prev" = "--model" ]; then
+    case "$arg" in
+      anthropic/claude-sonnet-4-20250514)
+        CURRENT_PROVIDER="anthropic"
+        CURRENT_MODEL="claude-sonnet-4-20250514"
+        CURRENT_NAME="Claude Sonnet 4"
+        ;;
+      openai/gpt-4o-mini)
+        CURRENT_PROVIDER="openai"
+        CURRENT_MODEL="gpt-4o-mini"
+        CURRENT_NAME="GPT-4o Mini"
+        ;;
+    esac
+  fi
+  if [ "$prev" = "--thinking" ]; then CURRENT_THINKING="$arg"; fi
   prev="$arg"
 done
 [ -n "$SESSION_DIR" ] || SESSION_DIR=/tmp/pi-test
 SESSION_FILE="${SESSION_FILE:-$SESSION_DIR/session.jsonl}"
+if [ -f "$SESSION_DIR/.ignore-startup-model" ]; then
+  CURRENT_PROVIDER="openai"
+  CURRENT_MODEL="gpt-4o-mini"
+  CURRENT_NAME="GPT-4o Mini"
+fi
 # ---- command loop -----------------------------------------------------------
 # Preamble commands (discovery + run setup) are answered inline; a `prompt`
 # dispatches its scenario, which runs to completion and exits (EOF then ends
@@ -49,7 +73,7 @@ while read -r line; do
     ;;
 
   *'"type":"get_state"'*)
-    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\",\"reasoning\":true},\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"sessionFile\":\"$SESSION_FILE\",\"sessionId\":\"abc123\"}}"
+    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"model\":{\"id\":\"$CURRENT_MODEL\",\"name\":\"$CURRENT_NAME\",\"provider\":\"$CURRENT_PROVIDER\",\"reasoning\":true},\"thinkingLevel\":\"$CURRENT_THINKING\",\"isStreaming\":false,\"sessionFile\":\"$SESSION_FILE\",\"sessionId\":\"abc123\"}}"
     ;;
 
   *'"type":"switch_session"'*)
@@ -65,16 +89,40 @@ while read -r line; do
     # asserts SessionStarted/Done carry the resumed path.
     SESSION_FILE=$(printf '%s' "$line" | sed 's/.*"sessionPath":"\([^"]*\)".*/\1/')
     [ -n "$SESSION_FILE" ] || SESSION_FILE=/tmp/pi-test/session.jsonl
+    # A historical session can restore a different model than the new Run
+    # requested. The harness must detect this state and switch back before it
+    # sends the prompt.
+    case "$SESSION_FILE" in
+    *other-model*)
+      CURRENT_PROVIDER="openai"
+      CURRENT_MODEL="gpt-4o-mini"
+      CURRENT_NAME="GPT-4o Mini"
+      CURRENT_THINKING="low"
+      ;;
+    esac
     emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"switch_session\",\"success\":true,\"data\":{\"cancelled\":false}}"
     ;;
 
   *'"type":"set_model"'*)
-    # Best-effort on the harness side, so accept anything (the tests' request
-    # carries provider/anthropic modelId/claude-sonnet-4-20250514).
-    emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_model\",\"success\":true,\"data\":{}}"
+    if [ -f "$SESSION_DIR/.reject-model-switch" ]; then
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_model\",\"success\":false,\"error\":\"model switch rejected\"}"
+    elif has "$line" '"provider":"anthropic"' && has "$line" '"modelId":"claude-sonnet-4-20250514"'; then
+      CURRENT_PROVIDER="anthropic"
+      CURRENT_MODEL="claude-sonnet-4-20250514"
+      CURRENT_NAME="Claude Sonnet 4"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_model\",\"success\":true,\"data\":{}}"
+    elif has "$line" '"provider":"openai"' && has "$line" '"modelId":"gpt-4o-mini"'; then
+      CURRENT_PROVIDER="openai"
+      CURRENT_MODEL="gpt-4o-mini"
+      CURRENT_NAME="GPT-4o Mini"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_model\",\"success\":true,\"data\":{}}"
+    else
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_model\",\"success\":false,\"error\":\"unknown model\"}"
+    fi
     ;;
 
   *'"type":"set_thinking_level"'*)
+    CURRENT_THINKING=$(printf '%s' "$line" | sed 's/.*"level":"\([^"]*\)".*/\1/')
     emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}"
     ;;
 

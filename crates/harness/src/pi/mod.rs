@@ -650,10 +650,55 @@ impl PiHarness {
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
     ) -> Result<Command, HarnessError> {
+        self.spawn_command_with_config(cwd, host, append_prompt, None, None)
+    }
+
+    /// Test seam for the exact command used by a normal run, including the
+    /// requested model and thinking level. Starting Pi on the selected model
+    /// avoids briefly initializing its persisted/default model and, more
+    /// importantly, avoids racing RPC `set_model` against Pi's asynchronously
+    /// populated model-catalog snapshot.
+    #[doc(hidden)]
+    pub fn spawn_run_command(
+        &self,
+        cwd: Option<&str>,
+        host: &RunHostContext,
+        append_prompt: Option<&PathBuf>,
+        request: &RunRequest,
+    ) -> Result<Command, HarnessError> {
+        self.spawn_command_with_config(
+            cwd,
+            host,
+            append_prompt,
+            request.model.as_deref(),
+            request.reasoning.map(thinking_level),
+        )
+    }
+
+    fn spawn_command_with_config(
+        &self,
+        cwd: Option<&str>,
+        host: &RunHostContext,
+        append_prompt: Option<&PathBuf>,
+        requested_model: Option<&str>,
+        requested_thinking: Option<&str>,
+    ) -> Result<Command, HarnessError> {
         let (exe, mut args) = self.resolve_program()?;
         // Child-subagent semantics (Cypher-hosted child chats): restrict tools
         // to the persisted agent allowlist plus the messaging tools, append
-        // the persisted system prompt, preserve model/thinking.
+        // the persisted system prompt, preserve model/thinking. The child
+        // profile is authoritative when it supplies either launch value;
+        // otherwise the RunRequest value is used, just like a root chat.
+        let launch_model = host
+            .child
+            .as_ref()
+            .and_then(|child| child.model.as_deref())
+            .or(requested_model);
+        let launch_thinking = host
+            .child
+            .as_ref()
+            .and_then(|child| child.thinking.as_deref())
+            .or(requested_thinking);
         if let Some(child) = &host.child {
             let mut tools = child.tools.clone();
             for tool in MESSAGING_TOOLS {
@@ -665,20 +710,20 @@ impl PiHarness {
                 args.push("--tools".into());
                 args.push(tools.join(","));
             }
-            if let Some(model) = &child.model {
-                args.push("--model".into());
-                args.push(model.clone());
-            }
-            if let Some(thinking) = &child.thinking {
-                args.push("--thinking".into());
-                args.push(thinking.clone());
-            }
             if let Some(path) = append_prompt
                 && !child.system_prompt.trim().is_empty()
             {
                 args.push("--append-system-prompt".into());
                 args.push(path.display().to_string());
             }
+        }
+        if let Some(model) = launch_model {
+            args.push("--model".into());
+            args.push(model.into());
+        }
+        if let Some(thinking) = launch_thinking {
+            args.push("--thinking".into());
+            args.push(thinking.into());
         }
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -717,8 +762,16 @@ impl PiHarness {
         cwd: Option<&str>,
         host: &RunHostContext,
         append_prompt: Option<&PathBuf>,
+        requested_model: Option<&str>,
+        requested_thinking: Option<&str>,
     ) -> Result<(Child, crate::StderrTail), HarnessError> {
-        let mut cmd = self.spawn_command(cwd, host, append_prompt)?;
+        let mut cmd = self.spawn_command_with_config(
+            cwd,
+            host,
+            append_prompt,
+            requested_model,
+            requested_thinking,
+        )?;
         let exe = cmd.as_std().get_program().to_string_lossy().into_owned();
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -755,7 +808,7 @@ impl PiHarness {
     /// when the CLI lists dozens of models a moment later.
     async fn discover_models(&self) -> Result<DiscoveredModels, HarnessError> {
         let (mut child, _stderr) = self
-            .spawn_child(None, &RunHostContext::default(), None)
+            .spawn_child(None, &RunHostContext::default(), None, None, None)
             .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
@@ -800,7 +853,7 @@ impl PiHarness {
     /// (extension / prompt / skill commands, all three sources).
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let (mut child, _stderr) = self
-            .spawn_child(None, &RunHostContext::default(), None)
+            .spawn_child(None, &RunHostContext::default(), None, None, None)
             .await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => PiClient::new(stdin, stdout),
@@ -1023,7 +1076,13 @@ impl Harness for PiHarness {
             );
         }
         let spawn = self
-            .spawn_child(Some(&request.cwd), &controls.host, temp_prompt.as_ref())
+            .spawn_child(
+                Some(&request.cwd),
+                &controls.host,
+                temp_prompt.as_ref(),
+                request.model.as_deref(),
+                request.reasoning.map(thinking_level),
+            )
             .await;
         let (mut child, stderr_tail) = match spawn {
             Ok(child) => child,
@@ -1065,6 +1124,7 @@ impl Harness for PiHarness {
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
             no_activity_grace: self.no_activity_grace,
+            model_catalog_wait: self.model_catalog_wait,
             stderr_tail,
             intercept,
             temp_prompt,
@@ -1088,6 +1148,7 @@ struct Session {
     kill_grace: Duration,
     handshake_timeout: Duration,
     no_activity_grace: Duration,
+    model_catalog_wait: Duration,
     stderr_tail: crate::StderrTail,
     /// Which synthesized built-in commands this run intercepts (computed from
     /// the discovery cache at run start).
@@ -1377,6 +1438,85 @@ impl Drop for TempPromptGuard {
     }
 }
 
+fn requested_model_parts(requested: &str) -> Result<(&str, &str), HarnessError> {
+    let Some((provider, model_id)) = requested.split_once('/') else {
+        return Err(HarnessError::Protocol(format!(
+            "pi model must use provider/id form: {requested}"
+        )));
+    };
+    if provider.is_empty() || model_id.is_empty() {
+        return Err(HarnessError::Protocol(format!(
+            "pi model must use provider/id form: {requested}"
+        )));
+    }
+    Ok((provider, model_id))
+}
+
+fn state_model_key(state: &Value) -> Option<String> {
+    let model = state.get("model")?;
+    let provider = model.get("provider")?.as_str()?;
+    let model_id = model.get("id")?.as_str()?;
+    Some(format!("{provider}/{model_id}"))
+}
+
+fn state_uses_model(state: &Value, requested: &str) -> bool {
+    state_model_key(state).as_deref() == Some(requested)
+}
+
+fn catalog_contains_model(catalog: &Value, provider: &str, model_id: &str) -> bool {
+    catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                model.get("provider").and_then(Value::as_str) == Some(provider)
+                    && model.get("id").and_then(Value::as_str) == Some(model_id)
+            })
+        })
+}
+
+/// Re-select after `switch_session` only when the loaded session overrode the
+/// launch model. Pi's RPC `set_model` consults an asynchronously populated
+/// snapshot and can report "Model not found" during a cold start, so wait for
+/// the exact catalog row before retrying. A user-selected model is never a
+/// best-effort hint: exhaustion is a loud setup failure, not a silent fallback.
+async fn select_requested_model(
+    client: &PiClient,
+    requested: &str,
+    catalog_wait: Duration,
+) -> Result<(), HarnessError> {
+    let (provider, model_id) = requested_model_parts(requested)?;
+    let set_params = || {
+        let mut params = Map::new();
+        params.insert("provider".into(), Value::String(provider.into()));
+        params.insert("modelId".into(), Value::String(model_id.into()));
+        params
+    };
+    let first_error = match client.request("set_model", set_params()).await {
+        Ok(_) => return Ok(()),
+        Err(err) => err,
+    };
+    if !first_error.to_string().contains("Model not found") {
+        return Err(first_error);
+    }
+
+    let deadline = Instant::now() + catalog_wait;
+    loop {
+        let catalog = client.request("get_available_models", Map::new()).await?;
+        if catalog_contains_model(&catalog, provider, model_id) {
+            return client.request("set_model", set_params()).await.map(|_| ());
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::Protocol(format!(
+                "requested pi model {requested} was unavailable after {}s; \
+                 initial set_model failed: {first_error}",
+                catalog_wait.as_secs_f32()
+            )));
+        }
+        tokio::time::sleep(MODEL_CATALOG_POLL).await;
+    }
+}
+
 /// The per-run event loop: one task multiplexing agent events, the steering
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
@@ -1391,6 +1531,7 @@ async fn run_session(session: Session) {
         kill_grace,
         handshake_timeout,
         no_activity_grace,
+        model_catalog_wait,
         stderr_tail,
         intercept,
         temp_prompt,
@@ -1420,32 +1561,41 @@ async fn run_session(session: Session) {
                 )));
             }
         }
-        // Model + reasoning: best-effort, like the ACP set_config_option
-        // attitude — a rejected set is logged, never fatal.
-        if let Some(model) = &request.model
-            && let Some((provider, model_id)) = model.split_once('/')
+        // Fresh runs already launched with --model/--thinking, so there is no
+        // default-model initialization followed by an unconditional switch.
+        // A resumed session may restore its historical model; detect that
+        // exact case and re-select, waiting out Pi's cold catalog snapshot.
+        let mut state = client.request("get_state", Map::new()).await?;
+        if let Some(requested) = request.model.as_deref()
+            && !state_uses_model(&state, requested)
         {
-            let mut params = Map::new();
-            params.insert("provider".into(), Value::String(provider.into()));
-            params.insert("modelId".into(), Value::String(model_id.into()));
-            if let Err(e) = client.request("set_model", params).await {
-                tracing::debug!(
-                    target: "cypher_harness::pi",
-                    "set_model rejected (agent default runs): {e}"
-                );
+            select_requested_model(&client, requested, model_catalog_wait).await?;
+            state = client.request("get_state", Map::new()).await?;
+            if !state_uses_model(&state, requested) {
+                let actual = state_model_key(&state).unwrap_or_else(|| "<none>".into());
+                return Err(HarnessError::Protocol(format!(
+                    "pi selected {actual} instead of requested model {requested}"
+                )));
             }
         }
         if let Some(level) = request.reasoning {
-            let mut params = Map::new();
-            params.insert("level".into(), Value::String(thinking_level(level).into()));
-            if let Err(e) = client.request("set_thinking_level", params).await {
-                tracing::debug!(
-                    target: "cypher_harness::pi",
-                    "set_thinking_level rejected (agent default runs): {e}"
-                );
+            let requested = thinking_level(level);
+            if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
+                let mut params = Map::new();
+                params.insert("level".into(), Value::String(requested.into()));
+                client.request("set_thinking_level", params).await?;
+                state = client.request("get_state", Map::new()).await?;
+                if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
+                    let actual = state
+                        .get("thinkingLevel")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<none>");
+                    return Err(HarnessError::Protocol(format!(
+                        "pi selected thinking level {actual} instead of requested {requested}"
+                    )));
+                }
             }
         }
-        let state = client.request("get_state", Map::new()).await?;
         let session_file = state
             .get("sessionFile")
             .and_then(Value::as_str)

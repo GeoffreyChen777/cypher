@@ -145,6 +145,40 @@ fn engine_bridge_url_is_injected_into_children() {
     );
 }
 
+#[test]
+fn requested_model_and_thinking_are_applied_at_process_launch() {
+    let harness = harness();
+    let request = request("scenario:happy");
+    let cmd = harness
+        .spawn_run_command(
+            Some(&request.cwd),
+            &RunHostContext::default(),
+            None,
+            &request,
+        )
+        .expect("run command builds");
+    let args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        args.windows(2).any(|pair| {
+            pair == [
+                "--model".to_string(),
+                "anthropic/claude-sonnet-4-20250514".to_string(),
+            ]
+        }),
+        "requested model must be selected before Pi initializes: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--thinking".to_string(), "medium".to_string()]),
+        "requested thinking level must be selected before Pi initializes: {args:?}"
+    );
+}
+
 #[tokio::test]
 async fn models_and_commands_are_discovered_from_the_probe() {
     let harness = harness();
@@ -193,6 +227,31 @@ async fn models_and_commands_are_discovered_from_the_probe() {
     harness.invalidate_discovery();
     let refreshed = harness.commands().await.expect("rediscovered commands");
     assert_eq!(refreshed, commands);
+}
+
+#[tokio::test]
+async fn model_mismatch_is_a_loud_error_instead_of_silent_fallback() {
+    let dir = tempfile::tempdir().expect("session dir");
+    std::fs::write(dir.path().join(".ignore-startup-model"), b"").expect("startup marker");
+    std::fs::write(dir.path().join(".reject-model-switch"), b"").expect("switch marker");
+    let harness = PiHarness::new(dir.path().to_path_buf())
+        .with_executable(fixture_path())
+        .with_model_catalog_wait(Duration::from_millis(20));
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("scenario:happy"), controls).await;
+
+    let dones = dones(&events);
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert_eq!(dones[0].0, DoneStatus::Errored);
+    let error = dones[0].1.as_deref().expect("model mismatch error");
+    assert!(error.contains("set_model"), "{error}");
+    assert!(error.contains("model switch rejected"), "{error}");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+        "the prompt must not run on a fallback model: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -479,6 +538,24 @@ async fn resume_switches_to_the_injected_session_path() {
         AgentEvent::Done { session_id, .. }
             if session_id.as_deref() == Some("/tmp/pi-test/resumed-session.jsonl")
     )));
+}
+
+#[tokio::test]
+async fn resume_reapplies_the_requested_model_and_thinking_before_prompting() {
+    let mut req = request("scenario:resumed");
+    req.resume = Some("/tmp/pi-test/other-model-session.jsonl".into());
+
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness(), req, controls).await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SessionStarted { model, .. } if model == "Claude Sonnet 4"
+    )));
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "back again".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
 #[tokio::test]
