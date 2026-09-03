@@ -27,6 +27,8 @@ struct AuthTokens: Codable, Equatable {
 }
 
 enum AuthError: LocalizedError, Equatable {
+    case emailVerificationRequired(pendingAuthenticationToken: String, email: String?)
+
     /// Non-2xx from the edge. `code`/`retryable` come from the edge's typed
     /// JSON envelope `{error, code, retryable}` when it was parseable; a raw
     /// status with an unparseable body carries `nil` for both.
@@ -52,6 +54,8 @@ enum AuthError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .emailVerificationRequired:
+            return "Email verification required"
         case .http(let code, let body, _, _): return "Auth failed (\(code)): \(body)"
         case .invalidResponse: return "Unexpected auth response"
         case .transport(let detail): return "Auth request failed: \(detail)"
@@ -91,6 +95,22 @@ struct AuthClient {
         var body: [String: String] = ["code": code]
         if let codeVerifier { body["codeVerifier"] = codeVerifier }
         let r: Response = try await post("auth/exchange", body: body)
+        return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken))
+    }
+
+    func verifyEmail(pendingAuthenticationToken: String, code: String) async throws -> (AuthUser, AuthTokens) {
+        struct Response: Codable {
+            var user: AuthUser
+            var accessToken: String
+            var refreshToken: String
+        }
+        let r: Response = try await post(
+            "auth/verify-email",
+            body: [
+                "pendingAuthenticationToken": pendingAuthenticationToken,
+                "code": code
+            ]
+        )
         return (r.user, AuthTokens(accessToken: r.accessToken, refreshToken: r.refreshToken))
     }
 
@@ -142,11 +162,20 @@ struct AuthClient {
         var error: String?
         var code: String?
         var retryable: Bool?
+        var pendingAuthenticationToken: String?
+        var email: String?
     }
 
     private static func check(statusCode: Int, data: Data) throws {
         guard (200..<300).contains(statusCode) else {
             let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
+            if envelope?.code == "email_verification_required",
+               let token = envelope?.pendingAuthenticationToken {
+                throw AuthError.emailVerificationRequired(
+                    pendingAuthenticationToken: token,
+                    email: envelope?.email
+                )
+            }
             throw AuthError.http(
                 statusCode,
                 envelope?.error ?? String(data: data, encoding: .utf8) ?? "",

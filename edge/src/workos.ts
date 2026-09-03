@@ -37,6 +37,22 @@ export class WorkOsAuthError extends Error {
   }
 }
 
+/** WorkOS successfully authenticated the upstream identity provider, but the
+ * user's email still needs its one-time verification code. This is a
+ * continuation, not a failed credential: the short-lived pending token must
+ * be presented with the emailed code to finish authentication. */
+export class WorkOsEmailVerificationRequired extends Error {
+  readonly pendingAuthenticationToken: string;
+  readonly email: string | null;
+
+  constructor(pendingAuthenticationToken: string, email: string | null) {
+    super("email verification required");
+    this.name = "WorkOsEmailVerificationRequired";
+    this.pendingAuthenticationToken = pendingAuthenticationToken;
+    this.email = email;
+  }
+}
+
 export interface ExchangeResult {
   readonly user: {
     readonly id: string;
@@ -96,11 +112,21 @@ interface WireMembership {
  * the rest; a non-JSON body is simply an unknown error. */
 const readWireError = async (res: Response): Promise<{
   error?: string;
+  code?: string;
   error_description?: string;
   message?: string;
+  pending_authentication_token?: string;
+  email?: string;
 }> => {
   try {
-    return (await res.json()) as { error?: string; error_description?: string; message?: string };
+    return (await res.json()) as {
+      error?: string;
+      code?: string;
+      error_description?: string;
+      message?: string;
+      pending_authentication_token?: string;
+      email?: string;
+    };
   } catch {
     return {};
   }
@@ -138,9 +164,28 @@ const sanitizeProfilePicture = (value: unknown): string | null => {
  *    retryable, WITHOUT the upstream body: only an explicit `invalid_grant`
  *    may clear a session, so every ambiguous failure is conservative. */
 const failed = async (res: Response): Promise<never> => {
-  const { error, error_description, message } = await readWireError(res);
+  const {
+    error,
+    code,
+    error_description,
+    message,
+    pending_authentication_token,
+    email
+  } = await readWireError(res);
+  const wireCode = code ?? error;
   const status = res.status;
-  if (error === "invalid_grant") {
+  if (
+    wireCode === "email_verification_required" &&
+    typeof pending_authentication_token === "string" &&
+    pending_authentication_token.length > 0 &&
+    pending_authentication_token.length <= 4096
+  ) {
+    throw new WorkOsEmailVerificationRequired(
+      pending_authentication_token,
+      typeof email === "string" && email.length <= 320 ? email : null
+    );
+  }
+  if (wireCode === "invalid_grant") {
     throw new WorkOsAuthError(
       401,
       "invalid_grant",
@@ -202,6 +247,42 @@ export const exchange = async (
       grant_type: "authorization_code",
       code,
       code_verifier: codeVerifier
+    })
+  });
+  if (!res.ok) return failed(res);
+  const r = (await res.json()) as WireAuthResponse;
+  return {
+    user: {
+      id: r.user.id,
+      email: r.user.email,
+      firstName: r.user.first_name,
+      lastName: r.user.last_name,
+      profilePictureUrl: sanitizeProfilePicture(r.user.profile_picture_url)
+    },
+    accessToken: r.access_token,
+    refreshToken: r.refresh_token
+  };
+};
+
+/** Continue an authentication that WorkOS paused for email ownership
+ * verification. The pending token comes only from the immediately preceding
+ * code exchange and remains short-lived; neither it nor the six-digit code is
+ * ever logged. */
+export const verifyEmail = async (
+  env: Env,
+  apiKey: string,
+  pendingAuthenticationToken: string,
+  code: string
+): Promise<ExchangeResult> => {
+  const res = await fetchOrError(`${API}/user_management/authenticate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_id: env.WORKOS_CLIENT_ID,
+      client_secret: apiKey,
+      grant_type: "urn:workos:oauth:grant-type:email-verification:code",
+      pending_authentication_token: pendingAuthenticationToken,
+      code
     })
   });
   if (!res.ok) return failed(res);

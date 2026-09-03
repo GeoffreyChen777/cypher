@@ -3,8 +3,8 @@
 // The Cypher app icon on black, one white button — the old mobile app's Gate.
 //
 // GitHub-only: the authorize `provider` is pinned to the exact `GitHubOAuth`
-// (never AuthKit's email/SSO selector) — defense-in-depth, since the dashboard
-// AuthKit still exposes email/SSO. Callback and PKCE are unaffected.
+// (never AuthKit's email/SSO selector). Unverified GitHub emails continue
+// through the email-verification step after the OAuth callback.
 //
 // Endpoints are fixed to production (the old app's rule: mobile always talks
 // to prod; a stale override once broke sign-in in the worst ghost way).
@@ -45,6 +45,8 @@ struct SignInView: View {
     @Environment(AppModel.self) private var model
     @State private var busy = false
     @State private var error: String?
+    @State private var verification: PendingEmailVerification?
+    @State private var verificationCode = ""
     @State private var authSession = AuthSessionCoordinator()
 
     var body: some View {
@@ -73,26 +75,30 @@ struct SignInView: View {
                 }
 
                 VStack(spacing: 12) {
-                    Button {
-                        signIn()
-                    } label: {
-                        Group {
-                            if busy {
-                                ProgressView()
-                                    .tint(Theme.bg)
-                            } else {
-                                Text("Log in to Cypher")
-                                    .font(Theme.sans(15, weight: .semibold))
-                                    .foregroundStyle(Theme.bg)
+                    if let verification {
+                        verificationForm(verification)
+                    } else {
+                        Button {
+                            signIn()
+                        } label: {
+                            Group {
+                                if busy {
+                                    ProgressView()
+                                        .tint(Theme.bg)
+                                } else {
+                                    Text("Log in to Cypher")
+                                        .font(Theme.sans(15, weight: .semibold))
+                                        .foregroundStyle(Theme.bg)
+                                }
                             }
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
                         }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 50)
-                        .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                        .opacity(busy ? 0.6 : 1)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(busy)
-                    .opacity(busy ? 0.6 : 1)
 
                     if let error {
                         Text(error)
@@ -107,6 +113,34 @@ struct SignInView: View {
             .padding(.horizontal, 32)
             .frame(maxWidth: 480)
         }
+    }
+
+    @ViewBuilder
+    private func verificationForm(_ verification: PendingEmailVerification) -> some View {
+        Text("Enter the six-digit code sent to \(verification.email ?? "your email").")
+            .font(Theme.sans(14))
+            .foregroundStyle(Theme.textMuted)
+            .multilineTextAlignment(.center)
+        TextField("Verification code", text: $verificationCode)
+            .textContentType(.oneTimeCode)
+            .keyboardType(.numberPad)
+            .multilineTextAlignment(.center)
+            .font(Theme.sans(20, weight: .semibold))
+            .padding()
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+        Button {
+            verifyEmail(verification)
+        } label: {
+            Text(busy ? "Verifying…" : "Verify email")
+                .font(Theme.sans(15, weight: .semibold))
+                .foregroundStyle(Theme.bg)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .opacity(busy ? 0.6 : 1)
     }
 
     /// The GitHub-only AuthKit code flow: system browser session → edge bridge
@@ -152,6 +186,12 @@ struct SignInView: View {
                     do {
                         try await model.signIn(edgeURL: Endpoints.edgeURL, code: code,
                                                codeVerifier: verifier)
+                    } catch let AuthError.emailVerificationRequired(pendingAuthenticationToken, email) {
+                        verification = PendingEmailVerification(
+                            pendingAuthenticationToken: pendingAuthenticationToken,
+                            email: email
+                        )
+                        self.error = nil
                     } catch {
                         self.error = error.localizedDescription
                     }
@@ -160,6 +200,35 @@ struct SignInView: View {
             }
         }
     }
+
+    private func verifyEmail(_ verification: PendingEmailVerification) {
+        let code = verificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count == 6, code.allSatisfy(\.isNumber) else {
+            error = "Enter the six-digit verification code"
+            return
+        }
+        busy = true
+        error = nil
+        Task { @MainActor in
+            do {
+                try await model.verifyEmail(
+                    edgeURL: Endpoints.edgeURL,
+                    pendingAuthenticationToken: verification.pendingAuthenticationToken,
+                    code: code
+                )
+                self.verification = nil
+                self.verificationCode = ""
+            } catch {
+                self.error = error.localizedDescription
+            }
+            busy = false
+        }
+    }
+}
+
+private struct PendingEmailVerification {
+    let pendingAuthenticationToken: String
+    let email: String?
 }
 
 // MARK: - Auth session plumbing

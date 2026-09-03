@@ -2,6 +2,7 @@
  * The /auth/* HTTP surface absorbed from zeron's apps/server:
  *
  *  - POST /auth/exchange     — WorkOS code → tokens (see `workos.ts`).
+ *  - POST /auth/verify-email — continue a paused email-verification flow.
  *  - POST /auth/refresh      — WorkOS refresh → fresh tokens (org-scopable).
  *  - GET  /auth/orgs         — the caller's active org memberships.
  *  - POST /auth/orgs         — create an org + first (admin) membership.
@@ -19,7 +20,15 @@
  */
 import { bearerFromRequest, verifyToken } from "./auth";
 import type { Env } from "./env";
-import { WorkOsAuthError, createOrg, exchange, listOrgs, refresh } from "./workos";
+import {
+  WorkOsAuthError,
+  WorkOsEmailVerificationRequired,
+  createOrg,
+  exchange,
+  listOrgs,
+  refresh,
+  verifyEmail
+} from "./workos";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -34,13 +43,25 @@ const notConfigured = (): Response => json({ error: "workos not configured" }, 5
  * credential rejection (`invalid_grant`) from a retryable blip; the `error`
  * string is always a safe message. An unclassified failure answers a
  * conservative retryable 502 without leaking internals. */
-const authFailed = (e: unknown): Response =>
-  e instanceof WorkOsAuthError
+const authFailed = (e: unknown): Response => {
+  if (e instanceof WorkOsEmailVerificationRequired) {
+    return json(
+      {
+        error: e.message,
+        code: "email_verification_required",
+        pendingAuthenticationToken: e.pendingAuthenticationToken,
+        ...(e.email ? { email: e.email } : {})
+      },
+      409
+    );
+  }
+  return e instanceof WorkOsAuthError
     ? json({ error: e.message, code: e.code, retryable: e.retryable }, e.status)
     : json(
         { error: "authentication failed — please try again", code: "upstream", retryable: true },
         502
       );
+};
 
 /** Short SHA-256 fingerprint for log attribution of a credential WITHOUT
  * ever exposing it (a refresh token is single-use and would rotate anyway). */
@@ -84,6 +105,29 @@ export const handleAuthRoute = async (
     // The code + verifier go straight to WorkOS; neither is ever logged.
     try {
       return json(await exchange(env, apiKey, body.code, body.codeVerifier));
+    } catch (e) {
+      return authFailed(e);
+    }
+  }
+
+  if (parts[1] === "verify-email" && parts.length === 2 && request.method === "POST") {
+    if (!apiKey) return notConfigured();
+    const body = await bodyJson<{
+      code?: string;
+      pendingAuthenticationToken?: string;
+    }>(request);
+    if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code))
+      return json({ error: "verification code must be 6 digits" }, 400);
+    if (
+      typeof body?.pendingAuthenticationToken !== "string" ||
+      body.pendingAuthenticationToken.length === 0 ||
+      body.pendingAuthenticationToken.length > 4096
+    )
+      return json({ error: "missing or invalid pendingAuthenticationToken" }, 400);
+    try {
+      return json(
+        await verifyEmail(env, apiKey, body.pendingAuthenticationToken, body.code)
+      );
     } catch (e) {
       return authFailed(e);
     }

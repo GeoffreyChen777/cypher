@@ -288,6 +288,103 @@ describe("POST /auth/exchange", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("returns a safe email-verification continuation without discarding the pending token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "email_verification_required",
+            message: "Email ownership must be verified.",
+            pending_authentication_token: "pending_test_123",
+            email: "new-user@example.com"
+          }),
+          { status: 400 }
+        )
+    );
+    try {
+      const res = await exchange({ code: "github-code", codeVerifier: VALID_VERIFIER });
+      expect(res?.status).toBe(409);
+      expect(await res?.json()).toEqual({
+        error: "email verification required",
+        code: "email_verification_required",
+        pendingAuthenticationToken: "pending_test_123",
+        email: "new-user@example.com"
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("POST /auth/verify-email", () => {
+  const workosEnv = {
+    WORKOS_API_KEY: "sk_test",
+    WORKOS_CLIENT_ID: "client_test",
+    AUTH_MODE: "workos"
+  } as unknown as Env;
+
+  const verifyEmail = (body: unknown): Promise<Response | undefined> =>
+    handleAuthRoute(
+      new Request("https://edge.letscypher.app/auth/verify-email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      }),
+      workosEnv,
+      new URL("https://edge.letscypher.app/auth/verify-email")
+    );
+
+  it("validates the six-digit code and pending token", async () => {
+    expect(
+      (await verifyEmail({ code: "12345", pendingAuthenticationToken: "p" }))?.status
+    ).toBe(400);
+    expect((await verifyEmail({ code: "123456" }))?.status).toBe(400);
+  });
+
+  it("continues authentication with the WorkOS email-verification grant", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", async (_url: string, init: { body: string }) => {
+      calls.push(JSON.parse(init.body) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          user: {
+            id: "u1",
+            email: "new-user@example.com",
+            first_name: "New",
+            last_name: "User",
+            profile_picture_url: null
+          },
+          access_token: "at",
+          refresh_token: "rt"
+        }),
+        { status: 200 }
+      );
+    });
+    try {
+      const res = await verifyEmail({
+        code: "123456",
+        pendingAuthenticationToken: "pending_test_123"
+      });
+      expect(res?.status).toBe(200);
+      expect(await res?.json()).toMatchObject({
+        accessToken: "at",
+        refreshToken: "rt",
+        user: { email: "new-user@example.com" }
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        client_id: "client_test",
+        client_secret: "sk_test",
+        grant_type: "urn:workos:oauth:grant-type:email-verification:code",
+        pending_authentication_token: "pending_test_123",
+        code: "123456"
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

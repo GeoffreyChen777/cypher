@@ -194,6 +194,20 @@ final class AppModel {
     func signIn(edgeURL: URL, code: String, codeVerifier: String) async throws {
         let client = AuthClient(baseURL: edgeURL)
         let (user, tokens) = try await client.exchange(code: code, codeVerifier: codeVerifier)
+        try await finishSignIn(edgeURL: edgeURL, user: user, tokens: tokens)
+    }
+
+    func verifyEmail(edgeURL: URL, pendingAuthenticationToken: String, code: String) async throws {
+        let client = AuthClient(baseURL: edgeURL)
+        let (user, tokens) = try await client.verifyEmail(
+            pendingAuthenticationToken: pendingAuthenticationToken,
+            code: code
+        )
+        try await finishSignIn(edgeURL: edgeURL, user: user, tokens: tokens)
+    }
+
+    private func finishSignIn(edgeURL: URL, user: AuthUser, tokens: AuthTokens) async throws {
+        let client = AuthClient(baseURL: edgeURL)
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.workos.rawValue
         storedUserId = user.id

@@ -255,6 +255,15 @@ struct SignInLifecycle {
     generation: u64,
     /// `state` → the pending attempt it fences.
     pending: HashMap<String, PendingSignIn>,
+    /// `state` → a WorkOS authentication paused for email verification.
+    email_verification: HashMap<String, PendingEmailVerification>,
+}
+
+struct PendingEmailVerification {
+    generation: u64,
+    pending_authentication_token: String,
+    email: Option<String>,
+    at: Instant,
 }
 
 /// The auth service — cheap to clone by `Arc`.
@@ -520,14 +529,75 @@ impl Auth {
                     .into(),
             ));
         };
-        let result = self.exchange_code(code, &verifier).await?;
-        self.finish_sign_in(result, generation)
+        match self.exchange_code(code, &verifier).await? {
+            ExchangeOutcome::Complete(result) => self.finish_sign_in(result, generation),
+            ExchangeOutcome::EmailVerificationRequired {
+                pending_authentication_token,
+                email,
+            } => {
+                self.store_email_verification(
+                    state,
+                    generation,
+                    pending_authentication_token,
+                    email,
+                );
+                Err(EngineError::Other(
+                    "email verification required — enter the six-digit code from your email".into(),
+                ))
+            }
+        }
+    }
+
+    /// Whether a headless or headed sign-in is waiting for WorkOS's emailed
+    /// verification code. This is intentionally a boolean so the pending
+    /// authentication token never crosses an RPC or log boundary.
+    pub fn email_verification_pending(&self) -> bool {
+        let mut sign_in = lock(&self.inner.sign_in);
+        let now = Instant::now();
+        sign_in
+            .email_verification
+            .retain(|_, pending| now.duration_since(pending.at) < SIGN_IN_TTL);
+        !sign_in.email_verification.is_empty()
+    }
+
+    /// Complete the one pending headless email-verification continuation.
+    /// The token is kept in memory only and is removed after a successful
+    /// exchange (or sign-out); a bad code leaves it available for retry.
+    pub async fn complete_email_verification(&self, code: &str) -> Result<(), EngineError> {
+        let code = code.trim();
+        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(EngineError::Other(
+                "email verification code must be six digits".into(),
+            ));
+        }
+        let (state, generation, token) = {
+            let mut sign_in = lock(&self.inner.sign_in);
+            let now = Instant::now();
+            sign_in
+                .email_verification
+                .retain(|_, pending| now.duration_since(pending.at) < SIGN_IN_TTL);
+            let Some((state, pending)) = sign_in.email_verification.iter().next() else {
+                return Err(EngineError::Other(
+                    "no email verification is pending — start sign-in again".into(),
+                ));
+            };
+            (
+                state.clone(),
+                pending.generation,
+                pending.pending_authentication_token.clone(),
+            )
+        };
+        let result = self.exchange_email_verification(&token, code).await?;
+        self.finish_sign_in(result, generation)?;
+        self.clear_email_verification(&state);
+        Ok(())
     }
 
     pub fn sign_out(&self) {
         let mut sign_in = lock(&self.inner.sign_in);
         sign_in.generation = sign_in.generation.wrapping_add(1);
         sign_in.pending.clear();
+        sign_in.email_verification.clear();
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
         self.persist::<&StoredSession>(None);
@@ -619,10 +689,9 @@ impl Auth {
         }
         let client_id = self.inner.workos.clone().unwrap_or_default();
         // GitHub-only: pin `provider` to the exact `GitHubOAuth` so the app
-        // flow can never fall back to AuthKit's email/SSO screen. Defense-in-
-        // depth — the dashboard AuthKit still exposes those providers, but the
-        // Cypher app surfaces GitHub sign-in exclusively. Callback and PKCE are
-        // unaffected by the provider pin.
+        // flow can never fall back to AuthKit's email/SSO screen. Callback and
+        // PKCE are unaffected by the provider pin; an unverified GitHub email
+        // may continue through the local email-verification form below.
         format!(
             "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=GitHubOAuth&state={}&code_challenge={}&code_challenge_method=S256",
             self.inner.config.workos_api_base.trim_end_matches('/'),
@@ -647,7 +716,47 @@ impl Auth {
         Some((sign_in.generation, pending.verifier))
     }
 
-    async fn exchange_code(&self, code: &str, verifier: &str) -> Result<SignInResult, EngineError> {
+    fn store_email_verification(
+        &self,
+        state: &str,
+        generation: u64,
+        pending_authentication_token: String,
+        email: Option<String>,
+    ) {
+        lock(&self.inner.sign_in).email_verification.insert(
+            state.to_string(),
+            PendingEmailVerification {
+                generation,
+                pending_authentication_token,
+                email,
+                at: Instant::now(),
+            },
+        );
+    }
+
+    fn pending_email_verification(&self, state: &str) -> Option<(u64, String, Option<String>)> {
+        let mut sign_in = lock(&self.inner.sign_in);
+        let now = Instant::now();
+        sign_in
+            .email_verification
+            .retain(|_, pending| now.duration_since(pending.at) < SIGN_IN_TTL);
+        let pending = sign_in.email_verification.get(state)?;
+        Some((
+            pending.generation,
+            pending.pending_authentication_token.clone(),
+            pending.email.clone(),
+        ))
+    }
+
+    fn clear_email_verification(&self, state: &str) {
+        lock(&self.inner.sign_in).email_verification.remove(state);
+    }
+
+    async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<ExchangeOutcome, EngineError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WireUser {
@@ -684,6 +793,31 @@ impl Auth {
             .send()
             .await
             .map_err(|e| EngineError::Other(format!("the edge is unreachable: {e}")))?;
+        if res.status() == reqwest::StatusCode::CONFLICT {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Verification {
+                code: String,
+                pending_authentication_token: String,
+                #[serde(default)]
+                email: Option<String>,
+            }
+            let body: Verification = res
+                .json()
+                .await
+                .map_err(|e| EngineError::Other(format!("malformed verification response: {e}")))?;
+            if body.code == "email_verification_required"
+                && !body.pending_authentication_token.is_empty()
+            {
+                return Ok(ExchangeOutcome::EmailVerificationRequired {
+                    pending_authentication_token: body.pending_authentication_token,
+                    email: body.email,
+                });
+            }
+            return Err(EngineError::Other(
+                "sign-in returned an invalid email-verification response".into(),
+            ));
+        }
         if !res.status().is_success() {
             return Err(EngineError::Other(format!(
                 "sign-in failed during token exchange ({}) — the code may have expired; start again",
@@ -694,6 +828,73 @@ impl Auth {
             .json()
             .await
             .map_err(|e| EngineError::Other(format!("malformed exchange response: {e}")))?;
+        let name = [body.user.first_name, body.user.last_name]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(ExchangeOutcome::Complete(SignInResult {
+            user: AuthUser {
+                id: body.user.id,
+                email: body.user.email,
+                name: (!name.is_empty()).then_some(name),
+                avatar_url: sanitize_avatar_url(body.user.profile_picture_url),
+            },
+            access_token: body.access_token,
+            refresh_token: body.refresh_token,
+        }))
+    }
+
+    async fn exchange_email_verification(
+        &self,
+        pending_authentication_token: &str,
+        code: &str,
+    ) -> Result<SignInResult, EngineError> {
+        let url = format!(
+            "{}/auth/verify-email",
+            self.inner.config.edge_url.trim_end_matches('/')
+        );
+        let res = self
+            .inner
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "pendingAuthenticationToken": pending_authentication_token,
+                "code": code
+            }))
+            .send()
+            .await
+            .map_err(|e| EngineError::Other(format!("the edge is unreachable: {e}")))?;
+        if !res.status().is_success() {
+            return Err(EngineError::Other(format!(
+                "email verification failed ({}) — check the code and try again",
+                res.status().as_u16()
+            )));
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireUser {
+            id: String,
+            email: String,
+            #[serde(default)]
+            first_name: Option<String>,
+            #[serde(default)]
+            last_name: Option<String>,
+            #[serde(default)]
+            profile_picture_url: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Exchange {
+            user: WireUser,
+            access_token: String,
+            refresh_token: String,
+        }
+        let body: Exchange = res
+            .json()
+            .await
+            .map_err(|e| EngineError::Other(format!("malformed verification response: {e}")))?;
         let name = [body.user.first_name, body.user.last_name]
             .into_iter()
             .flatten()
@@ -966,6 +1167,14 @@ struct SignInResult {
     refresh_token: String,
 }
 
+enum ExchangeOutcome {
+    Complete(SignInResult),
+    EmailVerificationRequired {
+        pending_authentication_token: String,
+        email: Option<String>,
+    },
+}
+
 fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
     // Every user must belong to an organization before the product opens up; an org-less
     // session is `NeedsOrganization`, which the UI gates on.
@@ -1056,7 +1265,8 @@ async fn handle_loopback_conn(
     mut stream: tokio::net::TcpStream,
     auth: Auth,
 ) -> Result<(), std::io::Error> {
-    // Read the request head (bounded; we only need the request line).
+    // Read the request head (bounded; verification submissions also carry a
+    // small URL-encoded body).
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
     loop {
@@ -1071,57 +1281,214 @@ async fn handle_loopback_conn(
             break;
         }
     }
-    let head = String::from_utf8_lossy(&buf);
-    let request_line = head.lines().next().unwrap_or_default();
-    let target = request_line.split_whitespace().nth(1).unwrap_or("");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-
-    let (status, body) = if path != "/callback" {
-        ("404 Not Found", page("Not found."))
-    } else {
-        let params: HashMap<String, String> = query
-            .split('&')
-            .filter_map(|kv| kv.split_once('='))
-            .map(|(k, v)| (k.to_string(), url_decode(v)))
-            .collect();
-        let code = params.get("code");
-        let state = params.get("state");
-        let invalid_callback = || {
-            (
-                "400 Bad Request",
-                page("Invalid or expired sign-in link. Start again from Cypher."),
-            )
-        };
-        match (code, state) {
-            (Some(code), Some(state)) => match auth.take_pending(state) {
-                Some((generation, verifier)) => match auth.exchange_code(code, &verifier).await {
-                    Ok(result) => match auth.finish_sign_in(result, generation) {
-                        Ok(()) => (
-                            "200 OK",
-                            page("Signed in. You can close this tab and return to Cypher."),
-                        ),
-                        Err(err) => {
-                            tracing::info!(error = %err, "auth: discarded canceled callback exchange");
-                            (
-                                "409 Conflict",
-                                page(
-                                    "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
-                                ),
-                            )
-                        }
-                    },
-                    Err(err) => {
-                        tracing::warn!(error = %err, "auth: loopback code exchange failed");
-                        (
-                            "502 Bad Gateway",
-                            page("Sign-in failed during token exchange — check the Cypher logs."),
-                        )
-                    }
-                },
-                None => invalid_callback(),
-            },
-            _ => invalid_callback(),
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|offset| offset + 4)
+        .unwrap_or(buf.len());
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let (method, target) = {
+        let request_line = head.lines().next().unwrap_or_default();
+        (
+            request_line
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+            request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_owned(),
+        )
+    };
+    let content_length = head
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .or_else(|| line.strip_prefix("content-length:"))
+        })
+        .and_then(|length| length.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length > 16 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "request body too large",
+        ));
+    }
+    let body_start = header_end;
+    while buf.len() < body_start + content_length {
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "body read"))??;
+        if n == 0 {
+            break;
         }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let form_body = String::from_utf8_lossy(
+        &buf[body_start..buf.len().min(body_start.saturating_add(content_length))],
+    )
+    .into_owned();
+    let (path, query) = target
+        .as_str()
+        .split_once('?')
+        .unwrap_or((target.as_str(), ""));
+
+    let query_params: HashMap<String, String> = query
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), url_decode(v)))
+        .collect();
+    let form_params: HashMap<String, String> = form_body
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), url_decode(v)))
+        .collect();
+    let invalid_callback = || {
+        (
+            "400 Bad Request",
+            page("Invalid or expired sign-in link. Start again from Cypher."),
+        )
+    };
+    let (status, body) = match path {
+        "/callback" => {
+            let code = query_params.get("code");
+            let state = query_params.get("state");
+            match (code, state) {
+                (Some(code), Some(state)) => match auth.take_pending(state) {
+                    Some((generation, verifier)) => {
+                        match auth.exchange_code(code, &verifier).await {
+                            Ok(ExchangeOutcome::Complete(result)) => {
+                                match auth.finish_sign_in(result, generation) {
+                                    Ok(()) => (
+                                        "200 OK",
+                                        page(
+                                            "Signed in. You can close this tab and return to Cypher.",
+                                        ),
+                                    ),
+                                    Err(err) => {
+                                        tracing::info!(
+                                            error = %err,
+                                            "auth: discarded canceled callback exchange"
+                                        );
+                                        (
+                                            "409 Conflict",
+                                            page(
+                                                "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                            Ok(ExchangeOutcome::EmailVerificationRequired {
+                                pending_authentication_token,
+                                email,
+                            }) => {
+                                auth.store_email_verification(
+                                    state,
+                                    generation,
+                                    pending_authentication_token,
+                                    email.clone(),
+                                );
+                                ("200 OK", verification_page(state, email.as_deref(), None))
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "auth: loopback code exchange failed"
+                                );
+                                (
+                                    "502 Bad Gateway",
+                                    page(
+                                        "Sign-in failed during token exchange — check the Cypher logs.",
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                    None => invalid_callback(),
+                },
+                _ => invalid_callback(),
+            }
+        }
+        "/verify" => {
+            let params = if method == "POST" {
+                &form_params
+            } else {
+                &query_params
+            };
+            let state = params.get("state");
+            let code = params.get("code");
+            match (state, code) {
+                (Some(state), Some(code))
+                    if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    match auth.pending_email_verification(state) {
+                        Some((generation, token, email)) => {
+                            match auth.exchange_email_verification(&token, code).await {
+                                Ok(result) => match auth.finish_sign_in(result, generation) {
+                                    Ok(()) => {
+                                        auth.clear_email_verification(state);
+                                        (
+                                            "200 OK",
+                                            page(
+                                                "Email verified and signed in. You can close this tab and return to Cypher.",
+                                            ),
+                                        )
+                                    }
+                                    Err(err) => {
+                                        auth.clear_email_verification(state);
+                                        tracing::info!(
+                                            error = %err,
+                                            "auth: discarded canceled email verification"
+                                        );
+                                        (
+                                            "409 Conflict",
+                                            page(
+                                                "This sign-in was canceled. Start again from Cypher if you still want to enable sync.",
+                                            ),
+                                        )
+                                    }
+                                },
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        "auth: email verification failed"
+                                    );
+                                    (
+                                        "400 Bad Request",
+                                        verification_page(
+                                            state,
+                                            email.as_deref(),
+                                            Some(
+                                                "That code was not accepted. Check the email and try again.",
+                                            ),
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        None => invalid_callback(),
+                    }
+                }
+                (Some(state), _) if auth.pending_email_verification(state).is_some() => {
+                    let email = auth
+                        .pending_email_verification(state)
+                        .and_then(|(_, _, email)| email);
+                    (
+                        "400 Bad Request",
+                        verification_page(
+                            state,
+                            email.as_deref(),
+                            Some("Enter the six-digit code from your email."),
+                        ),
+                    )
+                }
+                _ => invalid_callback(),
+            }
+        }
+        _ => ("404 Not Found", page("Not found.")),
     };
     let response = format!(
         "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -1131,8 +1498,99 @@ async fn handle_loopback_conn(
     stream.shutdown().await
 }
 
+/// Shared shell for every loopback page — mirrors the edge's hosted
+/// paste-code page (dark, centered card, system fonts) so the browser side of
+/// sign-in looks like one product regardless of which server rendered it.
+/// Inline styles only: these pages must never fetch external assets.
+fn page_shell(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html>\
+<html lang='en'>\
+<head>\
+<meta charset='utf-8'>\
+<meta name='viewport' content='width=device-width, initial-scale=1'>\
+<meta name='referrer' content='no-referrer'>\
+<meta name='robots' content='noindex'>\
+<title>{title}</title>\
+<style>\
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;\
+         background: #0a0a0a; color: #ededed;\
+         font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; }}\
+  main {{ max-width: 24rem; padding: 2.5rem 2rem; text-align: center; }}\
+  .mark {{ width: 44px; height: 44px; margin: 0 auto 1.25rem; border-radius: 12px;\
+         background: #ededed; color: #0a0a0a; display: grid; place-items: center;\
+         font: 700 20px ui-sans-serif, system-ui, sans-serif; }}\
+  h1 {{ font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; }}\
+  p {{ color: #a1a1a1; margin: 0.25rem 0; }}\
+  p.error {{ color: #f87171; }}\
+  strong {{ color: #ededed; font-weight: 600; }}\
+  form {{ margin-top: 1.25rem; }}\
+  input[name=code] {{ display: block; width: 100%; box-sizing: border-box;\
+         margin: 0 0 0.75rem; padding: 0.8rem 1rem; text-align: center;\
+         background: #171717; border: 1px solid #2e2e2e; border-radius: 10px;\
+         color: #ededed; font: 600 22px/1.4 ui-monospace, monospace;\
+         letter-spacing: 0.45em; text-indent: 0.45em; outline: none; }}\
+  input[name=code]:focus {{ border-color: #ededed; }}\
+  button {{ width: 100%; padding: 0.7rem 1rem; border-radius: 10px; border: none;\
+         background: #ededed; color: #0a0a0a; cursor: pointer;\
+         font: 600 14px ui-sans-serif, system-ui, sans-serif; }}\
+  button:hover {{ background: #ffffff; }}\
+  .hint {{ margin-top: 1.25rem; font-size: 13px; }}\
+</style>\
+</head>\
+<body><main><div class='mark' aria-hidden='true'>C</div>{body}</main></body>\
+</html>"
+    )
+}
+
 fn page(message: &str) -> String {
-    format!("<html><body style='font-family:sans-serif;padding:2rem'>{message}</body></html>")
+    // Split "Title. Rest of the message." into heading + body when possible.
+    let (title, rest) = message.split_once(". ").unwrap_or((message, ""));
+    let title = title.trim_end_matches('.');
+    let rest = if rest.is_empty() {
+        String::new()
+    } else {
+        format!("<p>{}</p>", escape_html(rest))
+    };
+    page_shell(
+        &escape_html(title),
+        &format!("<h1>{}</h1>{rest}", escape_html(title)),
+    )
+}
+
+fn verification_page(state: &str, email: Option<&str>, error: Option<&str>) -> String {
+    let email = email
+        .map(escape_html)
+        .unwrap_or_else(|| "your email".into());
+    let error = error
+        .map(|message| format!("<p class='error'>{}</p>", escape_html(message)))
+        .unwrap_or_default();
+    page_shell(
+        "Verify your email",
+        &format!(
+            "<h1>Verify your email</h1>\
+<p>We sent a six-digit code to <strong>{email}</strong>.</p>\
+{error}\
+<form action='/verify' method='post'>\
+<input type='hidden' name='state' value='{}'>\
+<input name='code' inputmode='numeric' autocomplete='one-time-code' \
+pattern='[0-9]{{6}}' maxlength='6' placeholder='000000' required autofocus \
+aria-label='Verification code'>\
+<button type='submit'>Verify and sign in</button>\
+</form>\
+<p class='hint'>The code expires in a few minutes. Keep this tab open until you're signed in.</p>",
+            escape_html(state)
+        ),
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 // ---------------------------------------------------------------------------

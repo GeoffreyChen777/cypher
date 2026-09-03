@@ -1004,7 +1004,29 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                             }
                             match auth.complete_sign_in(pasted).await {
                                 Ok(()) => return,
-                                Err(err) => println!("Sign-in failed: {err}"),
+                                Err(err) => {
+                                    println!("Sign-in failed: {err}");
+                                    if auth.email_verification_pending() {
+                                        println!(
+                                            "Enter the six-digit verification code sent to your email:"
+                                        );
+                                        loop {
+                                            let Some(line) = read_stdin_line().await else {
+                                                return;
+                                            };
+                                            let code = line.trim();
+                                            if code.is_empty() {
+                                                continue;
+                                            }
+                                            match auth.complete_email_verification(code).await {
+                                                Ok(()) => return,
+                                                Err(err) => {
+                                                    println!("Email verification failed: {err}")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }));
