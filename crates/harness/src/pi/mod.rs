@@ -524,10 +524,12 @@ pub struct PiHarness {
     interrupt_grace: Duration,
     kill_grace: Duration,
     handshake_timeout: Duration,
-    /// How long a run waits for a first agent event after the prompt is
-    /// accepted before terminating itself with `Done{Completed}`. A run with
-    /// no agent activity at all (e.g. an extension command whose handler
-    /// only notifies) must never sit "Working" forever.
+    /// How long a turn waits for a first agent event after the prompt is
+    /// accepted before settling itself with `Done{Completed}`. A turn with no
+    /// agent activity at all (e.g. an extension command whose handler only
+    /// notifies) must never sit "Working" forever. On a steerable run the
+    /// child remains parked afterward so process-local extension state (such
+    /// as `/fast`) survives into the next turn.
     no_activity_grace: Duration,
     /// How long model discovery waits for `get_available_models` to become
     /// non-empty. pi's RPC snapshot is empty until the catalog refresh
@@ -592,9 +594,9 @@ impl PiHarness {
         self
     }
 
-    /// Test seam: how long a run waits for a first agent event after the
-    /// prompt is accepted before terminating with `Done{Completed}` (default
-    /// 2s). Tests shrink it so the no-activity termination is fast.
+    /// Test seam: how long a turn waits for a first agent event after the
+    /// prompt is accepted before settling with `Done{Completed}` (default
+    /// 2s). Tests shrink it so no-activity settlement is fast.
     pub fn with_no_activity_grace(mut self, grace: Duration) -> Self {
         self.no_activity_grace = grace;
         self
@@ -2385,21 +2387,40 @@ async fn run_session(session: Session) {
             _ = &mut no_activity, if !agent_started && !done_sent && idle_prompt.is_none() => {
                 // The prompt was accepted but no agent event ever arrived
                 // (an extension command whose handler only notifies, say).
-                // Terminate the run: Done Completed whose result is whatever
-                // text arrived (the notify output), then reap the child —
-                // no parking; late sendMessage work is dropped by design.
+                // Settle this TURN with the notify output, but keep a
+                // steerable child parked exactly like `agent_settled`.
+                // Extensions such as pi-gpt-fast-mode keep their toggle in
+                // process memory; reaping here made every `/fast` start from
+                // the configured default and therefore appear permanently
+                // disabled when that default was true.
+                in_turn = false;
                 done_sent = true;
                 let result = (!last_assistant_text.is_empty())
                     .then(|| last_assistant_text.clone());
-                let _ = event_tx
-                    .send(Ok(AgentEvent::Done {
+                if !send(
+                    &event_tx,
+                    AgentEvent::Done {
                         status: DoneStatus::Completed,
                         result,
                         error: None,
                         session_id: Some(session_file.clone()),
-                    }))
-                    .await;
-                break 'main;
+                    },
+                )
+                .await
+                {
+                    break 'main;
+                }
+                // If nobody can route another turn, there is no reason to
+                // retain the child. Otherwise remain parked until a mailbox
+                // prompt, interrupt, child exit, or sender close arrives.
+                if !steering_open
+                    && idle_prompt.is_none()
+                    && steer_call.is_none()
+                    && steers_queued.is_empty()
+                    && prompt_backlog.is_empty()
+                {
+                    break 'main;
+                }
             },
 
             _ = event_tx.closed() => break 'main,

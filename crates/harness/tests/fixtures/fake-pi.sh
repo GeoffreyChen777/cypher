@@ -465,6 +465,24 @@ while read -r line; do
       exit 0
       ;;
 
+    *scenario:stateful-notify*)
+      # Stateful notify-only extension command (the /fast regression). The
+      # state lives only in this process. Cypher must settle the first turn
+      # without reaping us, then route the second command back here as a
+      # parked prompt so the state can toggle in the opposite direction.
+      emit '{"type":"extension_ui_request","id":"fast-1","method":"notify","message":"GPT Fast mode disabled.","notifyType":"info"}'
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      read -r second || exit 1
+      if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" '/fast'; then
+        emit '{"type":"extension_ui_request","id":"fast-2","method":"notify","message":"GPT Fast mode enabled (service_tier: priority).","notifyType":"info"}'
+        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+        while read -r line; do :; done
+        exit 0
+      fi
+      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stateful command must reuse the parked process\"}"
+      exit 1
+      ;;
+
     *scenario:resumed*)
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'

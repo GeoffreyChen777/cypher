@@ -473,13 +473,15 @@ async fn tool_progress_is_throttled_and_stops_after_end() {
 }
 
 #[tokio::test]
-async fn no_agent_activity_terminates_with_done_completed_carrying_notify_text() {
+async fn no_agent_activity_settles_with_done_completed_carrying_notify_text() {
     // An extension command whose handler only notifies: pi relays the notify
     // requests, accepts the prompt, then goes silent forever. The harness
-    // must end the run itself (Done Completed, result = notify text) instead
-    // of sitting "Working" indefinitely, and reap the child.
+    // must settle the turn itself (Done Completed, result = notify text)
+    // instead of sitting "Working" indefinitely. With no remaining mailbox
+    // sender, the parked child is then reaped.
     let harness = harness().with_no_activity_grace(Duration::from_millis(200));
-    let (controls, _steer, _token) = controls();
+    let (controls, steer, _token) = controls();
+    drop(steer);
     let events = run_to_end(&harness, request("scenario:noagent"), controls).await;
 
     // info notify → TextDelta (escaped multi-line text passes through as-is),
@@ -490,8 +492,8 @@ async fn no_agent_activity_terminates_with_done_completed_carrying_notify_text()
     assert!(events.contains(&AgentEvent::Error {
         message: "command failed: no token".into()
     }));
-    // The run terminates itself: Done Completed whose result is the notify
-    // text, and the stream closes cleanly (no Errored).
+    // The turn settles itself: Done Completed whose result is the notify
+    // text, and the stream closes cleanly once the mailbox is gone.
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
     let done = events
         .iter()
@@ -508,6 +510,76 @@ async fn no_agent_activity_terminates_with_done_completed_carrying_notify_text()
             Some("Available subagents:\n- actor: does things\n- coder: writes code".into()),
             Some(fixture_session_file()),
         )
+    );
+}
+
+#[tokio::test]
+async fn notify_only_extension_state_survives_in_the_parked_process() {
+    // `/fast` keeps its enabled flag in the extension process. A notify-only
+    // first turn must park that process rather than reap it, or every command
+    // starts from the global default and toggles in the same direction.
+    let harness = harness().with_no_activity_grace(Duration::from_millis(100));
+    let (controls, steer, _token) = controls();
+    let stream = harness
+        .run(request("scenario:stateful-notify"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut steer = Some(steer);
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(
+                &ev,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            ) && let Some(steer) = steer.take()
+            {
+                steer
+                    .send(SteerMessage {
+                        prompt: "/fast".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .expect("second toggle routed");
+                // Close the mailbox after the queued turn so the harness
+                // exits once its second notify-only Done has been emitted.
+                drop(steer);
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "GPT Fast mode disabled.".into(),
+        }),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "GPT Fast mode enabled (service_tier: priority).".into(),
+        }),
+        "{events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::SessionStarted { .. }))
+            .count(),
+        1,
+        "both toggles must use one Pi process: {events:?}"
     );
 }
 
@@ -732,6 +804,7 @@ async fn parked_notify_only_turn_rearms_no_activity_and_resets_result() {
         .expect("run starts");
     let events = tokio::time::timeout(Duration::from_secs(10), async move {
         let mut events = Vec::new();
+        let mut steer = Some(steer);
         let mut stream = stream;
         while let Some(ev) = stream.next().await {
             let ev = ev.expect("stream event");
@@ -741,6 +814,7 @@ async fn parked_notify_only_turn_rearms_no_activity_and_resets_result() {
             } = ev
                 && dones_so_far(&events) == 0
             {
+                let steer = steer.take().expect("first Done only");
                 steer
                     .send(SteerMessage {
                         prompt: "notify only".into(),
@@ -748,6 +822,7 @@ async fn parked_notify_only_turn_rearms_no_activity_and_resets_result() {
                     })
                     .await
                     .expect("second mailbox send");
+                drop(steer);
             }
             events.push(ev);
         }
