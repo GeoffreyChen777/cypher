@@ -1397,6 +1397,7 @@ fn reconcile_mention_active(active: Option<usize>, count: usize) -> Option<usize
 struct TextProjection {
     display: String,
     mentions: Vec<(MentionLink, Range<usize>)>,
+    secret_boundaries: Vec<(usize, usize)>,
 }
 
 /// The hover identity of one chip: the raw range plus enough display info to
@@ -1506,6 +1507,20 @@ struct MentionHit {
 }
 
 impl TextProjection {
+    fn secret(raw: &str) -> Self {
+        let mut result = Self::default();
+        for (offset, _) in raw.char_indices() {
+            result
+                .secret_boundaries
+                .push((offset, result.display.len()));
+            result.display.push('•');
+        }
+        result
+            .secret_boundaries
+            .push((raw.len(), result.display.len()));
+        result
+    }
+
     fn new(raw: &str) -> Self {
         let links = mention_links(raw);
         let labels = mention_display_labels(&links);
@@ -1538,6 +1553,15 @@ impl TextProjection {
     }
 
     fn raw_to_display(&self, raw: usize) -> usize {
+        if !self.secret_boundaries.is_empty() {
+            return self
+                .secret_boundaries
+                .iter()
+                .rev()
+                .find(|(r, _)| *r <= raw)
+                .map(|(_, d)| *d)
+                .unwrap_or(0);
+        }
         let mut raw_at = 0;
         let mut display_at = 0;
         for (link, display) in &self.mentions {
@@ -1554,6 +1578,15 @@ impl TextProjection {
     }
 
     fn display_to_raw(&self, display_offset: usize) -> usize {
+        if !self.secret_boundaries.is_empty() {
+            return self
+                .secret_boundaries
+                .iter()
+                .rev()
+                .find(|(_, d)| *d <= display_offset)
+                .map(|(r, _)| *r)
+                .unwrap_or(0);
+        }
         let mut raw_at = 0;
         let mut display_at = 0;
         for (link, display) in &self.mentions {
@@ -1715,12 +1748,14 @@ enum EditKind {
 
 /// Bind the composer keymap. Call once at app boot.
 pub fn init(cx: &mut App) {
-    let ctx = Some("Composer");
+    // Settings fields share native text editing, not the chat's Tab/Escape
+    // completions or Shift+Enter multiline behavior.
+    let ctx = Some("Composer || ProviderField");
     let mut bindings = vec![
         KeyBinding::new("enter", Submit, ctx),
-        KeyBinding::new("tab", MentionTab, ctx),
-        KeyBinding::new("escape", MentionEscape, ctx),
-        KeyBinding::new("shift-enter", Newline, ctx),
+        KeyBinding::new("tab", MentionTab, Some("Composer")),
+        KeyBinding::new("escape", MentionEscape, Some("Composer")),
+        KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
@@ -1914,6 +1949,8 @@ pub struct ComposerInput {
     /// File mentions are a composer feature, not a behavior of generic inputs
     /// (picker searches and rename fields also use this type).
     mentions_enabled: bool,
+    /// Settings credentials only; never used for chat drafts.
+    secret: bool,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
     /// most one compact↔expanded flip per layout (a flip is only re-evaluated
     /// after the input has been measured in the new mode).
@@ -1983,6 +2020,7 @@ impl ComposerInput {
             projection: TextProjection::default(),
             ghost: None,
             mentions_enabled: false,
+            secret: false,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -2035,6 +2073,24 @@ impl ComposerInput {
         &self.content
     }
 
+    pub fn new_secret(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(placeholder, cx);
+        input.secret = true;
+        input.refresh_projection();
+        input
+    }
+
+    pub fn settings_field(
+        placeholder: impl Into<SharedString>,
+        secret: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut input = Self::with_context(placeholder, "ProviderField", cx);
+        input.secret = secret;
+        input.refresh_projection();
+        input
+    }
+
     pub fn set_mention_controls(
         &mut self,
         open: bool,
@@ -2055,12 +2111,15 @@ impl ComposerInput {
     }
 
     fn refresh_projection(&mut self) {
-        self.projection = if self.mentions_enabled {
+        self.projection = if self.secret {
+            TextProjection::secret(&self.content)
+        } else if self.mentions_enabled {
             TextProjection::new(&self.content)
         } else {
             TextProjection {
                 display: self.content.clone(),
                 mentions: Vec::new(),
+                secret_boundaries: Vec::new(),
             }
         };
     }
@@ -2321,6 +2380,9 @@ impl ComposerInput {
     /// Called with the range about to be replaced, BEFORE the content changes,
     /// so the pushed snapshot is the pre-edit state.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str) {
+        if self.secret {
+            return;
+        }
         let kind = if new_text.is_empty() {
             EditKind::Delete
         } else {
@@ -2692,6 +2754,9 @@ impl ComposerInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.secret {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -2705,6 +2770,9 @@ impl ComposerInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.secret {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -3225,6 +3293,9 @@ impl EntityInputHandler for ComposerInput {
             .projection
             .normalize_range(self.range_from_utf16(&range_utf16));
         actual_range.replace(self.range_to_utf16(&range));
+        if self.secret {
+            return Some("*".repeat(self.content.get(range)?.encode_utf16().count()));
+        }
         Some(self.content.get(range)?.to_string())
     }
 
@@ -3300,7 +3371,7 @@ impl EntityInputHandler for ComposerInput {
         self.invalidate_mention_tooltip();
         // First keystroke of a composition: snapshot the text as it stood
         // before any of it existed, so one undo drops the whole composition.
-        if self.marked_range.is_none() {
+        if self.marked_range.is_none() && !self.secret {
             self.undo_stack.push(self.snapshot());
             if self.undo_stack.len() > UNDO_LIMIT {
                 self.undo_stack.remove(0);
@@ -3785,7 +3856,11 @@ impl Render for ComposerInput {
                 input: cx.entity(),
                 // Internal scrolling once content exceeds the 260px textarea
                 // box minus its `pt-4 pb-1` padding.
-                max_content_height: TEXTAREA_MAX - TEXTAREA_PAD_V,
+                max_content_height: if self.key_context == "ProviderField" {
+                    INPUT_LINE_HEIGHT
+                } else {
+                    TEXTAREA_MAX - TEXTAREA_PAD_V
+                },
             })
     }
 }
@@ -3797,6 +3872,10 @@ impl Render for ComposerInput {
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
+    OpenProviders {
+        intent: crate::settings::providers::ProviderIntent,
+        target_device: Option<String>,
+    },
     /// A prompt was sent optimistically — give the transcript its exact row
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
@@ -4154,6 +4233,8 @@ pub struct Composer {
     /// toggles a Pi package (`HarnessCatalogChanged`). Settings → Commands
     /// hide/show filters this list in [`Self::refilter_slash`].
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
+    slash_owner: Option<String>,
+    slash_generation: u64,
     current_key: String,
     sending: bool,
     failure: Option<SharedString>,
@@ -4223,6 +4304,10 @@ struct CommentEdit {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    pub fn report_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.failure = Some(message.into());
+        cx.notify();
+    }
     /// The picker entity, for the shell's canvas target selectors.
     pub fn pickers(&self) -> &Entity<Pickers> {
         &self.pickers
@@ -4309,7 +4394,10 @@ impl Composer {
         let catalog_observe =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Self, cx| {
                 this.slash_cache.clear();
+                this.slash_generation = this.slash_generation.wrapping_add(1);
                 this.slash_prefetch = None;
+                this.slash_task = None;
+                this.slash.request = this.slash.request.wrapping_add(1);
                 if this.slash.token.is_some() {
                     this.slash.harness = None;
                     let (text, cursor) = {
@@ -4380,6 +4468,8 @@ impl Composer {
             slash: SlashState::default(),
             slash_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
+            slash_owner: None,
+            slash_generation: 0,
             current_key,
             sending: false,
             failure: None,
@@ -5579,9 +5669,43 @@ impl Composer {
 
     // ---- slash commands ---------------------------------------------------
 
+    fn command_target(&self, cx: &App) -> Option<String> {
+        if let ComposerTransport::SideChat(side) = &self.transport {
+            return Some(side.target_device_id.clone());
+        }
+        let state = self.state.read(cx);
+        state
+            .selected_chat_row()
+            .map(|chat| chat.device_id.clone())
+            .or_else(|| {
+                state
+                    .selected_space_row()
+                    .map(|space| space.device_id.clone())
+            })
+            .or_else(|| state.local_device_id.clone())
+    }
+
+    fn sync_slash_owner(&mut self, cx: &App) {
+        let owner = self.command_target(cx);
+        if self.slash_owner == owner {
+            return;
+        }
+        self.slash_owner = owner;
+        self.slash_generation = self.slash_generation.wrapping_add(1);
+        self.slash_cache.clear();
+        self.slash_prefetch = None;
+        self.slash_task = None;
+        self.slash.request = self.slash.request.wrapping_add(1);
+        self.slash.harness = None;
+        self.slash.filtered.clear();
+        self.slash.loading = false;
+        self.slash.error = None;
+    }
+
     /// Warm [`Self::slash_cache`] without opening the popup, so the first `/`
     /// is not a cold `pi --mode rpc` spawn.
     fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
+        self.sync_slash_owner(cx);
         let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
             return;
         };
@@ -5591,13 +5715,8 @@ impl Composer {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let target = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat_row()
-                .map(|chat| chat.device_id.clone())
-                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
-        };
+        let target = self.command_target(cx);
+        let generation = self.slash_generation;
         self.slash_prefetch = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
@@ -5605,6 +5724,10 @@ impl Composer {
             }
             let result = engine.client().call(methods::LIST_COMMANDS, params).await;
             this.update(cx, |composer, cx| {
+                if composer.command_target(cx) != target || composer.slash_generation != generation
+                {
+                    return;
+                }
                 composer.slash_prefetch = None;
                 if let Ok(value) = result
                     && let Ok(commands) = serde_json::from_value::<Vec<SlashCommand>>(value)
@@ -5624,6 +5747,7 @@ impl Composer {
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on first open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
+        self.sync_slash_owner(cx);
         let token = slash_token(text, cursor);
         let still_dismissed = token.as_ref().is_some_and(|token| {
             self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
@@ -5676,13 +5800,7 @@ impl Composer {
             self.slash.loading = false;
             return;
         };
-        let target = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat_row()
-                .map(|chat| chat.device_id.clone())
-                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
-        };
+        let target = self.command_target(cx);
         let request = self.slash.request;
         self.slash_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
@@ -5691,7 +5809,7 @@ impl Composer {
             }
             let result = engine.client().call(methods::LIST_COMMANDS, params).await;
             this.update(cx, |composer, cx| {
-                if composer.slash.request != request {
+                if composer.slash.request != request || composer.command_target(cx) != target {
                     return;
                 }
                 composer.slash.loading = false;
@@ -6066,6 +6184,13 @@ impl Composer {
                 }
             }
         }
+        if self.slash.token.is_some() {
+            let (text, cursor) = {
+                let input = self.input.read(cx);
+                (input.text().to_string(), input.cursor_offset())
+            };
+            self.update_slash(&text, cursor, cx);
+        }
         self.prefetch_slash_commands(cx);
         cx.notify();
     }
@@ -6086,6 +6211,18 @@ impl Composer {
     /// project-less `~`-cwd sessions are no longer mintable from the canvas.
     /// Existing chats carry their own project, so they always send.
     fn send_blocked(&self, cx: &App) -> bool {
+        if matches!(self.transport, ComposerTransport::Main)
+            && self
+                .pickers
+                .read(cx)
+                .resolved(cx)
+                .harness
+                .unwrap_or(HarnessId::Pi)
+                == HarnessId::Pi
+            && crate::settings::providers::command_intent(self.input.read(cx).text()).is_some()
+        {
+            return false;
+        }
         let state = self.state.read(cx);
         state.selected_chat.is_none() && state.selected_space_row().is_none()
     }
@@ -6112,6 +6249,30 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
+        if matches!(self.transport, ComposerTransport::Main)
+            && self
+                .pickers
+                .read(cx)
+                .resolved(cx)
+                .harness
+                .unwrap_or(HarnessId::Pi)
+                == HarnessId::Pi
+            && let Some(intent) = crate::settings::providers::command_intent(&text)
+        {
+            let state = self.state.read(cx);
+            let target = state
+                .selected_chat_row()
+                .map(|c| c.device_id.clone())
+                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
+                .or_else(|| state.local_device_id.clone());
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.slash = SlashState::default();
+            cx.emit(ComposerEvent::OpenProviders {
+                intent,
+                target_device: target,
+            });
+            return;
+        }
         match self.button_mode(cx) {
             SendButtonMode::Stop => self.interrupt(cx),
             _ if !has_send_content(
@@ -6130,6 +6291,15 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, steer: bool, cx: &mut Context<Self>) {
+        if !text.trim_start().starts_with('/')
+            && let Some(id) = self.pickers.read(cx).unavailable_pi_model(cx)
+        {
+            self.failure = Some(format!(
+                "Model \"{id}\" is no longer available. Reconnect its provider in Settings → Providers, or choose another model."
+            ).into());
+            cx.notify();
+            return;
+        }
         // Annotated slash-command sends are blocked with an inline composer
         // error — comments and session references ride the NEXT NORMAL
         // Run/Steer only, and a slash command would be misrouted by the
@@ -8733,6 +8903,29 @@ mod tests {
             },
         });
         row
+    }
+
+    #[test]
+    fn secret_projection_masks_unicode_and_preserves_caret_boundaries() {
+        let raw = "sk-密🔑e";
+        let projection = TextProjection::secret(raw);
+        assert_eq!(projection.display, "••••••");
+        assert!(projection.mentions.is_empty());
+        for (index, (offset, _)) in raw.char_indices().enumerate() {
+            assert_eq!(projection.raw_to_display(offset), index * '•'.len_utf8());
+            assert_eq!(projection.display_to_raw(index * '•'.len_utf8()), offset);
+        }
+        assert_eq!(
+            projection.raw_to_display(raw.len()),
+            projection.display.len()
+        );
+        assert_eq!(
+            projection.display_to_raw(projection.display.len()),
+            raw.len()
+        );
+        let empty = TextProjection::secret("");
+        assert_eq!(empty.raw_to_display(0), 0);
+        assert_eq!(empty.display_to_raw(0), 0);
     }
 
     #[test]

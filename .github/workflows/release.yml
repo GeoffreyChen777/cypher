@@ -181,9 +181,38 @@ jobs:
             target/package/*.tar.gz
           if-no-files-found: error
 
+  # Small Cypher installers fetch this platform-specific Node + Pi + curated
+  # plugin runtime on first use. It is a separate artifact so users who never
+  # use Pi do not pay the ~100 MB download.
+  pi-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: dist/pi-runtime/package-lock.json
+      - name: package isolated Pi runtime
+        run: scripts/package-pi-runtime.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/package/cypher-pi-runtime-*.tar.gz
+            target/package/cypher-pi-runtime-*.json
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/cypher-v')
-    needs: [linux, macos]
+    needs: [linux, macos, pi-runtime]
     runs-on: ubuntu-latest
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface
@@ -224,6 +253,7 @@ jobs:
           cd dist
           # Reject extras: every downloaded file must be in the expected set.
           for f in *; do
+            [[ "$f" == cypher-pi-runtime-*.tar.gz || "$f" == cypher-pi-runtime-*.json ]] && continue
             match=0
             for want in "${expected[@]}"; do
               [[ "$f" == "$want" ]] && match=1
@@ -253,7 +283,7 @@ jobs:
           generate_release_notes: true
       - name: upload to R2 (edge.letscypher.app/releases/*)
         run: |
-          for f in dist/*; do
+          for f in dist/cypher-$VERSION-*; do
             npx wrangler@4 r2 object put "cypher-releases/$(basename "$f")" \
               --file "$f" --remote
           done
@@ -261,7 +291,7 @@ jobs:
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
           manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
-          for f in dist/*; do
+          for f in dist/cypher-$VERSION-*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
@@ -269,6 +299,62 @@ jobs:
           printf '%s' "$manifest" > manifest.json
           npx wrangler@4 r2 object put cypher-releases/manifest.json \
             --file manifest.json --remote
+      - name: publish Pi runtime channel
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          metas=(dist/cypher-pi-runtime-*.json)
+          archives=(dist/cypher-pi-runtime-*.tar.gz)
+          test "${#metas[@]}" -eq 3 || {
+            echo "::error::expected 3 Pi runtime metadata files, found ${#metas[@]}"; exit 1
+          }
+          test "${#archives[@]}" -eq 3 || {
+            echo "::error::expected 3 Pi runtime archives, found ${#archives[@]}"; exit 1
+          }
+          for f in "${archives[@]}"; do
+            test -s "$f"
+            tar -tzf "$f" >/dev/null
+          done
+          for meta in "${metas[@]}"; do
+            jq -e '.version and .piVersion and (.files | length == 1)' "$meta" >/dev/null
+            file=$(jq -r '.files[] | .url' "$meta")
+            expected_sha=$(jq -r '.files[] | .sha256' "$meta")
+            test -f "dist/$file" || {
+              echo "::error::$meta references missing archive $file"; exit 1
+            }
+            actual_sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
+            test "$actual_sha" = "$expected_sha" || {
+              echo "::error::checksum mismatch for $file"; exit 1
+            }
+          done
+          manifest=$(jq -s '
+            .[0] as $base |
+            reduce .[] as $item (
+              {
+                version: $base.version,
+                piVersion: $base.piVersion,
+                minimumCypherVersion: $base.minimumCypherVersion,
+                plugins: $base.plugins,
+                files: {}
+              };
+              if $item.version != $base.version
+                 or $item.piVersion != $base.piVersion
+                 or $item.minimumCypherVersion != $base.minimumCypherVersion
+                 or $item.plugins != $base.plugins
+              then error("Pi runtime metadata disagree across platforms")
+              else .files += $item.files
+              end
+            )
+          ' "${metas[@]}")
+          printf '%s\n' "$manifest" > pi-runtime-manifest.json
+          for f in "${archives[@]}"; do
+            npx wrangler@4 r2 object put "cypher-releases/runtimes/pi/$(basename "$f")" \
+              --file "$f" --remote
+          done
+          npx wrangler@4 r2 object put cypher-releases/runtimes/pi/manifest.json \
+            --file pi-runtime-manifest.json --remote
+          # Publish the app pointer last: a newly updated Cypher can never see
+          # a release before its on-demand Pi Runtime is available.
           printf '%s' "$VERSION" > latest.txt
           npx wrangler@4 r2 object put cypher-releases/latest.txt \
             --file latest.txt --remote

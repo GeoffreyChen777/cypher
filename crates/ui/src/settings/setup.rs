@@ -1,16 +1,17 @@
-//! First-run setup: install Pi, then pick recommended extensions.
+//! First-run setup for Cypher's isolated Pi Runtime.
 
 use gpui::{
     Context, Entity, EventEmitter, IntoElement, Render, SharedString, Task, Window, div,
     prelude::*, px,
 };
+use std::time::Duration;
 
-use cypher_engine::pi_packages::{PiPackage, PiPackagesSnapshot};
+use cypher_engine::pi_packages::PiPackagesSnapshot;
+use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
 use crate::icons;
 use crate::popover::{self, Loadable};
-use crate::settings::harnesses::{package_icon, package_initial};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -19,6 +20,7 @@ use crate::theme::Theme;
 #[derive(Debug, Clone)]
 pub enum SetupEvent {
     Continue,
+    ConfigureProviders,
 }
 
 /// Whether the first-run overlay should cover the ready app.
@@ -28,7 +30,6 @@ pub fn setup_should_show(completed: bool, debug: bool, dismissed: bool) -> bool 
 
 enum Busy {
     Pi,
-    Package(String),
 }
 
 pub struct SetupPage {
@@ -39,6 +40,8 @@ pub struct SetupPage {
     scroll: gpui::ScrollHandle,
     load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
+    progress_task: Option<Task<()>>,
+    runtime_status: Option<PiRuntimeStatus>,
 }
 
 impl EventEmitter<SetupEvent> for SetupPage {}
@@ -53,6 +56,8 @@ impl SetupPage {
             scroll: gpui::ScrollHandle::new(),
             load_task: None,
             action_task: None,
+            progress_task: None,
+            runtime_status: None,
         };
         page.load(cx);
         page
@@ -84,6 +89,7 @@ impl SetupPage {
 
     fn apply_snapshot(&mut self, result: Result<serde_json::Value, String>) {
         self.busy = None;
+        self.runtime_status = None;
         match result {
             Ok(value) => match serde_json::from_value::<PiPackagesSnapshot>(value) {
                 Ok(snapshot) => {
@@ -105,6 +111,33 @@ impl SetupPage {
         };
         self.error = None;
         self.busy = Some(Busy::Pi);
+        let progress_engine = engine.clone();
+        self.progress_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                let result = progress_engine
+                    .client()
+                    .call(methods::PI_RUNTIME_STATUS, serde_json::json!({}))
+                    .await;
+                let keep_polling = this
+                    .update(cx, |page, cx| {
+                        if !matches!(page.busy, Some(Busy::Pi)) {
+                            return false;
+                        }
+                        if let Ok(value) = result
+                            && let Ok(status) = serde_json::from_value::<PiRuntimeStatus>(value)
+                        {
+                            page.runtime_status = Some(status);
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_polling {
+                    break;
+                }
+            }
+        }));
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -120,46 +153,11 @@ impl SetupPage {
         cx.notify();
     }
 
-    fn install_package(&mut self, source: String, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.error = None;
-        self.busy = Some(Busy::Package(source.clone()));
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(
-                    methods::INSTALL_PI_PACKAGE,
-                    serde_json::json!({ "source": source }),
-                )
-                .await
-                .map_err(|err| err.to_string());
-            this.update(cx, |page, cx| {
-                page.apply_snapshot(result);
-                crate::pickers::bump_harness_catalog(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
     fn action_button(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         widgets::ghost_action(theme)
             .text_color(theme.text)
             .hover(|s| widgets::ghost_hover(theme, s))
             .child(label.into())
-    }
-
-    fn package_tile(theme: &Theme, name: &str, description: Option<&str>) -> gpui::Div {
-        match package_icon(name, description) {
-            Some(icon) => widgets::row_tile(theme, icon),
-            None => widgets::row_tile_letter(theme, package_initial(name)),
-        }
     }
 
     fn installed_label(theme: &Theme) -> gpui::Div {
@@ -181,90 +179,6 @@ impl SetupPage {
             )
     }
 
-    fn package_row(
-        &mut self,
-        theme: &Theme,
-        package: PiPackage,
-        index: usize,
-        pi_installed: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let busy = matches!(&self.busy, Some(Busy::Package(source)) if *source == package.source);
-        let blocked = self.busy.is_some() || !pi_installed;
-        let mut title = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(widgets::row_title(theme, package.name.clone()));
-        if let Some(version) = package.version.clone() {
-            title = title
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted.opacity(0.45))
-                        .child(SharedString::from("·")),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("v{version}"))),
-                );
-        }
-        let mut row = widgets::card_row(theme, index == 0)
-            .id(("setup-package-row", index))
-            .child(Self::package_tile(
-                theme,
-                &package.name,
-                package.description.as_deref(),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .child(title)
-                    .when_some(package.description.clone(), |el, description| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .w_full()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(description)),
-                        )
-                    }),
-            );
-        if package.installed {
-            row = row.child(Self::installed_label(theme));
-        } else {
-            let source = package.source.clone();
-            let label = if busy { "Installing…" } else { "Install" };
-            row = row.child(
-                Self::action_button(theme, label)
-                    .flex_none()
-                    .id(("setup-package-install", index))
-                    .when(blocked && !busy, |el| el.opacity(0.45))
-                    .when(!blocked || busy, |el| el.cursor_pointer())
-                    .when(!blocked, |el| {
-                        el.on_click(cx.listener(move |this, _, _, cx| {
-                            this.install_package(source.clone(), cx);
-                        }))
-                    }),
-            );
-        }
-        row.into_any_element()
-    }
-
     fn render_pi_card(
         &mut self,
         theme: &Theme,
@@ -272,13 +186,10 @@ impl SetupPage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let busy = matches!(&self.busy, Some(Busy::Pi));
-        let npm_available = snapshot.npm_available;
         let copy = if snapshot.pi_installed {
-            "The primary coding agent. Extensions load through Pi."
-        } else if npm_available {
-            "The primary coding agent. Install it to enable extensions."
+            "Cypher's isolated coding runtime. It does not use your system Pi."
         } else {
-            "Install Node.js/npm first, then return here to install Pi."
+            "Download the isolated Node.js, Pi and plugin runtime (about 100 MB)."
         };
         let mut row = widgets::card_row(theme, true)
             .id("setup-pi-row")
@@ -306,10 +217,24 @@ impl SetupPage {
         if snapshot.pi_installed {
             row = row.child(Self::installed_label(theme));
         } else {
-            let can_install = npm_available && self.busy.is_none();
-            let label = if busy { "Installing…" } else { "Install Pi" };
+            let can_install = self.busy.is_none();
+            let label = if busy {
+                self.runtime_status
+                    .as_ref()
+                    .and_then(|status| {
+                        status.total_bytes.filter(|total| *total > 0).map(|total| {
+                            format!(
+                                "Downloading… {}%",
+                                status.downloaded_bytes.saturating_mul(100) / total
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| "Preparing…".to_string())
+            } else {
+                "Download runtime".to_string()
+            };
             row = row.child(
-                popover::btn_primary(theme, label)
+                popover::btn_primary(theme, &label)
                     .flex_none()
                     .id("setup-install-pi")
                     .when(!can_install && !busy, |el| el.opacity(0.5))
@@ -337,7 +262,7 @@ impl Render for SetupPage {
                 .child(popover::skeleton_rows(
                     "setup-skeleton",
                     &theme,
-                    6,
+                    2,
                     cx.entity_id(),
                     cx,
                 ))
@@ -353,42 +278,50 @@ impl Render for SetupPage {
                 )
                 .into_any_element(),
             Loadable::Ready(snapshot) => {
-                let extensions: Vec<_> = snapshot
-                    .packages
-                    .iter()
-                    .filter(|package| package.recommended)
-                    .cloned()
-                    .collect();
                 let mut content = div()
                     .flex()
                     .flex_col()
                     .child(self.render_pi_card(&theme, &snapshot, cx));
-                if !extensions.is_empty() {
-                    content = content
-                        .child(widgets::field_label(&theme, "Extensions").mt(px(28.0)))
-                        .child(widgets::section_card(&theme).mt(px(10.0)).children(
-                            extensions.into_iter().enumerate().map(|(ix, package)| {
-                                self.package_row(&theme, package, ix, snapshot.pi_installed, cx)
-                            }),
-                        ));
-                }
                 let continue_label = if snapshot.pi_installed {
-                    "Continue"
+                    "Add provider"
                 } else {
                     "Skip for now"
                 };
+                let continue_button = if snapshot.pi_installed {
+                    popover::btn_primary(&theme, continue_label)
+                } else {
+                    Self::action_button(&theme, continue_label)
+                };
                 content = content.child(
                     div().mt(px(28.0)).flex().justify_end().child(
-                        popover::btn_primary(&theme, continue_label)
+                        continue_button
                             .id("setup-continue")
                             .when(busy, |el| el.opacity(0.5))
                             .when(!busy, |el| {
-                                el.on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(SetupEvent::Continue);
+                                let installed = snapshot.pi_installed;
+                                el.on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(if installed {
+                                        SetupEvent::ConfigureProviders
+                                    } else {
+                                        SetupEvent::Continue
+                                    });
                                 }))
                             }),
                     ),
                 );
+                if snapshot.pi_installed {
+                    content = content.child(
+                        div().mt(px(8.0)).flex().justify_end().child(
+                            Self::action_button(&theme, "Skip for now")
+                                .id("setup-skip")
+                                .when(!busy, |el| {
+                                    el.on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(SetupEvent::Continue)),
+                                    )
+                                }),
+                        ),
+                    );
+                }
                 content.into_any_element()
             }
         };
@@ -400,15 +333,16 @@ impl Render for SetupPage {
             .track_scroll(&self.scroll)
             .child(
                 div()
-                    .w_full()
+                    .size_full()
                     .flex()
+                    .items_center()
                     .justify_center()
                     .child(
                         div()
                             .w(px(560.0))
                             .flex_none()
                             .px(px(8.0))
-                            .py(px(48.0))
+                            .py(px(32.0))
                             .flex()
                             .flex_col()
                             .child(crate::icons::cypher_app_icon().w(px(28.0)).h(px(28.0)))
@@ -428,7 +362,7 @@ impl Render for SetupPage {
                                     .line_height(px(19.0))
                                     .text_color(theme.text_muted)
                                     .child(SharedString::from(
-                                        "Install Pi, then pick the extensions you want. You can change these later in Settings.",
+                                        "Cypher uses its own Pi runtime and plugins, isolated from your system installation. Extensions can be managed later in Settings.",
                                     )),
                             )
                             .children(

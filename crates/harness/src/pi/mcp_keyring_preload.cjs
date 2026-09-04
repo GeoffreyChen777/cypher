@@ -1,8 +1,8 @@
 "use strict";
 /**
  * Cypher-spawned `pi` cannot use the macOS login keychain (errSecInteractionNotAllowed).
- * Persist MCP OAuth entries under ~/.pi/agent/mcp-oauth/<account>/tokens.json and
- * serve them back through @napi-rs/keyring so pi-mcp-adapter sees the same API.
+ * Persist MCP OAuth entries under PI_CODING_AGENT_DIR/mcp-oauth/<account>/tokens.json
+ * and serve them back through @napi-rs/keyring so pi-mcp-adapter sees the same API.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -13,7 +13,10 @@ function homeDir() {
 }
 
 function entryPath(account) {
-  return path.join(homeDir(), ".pi", "agent", "mcp-oauth", account, "tokens.json");
+  const agentDir =
+    process.env.PI_CODING_AGENT_DIR ||
+    path.join(homeDir(), ".pi", "agent");
+  return path.join(agentDir, "mcp-oauth", account, "tokens.json");
 }
 
 function dumpWrite(service, account, password) {

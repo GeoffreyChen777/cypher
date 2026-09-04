@@ -1,10 +1,10 @@
-//! MCP servers from Pi's `~/.pi/agent/mcp.json`, plus OAuth via Pi's
+//! MCP servers from Cypher's isolated Pi agent directory, plus OAuth via Pi's
 //! `pi-mcp-adapter` slash command (`/mcp-auth`), the same path as the TUI.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cypher_harness::Harness;
 
@@ -55,38 +55,33 @@ pub struct SetMcpServerEnabled {
     pub enabled: bool,
 }
 
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+fn mcp_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("mcp.json")
 }
 
-fn agent_dir() -> Option<PathBuf> {
-    home().map(|h| h.join(".pi/agent"))
-}
-
-fn mcp_path() -> Option<PathBuf> {
-    agent_dir().map(|d| d.join("mcp.json"))
-}
-
-fn adapter_dir() -> Option<PathBuf> {
-    agent_dir().map(|d| d.join("npm/node_modules/pi-mcp-adapter"))
+fn adapter_dir(agent_dir: &Path) -> PathBuf {
+    let bundled = agent_dir
+        .parent()
+        .map(|root| root.join("current/npm/node_modules/pi-mcp-adapter"));
+    bundled
+        .filter(|path| path.join("mcp-auth-flow.ts").is_file())
+        .unwrap_or_else(|| agent_dir.join("npm/node_modules/pi-mcp-adapter"))
 }
 
 pub fn oauth_account(server: &str) -> String {
     format!("sha256-{:x}", Sha256::digest(server.as_bytes()))
 }
 
-fn read_mcp_root() -> Value {
-    let Some(path) = mcp_path() else {
-        return Value::Object(Default::default());
-    };
+fn read_mcp_root(agent_dir: &Path) -> Value {
+    let path = mcp_path(agent_dir);
     let Ok(text) = std::fs::read_to_string(path) else {
         return Value::Object(Default::default());
     };
     serde_json::from_str(&text).unwrap_or_else(|_| Value::Object(Default::default()))
 }
 
-fn write_mcp_root(value: &Value) -> Result<(), String> {
-    let path = mcp_path().ok_or_else(|| "HOME is not set.".to_string())?;
+fn write_mcp_root(agent_dir: &Path, value: &Value) -> Result<(), String> {
+    let path = mcp_path(agent_dir);
     let parent = path
         .parent()
         .ok_or_else(|| "Invalid MCP settings path.".to_string())?;
@@ -100,24 +95,21 @@ fn write_mcp_root(value: &Value) -> Result<(), String> {
 
 fn transport_label(entry: &Value) -> String {
     if let Some(url) = entry.get("url").and_then(Value::as_str) {
-        return url.to_string();
+        return match reqwest::Url::parse(url) {
+            Ok(mut url) => {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_query(None);
+                url.set_fragment(None);
+                url.to_string()
+            }
+            Err(_) => "HTTP endpoint (invalid URL)".into(),
+        };
     }
     if let Some(command) = entry.get("command").and_then(Value::as_str) {
-        let args = entry
-            .get("args")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default();
-        return if args.is_empty() {
-            command.to_string()
-        } else {
-            format!("{command} {args}")
-        };
+        // Arguments can contain credentials. Listings are safe metadata, not
+        // a command preview, especially when viewed from another device.
+        return format!("stdio · {command}");
     }
     if let Some(socket) = entry.get("socket").and_then(Value::as_str) {
         return socket.to_string();
@@ -139,8 +131,8 @@ fn auth_kind(entry: &Value) -> McpAuthKind {
     }
 }
 
-fn keychain_payload(account: &str) -> Option<String> {
-    let _ = ensure_app_keychain();
+fn keychain_payload(agent_dir: &Path, account: &str) -> Option<String> {
+    let _ = ensure_app_keychain(agent_dir);
     let mut args = vec![
         "find-generic-password".into(),
         "-s".into(),
@@ -149,9 +141,7 @@ fn keychain_payload(account: &str) -> Option<String> {
         account.to_string(),
         "-w".into(),
     ];
-    if let Ok(kc) = app_keychain_path() {
-        args.push(kc.display().to_string());
-    }
+    args.push(app_keychain_path(agent_dir).display().to_string());
     let output = std::process::Command::new("security")
         .args(&args)
         .output()
@@ -164,8 +154,8 @@ fn keychain_payload(account: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-fn legacy_payload(account: &str) -> Option<String> {
-    let path = agent_dir()?
+fn legacy_payload(agent_dir: &Path, account: &str) -> Option<String> {
+    let path = agent_dir
         .join("mcp-oauth")
         .join(account)
         .join("tokens.json");
@@ -192,7 +182,7 @@ fn token_status(payload: &str) -> McpAuthStatus {
     McpAuthStatus::SignedIn
 }
 
-fn auth_status(name: &str, kind: McpAuthKind) -> McpAuthStatus {
+fn auth_status(agent_dir: &Path, name: &str, kind: McpAuthKind) -> McpAuthStatus {
     match kind {
         McpAuthKind::None => McpAuthStatus::NotRequired,
         McpAuthKind::Bearer => {
@@ -201,7 +191,9 @@ fn auth_status(name: &str, kind: McpAuthKind) -> McpAuthStatus {
         }
         McpAuthKind::Oauth => {
             let account = oauth_account(name);
-            match keychain_payload(&account).or_else(|| legacy_payload(&account)) {
+            match keychain_payload(agent_dir, &account)
+                .or_else(|| legacy_payload(agent_dir, &account))
+            {
                 Some(payload) => token_status(&payload),
                 None => McpAuthStatus::NeedsAuth,
             }
@@ -209,8 +201,8 @@ fn auth_status(name: &str, kind: McpAuthKind) -> McpAuthStatus {
     }
 }
 
-pub fn list() -> McpSnapshot {
-    let root = read_mcp_root();
+pub fn list(agent_dir: &Path) -> McpSnapshot {
+    let root = read_mcp_root(agent_dir);
     let servers = root
         .get("mcpServers")
         .and_then(Value::as_object)
@@ -223,7 +215,7 @@ pub fn list() -> McpSnapshot {
                             .get("disabled")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
-                        auth_status: auth_status(name, kind),
+                        auth_status: auth_status(agent_dir, name, kind),
                         auth_kind: kind,
                         transport: transport_label(entry),
                         name: name.clone(),
@@ -233,13 +225,13 @@ pub fn list() -> McpSnapshot {
         })
         .unwrap_or_default();
     McpSnapshot {
-        adapter_installed: adapter_dir().is_some_and(|p| p.join("mcp-auth-flow.ts").is_file()),
+        adapter_installed: adapter_dir(agent_dir).join("mcp-auth-flow.ts").is_file(),
         servers,
     }
 }
 
-pub fn set_enabled(params: SetMcpServerEnabled) -> Result<McpSnapshot, String> {
-    let mut root = read_mcp_root();
+pub fn set_enabled(agent_dir: &Path, params: SetMcpServerEnabled) -> Result<McpSnapshot, String> {
+    let mut root = read_mcp_root(agent_dir);
     let servers = root
         .as_object_mut()
         .ok_or_else(|| "MCP settings are not a JSON object.".to_string())?
@@ -259,15 +251,15 @@ pub fn set_enabled(params: SetMcpServerEnabled) -> Result<McpSnapshot, String> {
     } else {
         object.insert("disabled".into(), Value::Bool(true));
     }
-    write_mcp_root(&root)?;
-    Ok(list())
+    write_mcp_root(agent_dir, &root)?;
+    Ok(list(agent_dir))
 }
 
-pub fn auth_dump_path() -> Option<PathBuf> {
-    agent_dir().map(|d| d.join(".cypher-mcp-auth-dump.jsonl"))
+pub fn auth_dump_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(".cypher-mcp-auth-dump.jsonl")
 }
 
-fn persist_auth_dump(path: &PathBuf) -> Result<usize, String> {
+fn persist_auth_dump(agent_dir: &Path, path: &PathBuf) -> Result<usize, String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(0);
     };
@@ -287,31 +279,31 @@ fn persist_auth_dump(path: &PathBuf) -> Result<usize, String> {
             .get("password")
             .and_then(Value::as_str)
             .ok_or_else(|| "Auth dump missing password.".to_string())?;
-        persist_secret(service, account, password)?;
+        persist_secret(agent_dir, service, account, password)?;
         wrote += 1;
     }
     Ok(wrote)
 }
 
-fn persist_secret(service: &str, account: &str, password: &str) -> Result<(), String> {
-    if let Some(dir) = agent_dir().map(|d| d.join("mcp-oauth").join(account)) {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join("tokens.json"), password).map_err(|e| e.to_string())?;
-    }
-    let _ = persist_secret_keychain(service, account, password);
+fn persist_secret(
+    agent_dir: &Path,
+    service: &str,
+    account: &str,
+    password: &str,
+) -> Result<(), String> {
+    let dir = agent_dir.join("mcp-oauth").join(account);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("tokens.json"), password).map_err(|e| e.to_string())?;
+    let _ = persist_secret_keychain(agent_dir, service, account, password);
     Ok(())
 }
 
-fn app_keychain_path() -> Result<PathBuf, String> {
-    agent_dir()
-        .map(|d| d.join("cypher-mcp.keychain-db"))
-        .ok_or_else(|| "HOME is not set.".to_string())
+fn app_keychain_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("cypher-mcp.keychain-db")
 }
 
-fn app_keychain_pass_path() -> Result<PathBuf, String> {
-    agent_dir()
-        .map(|d| d.join("cypher-mcp.keychain-pass"))
-        .ok_or_else(|| "HOME is not set.".to_string())
+fn app_keychain_pass_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("cypher-mcp.keychain-pass")
 }
 
 fn security_ok(args: &[&str]) -> Result<(), String> {
@@ -333,9 +325,9 @@ fn security_ok(args: &[&str]) -> Result<(), String> {
     })
 }
 
-fn ensure_app_keychain() -> Result<(PathBuf, String), String> {
-    let path = app_keychain_path()?;
-    let pass_path = app_keychain_pass_path()?;
+fn ensure_app_keychain(agent_dir: &Path) -> Result<(PathBuf, String), String> {
+    let path = app_keychain_path(agent_dir);
+    let pass_path = app_keychain_pass_path(agent_dir);
     let password = if pass_path.is_file() {
         std::fs::read_to_string(&pass_path)
             .map_err(|e| e.to_string())?
@@ -412,12 +404,17 @@ fn prepend_keychain_search(path: &PathBuf) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn persist_secret_keychain(service: &str, account: &str, password: &str) -> Result<(), String> {
+fn persist_secret_keychain(
+    agent_dir: &Path,
+    service: &str,
+    account: &str,
+    password: &str,
+) -> Result<(), String> {
     // Login keychain writes need a UI session (TUI/Terminal has one; a GUI
     // child and even this process when launched detached do not). Store in an
     // app-owned keychain we can unlock without a prompt, then put it on the
     // search list so Pi's adapter can read the same item.
-    let (keychain, _) = ensure_app_keychain()?;
+    let (keychain, _) = ensure_app_keychain(agent_dir)?;
     let kc = keychain.to_str().unwrap_or_default();
     let _ = security_ok(&["delete-generic-password", "-s", service, "-a", account, kc]);
     security_ok(&[
@@ -434,11 +431,16 @@ fn persist_secret_keychain(service: &str, account: &str, password: &str) -> Resu
 }
 
 #[cfg(not(target_os = "macos"))]
-fn persist_secret_keychain(_service: &str, _account: &str, _password: &str) -> Result<(), String> {
+fn persist_secret_keychain(
+    _agent_dir: &Path,
+    _service: &str,
+    _account: &str,
+    _password: &str,
+) -> Result<(), String> {
     Ok(())
 }
 
-pub fn logout(name: &str) -> Result<McpSnapshot, String> {
+pub fn logout(agent_dir: &Path, name: &str) -> Result<McpSnapshot, String> {
     let account = oauth_account(name);
     let _ = std::process::Command::new("security")
         .args([
@@ -449,48 +451,59 @@ pub fn logout(name: &str) -> Result<McpSnapshot, String> {
             &account,
         ])
         .output();
-    if let Ok(kc) = app_keychain_path() {
-        let _ = std::process::Command::new("security")
-            .args([
-                "delete-generic-password",
-                "-s",
-                "pi-mcp-adapter.oauth",
-                "-a",
-                &account,
-                kc.to_str().unwrap_or_default(),
-            ])
-            .output();
-    }
-    if let Some(dir) = agent_dir().map(|d| d.join("mcp-oauth").join(&account)) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    Ok(list())
+    let kc = app_keychain_path(agent_dir);
+    let _ = std::process::Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            "pi-mcp-adapter.oauth",
+            "-a",
+            &account,
+            kc.to_str().unwrap_or_default(),
+        ])
+        .output();
+    let _ = std::fs::remove_dir_all(agent_dir.join("mcp-oauth").join(&account));
+    Ok(list(agent_dir))
 }
 
-pub async fn authenticate(name: &str, harness: &dyn Harness) -> Result<McpSnapshot, String> {
+pub async fn authenticate(
+    agent_dir: &Path,
+    name: &str,
+    harness: &dyn Harness,
+) -> Result<McpSnapshot, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Server name is required.".into());
     }
-    let dump = auth_dump_path().ok_or_else(|| "HOME is not set.".to_string())?;
+    let dump = auth_dump_path(agent_dir);
     let _ = std::fs::remove_file(&dump);
     // Drop a leftover keychain item first. `@napi-rs/keyring` cannot always
     // overwrite an entry created by a different parent process (TUI vs GUI).
-    let _ = logout(name);
+    let _ = logout(agent_dir, name);
     let slash = harness.run_slash(&format!("/mcp-auth {name}")).await;
-    let dumped = persist_auth_dump(&dump);
+    let dumped = persist_auth_dump(agent_dir, &dump);
     let _ = std::fs::remove_file(&dump);
     match (slash, dumped) {
-        (_, Ok(n)) if n > 0 => Ok(list()),
+        (_, Ok(n)) if n > 0 => Ok(list(agent_dir)),
         (Err(err), _) => Err(err.to_string()),
         (Ok(_), Err(err)) => Err(err),
-        (Ok(_), Ok(_)) => Ok(list()),
+        (Ok(_), Ok(_)) => Ok(list(agent_dir)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listings_never_expose_url_credentials_or_command_arguments() {
+        let http = serde_json::json!({
+            "url": "https://user:fixture-secret@example.com/mcp?api_key=fixture-secret#fixture-secret"
+        });
+        assert_eq!(transport_label(&http), "https://example.com/mcp");
+        let stdio = serde_json::json!({"command": "node", "args": ["--token", "fixture-secret"]});
+        assert_eq!(transport_label(&stdio), "stdio · node");
+    }
 
     #[test]
     fn oauth_account_hashes_the_server_name() {
@@ -510,7 +523,7 @@ mod tests {
         assert_eq!(auth_kind(&off), McpAuthKind::None);
         let stdio = serde_json::json!({"command": "npx", "args": ["-y", "foo"]});
         assert_eq!(auth_kind(&stdio), McpAuthKind::None);
-        assert_eq!(transport_label(&stdio), "npx -y foo");
+        assert_eq!(transport_label(&stdio), "stdio · npx");
     }
 
     #[test]

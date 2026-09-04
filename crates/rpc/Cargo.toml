@@ -19,6 +19,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url = "2"
 
 [dev-dependencies]
 cypher-doc.workspace = true

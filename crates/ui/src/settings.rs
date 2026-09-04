@@ -15,10 +15,12 @@ pub mod appearance;
 pub mod archived;
 pub mod commands;
 pub mod composer;
+pub mod device_target;
 pub mod devices;
 pub mod harnesses;
 pub mod mcp;
 pub mod notifications;
+pub mod providers;
 pub mod setup;
 pub mod shortcuts;
 pub mod widgets;
@@ -105,6 +107,10 @@ pub struct UiSettings {
     /// written before this screen existed — those load as `false` so the
     /// setup still appears once.
     pub setup_completed: bool,
+    /// Versioned setup contract. Version 1 introduces Cypher's downloaded,
+    /// system-independent Pi runtime; pre-runtime settings deserialize as 0
+    /// and receive the one-time download prompt.
+    pub pi_runtime_setup_version: u32,
     /// Slash commands hidden from the composer `/` menu. `None` means the
     /// user hasn't customized yet — [`commands::default_hides`] applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +138,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             setup_completed: false,
+            pi_runtime_setup_version: 0,
             hidden_slash_commands: None,
         }
     }
@@ -462,6 +469,7 @@ mod tests {
             },
             appearance: crate::appearance::AppearanceMode::Light,
             setup_completed: true,
+            pi_runtime_setup_version: 1,
             hidden_slash_commands: Some(vec!["compact-ui-config".into()]),
         };
         settings.save(dir.path()).unwrap();
@@ -512,6 +520,11 @@ mod tests {
         assert!(
             !loaded.setup_completed,
             "pre-setup files still show first-run setup"
+        );
+        let pre_runtime: UiSettings = serde_json::from_str(r#"{"setupCompleted":true}"#).unwrap();
+        assert_eq!(
+            pre_runtime.pi_runtime_setup_version, 0,
+            "users who completed the old system-Pi setup see the runtime prompt once"
         );
     }
 

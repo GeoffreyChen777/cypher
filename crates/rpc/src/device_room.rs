@@ -697,6 +697,13 @@ pub struct LinkCache {
 }
 
 impl LinkCache {
+    /// Secret-bearing control requests require TLS, except for a loopback
+    /// relay used by local development/tests. This is transport encryption,
+    /// not E2EE: the authenticated relay remains part of the trust boundary.
+    pub fn credential_transport_allowed(&self) -> bool {
+        credential_transport_allowed(&self.config.edge_url)
+    }
+
     pub fn new(config: LinkCacheConfig) -> Arc<Self> {
         let cache = Arc::new(Self {
             config,
@@ -941,6 +948,23 @@ impl LinkCache {
     }
 }
 
+fn credential_transport_allowed(base: &str) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    matches!(url.scheme(), "https" | "wss")
+        || (matches!(url.scheme(), "http" | "ws")
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+}
+
 // ---------------------------------------------------------------------------
 // Codec tests — vectors ported from edge/src/device-frame.test.ts
 // ---------------------------------------------------------------------------
@@ -948,6 +972,30 @@ impl LinkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_require_tls_except_for_loopback_development() {
+        for url in [
+            "https://edge.example.com",
+            "wss://edge.example.com",
+            "http://127.0.0.1:1234",
+            "http://localhost:1234",
+            "ws://[::1]:1234",
+        ] {
+            assert!(credential_transport_allowed(url), "{url}");
+        }
+        for url in [
+            "http://edge.example.com",
+            "ws://192.168.1.2",
+            "file:///tmp/relay",
+            "https://user:key@edge.example.com",
+            "https://edge.example.com?token=key",
+            "https://edge.example.com#fragment",
+            "not a url",
+        ] {
+            assert!(!credential_transport_allowed(url), "{url}");
+        }
+    }
 
     fn header(s: &str, k: &str) -> DeviceFrameHeader {
         DeviceFrameHeader::new(s, k)

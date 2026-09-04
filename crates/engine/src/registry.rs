@@ -313,7 +313,19 @@ pub fn default_registry_with_bridge(
     pi_sessions_root: PathBuf,
     engine_ws_url: Option<String>,
 ) -> HarnessRegistry {
-    let registry = default_registry(pi_sessions_root.clone());
+    default_registry_with_bridge_and_runtime(pi_sessions_root, engine_ws_url, None)
+}
+
+/// Production registry with a Cypher-owned Pi runtime. The executable path is
+/// fixed even before first-run installation; the Pi descriptor therefore
+/// transitions from unavailable to available as soon as the runtime manager
+/// atomically publishes `current`, without ever falling back to system Pi.
+pub fn default_registry_with_bridge_and_runtime(
+    pi_sessions_root: PathBuf,
+    engine_ws_url: Option<String>,
+    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+) -> HarnessRegistry {
+    let registry = default_registry_with_runtime(pi_sessions_root.clone(), runtime.clone());
     if let Some(url) = engine_ws_url {
         // Re-arm the plain Pi slot IN PLACE with a bridge-aware PiHarness:
         // every pi child gets the local engine IPC WebSocket as
@@ -324,10 +336,17 @@ pub fn default_registry_with_bridge(
         registry.replace_lazy_factory(
             HarnessId::Pi,
             Box::new(move || {
-                Ok(Arc::new(
-                    cypher_harness::pi::PiHarness::new(pi_sessions.clone())
-                        .with_engine_bridge(Some(url.clone())),
-                ) as Arc<dyn Harness>)
+                let mut harness = cypher_harness::pi::PiHarness::new(pi_sessions.clone())
+                    .with_engine_bridge(Some(url.clone()));
+                if let Some(runtime) = &runtime {
+                    harness = harness
+                        .with_executable(runtime.executable.clone())
+                        .with_runtime_environment(
+                            runtime.agent_dir.clone(),
+                            runtime.package_dir.clone(),
+                        );
+                }
+                Ok(Arc::new(harness) as Arc<dyn Harness>)
             }),
         );
     }
@@ -335,6 +354,13 @@ pub fn default_registry_with_bridge(
 }
 
 pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
+    default_registry_with_runtime(pi_sessions_root, None)
+}
+
+fn default_registry_with_runtime(
+    pi_sessions_root: PathBuf,
+    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
     cypher_harness::shell_env::prewarm();
@@ -383,6 +409,8 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             },
         ],
     }));
+    let runtime_for_installed = runtime.clone();
+    let runtime_for_factory = runtime;
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::ClaudeCode,
@@ -510,12 +538,29 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(move || cypher_harness::pi::PiHarness::new(pi_sessions_root.clone()).installed()),
         Box::new(move || {
-            Ok(
-                Arc::new(cypher_harness::pi::PiHarness::new(pi_sessions.clone()))
-                    as Arc<dyn Harness>,
-            )
+            let mut harness = cypher_harness::pi::PiHarness::new(pi_sessions_root.clone());
+            if let Some(runtime) = &runtime_for_installed {
+                harness = harness
+                    .with_executable(runtime.executable.clone())
+                    .with_runtime_environment(
+                        runtime.agent_dir.clone(),
+                        runtime.package_dir.clone(),
+                    );
+            }
+            harness.installed()
+        }),
+        Box::new(move || {
+            let mut harness = cypher_harness::pi::PiHarness::new(pi_sessions.clone());
+            if let Some(runtime) = &runtime_for_factory {
+                harness = harness
+                    .with_executable(runtime.executable.clone())
+                    .with_runtime_environment(
+                        runtime.agent_dir.clone(),
+                        runtime.package_dir.clone(),
+                    );
+            }
+            Ok(Arc::new(harness) as Arc<dyn Harness>)
         }),
     );
     registry

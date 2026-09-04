@@ -179,6 +179,35 @@ fn requested_model_and_thinking_are_applied_at_process_launch() {
     );
 }
 
+#[test]
+fn empty_catalog_placeholder_is_not_passed_to_pi() {
+    let harness = harness();
+    let mut request = request("/newapi-provider-add");
+    request.model = Some("unknown/unknown".into());
+    let cmd = harness
+        .spawn_run_command(
+            Some(&request.cwd),
+            &RunHostContext::default(),
+            None,
+            &request,
+        )
+        .expect("run command builds");
+    let args: Vec<String> = cmd
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        !args.iter().any(|arg| arg == "--model"),
+        "the empty-catalog sentinel would make Pi exit at startup: {args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "--thinking"),
+        "thinking selection also requires a concrete model: {args:?}"
+    );
+}
+
 #[tokio::test]
 async fn models_and_commands_are_discovered_from_the_probe() {
     let harness = harness();

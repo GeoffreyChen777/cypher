@@ -82,6 +82,8 @@ pub(crate) const ENV_CYPHER_CHAT_ID: &str = "CYPHER_CHAT_ID";
 /// Local engine IPC WebSocket URL the extension's Cypher bridge helper dials
 /// (`StartSubagent` / `WatchAgentEvents`).
 pub(crate) const ENV_CYPHER_ENGINE_WS_URL: &str = "CYPHER_ENGINE_WS_URL";
+const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
+const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 
 /// The messaging tools every child gets regardless of its allowlist (the
 /// extension's `spawn.ts` appends the same trio).
@@ -131,6 +133,16 @@ fn thinking_level(level: ReasoningLevel) -> &'static str {
         | ReasoningLevel::Ultracode
         | ReasoningLevel::Ultrathink => "max",
     }
+}
+
+/// Cypher uses `unknown/unknown` as the empty-catalog placeholder. It is not a
+/// real Pi model and must never be passed to `pi --model`: extension commands
+/// such as `/newapi-provider-add` are specifically how a fresh installation
+/// creates its first provider/model.
+fn concrete_model(model: &str) -> bool {
+    model.split_once('/').is_some_and(|(provider, id)| {
+        !provider.is_empty() && !id.is_empty() && provider != "unknown" && id != "unknown"
+    })
 }
 
 /// Minimum gap between forwarded [`AgentEvent::ToolProgress`] events for the
@@ -489,7 +501,7 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
 }
 
 /// Every Cypher-spawned Pi needs this: the login keychain rejects writes/reads
-/// from these children, so MCP OAuth is stored in ~/.pi/agent/mcp-oauth and
+/// from these children, so MCP OAuth is stored below `PI_CODING_AGENT_DIR` and
 /// served through a keyring shim.
 fn inject_mcp_keyring_preload(cmd: &mut Command) {
     let preload = std::env::temp_dir().join("cypher-mcp-keyring-preload.cjs");
@@ -518,6 +530,12 @@ fn resolve_executable() -> Option<PathBuf> {
 /// a fake pi with [`PiHarness::with_executable`].
 pub struct PiHarness {
     executable: Option<PathBuf>,
+    /// Cypher-owned Pi config root. When set, the harness never reads
+    /// `~/.pi/agent`.
+    agent_dir: Option<PathBuf>,
+    /// Package root for Pi's built-in assets (`dist/`, themes, export
+    /// templates) when launched from the Cypher runtime wrapper.
+    package_dir: Option<PathBuf>,
     /// cypher-owned pi session store (`<profile store>/agent-sessions`),
     /// passed through as `--session-dir`.
     session_dir: PathBuf,
@@ -556,6 +574,8 @@ impl PiHarness {
     pub fn new(session_dir: PathBuf) -> Self {
         Self {
             executable: None,
+            agent_dir: None,
+            package_dir: None,
             session_dir,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -578,6 +598,18 @@ impl PiHarness {
     /// Use a fixed pi binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self
+    }
+
+    /// Isolate Pi's mutable config and package-root lookup from the user's
+    /// system Pi installation.
+    pub fn with_runtime_environment(
+        mut self,
+        agent_dir: impl Into<PathBuf>,
+        package_dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.agent_dir = Some(agent_dir.into());
+        self.package_dir = Some(package_dir.into());
         self
     }
 
@@ -623,7 +655,13 @@ impl PiHarness {
             self.session_dir.display().to_string(),
         ];
         if let Some(exe) = &self.executable {
-            return Ok((exe.clone(), args));
+            if exe.is_file() {
+                return Ok((exe.clone(), args));
+            }
+            return Err(HarnessError::NotInstalled(format!(
+                "Cypher Pi Runtime is not installed ({})",
+                exe.display()
+            )));
         }
         match resolve_executable() {
             Some(exe) => Ok((exe, args)),
@@ -695,12 +733,14 @@ impl PiHarness {
             .child
             .as_ref()
             .and_then(|child| child.model.as_deref())
-            .or(requested_model);
-        let launch_thinking = host
-            .child
-            .as_ref()
-            .and_then(|child| child.thinking.as_deref())
-            .or(requested_thinking);
+            .or(requested_model)
+            .filter(|model| concrete_model(model));
+        let launch_thinking = launch_model.and_then(|_| {
+            host.child
+                .as_ref()
+                .and_then(|child| child.thinking.as_deref())
+                .or(requested_thinking)
+        });
         if let Some(child) = &host.child {
             let mut tools = child.tools.clone();
             for tool in MESSAGING_TOOLS {
@@ -730,6 +770,12 @@ impl PiHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
+        if let Some(agent_dir) = &self.agent_dir {
+            cmd.env(ENV_AGENT_DIR, agent_dir);
+        }
+        if let Some(package_dir) = &self.package_dir {
+            cmd.env(ENV_PACKAGE_DIR, package_dir);
+        }
         inject_mcp_keyring_preload(&mut cmd);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
@@ -881,7 +927,12 @@ impl PiHarness {
     pub async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
         // Same plugin path as the TUI (`pi --mode rpc` + `/mcp-auth`).
         let mut cmd = self.spawn_command(None, &RunHostContext::default(), None)?;
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(agent_dir) = &self.agent_dir {
+            cmd.env(
+                "CYPHER_MCP_AUTH_DUMP",
+                agent_dir.join(".cypher-mcp-auth-dump.jsonl"),
+            );
+        } else if let Some(home) = std::env::var_os("HOME") {
             cmd.env(
                 "CYPHER_MCP_AUTH_DUMP",
                 std::path::PathBuf::from(home).join(".pi/agent/.cypher-mcp-auth-dump.jsonl"),
@@ -1001,7 +1052,10 @@ impl Harness for PiHarness {
     /// The pi CLI present on this device: a filesystem probe, never a spawn.
     /// Explicit executables (tests, `PI_EXECUTABLE` overrides) always count.
     fn installed(&self) -> bool {
-        self.executable.is_some() || resolve_executable().is_some()
+        self.executable
+            .as_ref()
+            .is_some_and(|executable| executable.is_file())
+            || (self.executable.is_none() && resolve_executable().is_some())
     }
 
     /// pi's provider/model config is the source of truth: a short-lived probe
@@ -1585,7 +1639,10 @@ async fn run_session(session: Session) {
         // A resumed session may restore its historical model; detect that
         // exact case and re-select, waiting out Pi's cold catalog snapshot.
         let mut state = client.request("get_state", Map::new()).await?;
-        if let Some(requested) = request.model.as_deref()
+        if let Some(requested) = request
+            .model
+            .as_deref()
+            .filter(|model| concrete_model(model))
             && !state_uses_model(&state, requested)
         {
             select_requested_model(&client, requested, model_catalog_wait).await?;
@@ -1597,7 +1654,11 @@ async fn run_session(session: Session) {
                 )));
             }
         }
-        if let Some(level) = request.reasoning {
+        if let Some(level) = request.reasoning
+            && state_model_key(&state)
+                .as_deref()
+                .is_some_and(concrete_model)
+        {
             let requested = thinking_level(level);
             if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
                 let mut params = Map::new();

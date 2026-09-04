@@ -446,7 +446,7 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
-    pi_updater: Option<crate::pi_packages::PiUpdater>,
+    pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -490,7 +490,7 @@ impl EngineRpc {
             auth: None,
             links: None,
             updater: None,
-            pi_updater: None,
+            pi_runtime: None,
             local_import: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -515,8 +515,8 @@ impl EngineRpc {
         self
     }
 
-    pub fn with_pi_updater(mut self, updater: crate::pi_packages::PiUpdater) -> Self {
-        self.pi_updater = Some(updater);
+    pub fn with_pi_runtime(mut self, runtime: crate::pi_runtime::PiRuntimeManager) -> Self {
+        self.pi_runtime = Some(runtime);
         self
     }
 
@@ -538,10 +538,10 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
     }
 
-    fn pi_updater(&self) -> Result<&crate::pi_packages::PiUpdater, RpcError> {
-        self.pi_updater
+    fn pi_runtime(&self) -> Result<&crate::pi_runtime::PiRuntimeManager, RpcError> {
+        self.pi_runtime
             .as_ref()
-            .ok_or_else(|| RpcError::Failed("Pi updates unavailable".into()))
+            .ok_or_else(|| RpcError::Failed("Pi Runtime unavailable".into()))
     }
 
     /// Pi packages changed: rediscover slash commands/models and recycle
@@ -966,6 +966,11 @@ impl EngineRpc {
                 "cannot reach device {target}: remote routing unavailable (offline)"
             )));
         };
+        if method == methods::SAVE_PI_PROVIDER && !links.credential_transport_allowed() {
+            return Err(RpcError::Failed(
+                "Remote provider credentials require an HTTPS/WSS relay (loopback development is allowed).".into()
+            ));
+        }
         let client = links.client(target).await?;
         if is_stream_method(method) {
             let rx = match client.subscribe(method, params).await {
@@ -1159,6 +1164,12 @@ fn forwardable(method: &str) -> bool {
             | methods::INSTALL_PI
             | methods::INSTALL_PI_PACKAGE
             | methods::SET_PI_PACKAGE_ENABLED
+            | methods::PI_RUNTIME_STATUS
+            | methods::LIST_PI_PROVIDERS
+            | methods::SAVE_PI_PROVIDER
+            | methods::REFRESH_PI_PROVIDER
+            | methods::LOGOUT_PI_PROVIDER
+            | methods::REMOVE_PI_PROVIDER
             | methods::PI_UPDATE_STATUS
             | methods::APPLY_PI_UPDATES
             | methods::LIST_MCP_SERVERS
@@ -1425,6 +1436,31 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let provider_method = matches!(
+            method,
+            methods::LIST_PI_PROVIDERS
+                | methods::SAVE_PI_PROVIDER
+                | methods::REFRESH_PI_PROVIDER
+                | methods::LOGOUT_PI_PROVIDER
+                | methods::REMOVE_PI_PROVIDER
+        );
+        if forwardable(method)
+            && let Some(target) = params.get("targetDeviceId")
+            && !target.as_str().is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(RpcError::BadParams("Invalid target device.".into()));
+        }
+        if provider_method {
+            // Validate before forwarding, without echoing malformed credentials.
+            if method == methods::SAVE_PI_PROVIDER {
+                let mut body = params.clone();
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
+                    .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
+            }
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1452,31 +1488,85 @@ impl RpcService for EngineRpc {
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
             }
-            methods::LIST_PI_PACKAGES => RpcReply::value(&crate::pi_packages::list()),
+            methods::LIST_PI_PACKAGES => {
+                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
+            }
             methods::INSTALL_PI => {
-                crate::pi_packages::install_pi()
+                self.pi_runtime()?
+                    .install_latest()
                     .await
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&crate::pi_packages::list())
+                self.registry.invalidate_discovery(HarnessId::Pi);
+                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
             methods::INSTALL_PI_PACKAGE => {
                 let p: PiPackageParams = parse_params(params)?;
-                crate::pi_packages::install_package(&p.source)
+                crate::pi_packages::install_package(self.pi_runtime()?.paths(), &p.source)
                     .await
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
-                RpcReply::value(&crate::pi_packages::list())
+                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
             methods::SET_PI_PACKAGE_ENABLED => {
                 let p: crate::pi_packages::SetPackageEnabled = parse_params(params)?;
-                crate::pi_packages::set_package_enabled(p).map_err(RpcError::Failed)?;
+                crate::pi_packages::set_package_enabled(self.pi_runtime()?.paths(), p)
+                    .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
-                RpcReply::value(&crate::pi_packages::list())
+                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
-            methods::LIST_MCP_SERVERS => RpcReply::value(&crate::mcp::list()),
+            methods::PI_RUNTIME_STATUS => RpcReply::value(&self.pi_runtime()?.status()),
+            methods::LIST_PI_PROVIDERS
+            | methods::SAVE_PI_PROVIDER
+            | methods::REFRESH_PI_PROVIDER
+            | methods::LOGOUT_PI_PROVIDER
+            | methods::REMOVE_PI_PROVIDER => {
+                // Routing is consumed here, never passed to the Runtime helper.
+                // Non-local requests have already been forwarded above.
+                let mut params = params;
+                if let Some(object) = params.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let (action, args) = match method {
+                    methods::LIST_PI_PROVIDERS => ("list", serde_json::json!({})),
+                    methods::SAVE_PI_PROVIDER => {
+                        let p = serde_json::from_value::<crate::pi_providers::SaveProvider>(params)
+                            .map_err(|_| {
+                                RpcError::BadParams("Invalid provider settings.".into())
+                            })?;
+                        (
+                            "save",
+                            serde_json::to_value(p)
+                                .map_err(|_| RpcError::BadParams("Invalid provider.".into()))?,
+                        )
+                    }
+                    _ => {
+                        let id = params
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| RpcError::BadParams("Missing provider id.".into()))?;
+                        let action = match method {
+                            methods::REFRESH_PI_PROVIDER => "refresh",
+                            methods::LOGOUT_PI_PROVIDER => "logout",
+                            _ => "remove",
+                        };
+                        (action, serde_json::json!({ "id": id }))
+                    }
+                };
+                let result =
+                    crate::pi_providers::request(self.pi_runtime()?.paths(), action, args).await;
+                // Even a partially completed disk operation needs cache invalidation.
+                if action != "list" {
+                    self.reload_pi_runtime().await;
+                }
+                RpcReply::value(&result.map_err(RpcError::Failed)?)
+            }
+            methods::LIST_MCP_SERVERS => {
+                RpcReply::value(&crate::mcp::list(&self.pi_runtime()?.paths().agent_dir))
+            }
             methods::SET_MCP_SERVER_ENABLED => {
                 let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
-                let snapshot = crate::mcp::set_enabled(p).map_err(RpcError::Failed)?;
+                let snapshot = crate::mcp::set_enabled(&self.pi_runtime()?.paths().agent_dir, p)
+                    .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
             }
@@ -1486,15 +1576,20 @@ impl RpcService for EngineRpc {
                     .registry
                     .resolve(cypher_proto::HarnessId::Pi)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let snapshot = crate::mcp::authenticate(&p.name, harness.as_ref())
-                    .await
-                    .map_err(RpcError::Failed)?;
+                let snapshot = crate::mcp::authenticate(
+                    &self.pi_runtime()?.paths().agent_dir,
+                    &p.name,
+                    harness.as_ref(),
+                )
+                .await
+                .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
             }
             methods::LOGOUT_MCP_SERVER => {
                 let p: crate::mcp::McpServerName = parse_params(params)?;
-                let snapshot = crate::mcp::logout(&p.name).map_err(RpcError::Failed)?;
+                let snapshot = crate::mcp::logout(&self.pi_runtime()?.paths().agent_dir, &p.name)
+                    .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
             }
@@ -1679,17 +1774,16 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
             }
-            methods::PI_UPDATE_STATUS => {
-                Ok(RpcReply::Stream(watch_stream(self.pi_updater()?.watch())))
-            }
+            methods::PI_UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(
+                self.pi_runtime()?.watch_updates(),
+            ))),
             methods::APPLY_PI_UPDATES => {
-                let status = self
-                    .pi_updater()?
-                    .apply_all()
+                self.pi_runtime()?
+                    .install_latest()
                     .await
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
-                RpcReply::value(&status)
+                RpcReply::value(&self.pi_runtime()?.update_status())
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;

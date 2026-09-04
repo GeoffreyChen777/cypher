@@ -24,6 +24,8 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod mcp;
 pub mod pi_packages;
+pub mod pi_providers;
+pub mod pi_runtime;
 pub mod profile;
 pub mod registry;
 pub mod repos;
@@ -50,6 +52,7 @@ pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use registry::{
     HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
+    default_registry_with_bridge_and_runtime,
 };
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
@@ -145,9 +148,8 @@ pub struct EngineCore {
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<cypher_update::Updater>>,
-    /// Pi CLI + extension update checker (same six-hour cadence as the Cypher
-    /// release checker), attached by [`Engine::assemble_runtime`].
-    pi_updater: std::sync::Mutex<Option<pi_packages::PiUpdater>>,
+    /// Downloaded, Cypher-owned Pi runtime + six-hour runtime update checker.
+    pi_runtime: std::sync::Mutex<Option<pi_runtime::PiRuntimeManager>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
@@ -325,7 +327,7 @@ impl EngineCore {
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
-            pi_updater: std::sync::Mutex::new(None),
+            pi_runtime: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
@@ -398,15 +400,15 @@ impl EngineCore {
             .clone()
     }
 
-    pub fn set_pi_updater(&self, updater: pi_packages::PiUpdater) {
+    pub fn set_pi_runtime(&self, runtime: pi_runtime::PiRuntimeManager) {
         *self
-            .pi_updater
+            .pi_runtime
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
     }
 
-    pub fn pi_updater(&self) -> Option<pi_packages::PiUpdater> {
-        self.pi_updater
+    pub fn pi_runtime(&self) -> Option<pi_runtime::PiRuntimeManager> {
+        self.pi_runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -470,8 +472,8 @@ impl EngineCore {
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
         }
-        if let Some(updater) = self.pi_updater() {
-            rpc = rpc.with_pi_updater(updater);
+        if let Some(runtime) = self.pi_runtime() {
+            rpc = rpc.with_pi_runtime(runtime);
         }
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
@@ -522,13 +524,13 @@ impl EngineCore {
         if let Some(updater) = updater {
             updater.shutdown().await;
         }
-        let pi_updater = self
-            .pi_updater
+        let pi_runtime = self
+            .pi_runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(updater) = pi_updater {
-            updater.shutdown().await;
+        if let Some(runtime) = pi_runtime {
+            runtime.shutdown().await;
         }
         self.diff_sync.shutdown().await;
         self.spaces_sync.shutdown().await;
@@ -772,6 +774,11 @@ impl Engine {
 
         // The cypher-owned pi session store (`pi --mode rpc --session-dir`).
         let pi_sessions_root = profile.store_root().join("agent-sessions");
+        // The executable/config boundary is device-global and fixed before
+        // first-run installation. No system Pi fallback: publishing the
+        // `current` symlink makes the lazy harness become installed.
+        let pi_runtime_data_dir = profile.device_root().to_path_buf();
+        let pi_runtime_paths = pi_runtime::PiRuntimePaths::for_data_dir(profile.device_root());
         // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_WS_URL`:
         // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
         // headless and headed modes). Test-only `EngineCore::assemble` keeps
@@ -781,9 +788,10 @@ impl Engine {
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
-                Arc::new(default_registry_with_bridge(
+                Arc::new(default_registry_with_bridge_and_runtime(
                     pi_sessions_root,
                     engine_ws_url,
+                    Some(pi_runtime_paths.clone()),
                 )),
                 config.default_harness,
                 edge.clone(),
@@ -791,9 +799,10 @@ impl Engine {
             )?,
             None => EngineCore::assemble_with_profile(
                 profile,
-                Arc::new(default_registry_with_bridge(
+                Arc::new(default_registry_with_bridge_and_runtime(
                     pi_sessions_root,
                     engine_ws_url,
+                    Some(pi_runtime_paths),
                 )),
                 config.default_harness,
                 edge.clone(),
@@ -842,7 +851,10 @@ impl Engine {
             core.set_updater_wake(wake);
         }
         core.set_updater(updater);
-        core.set_pi_updater(pi_packages::PiUpdater::spawn());
+        core.set_pi_runtime(pi_runtime::PiRuntimeManager::spawn(
+            config.edge_url.clone(),
+            &pi_runtime_data_dir,
+        ));
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
@@ -852,7 +864,6 @@ impl Engine {
         // that loads every extension. Kick that probe off at boot so the
         // popup is a cache hit.
         {
-            use cypher_harness::Harness;
             let registry = core.registry.clone();
             tokio::spawn(async move {
                 let Ok(harness) = registry.resolve(HarnessId::Pi) else {

@@ -57,6 +57,12 @@ pub fn bump_harness_catalog(cx: &mut App) {
     cx.set_global(HarnessCatalogChanged);
 }
 
+fn concrete_pi_model(id: &str) -> bool {
+    id.split_once('/').is_some_and(|(provider, model)| {
+        !provider.is_empty() && !model.is_empty() && provider != "unknown" && model != "unknown"
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Draft config (what the pickers accumulate)
 // ---------------------------------------------------------------------------
@@ -422,6 +428,8 @@ pub struct Pickers {
     model_rail: ModelRail,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    model_generation: u64,
+    catalog_owner: Option<String>,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -507,12 +515,15 @@ impl Pickers {
             if Self::no_project_invalidates_pin(this.pinned.is_some(), state.no_project) {
                 this.clear_pinned_target();
             }
+            this.sync_catalog_owner(cx);
             cx.notify();
         });
         // A Settings → Agents toggle changed some device's enabled set:
         // force-refresh the cached catalog so the rail/chips follow without a
         // restart (stale rows stay visible while the reload runs).
         let catalog_observe = cx.observe_global::<HarnessCatalogChanged>(|this: &mut Self, cx| {
+            this.model_generation = this.model_generation.wrapping_add(1);
+            this.models.clear();
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
@@ -570,6 +581,8 @@ impl Pickers {
             model_rail: ModelRail::default(),
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            model_generation: 0,
+            catalog_owner: None,
             refs: Loadable::Idle,
             refs_space: None,
             pinned: None,
@@ -628,6 +641,19 @@ impl Pickers {
     /// (a side chat's synthetic row names its parent's device — including a
     /// remote PROJECT-LESS side chat, which has no space row to target); a
     /// new-chat canvas targets its picked project's host.
+    fn sync_catalog_owner(&mut self, cx: &App) {
+        let owner = self
+            .space_target(cx)
+            .or_else(|| self.state.read(cx).local_device_id.clone());
+        if owner != self.catalog_owner {
+            self.catalog_owner = owner;
+            self.model_generation = self.model_generation.wrapping_add(1);
+            self.models.clear();
+            self.harnesses = Loadable::Idle;
+            self.load_task = None;
+        }
+    }
+
     fn space_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
         let device = state
@@ -704,18 +730,33 @@ impl Pickers {
     }
 
     /// The selected model — concrete from the moment the list loads: the
-    /// effective id when the list still offers it, else the harness default
-    /// (first row). Never `None` with a non-empty catalog.
+    /// effective id when the list still offers it, else the harness default.
+    /// Pi keeps a missing explicit selection unresolved rather than silently
+    /// sending the next prompt to a different provider.
     fn selected_model<'a>(&'a self, cx: &'a App) -> Option<&'a Model> {
         let harness = self.effective_harness(cx)?;
         let models = self.models.get(&harness)?.ready()?;
         match self.effective_model_id(cx) {
+            Some(id) if harness == HarnessId::Pi && concrete_pi_model(id) => {
+                models.iter().find(|m| m.id == id)
+            }
             Some(id) => models
                 .iter()
                 .find(|m| m.id == id)
                 .or_else(|| default_model(models)),
             None => default_model(models),
         }
+    }
+
+    /// Removing credentials or a provider must not silently select a different
+    /// service for the next user message.
+    pub fn unavailable_pi_model<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        if self.effective_harness(cx) != Some(HarnessId::Pi) {
+            return None;
+        }
+        let id = self.effective_model_id(cx)?;
+        let models = self.models.get(&HarnessId::Pi)?.ready()?;
+        (concrete_pi_model(id) && !models.iter().any(|m| m.id == id)).then_some(id)
     }
 
     /// The explicit (non-default) option picks: the chat's persisted
@@ -903,6 +944,7 @@ impl Pickers {
     // ---- loads ----
 
     fn ensure_harnesses(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.sync_catalog_owner(cx);
         // Non-forced (the render loop's eager kick) only loads from Idle: an
         // Error that could re-trigger a load would flip back to Loading
         // before the retry row ever painted (and spam the engine); Retry
@@ -990,6 +1032,7 @@ impl Pickers {
         };
         let target = self.space_target(cx);
         self.models.insert(harness, Loadable::Loading);
+        let generation = self.model_generation;
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
@@ -1000,6 +1043,9 @@ impl Pickers {
             }
             let result = engine.client().call(methods::LIST_MODELS, params).await;
             this.update(cx, |pickers, cx| {
+                if generation != pickers.model_generation {
+                    return;
+                }
                 let loaded = match result {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
                         // Display hygiene for catalogs from older engines
@@ -1820,6 +1866,7 @@ impl Pickers {
         // Catalogs are per-DEVICE (fetched from the space's host): a space
         // switch may land on another device, so refetch.
         self.harnesses = Loadable::Idle;
+        self.model_generation = self.model_generation.wrapping_add(1);
         self.models.clear();
     }
 
@@ -2784,6 +2831,7 @@ impl Pickers {
                         PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
                         PickerKind::HarnessModel | PickerKind::Traits => {
                             this.harnesses = Loadable::Idle;
+                            this.model_generation = this.model_generation.wrapping_add(1);
                             this.models.clear();
                             this.ensure_harnesses(false, cx);
                         }
@@ -3334,7 +3382,7 @@ impl Pickers {
                 Some(Loadable::Ready(models)) if models.is_empty() => {
                     vec![empty_list_note(
                         &theme,
-                        "No models available — configure a Pi provider first",
+                        "No models available — add a service in Settings → Providers",
                     )]
                 }
                 _ => vec![popover::skeleton_rows(

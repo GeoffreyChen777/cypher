@@ -5,13 +5,14 @@
 //! typed. Until the user customizes, [`DEFAULT_HIDDEN`] applies.
 
 use gpui::{
-    App, Context, Entity, EventEmitter, Global, Render, SharedString, Task, Window, div,
-    prelude::*, px,
+    App, Context, Entity, EventEmitter, Global, Render, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 
 use cypher_proto::{HarnessId, SlashCommand};
 use cypher_rpc::methods;
 
+use super::device_target::DeviceTarget;
 use crate::icons;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -93,6 +94,10 @@ pub enum CommandsEvent {
 
 pub struct CommandsPage {
     state: Entity<AppState>,
+    target: Entity<DeviceTarget>,
+    generation: u64,
+    _target_observer: Subscription,
+    _catalog_observer: Subscription,
     commands: Loadable<Vec<SlashCommand>>,
     /// `None` = default hide rules; `Some` = user-customized exact names.
     hidden: Option<Vec<String>>,
@@ -104,11 +109,31 @@ impl EventEmitter<CommandsEvent> for CommandsPage {}
 impl CommandsPage {
     pub fn new(
         state: Entity<AppState>,
+        target: Entity<DeviceTarget>,
         hidden: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let generation = target.read(cx).generation();
+        let observer = cx.observe(&target, |page: &mut Self, target, cx| {
+            let generation = target.read(cx).generation();
+            if generation != page.generation {
+                page.generation = generation;
+                page.load_task = None;
+                page.commands = Loadable::Idle;
+                page.load(cx);
+            }
+            cx.notify();
+        });
+        let catalog_observer =
+            cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|page: &mut Self, cx| {
+                page.load(cx)
+            });
         let mut page = Self {
             state,
+            target,
+            generation,
+            _target_observer: observer,
+            _catalog_observer: catalog_observer,
             commands: Loadable::Idle,
             hidden,
             load_task: None,
@@ -118,6 +143,14 @@ impl CommandsPage {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        let ticket = match self.target.read(cx).ticket(cx) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.commands = Loadable::Error(error);
+                cx.notify();
+                return;
+            }
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -127,16 +160,19 @@ impl CommandsPage {
                 .client()
                 .call(
                     methods::LIST_COMMANDS,
-                    serde_json::json!({ "harness": HarnessId::Pi }),
+                    ticket.params(serde_json::json!({ "harness": HarnessId::Pi })),
                 )
                 .await;
             this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
                 page.commands = match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
                         Ok(commands) => Loadable::Ready(commands),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
+                    Err(err) => Loadable::Error(format!("{}: {err}", ticket.label)),
                 };
                 cx.notify();
             })
@@ -255,11 +291,13 @@ impl Render for CommandsPage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "Choose which slash commands appear when you type /. Hidden commands still run if you type them.",
+                            "Commands available on the selected device. Visibility is saved on this client only; hiding a command does not disable it on the host.",
                         )
                         .max_w(px(560.0))
                         .line_height(px(20.0)),
                     )
+                    .when_some(self.target.read(cx).unavailable(cx), |el, error|
+                        el.child(widgets::warning_strip(&theme, error)))
                     .child(body),
             )
     }
@@ -314,5 +352,19 @@ mod tests {
         assert!(!hides(Some(&shown), "goal"));
         let hidden = set_visible(&commands, Some(&shown), "goal", false);
         assert!(hides(Some(&hidden), "goal"));
+    }
+
+    #[test]
+    fn client_visibility_preferences_survive_a_different_device_catalog() {
+        let a = vec![cmd("goal"), cmd("mcp")];
+        let hidden = set_visible(&a, None, "goal", false);
+        let b = vec![cmd("goal"), cmd("remote-only")];
+        let next = set_visible(&b, Some(&hidden), "remote-only", true);
+        assert!(hides(Some(&next), "goal"));
+        assert!(
+            hides(Some(&next), "mcp"),
+            "an absent host command must not erase a client preference"
+        );
+        assert!(!hides(Some(&next), "remote-only"));
     }
 }

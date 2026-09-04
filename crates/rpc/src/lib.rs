@@ -41,10 +41,17 @@ pub mod methods {
     pub const INSTALL_PI: &str = "InstallPi";
     pub const INSTALL_PI_PACKAGE: &str = "InstallPiPackage";
     pub const SET_PI_PACKAGE_ENABLED: &str = "SetPiPackageEnabled";
+    /// Download/install state for Cypher's isolated Pi runtime.
+    pub const PI_RUNTIME_STATUS: &str = "PiRuntimeStatus";
+    pub const LIST_PI_PROVIDERS: &str = "ListPiProviders";
+    pub const SAVE_PI_PROVIDER: &str = "SavePiProvider";
+    pub const REFRESH_PI_PROVIDER: &str = "RefreshPiProvider";
+    pub const LOGOUT_PI_PROVIDER: &str = "LogoutPiProvider";
+    pub const REMOVE_PI_PROVIDER: &str = "RemovePiProvider";
     /// Current Pi CLI + package update facts, then every six-hour refresh or
     /// apply transition.
     pub const PI_UPDATE_STATUS: &str = "PiUpdateStatus";
-    /// Explicit one-click update of Pi plus all unpinned installed packages.
+    /// Explicit retry/repair of the latest isolated Pi runtime bundle.
     pub const APPLY_PI_UPDATES: &str = "ApplyPiUpdates";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";

@@ -478,3 +478,287 @@ async fn remote_target_without_links_fails_clearly() {
     );
     core.shutdown().await;
 }
+
+// Distinct catalogs prove each settings page resolves the selected host,
+// including when both hosts offer the same harness.
+struct DeviceCatalog(&'static str);
+#[async_trait]
+impl Harness for DeviceCatalog {
+    fn id(&self) -> HarnessId {
+        HarnessId::Pi
+    }
+    fn display_name(&self) -> &str {
+        self.0
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![Model {
+            id: format!("{}/model", self.0),
+            label: self.0.into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        }])
+    }
+    async fn commands(&self) -> Result<Vec<cypher_proto::SlashCommand>, HarnessError> {
+        Ok(vec![cypher_proto::SlashCommand {
+            name: format!("{}-command", self.0),
+            description: String::new(),
+            input_hint: None,
+        }])
+    }
+    async fn run(
+        &self,
+        _: RunRequest,
+        _: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Ok(futures::stream::empty().boxed())
+    }
+}
+
+#[cfg(unix)]
+fn settings_engine(dir: &std::path::Path, device: &'static str) -> EngineCore {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("device-id"), device).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(DeviceCatalog(device)));
+    let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Pi, None).unwrap();
+    let current = dir.join("pi-runtime/current");
+    for folder in ["bin", "pi", "npm"] {
+        std::fs::create_dir_all(current.join(folder)).unwrap();
+    }
+    std::fs::write(
+        current.join("runtime.json"),
+        r#"{"version":"1","piVersion":"0.85.0","plugins":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        current.join("pi/package.json"),
+        r#"{"name":"fixture-pi","version":"1"}"#,
+    )
+    .unwrap();
+    std::fs::write(current.join("npm/package.json"), r#"{"private":true}"#).unwrap();
+    std::fs::write(current.join("bin/pi"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(current.join("bin/node"), "#!/bin/sh\nexec python3 \"$@\"\n").unwrap();
+    for exe in ["bin/pi", "bin/node"] {
+        std::fs::set_permissions(current.join(exe), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    // Test-only transport fixture. Observe no secret values; the real Runtime
+    // credential lifecycle is covered by provider-service.test.mjs.
+    let helper = format!(
+        r#"import json,os,sys
+p=json.load(sys.stdin)
+agent=os.environ["PI_CODING_AGENT_DIR"]
+with open(os.path.join(agent,"observed.json"),"w") as f:
+    json.dump({{"action":p["action"],"id":p.get("id"),
+      "credentialReceived":p.get("apiKey")=="fixture-key",
+      "routingStripped":"targetDeviceId" not in p}},f)
+print(json.dumps({{"ok":True,"data":{{"providers":[{{
+  "id":"{device}","baseUrl":"https://example.com","providerType":"newapi",
+  "credentialSaved":p["action"]=="save","state":"unverified","modelCount":1
+}}]}}}}))
+"#
+    );
+    std::fs::write(current.join("provider-service.mjs"), helper).unwrap();
+    let runtime =
+        cypher_engine::pi_runtime::PiRuntimeManager::spawn("http://127.0.0.1:1".into(), dir);
+    std::fs::write(runtime.paths().agent_dir.join("mcp.json"), serde_json::to_vec(&serde_json::json!({
+        "mcpServers": { format!("{device}-mcp"): {
+            "url": "https://user:fixture-secret@example.com/mcp?token=fixture-secret", "auth": false
+        }}
+    })).unwrap()).unwrap();
+    core.set_pi_runtime(runtime);
+    core
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target() {
+    let (url, relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let a_dir = dirs.path().join("a");
+    let b_dir = dirs.path().join("b");
+    let b = settings_engine(&b_dir, "device-b");
+    let _host = b.start_host_relay(&url);
+    let a = settings_engine(&a_dir, "device-a");
+    let config = LinkCacheConfig::new(url, Arc::new(StaticToken("test-user".into())));
+    a.set_links(LinkCache::new(config));
+    let client = cypher_rpc::memory_client(a.rpc_service());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if client
+            .call(
+                methods::LIST_HARNESSES,
+                serde_json::json!({"targetDeviceId":"device-b"}),
+            )
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "relay did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for device in ["device-a", "device-b"] {
+        let commands = client
+            .call(
+                methods::LIST_COMMANDS,
+                serde_json::json!({"harness":"pi","targetDeviceId":device}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(commands[0]["name"], format!("{device}-command"));
+        let models = client
+            .call(
+                methods::LIST_MODELS,
+                serde_json::json!({"harness":"pi","targetDeviceId":device}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models[0]["id"], format!("{device}/model"));
+        let packages = client
+            .call(
+                methods::LIST_PI_PACKAGES,
+                serde_json::json!({"targetDeviceId":device}),
+            )
+            .await
+            .unwrap();
+        assert!(packages.is_object());
+    }
+    for (method, action) in [
+        (methods::LIST_PI_PROVIDERS, "list"),
+        (methods::SAVE_PI_PROVIDER, "save"),
+        (methods::REFRESH_PI_PROVIDER, "refresh"),
+        (methods::LOGOUT_PI_PROVIDER, "logout"),
+        (methods::REMOVE_PI_PROVIDER, "remove"),
+    ] {
+        let mut params = serde_json::json!({"id":"gateway","targetDeviceId":"device-b"});
+        if method == methods::SAVE_PI_PROVIDER {
+            params["baseUrl"] = "https://example.com".into();
+            params["apiKey"] = "fixture-key".into();
+        }
+        let reply = client.call(method, params).await.unwrap();
+        assert_eq!(reply["providers"][0]["id"], "device-b");
+        assert!(!reply.to_string().contains("fixture-key"));
+        let observed: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(b_dir.join("pi-runtime/agent/observed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observed["action"], action);
+        assert_eq!(observed["routingStripped"], true);
+        if action == "save" {
+            assert_eq!(observed["credentialReceived"], true);
+        }
+        assert!(
+            !a_dir.join("pi-runtime/agent/observed.json").exists(),
+            "remote call touched local provider state"
+        );
+    }
+    let local = client.call(methods::SAVE_PI_PROVIDER, serde_json::json!({
+        "id":"local-gateway","baseUrl":"https://example.com","apiKey":"fixture-key","targetDeviceId":"device-a"
+    })).await.unwrap();
+    assert_eq!(
+        local["providers"][0]["id"], "device-a",
+        "explicit local routing is accepted"
+    );
+    let mcp = client
+        .call(
+            methods::LIST_MCP_SERVERS,
+            serde_json::json!({"targetDeviceId":"device-b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mcp["servers"][0]["name"], "device-b-mcp");
+    assert!(
+        !mcp.to_string().contains("fixture-secret"),
+        "MCP list exposed URL credentials"
+    );
+    let changed = client
+        .call(
+            methods::SET_MCP_SERVER_ENABLED,
+            serde_json::json!({"targetDeviceId":"device-b","name":"device-b-mcp","enabled":false}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed["servers"][0]["enabled"], false);
+    let local_mcp = client
+        .call(methods::LIST_MCP_SERVERS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(local_mcp["servers"][0]["enabled"], true);
+    let bad = client
+        .call(
+            methods::SAVE_PI_PROVIDER,
+            serde_json::json!({
+                "id":"gateway","baseUrl":"https://example.com","apiKey":{"secret":"must-not-echo"},
+                "targetDeviceId":"device-b"
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(!bad.to_string().contains("must-not-echo"));
+    for target in [
+        serde_json::Value::Null,
+        serde_json::json!(123),
+        serde_json::json!(""),
+    ] {
+        for method in [
+            methods::LIST_PI_PROVIDERS,
+            methods::LIST_PI_PACKAGES,
+            methods::LIST_MCP_SERVERS,
+            methods::LIST_COMMANDS,
+        ] {
+            assert!(
+                client
+                    .call(
+                        method,
+                        serde_json::json!({"targetDeviceId":target,"harness":"pi"})
+                    )
+                    .await
+                    .is_err(),
+                "{method} must reject invalid routing instead of falling back locally"
+            );
+        }
+    }
+    relay.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_provider_errors_never_fall_back_to_local_and_insecure_relays_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = settings_engine(dir.path(), "device-a");
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({
+        "id":"gateway","baseUrl":"https://example.com","apiKey":"fixture-key","targetDeviceId":"device-b"
+    });
+    let error = client
+        .call(methods::SAVE_PI_PROVIDER, params.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("remote routing unavailable"));
+    core.set_links(LinkCache::new(LinkCacheConfig::new(
+        "http://insecure.example.com",
+        Arc::new(StaticToken("test-user".into())),
+    )));
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let error = client
+        .call(methods::SAVE_PI_PROVIDER, params)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("HTTPS/WSS"));
+    assert!(!dir.path().join("pi-runtime/agent/observed.json").exists());
+}

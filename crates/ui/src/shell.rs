@@ -37,10 +37,12 @@ use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::commands::{CommandsEvent, CommandsPage};
+use crate::settings::device_target::DeviceTarget;
 use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
+use crate::settings::providers::{ProviderIntent, ProvidersPage};
 use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -189,6 +191,7 @@ pub enum SettingsSection {
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
+    Providers,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Commands,
@@ -200,9 +203,22 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 8] = [
+    pub const DEVICE_SETTINGS: [Self; 4] =
+        [Self::Harnesses, Self::Providers, Self::Commands, Self::Mcp];
+    pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
+    // Registry and archived conversations span the workspace, not the selected
+    // host. Keep them separate from both host configuration and UI preferences.
+    pub const WORKSPACE_SETTINGS: [Self; 2] = [Self::Devices, Self::Archived];
+    pub const NAV_GROUPS: [(&'static str, &'static [Self]); 3] = [
+        ("Device settings", &Self::DEVICE_SETTINGS),
+        ("Client settings", &Self::CLIENT_SETTINGS),
+        ("Workspace", &Self::WORKSPACE_SETTINGS),
+    ];
+
+    pub const ALL: [SettingsSection; 9] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
+        SettingsSection::Providers,
         SettingsSection::Commands,
         SettingsSection::Mcp,
         SettingsSection::Appearance,
@@ -217,6 +233,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
+            SettingsSection::Providers => "Providers",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
@@ -934,6 +951,8 @@ pub struct Shell {
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
+    providers_page: Option<Entity<ProvidersPage>>,
+    settings_target: Entity<DeviceTarget>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     commands_page: Option<Entity<CommandsPage>>,
     commands_sub: Option<Subscription>,
@@ -1196,7 +1215,21 @@ impl Shell {
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::OpenProviders {
+                    intent,
+                    target_device,
+                } => {
+                    let result = this
+                        .settings_target
+                        .update(cx, |target, cx| target.select(target_device.clone(), cx));
+                    match result {
+                        Ok(()) => this.open_providers(intent.clone(), cx),
+                        Err(error) => this
+                            .composer
+                            .update(cx, |composer, cx| composer.report_error(error, cx)),
+                    }
+                }
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,
@@ -1278,6 +1311,7 @@ impl Shell {
             }
         });
         let data_dir = boot.data_dir.clone();
+        let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
         let settings = UiSettings::load(&data_dir);
         crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
         // Bind the customizable shortcuts from the persisted keymap.
@@ -1286,10 +1320,10 @@ impl Shell {
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
         let route = match cypher_env::var("OPEN_ROUTE").as_deref() {
-            Some("settings") | Some("settings/devices") => {
-                Route::Settings(SettingsSection::Devices)
-            }
+            Some("settings") => Route::Settings(SettingsSection::Harnesses),
+            Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
+            Some("settings/providers") => Route::Settings(SettingsSection::Providers),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/commands") => Route::Settings(SettingsSection::Commands),
             Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
@@ -1353,6 +1387,8 @@ impl Shell {
             notifications_page: None,
             shortcuts_page: None,
             accounts_page: None,
+            providers_page: None,
+            settings_target,
             harnesses_page: None,
             commands_page: None,
             commands_sub: None,
@@ -2700,7 +2736,7 @@ impl Shell {
 
     fn showing_setup(&self) -> bool {
         crate::settings::setup::setup_should_show(
-            self.settings.setup_completed,
+            self.settings.pi_runtime_setup_version >= 1,
             self.debug_setup,
             self.setup_dismissed,
         )
@@ -2712,14 +2748,18 @@ impl Shell {
         }
         let state = self.state.clone();
         let page = cx.new(|cx| SetupPage::new(state, cx));
-        self.setup_sub = Some(cx.subscribe(&page, |this, _, _: &SetupEvent, cx| {
+        self.setup_sub = Some(cx.subscribe(&page, |this, _, event: &SetupEvent, cx| {
             this.complete_setup(cx);
+            if matches!(event, SetupEvent::ConfigureProviders) {
+                this.open_providers(ProviderIntent::Add, cx);
+            }
         }));
         self.setup_page = Some(page);
     }
 
     fn complete_setup(&mut self, cx: &mut Context<Self>) {
         self.settings.setup_completed = true;
+        self.settings.pi_runtime_setup_version = 1;
         self.setup_dismissed = true;
         self.setup_page = None;
         self.setup_sub = None;
@@ -2754,7 +2794,20 @@ impl Shell {
             .into_any_element()
     }
 
+    fn open_providers(&mut self, intent: ProviderIntent, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Providers, cx);
+        let state = self.state.clone();
+        let target = self.settings_target.clone();
+        self.providers_page = Some(cx.new(|cx| ProvidersPage::new(state, target, intent, cx)));
+    }
+
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if let Some(page) = &self.providers_page {
+            page.update(cx, |page, cx| page.dismiss(cx));
+        }
+        if section == SettingsSection::Providers {
+            self.providers_page = None;
+        }
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
@@ -2775,6 +2828,9 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = &self.providers_page {
+            page.update(cx, |page, cx| page.dismiss(cx));
+        }
         self.route = Route::Chat;
         self.nav.push(NavEntry::Chat(self.active_chat.clone()));
         cx.notify();
@@ -2798,6 +2854,9 @@ impl Shell {
     /// points at `entry` (back/forward moved the index); the selection change
     /// this triggers dedups against `current()` in [`Self::on_state_changed`].
     fn apply_nav(&mut self, entry: NavEntry, cx: &mut Context<Self>) {
+        if let Some(page) = &self.providers_page {
+            page.update(cx, |page, cx| page.dismiss(cx));
+        }
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.route = Route::Chat;
@@ -2819,6 +2878,20 @@ impl Shell {
     /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(&mut self, section: SettingsSection, cx: &mut Context<Self>) -> AnyElement {
         match section {
+            SettingsSection::Providers => {
+                if self.providers_page.is_none() {
+                    let state = self.state.clone();
+                    let target = self.settings_target.clone();
+                    self.providers_page = Some(
+                        cx.new(|cx| ProvidersPage::new(state, target, ProviderIntent::List, cx)),
+                    );
+                }
+                self.providers_page
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
                     let state = self.state.clone();
@@ -2832,7 +2905,8 @@ impl Shell {
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    let target = self.settings_target.clone();
+                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, target, cx)));
                 }
                 match &self.harnesses_page {
                     Some(page) => page.clone().into_any_element(),
@@ -2853,7 +2927,8 @@ impl Shell {
                 if self.commands_page.is_none() {
                     let state = self.state.clone();
                     let hidden = self.settings.hidden_slash_commands.clone();
-                    let page = cx.new(|cx| CommandsPage::new(state, hidden, cx));
+                    let target = self.settings_target.clone();
+                    let page = cx.new(|cx| CommandsPage::new(state, target, hidden, cx));
                     self.commands_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &CommandsEvent, cx| {
@@ -2874,7 +2949,8 @@ impl Shell {
             SettingsSection::Mcp => {
                 if self.mcp_page.is_none() {
                     let state = self.state.clone();
-                    self.mcp_page = Some(cx.new(|cx| McpPage::new(state, cx)));
+                    let target = self.settings_target.clone();
+                    self.mcp_page = Some(cx.new(|cx| McpPage::new(state, target, cx)));
                 }
                 match &self.mcp_page {
                     Some(page) => page.clone().into_any_element(),
@@ -3935,9 +4011,9 @@ impl Shell {
         )
     }
 
-    /// Settings-mode sidebar (zeron settings-sidebar.tsx): window-control
-    /// strip, "Settings" heading, icon section rows styled like session rows,
-    /// and a Back row pinned to the bottom.
+    /// Settings navigation has a pinned device selector, scrollable scope
+    /// groups, and a pinned Back row. Only Device settings follow the selector;
+    /// client preferences and workspace management keep their own scope.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
@@ -3947,6 +4023,7 @@ impl Shell {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Providers => icons::KEY_MINIMALISTIC,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,
@@ -3955,95 +4032,155 @@ impl Shell {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
-        // Match the user's dragged sidebar width — the pane container clips to
-        // it, so a hardcoded default here left hover washes stopping short of
-        // the sidebar's right edge (user-reported). Device identity lives on
-        // the Accounts page now — the one surface where the device matters.
-        div()
-            .w(px(self.settings.sidebar_width))
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .px(px(Theme::SPACE_SM))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .px(px(Theme::SPACE_SM))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from("Settings")),
-                    )
-                    .child(div().flex().flex_col().gap(px(2.0)).children(
-                        SettingsSection::ALL.into_iter().map(|item| {
-                            let selected = item == section;
-                            div()
-                                .id(SharedString::from(format!("settings-nav-{}", item.label())))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .rounded(px(8.0))
-                                .px(px(Theme::SPACE_SM))
-                                .py(px(6.0))
-                                .text_size(px(13.0))
-                                .when(selected, |el| {
-                                    // Same tokens as the main sidebar's session
-                                    // rows — the two sidebars must feel alike.
-                                    el.bg(crate::theme::glass_selected_bg())
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                })
+        let mut groups = div()
+            .id("settings-nav-groups")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(8.0))
+            .pb(px(16.0));
+        for (index, (title, sections)) in SettingsSection::NAV_GROUPS.into_iter().enumerate() {
+            let rows = sections
+                .iter()
+                .copied()
+                .map(|item| {
+                    let selected = item == section;
+                    div()
+                        .id(SharedString::from(format!("settings-nav-{}", item.label())))
+                        .role(gpui::Role::Button)
+                        .aria_label(item.label())
+                        .tab_index(0)
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_h(px(32.0))
+                        .rounded(px(8.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_size(px(13.0))
+                        .when(selected, |el| {
+                            el.bg(crate::theme::glass_selected_bg())
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                        })
+                        .text_color(if selected {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_settings(item, cx)))
+                        .child(
+                            icon(section_icon(item))
+                                .size(px(16.0))
                                 .text_color(if selected {
                                     theme.text
                                 } else {
                                     theme.text_muted
-                                })
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.open_settings(item, cx)),
-                                )
-                                .child(
-                                    icon(section_icon(item))
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from(item.label()))
-                        }),
-                    )),
-            )
-            // Back pinned to the bottom (zeron settings-sidebar.tsx).
-            .child(
-                div().px(px(Theme::SPACE_SM)).pb(px(12.0)).child(
-                    div()
-                        .id("settings-back")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(8.0))
-                        .px(px(Theme::SPACE_SM))
-                        .py(px(6.0))
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
-                        .child(
-                            // AltArrowLeft chevron (zeron settings-sidebar.tsx),
-                            // not the straight history arrow.
-                            icon(icons::ALT_ARROW_LEFT)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
+                                }),
                         )
-                        .child(SharedString::from("Back")),
-                ),
+                        .child(SharedString::from(item.label()))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            groups = groups.child(
+                div()
+                    .id(("settings-nav-group", index))
+                    .flex()
+                    .flex_col()
+                    .when(index > 0, |el| {
+                        el.mt(px(12.0))
+                            .pt(px(12.0))
+                            .border_t_1()
+                            .border_color(theme.border)
+                    })
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .pt(px(4.0))
+                            .pb(px(8.0))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child(title),
+                    )
+                    .child(div().flex().flex_col().gap(px(2.0)).children(rows)),
+            );
+        }
+        // Follow the user-resized sidebar instead of imposing a header width.
+        div()
+            .w(px(self.settings.sidebar_width))
+            .h_full()
+            .min_h_0()
+            .key_context("SettingsNavigation")
+            .tab_group()
+            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "tab" {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(12.0))
+                    .pt(px(12.0))
+                    .pb(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .px(px(4.0))
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(SharedString::from("Settings")),
+                    )
+                    .child(self.settings_target.clone()),
+            )
+            .child(groups)
+            // Neither the device selector nor Back scroll with the sections.
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(12.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("settings-back")
+                            .role(gpui::Role::Button)
+                            .aria_label("Back to chats")
+                            .tab_index(0)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded(px(8.0))
+                            .px(px(Theme::SPACE_SM))
+                            .py(px(6.0))
+                            .text_size(px(13.0))
+                            .text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                            .child(
+                                // AltArrowLeft chevron (zeron settings-sidebar.tsx),
+                                // not the straight history arrow.
+                                icon(icons::ALT_ARROW_LEFT)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Back")),
+                    ),
             )
             .into_any_element()
     }
@@ -4813,7 +4950,7 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
+                            this.open_settings(SettingsSection::Harnesses, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)
@@ -7193,6 +7330,13 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A sidebar chat selection can leave settings without close_settings.
+        // Do not retain a hidden credential field in the cached page entity.
+        if self.route != Route::Settings(SettingsSection::Providers)
+            && let Some(page) = &self.providers_page
+        {
+            page.update(cx, |page, cx| page.dismiss(cx));
+        }
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the
@@ -7292,7 +7436,7 @@ impl Render for Shell {
             }))
             .on_action(
                 cx.listener(|this, _: &crate::app_menus::OpenSettings, _, cx| {
-                    this.open_settings(SettingsSection::Devices, cx);
+                    this.open_settings(SettingsSection::Harnesses, cx);
                 }),
             )
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
@@ -8433,6 +8577,43 @@ mod tests {
 
     fn chat(id: &str) -> NavEntry {
         NavEntry::Chat(id.to_string())
+    }
+
+    #[test]
+    fn settings_navigation_groups_are_disjoint_and_complete() {
+        let listed = SettingsSection::NAV_GROUPS
+            .iter()
+            .flat_map(|(_, sections)| sections.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), SettingsSection::ALL.len());
+        for section in SettingsSection::ALL {
+            assert_eq!(
+                listed.iter().filter(|s| **s == section).count(),
+                1,
+                "{section:?}"
+            );
+        }
+        assert_eq!(
+            SettingsSection::DEVICE_SETTINGS,
+            [
+                SettingsSection::Harnesses,
+                SettingsSection::Providers,
+                SettingsSection::Commands,
+                SettingsSection::Mcp,
+            ]
+        );
+        assert_eq!(
+            SettingsSection::CLIENT_SETTINGS,
+            [
+                SettingsSection::Appearance,
+                SettingsSection::Notifications,
+                SettingsSection::Shortcuts,
+            ]
+        );
+        assert_eq!(
+            SettingsSection::WORKSPACE_SETTINGS,
+            [SettingsSection::Devices, SettingsSection::Archived,]
+        );
     }
 
     #[test]

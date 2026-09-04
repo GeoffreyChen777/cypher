@@ -1,0 +1,20 @@
+{
+  "name": "cypher-pi-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned Pi and extension set for Cypher's isolated runtime",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-server": "0.85.0",
+    "@lll9p/pi-better-compaction": "0.6.0",
+    "@narumitw/pi-goal": "0.54.4",
+    "gpt-fast-pi": "0.1.1",
+    "pi-agent-squad": "0.8.5",
+    "pi-ask-user": "0.15.0",
+    "pi-codex-tools": "0.2.3",
+    "pi-mcp-adapter": "2.32.1",
+    "pi-permission-control": "0.2.0",
+    "pi-provider-newapi": "0.5.0",
+    "pi-web-search": "1.4.0"
+  }
+}

@@ -1,10 +1,14 @@
 //! Settings → MCP: configured Pi MCP servers, OAuth sign-in, enable/disable.
 
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
+};
 
 use cypher_engine::mcp::{McpAuthKind, McpAuthStatus, McpServer, McpSnapshot};
 use cypher_rpc::methods;
 
+use super::device_target::DeviceTarget;
 use crate::icons;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -13,28 +17,60 @@ use crate::theme::Theme;
 
 pub struct McpPage {
     state: Entity<AppState>,
+    target: Entity<DeviceTarget>,
+    generation: u64,
+    _target_observer: Subscription,
     snapshot: Loadable<McpSnapshot>,
     error: Option<String>,
     busy: Option<String>,
     load_task: Option<Task<()>>,
-    action_task: Option<Task<()>>,
 }
 
 impl McpPage {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        target: Entity<DeviceTarget>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let generation = target.read(cx).generation();
+        let observer = cx.observe(&target, |page: &mut Self, target, cx| {
+            let generation = target.read(cx).generation();
+            if generation != page.generation {
+                page.generation = generation;
+                page.load_task = None;
+                page.snapshot = Loadable::Idle;
+                page.busy = None;
+                page.error = None;
+                page.load(cx);
+            }
+            cx.notify();
+        });
         let mut page = Self {
             state,
+            target,
+            generation,
+            _target_observer: observer,
             snapshot: Loadable::Idle,
             error: None,
             busy: None,
             load_task: None,
-            action_task: None,
         };
         page.load(cx);
         page
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        let ticket = match self.target.read(cx).ticket(cx) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.snapshot = Loadable::Error(error);
+                cx.notify();
+                return;
+            }
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -42,15 +78,21 @@ impl McpPage {
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call(methods::LIST_MCP_SERVERS, serde_json::json!({}))
+                .call(
+                    methods::LIST_MCP_SERVERS,
+                    ticket.params(serde_json::json!({})),
+                )
                 .await;
             this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
                 page.snapshot = match result {
                     Ok(value) => match serde_json::from_value::<McpSnapshot>(value) {
                         Ok(snapshot) => Loadable::Ready(snapshot),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
+                    Err(err) => Loadable::Error(format!("{}: {err}", ticket.label)),
                 };
                 cx.notify();
             })
@@ -73,56 +115,69 @@ impl McpPage {
     }
 
     fn call(&mut self, method: &'static str, name: String, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        self.mutate(
+            method,
+            name.clone(),
+            serde_json::json!({ "name": name }),
+            cx,
+        );
+    }
+
+    fn mutate(
+        &mut self,
+        method: &'static str,
+        name: String,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some()
+            || !self.target.read(cx).can_write(cx)
+            || self.generation != self.target.read(cx).generation()
+        {
             return;
         }
+        let Ok(ticket) = self.target.read(cx).ticket(cx) else {
+            return;
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         self.error = None;
         self.busy = Some(name.clone());
-        self.action_task = Some(cx.spawn(async move |this, cx| {
+        self.load_task = None;
+        let target = self.target.clone();
+        let lease = target.update(cx, |target, cx| target.lock(cx));
+        cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call(method, serde_json::json!({ "name": name }))
+                .call(method, ticket.params(params))
                 .await
-                .map_err(|err| err.to_string());
-            this.update(cx, |page, cx| {
-                page.apply_snapshot(result);
+                .map_err(|err| format!("{}: {err}", ticket.label));
+            drop(lease);
+            target.update(cx, |_, cx| {
+                cx.notify();
                 crate::pickers::bump_harness_catalog(cx);
+            });
+            this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
+                page.apply_snapshot(result);
                 cx.notify();
             })
             .ok();
-        }));
+        })
+        .detach();
         cx.notify();
     }
 
     fn set_enabled(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.error = None;
-        self.busy = Some(name.clone());
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(
-                    methods::SET_MCP_SERVER_ENABLED,
-                    serde_json::json!({ "name": name, "enabled": enabled }),
-                )
-                .await
-                .map_err(|err| err.to_string());
-            this.update(cx, |page, cx| {
-                page.apply_snapshot(result);
-                crate::pickers::bump_harness_catalog(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
+        self.mutate(
+            methods::SET_MCP_SERVER_ENABLED,
+            name.clone(),
+            serde_json::json!({ "name": name, "enabled": enabled }),
+            cx,
+        );
     }
 
     fn status_badge(theme: &Theme, server: &McpServer) -> gpui::Div {
@@ -145,7 +200,7 @@ impl McpPage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let busy = self.busy.as_deref() == Some(server.name.as_str());
-        let blocked = self.busy.is_some();
+        let blocked = self.busy.is_some() || !self.target.read(cx).can_write(cx);
         let icon = if server.transport.starts_with("http") {
             icons::GLOBAL
         } else {
@@ -281,7 +336,7 @@ impl Render for McpPage {
                             .text_size(px(13.0))
                             .text_color(theme.text_muted)
                             .child(SharedString::from(
-                                "No MCP servers in ~/.pi/agent/mcp.json yet.",
+                                "No MCP servers in Cypher's isolated Pi runtime yet.",
                             )),
                     )
                     .into_any_element()
@@ -325,11 +380,15 @@ impl Render for McpPage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "Servers from Pi's mcp.json. Sign in with OAuth here; sessions pick them up after a reload.",
+                            "MCP servers and credentials belong to the selected device. Local commands and paths run on that host.",
                         )
                         .max_w(px(560.0))
                         .line_height(px(20.0)),
                     )
+                    .when(!self.target.read(cx).is_local(), |el| el.child(widgets::page_subtitle(
+                        &theme, "OAuth sign-in runs on the selected host and may open a browser there.")))
+                    .when_some(self.target.read(cx).unavailable(cx), |el, error|
+                        el.child(widgets::warning_strip(&theme, error)))
                     .children(
                         self.error
                             .clone()

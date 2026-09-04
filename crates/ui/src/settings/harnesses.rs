@@ -1,13 +1,14 @@
 //! Settings → Agents: Pi installation and Pi package management.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 
 use cypher_engine::pi_packages::{PiPackage, PiPackagesSnapshot};
 use cypher_rpc::methods;
 
+use super::device_target::DeviceTarget;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -16,55 +17,63 @@ use crate::theme::Theme;
 pub struct HarnessesPage {
     state: Entity<AppState>,
     packages: Loadable<PiPackagesSnapshot>,
-    target_device: Option<String>,
-    device_menu_open: bool,
-    device_menu_pressed_open: bool,
+    target: Entity<DeviceTarget>,
+    generation: u64,
+    _target_observer: Subscription,
+    busy: bool,
     error: Option<String>,
     load_task: Option<Task<()>>,
-    action_task: Option<Task<()>>,
 }
 
 impl HarnessesPage {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        target: Entity<DeviceTarget>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let generation = target.read(cx).generation();
+        let observer = cx.observe(&target, |page: &mut Self, target, cx| {
+            let generation = target.read(cx).generation();
+            if generation != page.generation {
+                page.generation = generation;
+                page.load_task = None;
+                page.packages = Loadable::Idle;
+                page.error = None;
+                page.busy = false;
+                page.load(cx);
+            }
+            cx.notify();
+        });
         let mut page = Self {
             state,
             packages: Loadable::Idle,
-            target_device: None,
-            device_menu_open: false,
-            device_menu_pressed_open: false,
+            target,
+            generation,
+            _target_observer: observer,
+            busy: false,
             error: None,
             load_task: None,
-            action_task: None,
         };
         page.load(cx);
         page
     }
 
-    fn with_target(&self, mut value: serde_json::Value) -> serde_json::Value {
-        if let (Some(target), Some(object)) = (&self.target_device, value.as_object_mut()) {
-            object.insert("targetDeviceId".into(), serde_json::json!(target));
-        }
-        value
-    }
-
-    fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
-        self.device_menu_open = false;
-        if self.target_device == target {
-            cx.notify();
+    fn load(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
             return;
         }
-        self.target_device = target;
-        self.error = None;
-        self.packages = Loadable::Idle;
-        self.load(cx);
-        cx.notify();
-    }
-
-    fn load(&mut self, cx: &mut Context<Self>) {
+        let ticket = match self.target.read(cx).ticket(cx) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.packages = Loadable::Error(error);
+                cx.notify();
+                return;
+            }
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = self.with_target(serde_json::json!({}));
+        let params = ticket.params(serde_json::json!({}));
         self.packages = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -72,12 +81,15 @@ impl HarnessesPage {
                 .call(methods::LIST_PI_PACKAGES, params)
                 .await;
             this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
                 page.packages = match result {
                     Ok(value) => match serde_json::from_value::<PiPackagesSnapshot>(value) {
                         Ok(snapshot) => Loadable::Ready(snapshot),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
-                    Err(err) => Loadable::Error(err.to_string()),
+                    Err(err) => Loadable::Error(format!("{}: {err}", ticket.label)),
                 };
                 cx.notify();
             })
@@ -86,192 +98,72 @@ impl HarnessesPage {
     }
 
     fn install_pi(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({}));
-        self.error = None;
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::INSTALL_PI, params).await;
-            this.update(cx, |page, cx| {
-                match result {
-                    Ok(value) => {
-                        if let Ok(snapshot) = serde_json::from_value::<PiPackagesSnapshot>(value) {
-                            page.packages = Loadable::Ready(snapshot);
-                        }
-                    }
-                    Err(err) => page.error = Some(err.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
+        self.mutate(methods::INSTALL_PI, serde_json::json!({}), cx);
     }
 
     fn install_package(&mut self, source: String, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = self.with_target(serde_json::json!({ "source": source }));
-        self.error = None;
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::INSTALL_PI_PACKAGE, params)
-                .await;
-            this.update(cx, |page, cx| {
-                match result {
-                    Ok(value) => {
-                        if let Ok(snapshot) = serde_json::from_value::<PiPackagesSnapshot>(value) {
-                            page.packages = Loadable::Ready(snapshot);
-                        }
-                    }
-                    Err(err) => page.error = Some(err.to_string()),
-                }
-                crate::pickers::bump_harness_catalog(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
+        self.mutate(
+            methods::INSTALL_PI_PACKAGE,
+            serde_json::json!({ "source": source }),
+            cx,
+        );
     }
 
     fn set_package_enabled(&mut self, source: String, enabled: bool, cx: &mut Context<Self>) {
+        self.mutate(
+            methods::SET_PI_PACKAGE_ENABLED,
+            serde_json::json!({
+                "source": source,
+                "enabled": enabled,
+            }),
+            cx,
+        );
+    }
+
+    fn mutate(&mut self, method: &'static str, params: serde_json::Value, cx: &mut Context<Self>) {
+        if self.busy
+            || !self.target.read(cx).can_write(cx)
+            || self.generation != self.target.read(cx).generation()
+        {
+            return;
+        }
+        let Ok(ticket) = self.target.read(cx).ticket(cx) else {
+            return;
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = self.with_target(serde_json::json!({
-            "source": source,
-            "enabled": enabled,
-        }));
+        self.load_task = None;
+        self.busy = true;
         self.error = None;
-        self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SET_PI_PACKAGE_ENABLED, params)
-                .await;
+        let target = self.target.clone();
+        let lease = target.update(cx, |target, cx| target.lock(cx));
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call(method, ticket.params(params)).await;
+            drop(lease);
+            target.update(cx, |_, cx| {
+                cx.notify();
+                crate::pickers::bump_harness_catalog(cx);
+            });
             this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
+                page.busy = false;
                 match result {
                     Ok(value) => {
                         if let Ok(snapshot) = serde_json::from_value::<PiPackagesSnapshot>(value) {
                             page.packages = Loadable::Ready(snapshot);
                         }
                     }
-                    Err(err) => page.error = Some(err.to_string()),
+                    Err(err) => page.error = Some(format!("{}: {err}", ticket.label)),
                 }
-                crate::pickers::bump_harness_catalog(cx);
                 cx.notify();
             })
             .ok();
-        }));
-    }
-
-    fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        use crate::icons::{self, icon};
-        let (mut devices, local_id) = {
-            let state = self.state.read(cx);
-            (state.devices.clone(), state.local_device_id.clone())
-        };
-        devices.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let effective = self.target_device.clone().or_else(|| local_id.clone());
-        let selected = devices
-            .iter()
-            .find(|d| Some(d.id.as_str()) == effective.as_deref())
-            .cloned();
-        let glyph = match selected.as_ref().map(|d| d.platform.as_str()) {
-            Some("ios") | Some("android") => icons::SMARTPHONE,
-            Some("macos") | Some("darwin") => icons::LAPTOP,
-            _ => icons::MONITOR,
-        };
-        let label: SharedString = selected
-            .as_ref()
-            .map(|d| d.name.clone().into())
-            .unwrap_or_else(|| SharedString::from("This device"));
-        let open = self.device_menu_open;
-        let mut trigger = div()
-            .id("harnesses-device-switcher")
-            .flex_none()
-            .h(px(28.0))
-            .px(px(8.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_pointer()
-            .bg(if open {
-                crate::theme::ink(0.06)
-            } else {
-                gpui::transparent_black()
-            })
-            .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.device_menu_pressed_open = this.device_menu_open;
-                }),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                let pressed_open = std::mem::take(&mut this.device_menu_pressed_open);
-                this.device_menu_open = !pressed_open && !this.device_menu_open;
-                cx.notify();
-            }))
-            .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(label),
-            )
-            .child(
-                icon(icons::SORT_VERTICAL)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted.opacity(if open { 0.9 } else { 0.4 })),
-            );
-        if open {
-            let menu = popover::popover_card(theme)
-                .w(px(220.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.device_menu_open = false;
-                    cx.notify();
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(popover::menu_heading(theme, "Devices"))
-                .children(devices.into_iter().enumerate().map(|(ix, device)| {
-                    let active = Some(device.id.as_str()) == effective.as_deref();
-                    let local = local_id.as_deref() == Some(device.id.as_str());
-                    let id = device.id.clone();
-                    popover::menu_row(theme, active, format!("agents-device-row-{ix}"))
-                        .id(("agents-device-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_target_device((!local).then_some(id.clone()), cx);
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .child(SharedString::from(device.name)),
-                        )
-                        .when(local, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(theme.text_muted.opacity(0.4))
-                                    .child(SharedString::from("You")),
-                            )
-                        })
-                }))
-                .into_any_element();
-            trigger = trigger.child(popover::anchored_menu("agents-device-menu", menu, None));
-        }
-        trigger.into_any_element()
+        })
+        .detach();
+        cx.notify();
     }
 
     fn action_button(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
@@ -301,6 +193,7 @@ impl HarnessesPage {
         let name = package.name.clone();
         let installed = package.installed;
         let enabled = package.enabled;
+        let blocked = self.busy || !self.target.read(cx).can_write(cx);
         let mut title = div()
             .w_full()
             .min_w_0()
@@ -362,9 +255,12 @@ impl HarnessesPage {
                 widgets::toggle_switch(theme, enabled)
                     .flex_none()
                     .id(("pi-package-toggle", index))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_package_enabled(source.clone(), !enabled, cx);
-                    })),
+                    .when(blocked, |el| el.opacity(0.45))
+                    .when(!blocked, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_package_enabled(source.clone(), !enabled, cx);
+                        }))
+                    }),
             );
         } else {
             let source_for_click = package.source.clone();
@@ -372,8 +268,8 @@ impl HarnessesPage {
                 Self::action_button(theme, "Install")
                     .flex_none()
                     .id(("pi-package-install", index))
-                    .when(!pi_installed, |el| el.opacity(0.45))
-                    .when(pi_installed, |el| {
+                    .when(!pi_installed || blocked, |el| el.opacity(0.45))
+                    .when(pi_installed && !blocked, |el| {
                         el.cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.install_package(source_for_click.clone(), cx);
@@ -418,7 +314,6 @@ impl Render for HarnessesPage {
                     .collect();
                 let mut content = div().flex().flex_col().gap(px(10.0));
                 if !snapshot.pi_installed {
-                    let npm_available = snapshot.npm_available;
                     content = content.child(
                         widgets::section_card(&theme).p(px(16.0)).child(
                             div()
@@ -431,21 +326,15 @@ impl Render for HarnessesPage {
                                         .min_w_0()
                                         .text_size(px(13.0))
                                         .text_color(theme.text_muted)
-                                        .child(SharedString::from(if npm_available {
-                                            "Pi isn't installed yet. Install it to enable extensions."
-                                        } else {
-                                            "Install Node.js/npm first, then return here to install Pi."
-                                        })),
+                                        .child(SharedString::from(
+                                            "Download Cypher's isolated Pi runtime to enable the agent and extensions.",
+                                        )),
                                 )
                                 .child(
-                                    Self::action_button(&theme, "Install Pi")
+                                    Self::action_button(&theme, "Download runtime")
                                         .id("install-pi")
-                                        .when(!npm_available, |el| el.opacity(0.5))
-                                        .when(npm_available, |el| {
-                                            el.on_click(cx.listener(|page, _, _, cx| {
-                                                page.install_pi(cx)
-                                            }))
-                                        }),
+                                        .when(!self.target.read(cx).can_write(cx), |el| el.opacity(0.45))
+                                        .on_click(cx.listener(|page, _, _, cx| page.install_pi(cx))),
                                 ),
                         ),
                     );
@@ -472,25 +361,17 @@ impl Render for HarnessesPage {
                 content.into_any_element()
             }
         };
-        let switcher = self.render_device_switcher(&theme, cx);
         div()
             .id("harnesses-page")
             .size_full()
             .overflow_y_scroll()
             .child(
             widgets::page_column()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(widgets::page_header(&theme, "Agents", None))
-                        .child(switcher),
-                )
+                .child(widgets::page_header(&theme, "Agents", None))
                 .child(
                     widgets::page_subtitle(
                         &theme,
-                        "Pi is the primary coding agent. Install Pi and manage its plugins here.",
+                        "Cypher uses an isolated Pi runtime. Download it and manage its plugins here without changing your system Pi.",
                     )
                     .max_w(px(560.0))
                     .line_height(px(20.0)),
@@ -500,6 +381,9 @@ impl Render for HarnessesPage {
                         .clone()
                         .map(|message| widgets::error_strip(&theme, message).into_any_element()),
                 )
+                .when_some(self.target.read(cx).unavailable(cx), |el, error|
+                    el.child(widgets::warning_strip(&theme, error)))
+                .when(self.busy, |el| el.child(widgets::page_subtitle(&theme, "Updating the selected device…")))
                 .child(body),
         )
     }
