@@ -446,6 +446,7 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
+    pi_updater: Option<crate::pi_packages::PiUpdater>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
@@ -489,6 +490,7 @@ impl EngineRpc {
             auth: None,
             links: None,
             updater: None,
+            pi_updater: None,
             local_import: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
@@ -513,6 +515,11 @@ impl EngineRpc {
         self
     }
 
+    pub fn with_pi_updater(mut self, updater: crate::pi_packages::PiUpdater) -> Self {
+        self.pi_updater = Some(updater);
+        self
+    }
+
     /// Attach the local→synced profile importer (synced runtimes only).
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
@@ -529,6 +536,12 @@ impl EngineRpc {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
+    }
+
+    fn pi_updater(&self) -> Result<&crate::pi_packages::PiUpdater, RpcError> {
+        self.pi_updater
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("Pi updates unavailable".into()))
     }
 
     /// Pi packages changed: rediscover slash commands/models and recycle
@@ -1146,6 +1159,8 @@ fn forwardable(method: &str) -> bool {
             | methods::INSTALL_PI
             | methods::INSTALL_PI_PACKAGE
             | methods::SET_PI_PACKAGE_ENABLED
+            | methods::PI_UPDATE_STATUS
+            | methods::APPLY_PI_UPDATES
             | methods::LIST_MCP_SERVERS
             | methods::SET_MCP_SERVER_ENABLED
             | methods::START_MCP_AUTH
@@ -1220,6 +1235,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::UPDATE_STATUS
+            | methods::PI_UPDATE_STATUS
             | methods::WATCH_SIDE_CHAT_STATUS
     )
 }
@@ -1662,6 +1678,18 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
+            }
+            methods::PI_UPDATE_STATUS => {
+                Ok(RpcReply::Stream(watch_stream(self.pi_updater()?.watch())))
+            }
+            methods::APPLY_PI_UPDATES => {
+                let status = self
+                    .pi_updater()?
+                    .apply_all()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&status)
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;

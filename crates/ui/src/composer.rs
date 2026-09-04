@@ -58,6 +58,9 @@ pub const TEXTAREA_MAX: f32 = 260.0;
 /// children; composer/styles.tsx pickerChip) + `pb-2.5` (10) — zeron
 /// composer-actions.tsx line 60.
 pub const ACTIONS_ROW_HEIGHT: f32 = 46.0;
+/// Outer radius of the composer pill. Chrome sitting immediately above the
+/// pill uses this to align with the point where each top corner becomes flat.
+pub const PILL_RADIUS: f32 = 26.0;
 /// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
 pub const PILL_BORDER_V: f32 = 2.0;
 /// Expanded composer bounds, border-box: 76 + 46 + 2 = 124 when empty (the
@@ -8052,7 +8055,7 @@ impl Render for Composer {
         // shows through as an inner glow (theme.rs's card_selected_shadows
         // lesson; user report).
         let pill = div()
-            .rounded(px(26.0))
+            .rounded(px(PILL_RADIUS))
             .bg(pill_bg)
             .border_1()
             .border_color(theme.border)
@@ -8175,7 +8178,7 @@ impl Render for Composer {
         // Frosted: the pill backdrop-blurs the transcript scrolling under it
         // (the popover glass treatment; radius matches the pill's rounding).
         let container = container.child(crate::frost::frosted(
-            26.0,
+            PILL_RADIUS,
             16.0,
             motion::fade_quick("composer-input", body),
         ));

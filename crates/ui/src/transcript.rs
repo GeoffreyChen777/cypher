@@ -4427,6 +4427,10 @@ fn detail_body(
 /// expandable chip card.
 fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpui::Div {
     let (label, _) = tool_chip_content(&tool.call);
+    // `Tool` is only a generic fallback for extension/custom calls. Showing
+    // it ahead of the actual tool name adds no information (`Tool · read ·
+    // completed`), so generic calls start directly with their real name.
+    let show_label = label != "Tool";
     let detail = tool_row_summary(tool);
     let tint = if tool.is_error {
         theme.danger
@@ -4460,13 +4464,15 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                         .text_color(theme.text_muted),
                 ),
         )
-        .child(
-            div()
-                .flex_none()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(tint)
-                .child(SharedString::from(label)),
-        )
+        .when(show_label, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tint)
+                    .child(SharedString::from(label)),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -4510,7 +4516,16 @@ fn tool_row_summary(tool: &ToolItem) -> String {
     } else {
         "completed"
     };
-    format!("{label} · {} · {status}", parameter.trim())
+    let parameter = parameter.trim();
+    if label == "Tool" {
+        if parameter.is_empty() {
+            status.to_string()
+        } else {
+            format!("{parameter} · {status}")
+        }
+    } else {
+        format!("{label} · {parameter} · {status}")
+    }
 }
 
 /// The header row of an expandable chip card.
@@ -5423,7 +5438,7 @@ mod tests {
             output_bytes: None,
             diff_ref: None,
         };
-        assert_eq!(tool_row_summary(&tool), "Tool · apply_patch · completed");
+        assert_eq!(tool_row_summary(&tool), "apply_patch · completed");
 
         let no_output = ToolItem {
             call: ToolCall::ReadFile {

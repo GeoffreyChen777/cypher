@@ -327,6 +327,10 @@ async fn local_runtime_serves_update_status_without_edge_routing() {
         runtime.core().updater().is_some(),
         "local runtime must serve UpdateStatus via the release checker"
     );
+    assert!(
+        runtime.core().pi_updater().is_some(),
+        "local runtime must serve PiUpdateStatus via the package checker"
+    );
     let service = runtime.core().rpc_service();
     let client = cypher_rpc::memory_client(service);
     let mut updates = client
@@ -348,8 +352,21 @@ async fn local_runtime_serves_update_status_without_edge_routing() {
             .is_err(),
         "UpdateStatus stream must remain open before the delayed first check"
     );
+    let mut pi_updates = client
+        .subscribe(cypher_rpc::methods::PI_UPDATE_STATUS, serde_json::json!({}))
+        .await
+        .expect("local runtime must accept PiUpdateStatus subscriptions");
+    let initial = tokio::time::timeout(std::time::Duration::from_secs(1), pi_updates.recv())
+        .await
+        .expect("initial PiUpdateStatus frame timed out")
+        .expect("PiUpdateStatus stream closed before its initial frame");
+    let initial: cypher_engine::pi_packages::PiUpdateStatus =
+        serde_json::from_value(initial).expect("initial PiUpdateStatus must deserialize");
+    assert!(!initial.update_available());
+    assert!(initial.checked_at.is_none());
     // ...but nothing edge-bound happens: no token wake, and the first release
-    // check waits out the 20s initial delay, so zero network requests land.
+    // and Pi/package checks wait out the 20s initial delay, so zero network
+    // requests land.
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     runtime.shutdown().await;

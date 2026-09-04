@@ -985,6 +985,11 @@ pub struct Shell {
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
     update_dismissed: Option<String>,
+    /// One-click Pi CLI + extension update request. The engine publishes the
+    /// checker-side applying/error state; this local bit closes the
+    /// click-to-first-watch-frame double-click window.
+    pi_update_busy: bool,
+    pi_update_task: Option<Task<()>>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
     install: cypher_update::InstallKind,
@@ -1091,6 +1096,46 @@ struct UpdateStripView {
     clickable: bool,
     /// Failure tone (mac flow): label in danger color, chip tinted red.
     failed: bool,
+}
+
+struct PiUpdateStripView {
+    label: SharedString,
+    clickable: bool,
+    failed: bool,
+}
+
+fn pi_update_strip_view(
+    status: Option<&cypher_engine::pi_packages::PiUpdateStatus>,
+    local_busy: bool,
+) -> Option<PiUpdateStripView> {
+    let status = status?;
+    if !status.update_available() {
+        return None;
+    }
+    let package_count = status.package_updates.len();
+    let busy = local_busy || status.applying;
+    let failed = !busy && status.error.is_some();
+    let label = if busy {
+        "Updating Pi and plugins…".into()
+    } else if failed {
+        "Pi/plugin update failed — click to retry".into()
+    } else if status.pi_update_available && package_count > 0 {
+        format!("Pi and {package_count} plugin updates available").into()
+    } else if status.pi_update_available {
+        match status.latest_pi_version.as_deref() {
+            Some(version) => format!("Pi update available — v{version}").into(),
+            None => "Pi update available".into(),
+        }
+    } else if package_count == 1 {
+        "1 plugin update available".into()
+    } else {
+        format!("{package_count} plugin updates available").into()
+    };
+    Some(PiUpdateStripView {
+        label,
+        clickable: !busy,
+        failed,
+    })
 }
 
 fn update_strip_view(
@@ -1335,6 +1380,8 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
+            pi_update_busy: false,
+            pi_update_task: None,
             install: cypher_update::detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
@@ -4301,6 +4348,9 @@ impl Shell {
             .when_some(self.render_update_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
+            .when_some(self.render_pi_update_strip(theme, cx), |el, strip| {
+                el.child(strip)
+            })
             // Inline mutation-failure notice.
             .when_some(self.sidebar_notice.clone(), |el, notice| {
                 el.child(
@@ -4389,6 +4439,100 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
         }
         Some(strip.into_any_element())
+    }
+
+    /// Pi CLI + extension update notification. The engine checks npm shortly
+    /// after boot and every six hours; one click delegates the actual update
+    /// to `pi update --all`, then the engine hot-reloads the Pi runtime.
+    fn render_pi_update_strip(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view =
+            pi_update_strip_view(self.state.read(cx).pi_update.as_ref(), self.pi_update_busy)?;
+        let PiUpdateStripView {
+            label,
+            clickable,
+            failed,
+        } = view;
+        let tone = if failed { theme.danger } else { theme.accent };
+        let (chip_bg, chip_bg_hover) = if failed {
+            (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
+        } else {
+            match theme.appearance {
+                crate::theme::Appearance::Dark => {
+                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
+                    (purple.opacity(0.45), purple.opacity(0.60))
+                }
+                crate::theme::Appearance::Light => {
+                    (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
+                }
+            }
+        };
+        let mut strip = div()
+            .id("pi-update-strip")
+            .mx(px(Theme::SPACE_SM))
+            .mt(px(6.0))
+            .px(px(Theme::SPACE_SM))
+            .py(px(6.0))
+            .rounded(px(Theme::CONTROL_RADIUS))
+            .bg(chip_bg)
+            .flex()
+            .flex_row()
+            .items_center()
+            .text_size(px(11.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(tone)
+            .child(div().flex_1().min_w_0().child(label));
+        if clickable {
+            strip = strip
+                .cursor_pointer()
+                .hover(move |s| s.bg(chip_bg_hover))
+                .on_click(cx.listener(|this, _, _, cx| this.begin_pi_update(cx)));
+        }
+        Some(strip.into_any_element())
+    }
+
+    fn begin_pi_update(&mut self, cx: &mut Context<Self>) {
+        if self.pi_update_busy {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.pi_update_busy = true;
+        let state = self.state.clone();
+        self.pi_update_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::APPLY_PI_UPDATES, serde_json::json!({}))
+                .await;
+            if let Ok(value) = &result {
+                match serde_json::from_value::<cypher_engine::pi_packages::PiUpdateStatus>(
+                    value.clone(),
+                ) {
+                    Ok(status) => {
+                        let _ = state.update(cx, |state, cx| {
+                            state.apply_pi_update(status);
+                            cx.notify();
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "malformed ApplyPiUpdates reply");
+                    }
+                }
+            }
+            this.update(cx, |shell, cx| {
+                shell.pi_update_busy = false;
+                if let Err(err) = result {
+                    shell.sidebar_notice = Some(format!("Pi update failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
@@ -5738,18 +5882,19 @@ impl Shell {
     /// to a "Sending…" bridge and then the engine mode line. The strip's right
     /// side hosts the session-level subagents trigger — `[left status][flex
     /// spacer][Subagents accessory]` — so the left status and the right
-    /// accessory can coexist. The trigger's right edge aligns with the
-    /// composer pill's right INNER edge (the strip keeps its 24px left gutter
-    /// but drops to the composer's 16px right gutter).
+    /// accessory can coexist. Both outer accessories align with the points
+    /// where the composer pill's rounded top corners finish and become flat,
+    /// pulling them slightly inward from the pill's outer edges.
     fn render_status_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let state = self.state.read(cx);
 
-        // Aligned with the composer column: centered, same max width, small
-        // inner gutter (zeron's `mx-auto h-6 max-w-3xl px-2`). Right padding
-        // matches the composer's `px-4` so the accessory lines up with the
-        // pill's right inner edge.
+        // Aligned with the composer column: the pill starts after the
+        // composer's 16px column padding, then its 26px top-corner radius
+        // ends. Inset both accessories by their sum so the left/right trigger
+        // boundaries land exactly on those corner endpoints.
+        let accessory_inset = Theme::SPACE_LG + crate::composer::PILL_RADIUS;
         let strip = div()
             .h(px(Theme::STATUS_STRIP_HEIGHT))
             .flex_none()
@@ -5759,8 +5904,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(Theme::SPACE_SM))
-            .pl(px(Theme::SPACE_LG + 8.0))
-            .pr(px(Theme::SPACE_LG))
+            .px(px(accessory_inset))
             .text_size(px(11.0));
 
         let left: AnyElement = match state.selected_chat.as_deref() {
@@ -7678,6 +7822,47 @@ mod tests {
         .unwrap();
         assert_eq!(view.label, "Update failed: checksum mismatch");
         assert!(view.clickable && view.failed);
+    }
+
+    #[test]
+    fn pi_update_strip_presentation() {
+        use cypher_engine::pi_packages::{PiPackageUpdate, PiUpdateStatus};
+
+        let status =
+            |pi: bool, packages: usize, applying: bool, error: Option<&str>| PiUpdateStatus {
+                pi_installed: true,
+                current_pi_version: Some("0.84.0".into()),
+                latest_pi_version: Some("0.85.0".into()),
+                pi_update_available: pi,
+                package_updates: (0..packages)
+                    .map(|index| PiPackageUpdate {
+                        name: format!("plugin-{index}"),
+                        current_version: "1.0.0".into(),
+                        latest_version: "1.1.0".into(),
+                    })
+                    .collect(),
+                applying,
+                checked_at: None,
+                error: error.map(str::to_string),
+            };
+
+        assert!(pi_update_strip_view(None, false).is_none());
+        assert!(pi_update_strip_view(Some(&status(false, 0, false, None)), false).is_none());
+
+        let pi_only = pi_update_strip_view(Some(&status(true, 0, false, None)), false).unwrap();
+        assert_eq!(pi_only.label, "Pi update available — v0.85.0");
+        assert!(pi_only.clickable && !pi_only.failed);
+
+        let combined = pi_update_strip_view(Some(&status(true, 2, false, None)), false).unwrap();
+        assert_eq!(combined.label, "Pi and 2 plugin updates available");
+
+        let busy = pi_update_strip_view(Some(&status(false, 1, true, None)), false).unwrap();
+        assert_eq!(busy.label, "Updating Pi and plugins…");
+        assert!(!busy.clickable);
+
+        let failed =
+            pi_update_strip_view(Some(&status(false, 1, false, Some("network"))), false).unwrap();
+        assert!(failed.failed && failed.clickable);
     }
 
     #[tokio::test]

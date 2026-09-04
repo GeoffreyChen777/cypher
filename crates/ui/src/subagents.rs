@@ -640,6 +640,18 @@ impl SubagentsPanel {
         let window_w = f32::from(window.viewport_size().width);
         let width = (520.0_f32).min((window_w - 32.0).max(280.0));
         let active = self.active_row;
+        // The old Running glyph was the first braille-spinner frame (`⠋`)
+        // rendered as static text, so it looked frozen. Lease the shared
+        // throttled loader clock while at least one live row is mounted and
+        // use its phase for every Running row. All rows stay phase-locked and
+        // a closed inspector schedules no animation work.
+        let running_delta = ordered
+            .iter()
+            .any(|entry| entry.status == PanelStatus::Running)
+            .then(|| {
+                let view = cx.entity_id();
+                motion::pulse_delta(&motion::GRADIENT_SPIN, view, cx)
+            });
         // Owned copy of the ordered rows' child ids so the key listener below
         // (a 'static closure) can open the active row without borrowing `ordered`.
         let child_ids: Vec<Option<String>> =
@@ -655,7 +667,7 @@ impl SubagentsPanel {
                         .bg(crate::theme::hairline(0.05)),
                 );
             }
-            let row = inspector_row(theme, entry);
+            let row = inspector_row(theme, entry, running_delta);
             rows = rows.child(match entry.child_chat_id.clone() {
                 // Cypher-hosted child runs are navigable. Keyboard navigation
                 // is REAL focused-row navigation on the tracked list (Up/Down
@@ -800,8 +812,19 @@ fn counts_line(counts: &PanelCounts) -> SharedString {
     })
 }
 
+/// Braille frames for the compact Running spinner. Animation is driven by the
+/// shared 30fps pulse clock rather than a permanently hot display-frame loop.
+const RUNNING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn running_spinner_glyph(delta: f32) -> &'static str {
+    let phase = delta.rem_euclid(1.0);
+    let frame = (phase * RUNNING_SPINNER_FRAMES.len() as f32).floor() as usize;
+    RUNNING_SPINNER_FRAMES[frame.min(RUNNING_SPINNER_FRAMES.len() - 1)]
+}
+
 /// (glyph, color) for one status — the glyph tile carries the status color;
-/// the row/header text stays neutral (error tints only the glyph).
+/// the row/header text stays neutral (error tints only the glyph). Running's
+/// glyph is replaced with the current animated frame by [`inspector_row`].
 fn status_glyph(status: PanelStatus, theme: &Theme) -> (&'static str, gpui::Hsla) {
     match status {
         PanelStatus::Running => ("⠋", theme.accent),
@@ -818,8 +841,17 @@ fn status_glyph(status: PanelStatus, theme: &Theme) -> (&'static str, gpui::Hsla
 /// language). Settled rows are ~34px, in-flight ~50px. Rows share the
 /// inspector's single surface — separators are drawn between them, never
 /// cards around them.
-fn inspector_row(theme: &Theme, entry: &SubagentPanelEntry) -> gpui::Div {
-    let (glyph, glyph_color) = status_glyph(entry.status, theme);
+fn inspector_row(
+    theme: &Theme,
+    entry: &SubagentPanelEntry,
+    running_delta: Option<f32>,
+) -> gpui::Div {
+    let (static_glyph, glyph_color) = status_glyph(entry.status, theme);
+    let glyph = if entry.status == PanelStatus::Running {
+        running_spinner_glyph(running_delta.unwrap_or_default())
+    } else {
+        static_glyph
+    };
     let in_flight = SubagentPanelEntry::in_flight(entry.status);
     let mode_badge = match entry.mode {
         SubagentRunMode::Async => Some(SharedString::from("async")),
@@ -1080,6 +1112,14 @@ mod tests {
 
     fn ms(epoch_secs: i64) -> i64 {
         epoch_secs * 1000
+    }
+
+    #[test]
+    fn running_spinner_advances_and_wraps() {
+        assert_eq!(running_spinner_glyph(0.0), "⠋");
+        assert_eq!(running_spinner_glyph(0.15), "⠙");
+        assert_eq!(running_spinner_glyph(0.95), "⠏");
+        assert_eq!(running_spinner_glyph(1.0), "⠋");
     }
 
     fn subagent_part(id: &str, is_async: bool, resolved: bool, is_error: bool) -> MessagePart {

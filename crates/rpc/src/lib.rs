@@ -41,6 +41,11 @@ pub mod methods {
     pub const INSTALL_PI: &str = "InstallPi";
     pub const INSTALL_PI_PACKAGE: &str = "InstallPiPackage";
     pub const SET_PI_PACKAGE_ENABLED: &str = "SetPiPackageEnabled";
+    /// Current Pi CLI + package update facts, then every six-hour refresh or
+    /// apply transition.
+    pub const PI_UPDATE_STATUS: &str = "PiUpdateStatus";
+    /// Explicit one-click update of Pi plus all unpinned installed packages.
+    pub const APPLY_PI_UPDATES: &str = "ApplyPiUpdates";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
     pub const START_MCP_AUTH: &str = "StartMcpAuth";

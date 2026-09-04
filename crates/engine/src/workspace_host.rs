@@ -686,8 +686,13 @@ impl WorkspaceHost {
         self.inner.spaces_tx.subscribe()
     }
 
-    /// WatchSessions source: remote devices' rows from the registry merged with
-    /// this engine's live status watch (the local view is fresher for our own runs).
+    /// WatchSessions source: durable registry rows merged with this engine's
+    /// live status watch (the local view is fresher for runs touched since boot).
+    ///
+    /// Local durable rows must remain in the stream when the live map has no
+    /// entry yet. Otherwise every completed session — including child chats —
+    /// disappears after an engine restart and the UI can only guess that the
+    /// durable child relation is still "Starting".
     pub fn merged_sessions_watch(
         &self,
         local: watch::Receiver<Vec<Session>>,
@@ -1562,16 +1567,21 @@ fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     Some(dot_git.parent()?.to_string_lossy().into_owned())
 }
 
-/// Local live statuses win for this device's chats; every other device's rows come
-/// from the registry. Sorted by chat id (stable stream output).
+/// Durable registry rows survive engine restarts; local live statuses override
+/// matching rows for this device once a run is touched. Sorted by chat id
+/// (stable stream output).
 fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<Session> {
     let mut merged: std::collections::HashMap<String, Session> = rows
         .iter()
-        .filter(|s| s.device_id != device_id)
         .map(|s| (s.chat_id.clone(), s.clone()))
         .collect();
     for session in local {
-        merged.insert(session.chat_id.clone(), session.clone());
+        // Only this engine's own live projection may supersede its durable
+        // row. A malformed/foreign live row must not overwrite another
+        // device's registry truth.
+        if session.device_id == device_id {
+            merged.insert(session.chat_id.clone(), session.clone());
+        }
     }
     let mut list: Vec<Session> = merged.into_values().collect();
     list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
@@ -1736,10 +1746,54 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{TimeDelta, Utc};
-    use cypher_proto::Device;
+    use cypher_proto::{Device, Session, SessionStatus};
     use cypher_sync::DocsStore;
 
-    use super::{WorkspaceHost, WorkspaceHostConfig, device_name_on_boot, linked_worktree_root};
+    use super::{
+        WorkspaceHost, WorkspaceHostConfig, device_name_on_boot, linked_worktree_root,
+        merge_sessions,
+    };
+
+    fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
+        Session {
+            chat_id: chat_id.into(),
+            device_id: device_id.into(),
+            status,
+            started_at: None,
+            updated_at: Utc::now(),
+            subagents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn merged_sessions_restore_local_durable_rows_after_restart() {
+        let durable = vec![
+            session("finished-child", "local-device", SessionStatus::Idle),
+            session("remote-chat", "remote-device", SessionStatus::Working),
+        ];
+
+        let merged = merge_sessions("local-device", &durable, &[]);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].chat_id, "finished-child");
+        assert_eq!(merged[0].status, SessionStatus::Idle);
+        assert_eq!(merged[1].chat_id, "remote-chat");
+    }
+
+    #[test]
+    fn merged_sessions_prefer_own_live_status_over_durable_status() {
+        let durable = vec![session("local-chat", "local-device", SessionStatus::Idle)];
+        let live = vec![session(
+            "local-chat",
+            "local-device",
+            SessionStatus::Working,
+        )];
+
+        let merged = merge_sessions("local-device", &durable, &live);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].status, SessionStatus::Working);
+    }
 
     #[test]
     fn boot_repairs_the_legacy_unknown_device_sentinel() {

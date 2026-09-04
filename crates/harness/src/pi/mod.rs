@@ -2389,10 +2389,9 @@ async fn run_session(session: Session) {
                 // (an extension command whose handler only notifies, say).
                 // Settle this TURN with the notify output, but keep a
                 // steerable child parked exactly like `agent_settled`.
-                // Extensions such as pi-gpt-fast-mode keep their toggle in
-                // process memory; reaping here made every `/fast` start from
-                // the configured default and therefore appear permanently
-                // disabled when that default was true.
+                // Stateful extension commands can keep toggles in process
+                // memory; reaping here made every invocation start from the
+                // configured default instead of observing the previous turn.
                 in_turn = false;
                 done_sent = true;
                 let result = (!last_assistant_text.is_empty())

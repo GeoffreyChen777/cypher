@@ -145,6 +145,9 @@ pub struct EngineCore {
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<cypher_update::Updater>>,
+    /// Pi CLI + extension update checker (same six-hour cadence as the Cypher
+    /// release checker), attached by [`Engine::assemble_runtime`].
+    pi_updater: std::sync::Mutex<Option<pi_packages::PiUpdater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
@@ -322,6 +325,7 @@ impl EngineCore {
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
+            pi_updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
@@ -394,6 +398,20 @@ impl EngineCore {
             .clone()
     }
 
+    pub fn set_pi_updater(&self, updater: pi_packages::PiUpdater) {
+        *self
+            .pi_updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
+    }
+
+    pub fn pi_updater(&self) -> Option<pi_packages::PiUpdater> {
+        self.pi_updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// A live RPC client to another device's engine through its relay DO (the router's
     /// dial seam). Cached per device; invalidated + re-dialed on failure.
     pub async fn dial_device(
@@ -452,6 +470,9 @@ impl EngineCore {
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
         }
+        if let Some(updater) = self.pi_updater() {
+            rpc = rpc.with_pi_updater(updater);
+        }
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
@@ -499,6 +520,14 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(updater) = updater {
+            updater.shutdown().await;
+        }
+        let pi_updater = self
+            .pi_updater
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(updater) = pi_updater {
             updater.shutdown().await;
         }
         self.diff_sync.shutdown().await;
@@ -813,6 +842,7 @@ impl Engine {
             core.set_updater_wake(wake);
         }
         core.set_updater(updater);
+        core.set_pi_updater(pi_packages::PiUpdater::spawn());
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat

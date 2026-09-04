@@ -747,6 +747,9 @@ pub struct AppState {
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
     pub update: Option<cypher_update::UpdateStatus>,
+    /// Latest Pi CLI + extension update facts — drives the one-click package
+    /// update notification beside the Cypher release strip.
+    pub pi_update: Option<cypher_engine::pi_packages::PiUpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -845,6 +848,7 @@ impl AppState {
             upload_progress: None,
             local_device_id: None,
             update: None,
+            pi_update: None,
             data_dir: None,
             engine: None,
             watch_tasks: Vec::new(),
@@ -1058,6 +1062,10 @@ impl AppState {
 
     pub fn apply_update(&mut self, status: cypher_update::UpdateStatus) {
         self.update = Some(status);
+    }
+
+    pub fn apply_pi_update(&mut self, status: cypher_engine::pi_packages::PiUpdateStatus) {
+        self.pi_update = Some(status);
     }
 
     pub fn apply_auth(&mut self, auth: AuthState) {
@@ -1572,6 +1580,7 @@ impl AppState {
         self.upload_progress = None;
         self.local_device_id = None;
         self.update = None;
+        self.pi_update = None;
         cx.notify();
     }
 
@@ -1650,6 +1659,7 @@ impl AppState {
                 AppState::apply_auth_value,
             ),
             spawn_update_watch(cx, handle.clone()),
+            spawn_pi_update_watch(cx, handle.clone()),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
@@ -1968,6 +1978,67 @@ fn spawn_update_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<
             // valid frame resets the backoff; one that closed prematurely keeps
             // backing off so a broken runtime cannot churn every 2s.
             tracing::debug!("update status stream ended; retrying");
+            if frames > 0 {
+                backoff_step = 0;
+            }
+            let delay = update_backoff_delay(backoff_step);
+            if backoff_step < UPDATE_BACKOFF_SECS.len() - 1 {
+                backoff_step += 1;
+            }
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(delay).await;
+        }
+    })
+}
+
+/// Pi/package update watch: same advisory backoff discipline as the Cypher
+/// release stream. The last valid frame remains visible across engine
+/// reconnects so an available update never flickers away.
+fn spawn_pi_update_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let mut backoff_step = 0usize;
+        loop {
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::PI_UPDATE_STATUS, serde_json::json!({}))
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::debug!(error = %err, "Pi update status unavailable; retrying");
+                    let delay = update_backoff_delay(backoff_step);
+                    if backoff_step < UPDATE_BACKOFF_SECS.len() - 1 {
+                        backoff_step += 1;
+                    }
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(delay).await;
+                    continue;
+                }
+            };
+            let mut frames = 0usize;
+            while let Some(value) = rx.recv().await {
+                let parsed: cypher_engine::pi_packages::PiUpdateStatus =
+                    match serde_json::from_value(value) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "dropping malformed Pi update frame");
+                            continue;
+                        }
+                    };
+                let alive = this.update(cx, |state, cx| {
+                    state.apply_pi_update(parsed);
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+                frames += 1;
+            }
+            tracing::debug!("Pi update status stream ended; retrying");
             if frames > 0 {
                 backoff_step = 0;
             }

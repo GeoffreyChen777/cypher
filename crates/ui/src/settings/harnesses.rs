@@ -623,8 +623,8 @@ mod tests {
                 icons::STAR,
             ),
             (
-                "@tunnckocore/pi-gpt-fast-mode",
-                Some("Fast model mode controls."),
+                "gpt-fast-pi",
+                Some("Provider-agnostic GPT Fast mode controls."),
                 icons::TUNING,
             ),
             (
