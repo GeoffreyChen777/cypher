@@ -2179,12 +2179,13 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
-            // R2 sidecar PARKED (2026-08-10, product call): the fold's
-            // summary/stats ARE the doc's whole record — no refs stamped, no
-            // uploads. Full outputs survive only in the host's local run
-            // journal. To reintroduce: `cypher_doc::sidecar_payload(&event)`
-            // → `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`, all
-            // still in place and tested.
+            // R2 sidecar is parked: the fold's bounded output summary and
+            // diff stats are the doc-resident record used by the transcript.
+            // Full output survives only in the host's local run journal.
+            // To add a full-output affordance later, reintroduce
+            // `cypher_doc::sidecar_payload(&event)` →
+            // `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`; all
+            // supporting code remains in place and tested.
         }
 
         if let AgentEvent::Done { status, .. } = &event {

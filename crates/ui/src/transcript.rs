@@ -523,12 +523,13 @@ pub enum RowKind {
         auto_open: bool,
     },
     InputChip {
-        /// First question's header (chat-view.tsx `InputChip`: the resolved
-        /// chip shows it; unresolved shows "Awaiting your answer…" — which
-        /// stays TRUE even across a run death: the composer keeps the panel
-        /// up until the user answers, and the engine delivers a dead run's
-        /// answer as a resumed turn).
+        /// First question's header (the passive chip is only rendered after
+        /// the answer has resolved; the live question is rendered by the
+        /// composer's wizard).
         header: SharedString,
+        /// Stable request identity used to suppress a stale resolved mirror
+        /// while the interactive wizard for the same request is visible.
+        request_id: SharedString,
         resolved: bool,
     },
     ErrorChip {
@@ -554,6 +555,21 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+}
+
+/// A resolved transcript mirror for the request currently served by the
+/// interactive composer wizard. The mirror can arrive during replay before
+/// the unresolved part is removed; suppress it to avoid rendering the same
+/// question in two different UI surfaces.
+fn is_pending_input_duplicate(row: &Row, pending_request_id: Option<&str>) -> bool {
+    let Some(pending_request_id) = pending_request_id else {
+        return false;
+    };
+    matches!(
+        &row.kind,
+        RowKind::InputChip { request_id, .. }
+            if request_id.as_ref() == pending_request_id
+    )
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -913,6 +929,7 @@ pub fn rows_for_entry(
                     }
                     MessagePart::Input {
                         id: part_id,
+                        request_id,
                         questions,
                         resolved,
                         ..
@@ -937,6 +954,7 @@ pub fn rows_for_entry(
                             turn_start: false,
                             kind: RowKind::InputChip {
                                 header,
+                                request_id: request_id.clone().into(),
                                 resolved: *resolved,
                             },
                             entry_id: entry_id.clone(),
@@ -2397,6 +2415,12 @@ impl Transcript {
                 .collect();
             (s.selected_chat.clone(), s.transcript.clone(), echoes)
         };
+        // A replay can briefly contain both an unresolved live part (which
+        // drives the composer wizard) and a resolved mirror of the same
+        // request (which would otherwise render a second, different-looking
+        // question chip). Keep the interactive wizard as the single source of
+        // truth while that request is pending.
+        let pending_request_id = crate::composer::pending_input_request(&entries).map(|(id, _)| id);
 
         let attached = selected != self.chat_id;
         if attached {
@@ -2440,6 +2464,7 @@ impl Transcript {
             if after_slash_command && entry.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
@@ -2450,6 +2475,7 @@ impl Transcript {
             if after_slash_command && echo.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
+            rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
             new_rows.extend(rows);
         }
 
@@ -3234,9 +3260,9 @@ impl Transcript {
             RowKind::ToolGroup { tools, auto_open } => {
                 self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
             }
-            RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
-            }
+            RowKind::InputChip {
+                header, resolved, ..
+            } => input_chip(header.clone(), *resolved, &theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
         };
 
@@ -4400,7 +4426,8 @@ fn detail_body(
 /// when the chip expands). Shared between the plain chip and the header of an
 /// expandable chip card.
 fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpui::Div {
-    let (label, detail) = tool_chip_content(&tool.call);
+    let (label, _) = tool_chip_content(&tool.call);
+    let detail = tool_row_summary(tool);
     let tint = if tool.is_error {
         theme.danger
     } else {
@@ -4469,6 +4496,21 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                     .child(SharedString::from(if open { "▾" } else { "▸" })),
             )
         })
+}
+
+/// One compact line for a tool chip: tool name, parameters, then lifecycle
+/// status. The result body belongs to the expandable card rather than the
+/// collapsed header.
+fn tool_row_summary(tool: &ToolItem) -> String {
+    let (label, parameter) = tool_chip_content(&tool.call);
+    let status = if tool.is_error {
+        "failed"
+    } else if !tool.resolved {
+        "running…"
+    } else {
+        "completed"
+    };
+    format!("{label} · {} · {status}", parameter.trim())
 }
 
 /// The header row of an expandable chip card.
@@ -5361,6 +5403,48 @@ mod tests {
             query: "line one\nline two".into(),
         });
         assert_eq!(q, "line one line two");
+    }
+
+    #[test]
+    fn tool_rows_show_name_parameter_and_status() {
+        let tool = ToolItem {
+            call: ToolCall::Unknown {
+                name: "apply_patch".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            detail: Some(Arc::new(ToolDetail::Output {
+                lines: vec!["Applied patch:".into(), "Added src/new.rs".into()],
+                truncated_by: 0,
+            })),
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+        };
+        assert_eq!(tool_row_summary(&tool), "Tool · apply_patch · completed");
+
+        let no_output = ToolItem {
+            call: ToolCall::ReadFile {
+                path: "README.md".into(),
+            },
+            detail: None,
+            ..tool
+        };
+        assert_eq!(tool_row_summary(&no_output), "Read · README.md · completed");
+
+        let failed = ToolItem {
+            is_error: true,
+            ..no_output.clone()
+        };
+        assert_eq!(tool_row_summary(&failed), "Read · README.md · failed");
+
+        let running = ToolItem {
+            resolved: false,
+            ..no_output
+        };
+        assert_eq!(tool_row_summary(&running), "Read · README.md · running…");
     }
 
     #[test]

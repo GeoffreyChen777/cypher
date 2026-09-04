@@ -9,13 +9,10 @@ use cypher_proto::{AgentEvent, ToolCall, ToolDiff, UserInputQuestion};
 
 use crate::constants::MSG_INLINE_MAX;
 
-/// Char cap for the tool-output SUMMARY persisted into the doc: first
-/// non-empty line, nothing more. The per-part 4KB cap (c951c3e) bounded each
-/// part but not the session — chat 1b65e93d measured 917KB (85%) of a 1MB doc
-/// in capped outputs across 426 tool parts (docs/chat2-sync.md). Full outputs
-/// live in the R2 sidecar behind `output_ref`; t3code ships an 84-char
-/// summary, so 160 is generous.
-pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
+/// Line cap for the tool-output SUMMARY persisted into the doc. Keeping a
+/// small number of complete lines makes the expandable detail useful without
+/// imposing an arbitrary character limit on a single long line.
+pub const TOOL_OUTPUT_SUMMARY_MAX_LINES: usize = 5;
 
 /// Char cap for the `subagent` tool's `task` kept in the doc (privacy-safe
 /// persistence, [`sanitize_tool_call`]). Cut on a Unicode-char boundary, so
@@ -29,10 +26,8 @@ pub const SUBAGENT_TASK_MAX_CHARS: usize = 500;
 /// - Markdown code fences are stripped first — ACP harnesses fence every
 ///   output, so the fence is transport wrapping, never content (pre-fix,
 ///   every summary read "```console…").
-/// - Outputs that fit [`TOOL_OUTPUT_SUMMARY_MAX`] chars ride whole — a
-///   summary of a two-line output is more UI than the output.
-/// - Bigger outputs keep the first non-empty line, capped, with a `…`
-///   marker meaning "there was more".
+/// - Outputs keep complete lines, up to [`TOOL_OUTPUT_SUMMARY_MAX_LINES`].
+/// - A long single line is kept whole; the limit is by lines, not characters.
 ///
 /// `None` for blank output.
 pub fn summarize_tool_output(text: &str) -> Option<String> {
@@ -45,29 +40,13 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
     if stripped.is_empty() {
         return None;
     }
-    if stripped.chars().count() <= TOOL_OUTPUT_SUMMARY_MAX {
-        return Some(stripped.to_owned());
-    }
-    // Too big to inline: first non-empty line, capped. There is always more
-    // than the summary here (whole output exceeded the budget), so the
-    // marker is unconditional.
-    let line = stripped
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or(stripped)
-        .trim_end();
-    let mut chars = 0usize;
-    let mut end = line.len();
-    for (i, _) in line.char_indices() {
-        if chars == TOOL_OUTPUT_SUMMARY_MAX {
-            end = i;
-            break;
-        }
-        chars += 1;
-    }
-    let mut out = line[..end].to_owned();
-    out.push('…');
-    Some(out)
+    Some(
+        stripped
+            .lines()
+            .take(TOOL_OUTPUT_SUMMARY_MAX_LINES)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Tail-cap for the transient `progress` column: keep the LAST at most
@@ -169,9 +148,9 @@ pub enum MessagePart {
         /// True once a ToolResult arrived.
         #[serde(default)]
         resolved: bool,
-        /// One-line tool output summary ([`summarize_tool_output`]). Old
-        /// entries (pre-strip) still carry up to 4KB here; old app versions
-        /// render this field either way, so the strip is invisible to them.
+        /// Bounded tool output summary ([`summarize_tool_output`]): up to five
+        /// complete lines. Old entries (pre-strip) still carry up to 4KB here;
+        /// old app versions render this field either way.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         /// Live progress for an UNRESOLVED tool: the tail of the streamed
@@ -357,15 +336,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     // tool settles (the chip collapses back to its plain
                     // form).
                     *progress = None;
-                    // Tool OUTPUTS never enter the doc (2026-08-10 product
-                    // call: chips are one-liners — name + call info — like
-                    // pre-output builds; the R2 sidecar is parked with them,
-                    // docs/chat2-sync.md A2). Full text lives only in the
-                    // host's run journal. Inline diffs die the same way:
-                    // stats only, never text. `is_error` still folds so
-                    // failed chips read as failed.
-                    let _ = output; // journal-only
-                    *out_slot = None;
+                    // Keep the bounded output summary in the doc so expanding
+                    // a tool chip actually shows what the command returned.
+                    // Full output remains out of the doc budget; a sidecar can
+                    // be added later for a "show full output" affordance.
+                    *out_slot = output.as_deref().and_then(summarize_tool_output);
                     *output_bytes = None;
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
@@ -850,7 +825,7 @@ mod tests {
     // ── A1 strip (docs/chat2-sync.md) ───────────────────────────────────────
 
     #[test]
-    fn summarize_inlines_small_outputs_and_marks_big_cuts() {
+    fn summarize_keeps_five_lines_without_a_character_cap() {
         assert_eq!(summarize_tool_output(""), None);
         assert_eq!(summarize_tool_output("  \n\t\n"), None);
         assert_eq!(summarize_tool_output("one line"), Some("one line".into()));
@@ -871,17 +846,16 @@ mod tests {
             Some("real content".into())
         );
         assert_eq!(summarize_tool_output("```\n```"), None);
-        // Big outputs: first non-empty (post-fence) line + unconditional "…".
-        let big = format!("```console\nhead line\n{}\n```", "x".repeat(300));
-        assert_eq!(summarize_tool_output(&big), Some("head line…".into()));
-        let long = "x".repeat(TOOL_OUTPUT_SUMMARY_MAX + 40);
-        let summary = summarize_tool_output(&long).unwrap();
-        assert_eq!(summary.chars().count(), TOOL_OUTPUT_SUMMARY_MAX + 1);
-        assert!(summary.ends_with('…'));
-        // Char-boundary safety on multibyte input.
-        let wide = "é".repeat(TOOL_OUTPUT_SUMMARY_MAX + 5);
-        let summary = summarize_tool_output(&wide).unwrap();
-        assert_eq!(summary.chars().count(), TOOL_OUTPUT_SUMMARY_MAX + 1);
+        // Big outputs keep the first five complete lines, with no character
+        // cap on any individual line.
+        let big = format!(
+            "```console\nline one {}\nline two\nline three\nline four\nline five\nline six\n```",
+            "x".repeat(400)
+        );
+        let summary = summarize_tool_output(&big).unwrap();
+        assert_eq!(summary.lines().count(), TOOL_OUTPUT_SUMMARY_MAX_LINES);
+        assert!(summary.contains(&"x".repeat(400)));
+        assert!(!summary.contains("line six"));
     }
 
     #[test]
@@ -937,9 +911,14 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: outputs never enter the doc at all
-                // (journal-only); diff text neither — stats survive.
-                assert_eq!(output.as_deref(), None);
+                // The bounded summary is doc-resident and powers the
+                // expandable output body; diff text still becomes stats.
+                assert_eq!(
+                    output.as_deref(),
+                    Some(
+                        "running 42 tests\nrunning 42 tests\nrunning 42 tests\nrunning 42 tests\nrunning 42 tests"
+                    )
+                );
                 assert_eq!(*output_bytes, None);
                 assert!(diff.is_none(), "inline diff text must not enter the doc");
                 let stats = diff_stats.as_ref().unwrap();
@@ -999,7 +978,8 @@ mod tests {
             &parts[0],
             MessagePart::Tool { progress: Some(p), .. } if p == "fresh"
         ));
-        // Resolve clears it — the chip collapses back.
+        // Resolve clears the transient tail but keeps the bounded result
+        // summary for the expandable chip body.
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::ToolResult {
@@ -1013,8 +993,9 @@ mod tests {
             MessagePart::Tool {
                 resolved: true,
                 progress: None,
+                output: Some(output),
                 ..
-            } => {}
+            } => assert_eq!(output, "final"),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1154,9 +1135,9 @@ mod tests {
                 diff_ref,
                 ..
             } => {
-                // One-liner fold: outputs never reach the doc, so there is
-                // no output content to key even after resolution; diff
-                // STATS exist, so the diff ref still stamps.
+                // The output summary is already doc-resident. Full output
+                // sidecar refs remain absent until sidecar storage is enabled;
+                // diff STATS still get their ref shape.
                 assert_eq!(output_ref.as_deref(), None);
                 assert_eq!(diff_ref.as_deref(), Some("chat-9/t1.diff"));
             }

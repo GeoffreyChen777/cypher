@@ -1360,10 +1360,27 @@ fn bridge_ui_request(
         .and_then(Value::as_str)
         .unwrap_or("Agent question")
         .to_owned();
+    // The RPC fallback used by pi-ask-user has two dialog stages for the
+    // TUI's in-place "optional comment" mode: select first, then input with
+    // the original prompt plus a `Selected option(s):` section. Preserve that
+    // semantic label in the Cypher question model so the second stage reads
+    // like the TUI's comment editor instead of looking like a duplicate
+    // question.
+    let input_header = if matches!(method, "input" | "editor") {
+        if title.contains("Selected option:") || title.contains("Selected options:") {
+            "Optional comment"
+        } else if method == "editor" {
+            "Custom answer"
+        } else {
+            "Your answer"
+        }
+    } else {
+        &title
+    };
     let question = UserInputQuestion {
         // The extension request's own id: the answer comes back keyed on it.
         id: id.to_owned(),
-        header: title.clone(),
+        header: input_header.to_owned(),
         question: title.clone(),
         options: match method {
             "select" => payload

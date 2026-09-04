@@ -75,6 +75,9 @@ pub const INPUT_LINE_HEIGHT: f32 = 22.75;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
 /// Single-select questions auto-advance after this long.
 pub const AUTO_ADVANCE_MS: u64 = 220;
+/// Keep a question panel with many options inside the composer instead of
+/// letting its content push past the bottom edge of the window.
+const WIZARD_CONTENT_MAX_HEIGHT: f32 = 360.0;
 /// Drag-selection autoscroll runs at the display-friendly 60fps cadence.
 pub const DRAG_SCROLL_FRAME_MS: u64 = 16;
 
@@ -928,6 +931,66 @@ impl Wizard {
             })
             .collect()
     }
+}
+
+/// Structured copy carried by pi-ask-user's RPC fallback for its second-stage
+/// optional-comment editor:
+///
+/// ```text
+/// question
+///
+/// Context:
+/// context
+///
+/// Selected option:
+/// - choice
+/// ```
+///
+/// The TUI renders these as distinct visual sections. Parse that transport
+/// string so the desktop app can do the same instead of showing one flat
+/// paragraph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptionalCommentCopy {
+    question: String,
+    context: Option<String>,
+    selected_label: &'static str,
+    selected: String,
+}
+
+fn optional_comment_copy(header: &str, prompt: &str) -> Option<OptionalCommentCopy> {
+    if header != "Optional comment" {
+        return None;
+    }
+    let prompt = prompt.replace("\r\n", "\n");
+    let (before_selected, selected_label, selected) =
+        if let Some((before, selected)) = prompt.split_once("\n\nSelected option:\n") {
+            (before, "Selected option", selected)
+        } else if let Some((before, selected)) = prompt.split_once("\n\nSelected options:\n") {
+            (before, "Selected options", selected)
+        } else {
+            return None;
+        };
+    let (question, context) =
+        if let Some((question, context)) = before_selected.split_once("\n\nContext:\n") {
+            (question, Some(context.trim().to_owned()))
+        } else {
+            (before_selected, None)
+        };
+    let selected = selected
+        .lines()
+        .map(|line| line.trim().strip_prefix("- ").unwrap_or(line.trim()))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if question.trim().is_empty() || selected.is_empty() {
+        return None;
+    }
+    Some(OptionalCommentCopy {
+        question: question.trim().to_owned(),
+        context: context.filter(|text| !text.is_empty()),
+        selected_label,
+        selected,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5955,6 +6018,7 @@ impl Composer {
                     let pick_only = questions
                         .first()
                         .is_some_and(|q| !q.options.is_empty() && !q.multi_select);
+                    let input_header = questions.first().map(|q| q.header.clone());
                     let mut wizard = Wizard::new(request_id, questions);
                     if let Some(cmd) = slash {
                         wizard = wizard.for_slash(cmd);
@@ -5962,14 +6026,16 @@ impl Composer {
                     self.wizard = Some(wizard);
                     self.advance_task = None;
                     self.input.update(cx, |input, cx| {
-                        input.set_placeholder(
-                            if pick_only {
-                                ""
-                            } else {
-                                "Type your own answer, or pick an option above"
-                            },
-                            cx,
-                        )
+                        let placeholder = if pick_only {
+                            ""
+                        } else if input_header.as_deref() == Some("Optional comment") {
+                            "Optional comment (press Enter to skip)…"
+                        } else if input_header.as_deref() == Some("Custom answer") {
+                            "Type your answer…"
+                        } else {
+                            "Type your own answer, or pick an option above"
+                        };
+                        input.set_placeholder(placeholder, cx)
                     });
                 }
             }
@@ -7128,11 +7194,11 @@ impl Composer {
 
     // ---- render pieces ----
 
-    /// The agent-asked-a-question panel (zeron question-panel.tsx), rendered in
-    /// place of the composer: the same floating-pill chrome (`rounded-[26px]
-    /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
-    /// "1/3" counter chip, option rows with number kbd chips, a free-text
-    /// override over a hairline, and Back / Next-Submit footer.
+    /// The agent-asked-a-question panel, rendered in place of the composer:
+    /// compact card chrome, an uppercase header + counter chip, option rows
+    /// with number kbd chips, a free-text override, and a fixed footer. The
+    /// content area scrolls independently so large question payloads cannot
+    /// overflow the window.
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
@@ -7145,25 +7211,35 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
         let pick_only = !question.options.is_empty() && !question.multi_select;
         let compact = pick_only;
+        let optional_comment = optional_comment_copy(&question.header, &question.question);
+        let can_advance = optional_comment.is_some() || wizard.page_has_pick() || !typed_empty;
+        // Pi's dialog fallback uses the full prompt as both its title and
+        // body. In that case the title row would repeat the same question,
+        // context, and selected-option text in a second style. Keep the
+        // content once; a distinct header is still useful for native
+        // questions that provide one.
+        let show_header = !pick_only && question.header.trim() != question.question.trim();
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
             // (typed answers win — zeron question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
             let (pad_x, pad_y, radius, text, kbd) = if compact {
-                // 8px matches sidebar session rows (`rounded(px(8.0))`).
-                (8.0, 5.0, 8.0, 12.5, 16.0)
+                // Match the density of sidebar rows rather than the large
+                // question-card treatment used for free-text questions.
+                (8.0, 4.0, 7.0, 12.0, 16.0)
             } else {
-                (14.0, 10.0, 12.0, 13.5, 22.0)
+                (10.0, 6.0, 8.0, 12.5, 18.0)
             };
             div()
                 .id(("wizard-option", ix))
+                .w_full()
+                .min_w_0()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(if compact { 8.0 } else { 12.0 }))
+                .gap(px(if compact { 6.0 } else { 8.0 }))
                 .px(px(pad_x))
                 .py(px(pad_y))
                 .rounded(px(radius))
@@ -7190,6 +7266,7 @@ impl Composer {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(text))
+                        .line_height(px(if compact { 16.0 } else { 17.0 }))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(if picked {
                             theme.text
@@ -7206,7 +7283,7 @@ impl Composer {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(if compact { 4.0 } else { 6.0 }))
+                            .rounded(px(4.0))
                             .bg(if picked {
                                 crate::theme::ink(0.16)
                             } else {
@@ -7229,17 +7306,31 @@ impl Composer {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
-            .rounded(px(if pick_only { 8.0 } else { 26.0 }))
+            // This is an opaque foreground surface. Occlude pointer hit-testing
+            // and always consume wheel bubbling so scrolling its option list
+            // never moves the transcript behind it.
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .w_full()
+            .min_w_0()
+            .max_w(px(560.0))
+            .mx_auto()
+            .overflow_hidden()
+            .rounded(px(12.0))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.input_glass_bg())
-            .when(!theme.is_glass(), |el| el.shadow_lg())
+            .border_color(theme.border_strong)
+            .bg(theme.surface_dialog)
+            .shadow_lg()
             .flex()
             .flex_col()
             .child(
                 div()
-                    .px(px(if pick_only { 10.0 } else { 16.0 }))
-                    .pt(px(if pick_only { 10.0 } else { 16.0 }))
+                    .id("wizard-scroll")
+                    .min_w_0()
+                    .max_h(px(WIZARD_CONTENT_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .px(px(if pick_only { 10.0 } else { 12.0 }))
+                    .pt(px(if pick_only { 10.0 } else { 12.0 }))
                     .when(pick_only, |el| el.pb(px(10.0)))
                     .flex()
                     .flex_col()
@@ -7281,7 +7372,7 @@ impl Composer {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .text_size(px(13.0))
+                                        .text_size(px(12.5))
                                         .line_height(px(17.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text)
@@ -7324,7 +7415,7 @@ impl Composer {
                                 ),
                         )
                     })
-                    .when(!pick_only, |el| {
+                    .when(show_header, |el| {
                         el.child(
                             div()
                                 .flex()
@@ -7356,11 +7447,83 @@ impl Composer {
                                     )
                                 }),
                         )
-                        .child(
+                    })
+                    .when_some(optional_comment.clone(), |el, copy| {
+                        el.child(
                             div()
                                 .mt(px(6.0))
-                                .text_size(px(15.0))
-                                .line_height(px(20.0))
+                                .text_size(px(14.0))
+                                .line_height(px(19.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(SharedString::from(copy.question)),
+                        )
+                        .when_some(copy.context, |el, context| {
+                            el.child(
+                                div()
+                                    .mt(px(12.0))
+                                    .rounded(px(8.0))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.surface_card)
+                                    .px(px(10.0))
+                                    .py(px(8.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text_faint)
+                                            .child(SharedString::from("CONTEXT")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .line_height(px(17.0))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from(context)),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.accent.opacity(0.22))
+                                .bg(theme.surface_raised)
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.accent)
+                                        .child(SharedString::from(
+                                            copy.selected_label.to_uppercase(),
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .line_height(px(17.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(copy.selected)),
+                                ),
+                        )
+                    })
+                    .when(!pick_only && optional_comment.is_none(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(if show_header { 6.0 } else { 0.0 }))
+                                .text_size(px(14.0))
+                                .line_height(px(19.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(SharedString::from(question.question.clone())),
@@ -7383,7 +7546,43 @@ impl Composer {
                             .gap(px(if compact { 1.0 } else { 4.0 }))
                             .children(options),
                     )
-                    .when(!pick_only, |el| {
+                    .when(optional_comment.is_some(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(5.0))
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from("ADD CONTEXT — OPTIONAL")),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_h(px(54.0))
+                                        .rounded(px(8.0))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.surface_card)
+                                        .px(px(10.0))
+                                        .py(px(8.0))
+                                        .child(self.input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from(
+                                            "Leave blank to submit the selection without a comment.",
+                                        )),
+                                ),
+                        )
+                    })
+                    .when(!pick_only && optional_comment.is_none(), |el| {
                         el.child(
                             div()
                                 .mt(px(12.0))
@@ -7403,10 +7602,19 @@ impl Composer {
                         .flex_row()
                         .justify_between()
                         .items_center()
-                        .px(px(16.0))
-                        .pb(px(16.0))
+                        .px(px(12.0))
+                        .pb(px(12.0))
                         .pt(px(4.0))
-                        .child(if page > 0 {
+                        .child(if optional_comment.is_some() {
+                            crate::popover::btn_ghost(
+                                &theme,
+                                "Skip",
+                                "wizard-comment-skip",
+                            )
+                            .id("wizard-comment-skip")
+                            .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+                            .into_any_element()
+                        } else if page > 0 {
                             crate::popover::btn_ghost(&theme, "Back", "wizard-back")
                                 .id("wizard-back")
                                 .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
@@ -7420,7 +7628,7 @@ impl Composer {
                                 if last { "Submit" } else { "Next" },
                             )
                             .id("wizard-submit")
-                            .px(px(16.0))
+                            .px(px(12.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
                         ),
@@ -7764,7 +7972,10 @@ impl Render for Composer {
 
         if wizard_active {
             let wizard = self.render_wizard(cx);
-            return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
+            return container.child(motion::fade_quick(
+                "composer-wizard",
+                div().w_full().min_w_0().child(wizard),
+            ));
         }
 
         // New chats always use the expanded layout: the repo/branch pickers
@@ -9233,6 +9444,33 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
         }
+    }
+
+    #[test]
+    fn optional_comment_prompt_is_split_into_visual_sections() {
+        let copy = optional_comment_copy(
+            "Optional comment",
+            "Which mode?\n\nContext:\nThe fast path skips validation.\n\nSelected option:\n- Safe mode",
+        )
+        .expect("recognized optional-comment prompt");
+        assert_eq!(copy.question, "Which mode?");
+        assert_eq!(
+            copy.context.as_deref(),
+            Some("The fast path skips validation.")
+        );
+        assert_eq!(copy.selected_label, "Selected option");
+        assert_eq!(copy.selected, "Safe mode");
+
+        let multiple = optional_comment_copy(
+            "Optional comment",
+            "Pick gates\n\nSelected options:\n- Unit\n- E2E",
+        )
+        .expect("recognized plural prompt");
+        assert_eq!(multiple.context, None);
+        assert_eq!(multiple.selected_label, "Selected options");
+        assert_eq!(multiple.selected, "Unit\nE2E");
+
+        assert!(optional_comment_copy("Your answer", "plain prompt").is_none());
     }
 
     #[test]

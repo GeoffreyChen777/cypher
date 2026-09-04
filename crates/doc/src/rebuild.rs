@@ -243,11 +243,7 @@ mod tests {
             } => {
                 assert_eq!(
                     output.as_deref(),
-                    fat_output()
-                        .lines()
-                        .next()
-                        .map(|l| format!("{l}…"))
-                        .as_deref()
+                    summarize_tool_output(&fat_output()).as_deref()
                 );
                 assert_eq!(output_ref.as_deref(), Some("chat-w/m1-tool"));
                 assert_eq!(*output_bytes, Some(fat_output().len() as u64));
