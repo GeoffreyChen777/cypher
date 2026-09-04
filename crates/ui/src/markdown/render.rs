@@ -531,20 +531,21 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
-/// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
-/// — violet-300 text over a violet-400 wash, readable on the dark panel.
+/// Inline-code tint: emerald-300 text over an emerald-400 wash on the dark
+/// panel, with darker emerald siblings in light mode.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text // violet-300
+    theme.code_text // emerald-300
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash // violet-400/12
+    theme.code_wash // emerald-400/12
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
-/// x extends 2px past the glyphs, y insets 2px from the 22px line box).
+/// x extends 4px past the glyphs, y insets 2px from the 22px line box).
 pub const INLINE_CODE_RADIUS: f32 = 4.5;
-pub const INLINE_CODE_PAD_X: f32 = 2.0;
+pub const INLINE_CODE_PAD_X: f32 = 4.0;
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
+/// A thin visual margin between an inline-code pill and neighboring prose.
+const INLINE_CODE_MARGIN: &str = "\u{2009}";
 
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
 pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
@@ -566,9 +567,25 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    let mut previous_was_code = None;
     for run in runs {
         if run.text.is_empty() {
             continue;
+        }
+        // CSS-like separation without making the wash itself larger: a thin
+        // space sits outside the code range at each prose/code boundary.
+        if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
+            text.push_str(INLINE_CODE_MARGIN);
+            let mut margin_font = font(theme.font_sans.clone());
+            margin_font.weight = base_weight;
+            out.push(TextRun {
+                len: INLINE_CODE_MARGIN.len(),
+                font: margin_font,
+                color: theme.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
         }
         let start = text.len();
         text.push_str(&run.text);
@@ -591,7 +608,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
         let is_link = run.style.link.is_some();
-        // Inline code reads violet (see `inline_code_text`); everything else
+        // Inline code reads emerald (see `inline_code_text`); everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
@@ -637,6 +654,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 color: Some(theme.text_muted),
             }),
         });
+        previous_was_code = Some(run.style.code);
     }
     FlatText {
         text: text.into(),
@@ -1435,12 +1453,14 @@ mod tests {
             &theme,
             false,
         );
-        // Adjacent code runs merge into ONE wash box; separated ones don't.
-        assert_eq!(flat.code_ranges, vec![4..9, 14..17]);
-        // Code text is the violet tint; the square run background is gone
+        // Thin margins separate code from prose without entering the wash;
+        // adjacent code runs still merge into ONE box.
+        assert_eq!(flat.text, "use \u{2009}foo()\u{2009} and \u{2009}bar");
+        assert_eq!(flat.code_ranges, vec![7..12, 23..26]);
+        // Code text is the emerald tint; the square run background is gone
         // (the rounded wash is painted by the canvas underlay instead).
-        assert_eq!(flat.runs[1].color, inline_code_text(&theme));
-        assert_eq!(flat.runs[1].background_color, None);
+        assert_eq!(flat.runs[2].color, inline_code_text(&theme));
+        assert_eq!(flat.runs[2].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
     }
 

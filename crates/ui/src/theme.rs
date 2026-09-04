@@ -398,7 +398,7 @@ pub struct Theme {
     pub danger_strong: Hsla,
 
     // ---- paint: code & diff ----
-    /// Inline-code text — violet, per the user's "a nice purple" request.
+    /// Inline-code and mention-chip text — emerald.
     pub code_text: Hsla,
     /// Inline-code wash behind [`Self::code_text`].
     pub code_wash: Hsla,
@@ -627,8 +627,8 @@ impl Theme {
             cursor: hsla(0.0, 0.0, 1.0, 0.35),
             caret: hsla(0.66, 0.7, 0.7, 1.0),
             danger_strong: oklch(0.58, 0.16, 25.0),
-            code_text: oklch(0.811, 0.111, 293.571), // violet-300
-            code_wash: oklch(0.702, 0.183, 293.541).opacity(0.12), // violet-400/12
+            code_text: oklch(0.845, 0.143, 164.978), // emerald-300
+            code_wash: oklch(0.765, 0.177, 163.223).opacity(0.12), // emerald-400/12
             syntax: SyntaxPalette::dark(neutral(0.96), neutral(0.62), oklch(0.704, 0.191, 22.216)),
             diff_add: oklch(0.765, 0.177, 163.223), // emerald-400
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
@@ -703,8 +703,8 @@ impl Theme {
             cursor: hsla(0.0, 0.0, 0.0, 0.55),
             caret: hsla(0.66, 0.78, 0.42, 1.0),
             danger_strong: oklch(0.51, 0.20, 25.0),
-            code_text: oklch(0.491, 0.27, 292.581), // violet-700
-            code_wash: oklch(0.541, 0.281, 293.009).opacity(0.10), // violet-600/10
+            code_text: oklch(0.508, 0.118, 165.612), // emerald-700
+            code_wash: oklch(0.596, 0.145, 163.225).opacity(0.10), // emerald-600/10
             syntax: SyntaxPalette::light(neutral(0.25), neutral(0.48), oklch(0.505, 0.213, 27.518)),
             diff_add: oklch(0.596, 0.145, 163.225), // emerald-600
             diff_del: oklch(0.577, 0.245, 27.325),  // red-600

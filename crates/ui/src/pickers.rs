@@ -3524,9 +3524,9 @@ fn rail_indicator(tint: gpui::Hsla) -> gpui::Div {
         .bg(tint)
 }
 
-/// The picker's selection purple — the app's violet identity (the "nice
-/// purple" family inline code wears), NOT the indigo `accent`: the indigo
-/// bar read blue against the glass (user request). violet-400 on dark,
+/// The picker's selection purple — the app's violet identity, intentionally
+/// independent of the emerald inline-code palette. It is NOT the indigo
+/// `accent`: that bar read blue against the glass. Violet-400 on dark,
 /// violet-600 on light (AA against white).
 fn picker_purple(theme: &Theme) -> gpui::Hsla {
     match theme.appearance {

@@ -393,14 +393,14 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
                 "{server} · {tool}\n{}",
                 serde_json::to_string_pretty(input).unwrap_or_default()
             ),
-            None => format!("{server} · {tool}"),
+            None => format!("{server} · {tool}\nInput details not retained in chat"),
         },
         ToolCall::Unknown { name, input } => match input {
             Some(input) => format!(
                 "{name}\n{}",
                 serde_json::to_string_pretty(input).unwrap_or_default()
             ),
-            None => name.clone(),
+            None => format!("{name}\nInput details not retained in chat"),
         },
     };
     let mut lines: Vec<SharedString> = text
@@ -4103,7 +4103,7 @@ impl Transcript {
 
 /// A sent message's text with its file-mention chips. The same recipe as the
 /// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at `code_text` violet, [`StyledText`] supplies wrapped glyph
+/// the mono font at `code_text` emerald, [`StyledText`] supplies wrapped glyph
 /// geometry through its layout handle, and a canvas paints the rounded
 /// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
 /// like the text they decorate.
@@ -5484,6 +5484,19 @@ mod tests {
         };
         assert_eq!(lines[0].as_ref(), "gh · issues");
         assert!(lines.iter().any(|l| l.contains("\"repo\": \"cypher\"")));
+
+        // A sanitized extension call explains why its full input is absent
+        // instead of expanding to a duplicate of the tool name.
+        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Unknown {
+            name: "apply_patch".into(),
+            input: None,
+        }) else {
+            panic!("expected an output block")
+        };
+        assert_eq!(
+            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            vec!["apply_patch", "Input details not retained in chat"]
+        );
 
         // Todos list one item per line with checkbox state.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
