@@ -29,8 +29,8 @@ class Fixture(unittest.TestCase):
         self.dist.mkdir()
         self.out = self.root / "plan"
         self.v = "1.2.3"
-        self.rv = "0.85.0.4"
         self.spec = release.ROOT / "dist/pi-runtime/package.json"
+        self.rv = json.loads(self.spec.with_name("release.json").read_text())["version"]
         dependencies = json.loads(self.spec.read_text())["dependencies"]
         self.plugins = {k: v for k, v in dependencies.items() if not k.startswith("@earendil-works/")}
         self.inner = {"version": self.rv, "piVersion": dependencies["@earendil-works/pi-coding-agent"],
