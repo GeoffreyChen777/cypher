@@ -175,23 +175,36 @@ fn init_repo(dir: &Path) -> String {
         .into_owned()
 }
 
-async fn assemble_with(cwds: Arc<Mutex<Vec<String>>>) -> (EngineCore, PathBuf) {
+async fn assemble_with(cwds: Arc<Mutex<Vec<String>>>) -> (EngineCore, tempfile::TempDir) {
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let tmp = tempfile::tempdir().unwrap();
     let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
-    // Process-global — this test file sets it once at boot and never mutates.
-    unsafe { std::env::set_var("CYPHER_WORKTREES_DIR", &worktrees_root) };
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
-    let core = EngineCore::assemble(
-        &tmp_path.join("data"),
-        Arc::new(registry),
-        HarnessId::Mock,
-        None,
-    )
-    .expect("engine core assembles");
-    // Keep the tempdir alive for the whole test (returned handle drops it).
-    (core, tmp_path)
+    // Repos captures this value during construction. The two parallel tests
+    // used to overwrite each other's roots, then assert against the wrong one.
+    let core = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("CYPHER_WORKTREES_DIR");
+        unsafe { std::env::set_var("CYPHER_WORKTREES_DIR", &worktrees_root) };
+        let core = EngineCore::assemble(
+            &tmp_path.join("data"),
+            Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        );
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("CYPHER_WORKTREES_DIR", value),
+                None => std::env::remove_var("CYPHER_WORKTREES_DIR"),
+            }
+        }
+        core.expect("engine core assembles")
+    };
+    // Return the owner, not just a PathBuf: otherwise this function deletes the
+    // live engine's data directory before the test even queues its first run.
+    (core, tmp)
 }
 
 /// Mirror the composer: createChat lands first (cwd-less; the engine resolves
@@ -218,7 +231,8 @@ async fn create_chat(core: &EngineCore) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let (core, tmp_path) = assemble_with(cwds.clone()).await;
+    let (core, tmp) = assemble_with(cwds.clone()).await;
+    let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
     let repo_path = init_repo(&tmp_path.join("repo"));
 
@@ -291,7 +305,8 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_base_ref_rejects_and_never_dispatches() {
     let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let (core, tmp_path) = assemble_with(cwds.clone()).await;
+    let (core, tmp) = assemble_with(cwds.clone()).await;
+    let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
     let repo_path = init_repo(&tmp_path.join("repo"));
 

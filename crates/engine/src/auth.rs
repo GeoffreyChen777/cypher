@@ -273,6 +273,15 @@ pub struct Auth {
 }
 
 impl Auth {
+    /// Inspect cached account state without refreshing credentials or rewriting
+    /// the session. Diagnostics may run while the engine owns the session lock.
+    pub fn saved_state(data_dir: &std::path::Path) -> Option<AuthState> {
+        let raw = std::fs::read(data_dir.join("session.json")).ok()?;
+        let mut session: StoredSession = serde_json::from_slice(&raw).ok()?;
+        session.user.avatar_url = sanitize_avatar_url(session.user.avatar_url);
+        Some(state_for(session.user, session.org_id))
+    }
+
     /// Build from config: dev mode unless a WorkOS client id is configured.
     pub fn new(config: AuthConfig) -> Self {
         let workos = config

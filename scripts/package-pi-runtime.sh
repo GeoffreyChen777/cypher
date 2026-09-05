@@ -27,6 +27,9 @@ esac
 
 PI_VERSION="$(node -p "require('$SPEC/package.json').dependencies['@earendil-works/pi-coding-agent']")"
 RUNTIME_VERSION="${PI_RUNTIME_VERSION:-${PI_VERSION}.4}"
+[[ "$RUNTIME_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]] || {
+  echo "invalid PI_RUNTIME_VERSION" >&2; exit 1
+}
 CYPHER_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 NAME="cypher-pi-runtime-$RUNTIME_VERSION-$PLATFORM"
 STAGE="$OUT_DIR/$NAME"
@@ -167,13 +170,18 @@ trap - EXIT
 # path, then extracts with --strip-components=1.
 mkdir -p "$OUT_DIR"
 tar -czf "$ARCHIVE" -C "$OUT_DIR" "$NAME"
-SIZE="$(stat -f '%z' "$ARCHIVE" 2>/dev/null || stat -c '%s' "$ARCHIVE")"
+# GNU stat -f can print filesystem information before returning an error for
+# '%z'; concatenating that with the fallback produced NaN/null Linux sizes.
+SIZE="$(node -p "require('node:fs').statSync(process.argv[1]).size" "$ARCHIVE")"
 SHA="$(shasum -a 256 "$ARCHIVE" 2>/dev/null | awk '{print $1}' || sha256sum "$ARCHIVE" | awk '{print $1}')"
 
 node - "$STAGE/runtime.json" "$META" "$PLATFORM" "$(basename "$ARCHIVE")" "$SIZE" "$SHA" "$CYPHER_VERSION" <<'NODE'
 const fs = require("fs");
 const runtime = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const [platform, file, size, sha256, minimumCypherVersion] = process.argv.slice(4);
+if (!Number.isSafeInteger(Number(size)) || Number(size) <= 0 || !/^[a-f0-9]{64}$/i.test(sha256)) {
+  throw new Error("Invalid Pi Runtime size or checksum");
+}
 fs.writeFileSync(process.argv[3], JSON.stringify({
   ...runtime,
   minimumCypherVersion,

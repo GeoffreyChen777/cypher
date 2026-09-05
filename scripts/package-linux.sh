@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Linux packaging: build the release binary and produce
 #   target/package/cypher-<version>-linux-<arch>.tar.gz
-# containing the binary, the .desktop entry, and the icon, plus an install.sh
-# that drops them into ~/.local (XDG) paths.
+# containing the headless binary and a manual install.sh. No desktop launcher:
+# this build deliberately has no GUI.
 #
 # The binary is built headless (--no-default-features): the desktop UI/GPUI is
 # not linked, so the artifact runs on a clean container with no X11/Wayland
@@ -44,20 +44,21 @@ scripts/check-linux-abi.sh "$BIN"
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/cypher"
-install -m 644 "$ROOT/dist/cypher.desktop" "$STAGE/cypher.desktop"
-install -m 644 "$ROOT/dist/cypher.png" "$STAGE/cypher.png"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 # Install Cypher into ~/.local (no root needed).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-install -Dm755 "$HERE/cypher" "$HOME/.local/bin/cypher"
-install -Dm644 "$HERE/cypher.desktop" "$HOME/.local/share/applications/cypher.desktop"
-install -Dm644 "$HERE/cypher.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/cypher.png"
-command -v update-desktop-database >/dev/null 2>&1 \
-  && update-desktop-database "$HOME/.local/share/applications" || true
+# install follows an existing command symlink: that could overwrite a managed,
+# currently running executable. Replace the directory entry atomically instead.
+mkdir -p "$HOME/.local/bin"
+tmp="$(mktemp "$HOME/.local/bin/.cypher-XXXXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+install -m755 "$HERE/cypher" "$tmp"
+mv -Tf "$tmp" "$HOME/.local/bin/cypher"
 echo "Installed. Make sure ~/.local/bin is on your PATH."
+echo "Manual installation: cypher update is report-only. Use the online installer for managed updates."
 INSTALL
 chmod 755 "$STAGE/install.sh"
 

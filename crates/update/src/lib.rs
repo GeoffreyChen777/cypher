@@ -52,7 +52,7 @@ const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 pub struct Manifest {
     pub version: String,
     /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// via `latest.txt` — downloads then require the artifact's .sha256 sidecar.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -115,35 +115,36 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     let base = edge_url.trim_end_matches('/');
     let client = http_client()?;
     let manifest_url = format!("{base}/releases/manifest.json");
-    match client.get(&manifest_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let manifest: Manifest = resp.json().await.context("parsing manifest.json")?;
-            if manifest.version.trim().is_empty() {
-                bail!("manifest.json has an empty version");
-            }
+    match client
+        .get(&manifest_url)
+        .send()
+        .await
+        .context("fetching manifest.json")?
+    {
+        resp if resp.status().is_success() => {
+            let manifest: Manifest =
+                serde_json::from_slice(&limited_body(resp, 1024 * 1024).await?)
+                    .context("parsing manifest.json")?;
+            validate_version(&manifest.version)?;
             return Ok(manifest);
         }
-        Ok(resp) => {
+        resp if resp.status() == reqwest::StatusCode::NOT_FOUND => {
             tracing::debug!(status = %resp.status(), "manifest.json unavailable; trying latest.txt")
         }
-        Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
+        resp => bail!("fetching manifest.json failed (HTTP {})", resp.status()),
     }
     let latest_url = format!("{base}/releases/latest.txt");
-    let version = client
+    let response = client
         .get(&latest_url)
         .send()
         .await
         .context("fetching latest.txt")?
         .error_for_status()
-        .context("fetching latest.txt")?
-        .text()
-        .await
-        .context("reading latest.txt")?
+        .context("fetching latest.txt")?;
+    let version = String::from_utf8(limited_body(response, 256).await?)?
         .trim()
         .to_string();
-    if version.is_empty() {
-        bail!("latest.txt is empty");
-    }
+    validate_version(&version)?;
     Ok(Manifest {
         version,
         files: BTreeMap::new(),
@@ -153,8 +154,39 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
 fn http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("cypher/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("building http client")
+}
+
+fn validate_version(version: &str) -> anyhow::Result<()> {
+    if version.is_empty()
+        || version.len() > 64
+        || version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        bail!("invalid release version");
+    }
+    Ok(())
+}
+
+async fn limited_body(response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len() + chunk.len() > limit {
+            bail!("release metadata exceeds size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +238,8 @@ fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
+/// Stream `{edge}/releases/<file>` to `dest`, requiring the manifest sha256 or
+/// a standalone checksum for legacy metadata. Writes through a private temp file so an interrupted download never
 /// leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
@@ -215,43 +247,73 @@ pub async fn download_release_file(
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let url = format!("{}/releases/{file}", edge_url.trim_end_matches('/'));
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
-    if expected.is_none() {
-        tracing::warn!(
-            file,
-            "no checksum in release metadata; skipping verification"
-        );
+    validate_version(&manifest.version)?;
+    if file.is_empty()
+        || file == "."
+        || file == ".."
+        || file.len() > 255
+        || !file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        bail!("invalid release artifact name");
     }
-    let partial = dest.with_extension("partial");
+    let url = format!("{}/releases/{file}", edge_url.trim_end_matches('/'));
+    let expected = match manifest.files.get(file).and_then(|m| m.sha256.as_deref()) {
+        Some(hash) => hash.to_owned(),
+        None if manifest.files.is_empty() => {
+            let response = http_client()?
+                .get(format!("{url}.sha256"))
+                .send()
+                .await?
+                .error_for_status()
+                .context("fetching required artifact checksum")?;
+            String::from_utf8(limited_body(response, 256).await?)?
+                .trim()
+                .to_owned()
+        }
+        None => bail!("release manifest is missing the checksum for {file}"),
+    };
+    if !valid_sha256(&expected) {
+        bail!("invalid SHA-256 for {file}");
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let partial = tempfile::Builder::new()
+        .prefix(".download-")
+        .tempfile_in(parent)?;
     let resp = http_client()?
         .get(&url)
+        .timeout(std::time::Duration::from_secs(300))
         .send()
         .await
         .with_context(|| format!("downloading {url}"))?
         .error_for_status()
         .with_context(|| format!("downloading {url}"))?;
-    let mut out = tokio::fs::File::create(&partial)
-        .await
-        .with_context(|| format!("creating {}", partial.display()))?;
+    let mut out = tokio::fs::File::from_std(partial.reopen()?);
     let mut hasher = Sha256::new();
     let mut stream = resp.bytes_stream();
+    let mut size = 0_u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading download stream")?;
+        size += chunk.len() as u64;
+        if size > 512 * 1024 * 1024 {
+            bail!("release artifact exceeds 512 MiB limit");
+        }
         hasher.update(&chunk);
         out.write_all(&chunk).await.context("writing download")?;
     }
-    out.flush().await.ok();
+    out.flush().await.context("flushing download")?;
+    out.sync_all().await.context("syncing download")?;
     drop(out);
-    if let Some(expected) = expected {
-        let actual = format!("{:x}", hasher.finalize());
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
-            tokio::fs::remove_file(&partial).await.ok();
-            bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
-        }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(&expected) {
+        bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
     }
-    tokio::fs::rename(&partial, dest)
-        .await
+    partial
+        .persist(dest)
         .with_context(|| format!("moving {} into place", dest.display()))?;
     Ok(())
 }
@@ -284,59 +346,144 @@ pub async fn stage_headless(
     app_root: &Path,
 ) -> anyhow::Result<PathBuf> {
     let version = &manifest.version;
+    validate_version(version)?;
     let dest = app_root.join(version);
-    if dest.join("cypher").exists() {
+    if headless_binary_ready(&dest) {
         return Ok(dest);
     }
+    if dest.exists() || dest.is_symlink() {
+        bail!(
+            "{} is an incomplete install; move it aside before retrying",
+            dest.display()
+        );
+    }
     let file = headless_artifact(version);
-    let stage = app_root.join(format!(".stage-{version}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&stage);
-    std::fs::create_dir_all(&stage).with_context(|| format!("creating {}", stage.display()))?;
-    let result = async {
-        let tarball = stage.join(&file);
-        download_release_file(edge_url, manifest, &file, &tarball).await?;
-        let unpacked = stage.join("unpacked");
-        std::fs::create_dir_all(&unpacked)?;
-        // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
-        // strip it exactly as install.sh does.
-        run(
-            "tar",
-            &[
-                "-xzf",
-                &tarball.to_string_lossy(),
-                "-C",
-                &unpacked.to_string_lossy(),
-                "--strip-components=1",
-            ],
-        )?;
-        if !unpacked.join("cypher").is_file() {
-            bail!("tarball {file} did not contain a cypher binary");
+    std::fs::create_dir_all(app_root)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".stage-")
+        .tempdir_in(app_root)?;
+    let stage = staging.path();
+    let tarball = stage.join(&file);
+    download_release_file(edge_url, manifest, &file, &tarball).await?;
+    validate_headless_archive(&tarball, file.trim_end_matches(".tar.gz"))?;
+    let unpacked = stage.join("unpacked");
+    std::fs::create_dir_all(&unpacked)?;
+    // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
+    // strip it exactly as install.sh does.
+    run(
+        "tar",
+        &[
+            "-xzf",
+            &tarball.to_string_lossy(),
+            "-C",
+            &unpacked.to_string_lossy(),
+            "--strip-components=1",
+            "--no-same-owner",
+        ],
+    )?;
+    if !headless_binary_ready(&unpacked) {
+        bail!("tarball {file} did not contain a runnable cypher binary");
+    }
+    match std::fs::rename(&unpacked, &dest) {
+        Ok(()) => {}
+        // Lost a race with another stager — the staged copy is equivalent.
+        Err(err) => {
+            if headless_binary_ready(&dest) {
+                return Ok(dest);
+            }
+            return Err(err).with_context(|| format!("moving {} into place", dest.display()));
         }
-        match std::fs::rename(&unpacked, &dest) {
-            Ok(()) => {}
-            // Lost a race with another stager — the staged copy is equivalent.
-            Err(err) => {
-                return Err(err).with_context(|| format!("moving {} into place", dest.display()));
+    }
+    Ok(dest)
+}
+
+fn headless_binary_ready(dir: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let binary = dir.join("cypher");
+    if dir.is_symlink() || binary.is_symlink() || !binary.is_file() {
+        return false;
+    }
+    let Ok(mut child) = Command::new(binary)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
             }
         }
-        Ok(dest.clone())
     }
-    .await;
-    let _ = std::fs::remove_dir_all(&stage);
-    result
+}
+
+fn validate_headless_archive(tarball: &Path, root: &str) -> anyhow::Result<()> {
+    fn listing(tarball: &Path, flag: &str) -> anyhow::Result<String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("tar")
+            .arg(flag)
+            .arg(tarball)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut bytes = Vec::new();
+        let read = child
+            .stdout
+            .take()
+            .unwrap()
+            .take(65537)
+            .read_to_end(&mut bytes);
+        if read.is_err() || bytes.len() > 65536 {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("invalid or oversized archive listing");
+        }
+        if !child.wait()?.success() {
+            bail!("invalid release archive");
+        }
+        Ok(String::from_utf8(bytes)?)
+    }
+    let allowed = ["", "cypher", "install.sh", "cypher.desktop", "cypher.png"]
+        .map(|name| format!("{root}/{name}"));
+    for member in listing(tarball, "-tzf")?.lines() {
+        if !allowed.iter().any(|name| name == member) {
+            bail!("unexpected release archive member");
+        }
+    }
+    for member in listing(tarball, "-tvzf")?.lines() {
+        if !member.starts_with('-') && !member.starts_with('d') {
+            bail!("release archive links and special files are not allowed");
+        }
+    }
+    Ok(())
 }
 
 /// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
 /// name, then rename over — never a window with no `current`).
 pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
+    validate_version(version)?;
     #[cfg(unix)]
     {
+        let app_root = std::path::absolute(app_root)?;
         let target = app_root.join(version);
-        if !target.join("cypher").exists() {
+        if !headless_binary_ready(&target) {
             bail!("{} is not a staged install", target.display());
         }
-        let tmp = app_root.join(format!(".current-{}", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
+        let staging = tempfile::Builder::new()
+            .prefix(".current-")
+            .tempdir_in(&app_root)?;
+        let tmp = staging.path().join("link");
         std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
         std::fs::rename(&tmp, app_root.join("current")).context("swapping current symlink")?;
         Ok(())
@@ -365,6 +512,20 @@ pub fn restart_service() -> anyhow::Result<()> {
     }
 }
 
+fn restart_service_from_engine() -> anyhow::Result<()> {
+    if cfg!(target_os = "linux") {
+        // A synchronous restart waits for THIS service to exit, while runtime
+        // teardown waits for this worker to return: systemd eventually SIGKILLs
+        // it at TimeoutStopSec. Queue the restart instead of waiting on ourselves.
+        run(
+            "systemctl",
+            &["--user", "--no-block", "restart", "cypher.service"],
+        )
+    } else {
+        restart_service()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
@@ -377,6 +538,7 @@ pub async fn stage_mac_app(
     data_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let version = &manifest.version;
+    validate_version(version)?;
     let dir = data_dir.join("updates").join(version);
     let staged = dir.join("Cypher.app");
     if staged.join("Contents/MacOS/cypher").exists() {
@@ -694,7 +856,7 @@ impl Updater {
         apply_headless(&app_root, &manifest.version)?;
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            if let Err(err) = restart_service() {
+            if let Err(err) = restart_service_from_engine() {
                 tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
             }
         });
@@ -708,6 +870,10 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod release_tests;
 
 #[cfg(test)]
 mod tests {
@@ -805,7 +971,10 @@ mod tests {
         let app_root = tmp.path().join("app");
         for ver in ["0.1.0", "0.1.1"] {
             std::fs::create_dir_all(app_root.join(ver)).unwrap();
-            std::fs::write(app_root.join(ver).join("cypher"), ver).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let binary = app_root.join(ver).join("cypher");
+            std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         apply_headless(&app_root, "0.1.0").unwrap();
         assert_eq!(

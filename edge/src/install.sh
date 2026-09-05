@@ -1,128 +1,128 @@
 #!/bin/sh
-# Cypher (native) headless installer.
-#
-#   curl -fsSL https://edge.letscypher.app/install.sh | sh
-#
-# Installs the headless native binary (glibc 2.31+ on GNU/Linux) to
-# ~/.cypher/app, puts `cypher` on PATH, and runs it as a local-only systemd
-# user service that survives reboots. Signing in is optional and enables sync
-# after a restart. Re-running upgrades in place; existing state is preserved.
-#
-# The binary ships with production endpoints baked in: no CYPHER_EDGE_URL or
-# client-id configuration needed. Overrides (if any) go in $data_root/env.
+# Linux headless installer. Requires a release with per-artifact .sha256 files.
+# curl -fsSL https://edge.letscypher.app/install.sh | sh
 set -eu
+umask 077
 
-# CYPHER_BASE_URL overrides the production edge.
+fail() { echo "cypher install: $*" >&2; exit 1; }
 BASE="${CYPHER_BASE_URL:-https://edge.letscypher.app}"
-
-# --- data root ---------------------------------------------------------------
-data_root="$HOME/.cypher"
-
-# --- platform ---------------------------------------------------------------
-os="$(uname -s)"
-arch="$(uname -m)"
-case "$os" in
-  Linux) plat=linux ;;
-  Darwin)
-    echo "cypher install: on macOS, download the desktop app instead:" >&2
-    echo "  $BASE/releases/latest.txt → $BASE/releases/cypher-<version>-macos-arm64.dmg" >&2
-    exit 1
-    ;;
-  *)
-    echo "cypher install: unsupported OS '$os' — only Linux for now." >&2
-    exit 1
-    ;;
+BASE="${BASE%/}"
+case "$BASE" in *'@'* | *'?'* | *'#'* | *'\'*) fail "invalid release base URL" ;; esac
+case "$BASE" in
+  https://* | http://localhost:* | http://127.0.0.1:* | http://localhost | http://127.0.0.1) ;;
+  *) fail "CYPHER_BASE_URL must use HTTPS (HTTP is allowed for loopback development)." ;;
 esac
-case "$arch" in
+case "${HOME:-}" in /*) ;; *) fail "HOME must be an absolute path" ;; esac
+case "$(uname -s)" in
+  Linux) ;;
+  Darwin) fail "on macOS, download the Cypher.app DMG instead." ;;
+  *) fail "only GNU/Linux is supported." ;;
+esac
+case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;
   aarch64 | arm64) arch=aarch64 ;;
-  *)
-    echo "cypher install: unsupported architecture '$arch'." >&2
-    exit 1
-    ;;
+  *) fail "unsupported architecture." ;;
 esac
+for command in curl tar sha256sum cmp mv timeout; do
+  command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
+done
 
-# --- download ----------------------------------------------------------------
-ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
-[ -n "$ver" ] || { echo "cypher install: could not resolve latest version" >&2; exit 1; }
-file="cypher-$ver-$plat-$arch.tar.gz"
-app_root="$data_root/app"
+# Fetch separately: a pipeline ending in tr used to hide curl failures. Reject
+# path components / malformed pointers before constructing any local paths.
+ver="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/latest.txt")"
+case "$ver" in
+  '' | *[!0-9.]* | .* | *. | *..*) fail "invalid release version" ;;
+esac
+[ "${#ver}" -le 64 ] || fail "invalid release version"
+file="cypher-$ver-linux-$arch.tar.gz"
+root="${file%.tar.gz}"
+app_root="$HOME/.cypher/app"
 dest="$app_root/$ver"
+mkdir -p "$app_root"
+tmp="$(mktemp -d "$app_root/.install-XXXXXXXX")"
+trap 'rm -rf "$tmp"; if [ -n "${command_tmp:-}" ]; then rm -f "$command_tmp"; fi' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-if [ -x "$dest/cypher" ]; then
-  echo "cypher $ver already downloaded — relinking."
+echo "downloading cypher $ver (linux-$arch)…"
+# Sidecar contains exactly the digest, not arbitrary sha256sum filenames.
+expected="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/$file.sha256")"
+case "$expected" in '' | *[!0-9a-fA-F]*) fail "invalid SHA-256 file" ;; esac
+[ "${#expected}" -eq 64 ] || fail "invalid SHA-256 file"
+curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 300 -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/package.tar.gz"
+actual="$(sha256sum "$tmp/package.tar.gz")"
+actual="${actual%% *}"
+expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+[ "$actual" = "$expected" ] || fail "download checksum mismatch; current installation unchanged"
+
+# These packages have a flat, known layout. Validate paths AND entry types
+# before extraction: strip-components alone does not make hostile tar safe.
+tar -tzf "$tmp/package.tar.gz" >"$tmp/members"
+while IFS= read -r member; do
+  case "$member" in
+    "$root/" | "$root/cypher" | "$root/install.sh" | "$root/cypher.desktop" | "$root/cypher.png") ;;
+    *) fail "unexpected archive member; current installation unchanged" ;;
+  esac
+done <"$tmp/members"
+tar -tvzf "$tmp/package.tar.gz" >"$tmp/types"
+awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" {exit 1}' "$tmp/types" \
+  || fail "archive links or special files are not allowed"
+mkdir "$tmp/unpacked"
+tar -xzf "$tmp/package.tar.gz" -C "$tmp/unpacked" --strip-components=1 --no-same-owner
+[ -f "$tmp/unpacked/cypher" ] && [ ! -L "$tmp/unpacked/cypher" ] && [ -x "$tmp/unpacked/cypher" ] \
+  || fail "archive has no executable cypher binary"
+timeout 10 "$tmp/unpacked/cypher" --help >/dev/null \
+  || fail "binary cannot run on this host (GNU/Linux with glibc 2.31+ required)"
+
+if [ -e "$dest" ] || [ -L "$dest" ]; then
+  if [ ! -L "$dest" ] && [ ! -L "$dest/cypher" ] && cmp -s "$tmp/unpacked/cypher" "$dest/cypher"; then
+    echo "cypher $ver already verified — relinking."
+  else
+    # Never overwrite a version directory, which might be in use. Incomplete
+    # downloads now stay in .install-* and cannot masquerade as installations.
+    fail "$dest differs from the verified release; move it aside before retrying"
+  fi
 else
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  echo "downloading cypher $ver ($plat-$arch)…"
-  curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
-  mkdir -p "$dest"
-  tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
+  mv "$tmp/unpacked" "$dest"
 fi
 
-ln -sfn "$dest" "$app_root/current"
+# GNU mv -T replaces the link itself, not the directory it points into. Keep
+# the new link on the same filesystem for an atomic rename.
+ln -s "$dest" "$tmp/current"
+mv -Tf "$tmp/current" "$app_root/current"
 mkdir -p "$HOME/.local/bin"
-ln -sf "$app_root/current/cypher" "$HOME/.local/bin/cypher"
+# ~/.local may be a separate filesystem; create the temporary link alongside
+# its destination instead, and let mv replace only the link (not a directory).
+command_tmp="$(mktemp "$HOME/.local/bin/.cypher-XXXXXXXX")"
+rm -f "$command_tmp"
+ln -s "$app_root/current/cypher" "$command_tmp"
+mv -Tf "$command_tmp" "$HOME/.local/bin/cypher"
 
-# --- service -----------------------------------------------------------------
-# The daemon is useful before auth: without a saved session it serves the local
-# profile. Login only changes which profile the next daemon start selects.
-
+# A single implementation owns unit paths, escaping, environment capture and
+# restarts. A set XDG_RUNTIME_DIR alone does not prove the user bus is usable.
 service=manual
-if command -v systemctl >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-  mkdir -p "$HOME/.config/systemd/user"
-  cat >"$HOME/.config/systemd/user/cypher.service" <<UNIT
-[Unit]
-Description=Cypher native headless engine
-After=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-ExecStart=$app_root/current/cypher headless
-Restart=on-failure
-RestartSec=5
-EnvironmentFile=-$data_root/env
-
-[Install]
-WantedBy=default.target
-UNIT
-  systemctl --user daemon-reload
-  systemctl --user enable cypher
-  systemctl --user restart cypher
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  "$app_root/current/cypher" daemon install
   service=running
-  # Keep the user manager (and the engine) running without an active login.
-  loginctl enable-linger "$USER" 2>/dev/null \
-    || sudo -n loginctl enable-linger "$USER" 2>/dev/null \
-    || echo "warn: could not enable linger — the engine stops when you log out (run: sudo loginctl enable-linger $USER)"
+  user="${USER:-$(id -un)}"
+  loginctl --no-ask-password enable-linger "$user" 2>/dev/null \
+    || echo "note: enable start-at-boot with: sudo loginctl enable-linger $user"
 else
-  echo "warn: systemd user session not available — run the engine manually with: cypher headless"
+  echo "note: no systemd user bus — use cypher headless under your process supervisor."
 fi
 
-# --- agent CLIs ---------------------------------------------------------------
-command -v claude >/dev/null 2>&1 || \
-  echo "note: Claude Code CLI not found — install it with: curl -fsSL https://claude.ai/install.sh | bash"
-
+echo ""
+echo "✓ cypher $ver installed"
 case ":$PATH:" in
-  *":$HOME/.local/bin:"*) path_hint="" ;;
-  *) path_hint=' (add ~/.local/bin to your PATH)' ;;
+  *":$HOME/.local/bin:"*) ;;
+  *) echo 'Add ~/.local/bin to PATH: export PATH="$HOME/.local/bin:$PATH"' ;;
 esac
-
-echo ""
-echo "✓ cypher $ver installed$path_hint"
-echo ""
-case "$service" in
-  running)
-    echo "the engine is running with the new version (local-only unless sync is enabled)."
-    echo "  systemctl --user status cypher    check the service"
-    echo ""
-    echo "optional sync (local sessions stay local):"
-    echo "  systemctl --user stop cypher"
-    echo "  cypher login"
-    echo "  systemctl --user restart cypher"
-    ;;
-  manual)
-    echo "next: run the local-only engine with \`cypher headless\`."
-    echo "optional sync: run \`cypher login\` before starting the engine."
-    ;;
-esac
+if [ "$service" = running ]; then
+  echo "Engine started. Logs: journalctl --user -u cypher.service -f"
+  echo "Optional sync: cypher daemon stop; cypher login; cypher daemon start"
+else
+  echo "Run cypher headless. For sync, run cypher login before starting it."
+fi
+echo "Pi is isolated: no system Pi or Claude CLI installation is needed."
+echo "Connect this device from Cypher desktop to install Pi Runtime and configure Providers/MCP."
+echo "Account login is optional; model providers still need their own credentials."

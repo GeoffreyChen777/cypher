@@ -13,11 +13,16 @@ curl -fsSL https://edge.letscypher.app/install.sh | sh
 cypher status
 ```
 
-The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+The installer starts a **systemd user service** when a working user bus is
+available. Otherwise run `cypher headless` under your own process supervisor.
+For operation after logout and at boot, enable lingering:
+`loginctl enable-linger "$USER"` (administrator permission may be required).
+No Cypher account is required to start the local-only engine.
 
 Official Linux binaries support glibc-based x86_64 and aarch64 systems with
 glibc 2.31 or newer (for example Ubuntu 20.04 or Debian 11 and newer).
 Alpine/musl is not currently an official target.
+This is a headless engine, not a terminal chat UI or Linux desktop application.
 
 Day-to-day:
 
@@ -25,7 +30,47 @@ Day-to-day:
 cypher status      # local/synced mode and engine status
 cypher update      # update to the latest release
 cypher daemon start|stop|restart|status
+journalctl --user -u cypher.service -f
 ```
+
+`cypher --version` prints the installed binary's version. `cypher update --check`
+exits 1 when an update is available; download/network errors also fail, so check
+the diagnostic output. `cypher status` inspects saved account state without
+refreshing credentials; it is not an online credential-validity test.
+
+### Pi and configuration
+
+System Pi and `~/.pi` are not used. Pi Runtime (Node, Pi and curated plugins) is a
+separate download, with per-device configuration under
+`$CYPHER_DATA_DIR/pi-runtime/agent` (default `~/.cypher/pi-runtime/agent`).
+For desktop-to-Linux setup, sign both devices into the same Cypher account,
+select Linux in the desktop Settings sidebar, install its Runtime under Agents,
+then configure Providers and MCP there. Account login is not provider login.
+
+`cypher headless` does not install the first Runtime automatically. Dedicated
+terminal-only Runtime/Provider/MCP management subcommands are not available yet.
+
+Use the same `CYPHER_DATA_DIR` and `CYPHER_IPC_PORT` for CLI commands and the
+service. `cypher daemon install` captures these and other supported `CYPHER_*`
+overrides, resolving a relative data directory to an absolute path.
+The optional `~/.cypher/env` is a **systemd EnvironmentFile**, not a shell script;
+it overrides captured service values and is **not** automatically loaded by
+one-shot CLI commands. Set matching shell variables when using it, especially
+for account/data-directory settings. Do not put provider API keys there.
+
+### Installation integrity and release compatibility
+
+The online installer requires an adjacent `<artifact>.sha256` containing the
+64-character digest. It verifies downloads, validates archive members, probes
+the executable and only then replaces the `current` link. Missing/mismatched
+checksums stop installation; existing versions and user data remain unchanged.
+An existing conflicting version directory is not overwritten automatically.
+The new installer must be deployed with a release containing these checksum
+files; it deliberately does not silently accept older checksum-less
+downloads. SHA-256 is an integrity check, **not** a release signature.
+
+The tarball's own `install.sh` is a manual, unmanaged installation to
+`~/.local/bin`; use the online installer for managed self-updates.
 
 ## Optional multi-device sync
 

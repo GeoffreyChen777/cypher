@@ -58,7 +58,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
           apt-get install -y -qq \
-            ca-certificates curl git build-essential pkg-config cmake binutils
+            ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd
       - name: bootstrap rust toolchain (stable/minimal) in container
         run: |
           set -euo pipefail
@@ -74,6 +74,10 @@ jobs:
           scripts/test-check-linux-abi.sh
       - name: package (headless, glibc 2.31 baseline)
         run: scripts/package-linux.sh
+      - name: isolated Linux CLI and installer regressions
+        run: |
+          cargo test --locked --no-default-features -p cypher -p cypher-update --bins --lib
+          python3 scripts/test-linux-cli.py --binary target/release/cypher
       - name: smoke + ABI check (headless on Ubuntu 20.04 / glibc 2.31)
         run: |
           set -euo pipefail
@@ -202,6 +206,24 @@ jobs:
           cache-dependency-path: dist/pi-runtime/package-lock.json
       - name: package isolated Pi runtime
         run: scripts/package-pi-runtime.sh
+      - name: Runtime metadata regression
+        run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
+      - name: Pi Runtime smoke on the minimum Linux glibc
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD/target/package:/packages:ro" \
+            -v "$PWD/dist/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
+            ubuntu:20.04 sh -ec '
+              mkdir /runtime /agent
+              archive=$(find /packages -name "cypher-pi-runtime-*.tar.gz")
+              tar -xzf "$archive" -C /runtime --strip-components=1
+              cp /provider-service.test.mjs /runtime/provider-service.test.mjs
+              export PI_CODING_AGENT_DIR=/agent PI_PACKAGE_DIR=/runtime/pi
+              /runtime/bin/pi --version
+              CYPHER_PROVIDER_HELPER=/runtime/provider-service.mjs \
+                /runtime/bin/node --test /runtime/provider-service.test.mjs
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: pi-runtime-${{ runner.os }}-${{ runner.arch }}
@@ -277,6 +299,11 @@ jobs:
             tar -tzf "$want"
           done
           echo "artifact set OK: ${expected[*]}"
+      - name: generate standalone artifact checksums
+        run: |
+          for f in dist/cypher-$VERSION-*; do
+            sha256sum "$f" | cut -d' ' -f1 > "$f.sha256"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -287,18 +314,16 @@ jobs:
             npx wrangler@4 r2 object put "cypher-releases/$(basename "$f")" \
               --file "$f" --remote
           done
-          # manifest.json: version + per-artifact sha256 — the auto-updater
-          # (crates/update) verifies downloads against it. Published before
-          # latest.txt so no client ever sees a version without its checksums.
+          # Prepare the app manifest, but do not advertise the app version
+          # until the matching Pi Runtime channel has also been published.
           manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
           for f in dist/cypher-$VERSION-*; do
+            [[ "$f" == *.sha256 ]] && continue
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
-          npx wrangler@4 r2 object put cypher-releases/manifest.json \
-            --file manifest.json --remote
       - name: publish Pi runtime channel
         run: |
           set -euo pipefail
@@ -316,7 +341,8 @@ jobs:
             tar -tzf "$f" >/dev/null
           done
           for meta in "${metas[@]}"; do
-            jq -e '.version and .piVersion and (.files | length == 1)' "$meta" >/dev/null
+            jq -e '.version and .piVersion and (.files | length == 1)
+              and ([.files[] | (.size | type == "number") and (.size > 0)] | all)' "$meta" >/dev/null
             file=$(jq -r '.files[] | .url' "$meta")
             expected_sha=$(jq -r '.files[] | .sha256' "$meta")
             test -f "dist/$file" || {
@@ -353,8 +379,10 @@ jobs:
           done
           npx wrangler@4 r2 object put cypher-releases/runtimes/pi/manifest.json \
             --file pi-runtime-manifest.json --remote
-          # Publish the app pointer last: a newly updated Cypher can never see
-          # a release before its on-demand Pi Runtime is available.
+          # Both app pointers go last. The Rust updater prefers manifest.json,
+          # so delaying only latest.txt did not actually protect that client.
+          npx wrangler@4 r2 object put cypher-releases/manifest.json \
+            --file manifest.json --remote
           printf '%s' "$VERSION" > latest.txt
           npx wrangler@4 r2 object put cypher-releases/latest.txt \
             --file latest.txt --remote

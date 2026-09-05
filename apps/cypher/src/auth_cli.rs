@@ -159,12 +159,9 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
 /// `cypher status`: report the fixed scope a new engine would select, optional
 /// auth, and engine liveness. Local-only is a healthy signed-out state.
 pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
-    let auth = Engine::build_auth(&config).await;
-    let next_scope = Engine::initial_workspace_scope(&auth);
-    let scope = live_engine_scope(config.ipc_port)
-        .await
-        .unwrap_or(next_scope);
-    let account = account_status(scope, &auth.state());
+    let (next_scope, state) = saved_account(&config);
+    let scope = live_engine_scope(&config).await.unwrap_or(next_scope);
+    let account = account_status(scope, &state);
     println!("Data dir: {}", config.data_dir.display());
     println!("Edge:     {}", config.edge_url);
     println!("Mode:     {}", account.mode);
@@ -193,17 +190,37 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
 /// Prefer the immutable scope of a live runtime. Falling back to the next-boot
 /// derivation is correct when no engine is listening and tolerant of old
 /// daemons that predate EngineInfo.
-async fn live_engine_scope(ipc_port: u16) -> Option<WorkspaceScope> {
-    let client = cypher_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
-        .await
-        .ok()?;
-    let value = client
-        .call(cypher_rpc::methods::ENGINE_INFO, serde_json::json!({}))
-        .await
-        .ok()?;
-    serde_json::from_value::<cypher_engine::EngineInfo>(value)
-        .ok()
-        .map(|info| info.workspace_scope)
+async fn live_engine_scope(config: &EngineConfig) -> Option<WorkspaceScope> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let client = cypher_rpc::connect_ws(&format!("ws://127.0.0.1:{}", config.ipc_port))
+            .await
+            .ok()?;
+        let value = client
+            .call(cypher_rpc::methods::ENGINE_INFO, serde_json::json!({}))
+            .await
+            .ok()?;
+        let info = serde_json::from_value::<cypher_engine::EngineInfo>(value).ok()?;
+        let expected = std::fs::read_to_string(config.data_dir.join("device-id")).ok()?;
+        (!expected.trim().is_empty() && info.device_id == expected.trim())
+            .then_some(info.workspace_scope)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn saved_account(config: &EngineConfig) -> (WorkspaceScope, AuthState) {
+    if !config
+        .workos_client_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return (WorkspaceScope::Development, AuthState::SignedOut);
+    }
+    match cypher_engine::Auth::saved_state(&config.data_dir) {
+        Some(state) => (WorkspaceScope::Synced, state),
+        None => (WorkspaceScope::Local, AuthState::SignedOut),
+    }
 }
 
 /// The same exclusive data-dir lock the engine holds for its lifetime: taken for
@@ -242,6 +259,39 @@ mod tests {
         assert_eq!(status.mode, "local only");
         assert_eq!(status.auth, "signed out (optional in local-only mode)");
         assert!(status.healthy);
+    }
+
+    #[test]
+    fn diagnostics_never_rewrite_the_engines_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session.json");
+        let raw = r#"{"refreshToken":"private-token","user":{"id":"u","email":"u@example.com","avatarUrl":"http://unsafe.example/avatar"},"orgId":"org"}"#;
+        std::fs::write(&session, raw).unwrap();
+        let _lock = InstanceLock::acquire(dir.path()).unwrap();
+        assert_eq!(saved_account(&config(dir.path())).0, WorkspaceScope::Synced);
+        assert_eq!(std::fs::read_to_string(session).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn status_does_not_wait_forever_for_a_non_websocket_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = config(dir.path());
+        config.ipc_port = listener.local_addr().unwrap().port();
+        let silent = tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                live_engine_scope(&config)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        silent.abort();
     }
 
     #[test]

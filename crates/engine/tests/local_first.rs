@@ -31,6 +31,24 @@ fn config(
     }
 }
 
+#[tokio::test]
+async fn duplicate_headless_start_cannot_touch_the_owned_auth_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let raw = r#"{"refreshToken":"private-fixture","user":{"id":"u","email":"u@example.com","avatarUrl":"http://unsafe.example/avatar"},"orgId":"org"}"#;
+    std::fs::write(&path, raw).unwrap();
+    let _lock = cypher_engine::InstanceLock::acquire(dir.path()).unwrap();
+    let engine = Engine::new(config(
+        dir.path(),
+        "http://127.0.0.1:1".into(),
+        Some("test"),
+        None,
+    ));
+    let error = engine.run().await.unwrap_err();
+    assert!(error.to_string().contains("already running"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+}
+
 async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -328,8 +346,8 @@ async fn local_runtime_serves_update_status_without_edge_routing() {
         "local runtime must serve UpdateStatus via the release checker"
     );
     assert!(
-        runtime.core().pi_updater().is_some(),
-        "local runtime must serve PiUpdateStatus via the package checker"
+        runtime.core().pi_runtime().is_some(),
+        "local runtime must serve PiUpdateStatus via the isolated Runtime manager"
     );
     let service = runtime.core().rpc_service();
     let client = cypher_rpc::memory_client(service);

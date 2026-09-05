@@ -903,6 +903,9 @@ impl Engine {
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
         std::fs::create_dir_all(&config.data_dir)?;
+        // Auth construction can persist a sanitized session, and its refresh
+        // loop rotates single-use credentials. Own the directory BEFORE either.
+        let lock = InstanceLock::acquire(&config.data_dir)?;
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
@@ -919,7 +922,7 @@ impl Engine {
         let profile = profile
             .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
 
-        let runtime = Self::assemble_runtime(&config, auth, profile).await?;
+        let runtime = Self::assemble_runtime_with_lock(&config, auth, profile, lock).await?;
 
         // A daemon exists to serve this port, so a bind failure is fatal here —
         // unlike the headed app, which can still work over its in-process
@@ -1018,13 +1021,13 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     let mut state_rx = auth.watch_state();
     let mut stdin_reader: Option<tokio::task::JoinHandle<()>> = None;
     let mut org_reader: Option<tokio::task::JoinHandle<()>> = None;
-    loop {
+    let outcome = loop {
         let state = state_rx.borrow().clone();
         match state {
             AuthState::SignedIn { user, org_id } => {
                 tracing::info!(email = %user.email, org = org_id.as_deref().unwrap_or("<none>"),
                     "auth: session ready");
-                break;
+                break Ok(());
             }
             AuthState::NeedsOrganization { user } => {
                 if !interactive {
@@ -1094,17 +1097,44 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                 }
             }
         }
-        if state_rx.changed().await.is_err() {
-            break;
+        // EOF, a failed workspace request, or a reader panic does not change
+        // auth state. Waiting only for that state used to hang login forever.
+        tokio::select! {
+            changed = state_rx.changed() => {
+                if changed.is_err() {
+                    break Err(EngineError::Other("authentication closed before sign-in completed".into()));
+                }
+            }
+            result = wait_terminal_reader(&mut stdin_reader) => {
+                stdin_reader = None;
+                if result.is_err() || matches!(auth.state(), AuthState::SignedOut) {
+                    break Err(EngineError::Other("sign-in did not complete (terminal input closed)".into()));
+                }
+            }
+            result = wait_terminal_reader(&mut org_reader) => {
+                org_reader = None;
+                if result.is_err() || !auth.state().is_signed_in() {
+                    break Err(EngineError::Other("workspace setup did not complete — retry `cypher login`".into()));
+                }
+            }
         }
-    }
+    };
     if let Some(reader) = stdin_reader {
         reader.abort();
     }
     if let Some(reader) = org_reader {
         reader.abort();
     }
-    Ok(())
+    outcome
+}
+
+async fn wait_terminal_reader(
+    reader: &mut Option<tokio::task::JoinHandle<()>>,
+) -> Result<(), tokio::task::JoinError> {
+    match reader {
+        Some(reader) => reader.await,
+        None => std::future::pending().await,
+    }
 }
 
 /// One line from stdin (blocking read off the runtime). `None` = stdin closed.

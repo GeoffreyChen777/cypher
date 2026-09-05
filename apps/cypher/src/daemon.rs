@@ -32,21 +32,32 @@ const CAPTURED_ENV: &[&str] = &[
     "CYPHER_CALLBACK_PORT",
     "CYPHER_HARNESS",
     "CYPHER_DEVICE_NAME",
+    "CYPHER_AUTO_UPDATE",
+    "CYPHER_PI_RUNTIME_DIR",
+    "CYPHER_PI_RUNTIME_BASE_URL",
     "RUST_LOG",
 ];
 
 pub fn install(data_dir: &Path) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolving the cypher executable path")?;
-    let env = captured_env();
+    let mut env = captured_env();
+    // Relative paths otherwise resolve under the service manager's working
+    // directory rather than the shell that ran `daemon install`.
+    let data_dir = std::path::absolute(data_dir)?;
+    env.retain(|(key, _)| key != "CYPHER_DATA_DIR");
+    env.push((
+        "CYPHER_DATA_DIR".into(),
+        data_dir.to_string_lossy().into_owned(),
+    ));
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
         std::fs::create_dir_all(plist.parent().expect("LaunchAgents parent"))?;
-        std::fs::create_dir_all(data_dir)?;
+        std::fs::create_dir_all(&data_dir)?;
         // Reinstall-friendly: unload any previous incarnation before rewriting.
         let _ = run_quiet("launchctl", &["bootout", &launchd_service_target()?]);
-        std::fs::write(
+        write_private_file(
             &plist,
-            render_launchd_plist(&exe, &env, &data_dir.join("daemon.log")),
+            &render_launchd_plist(&exe, &env, &data_dir.join("daemon.log")),
         )?;
         run(
             "launchctl",
@@ -57,11 +68,24 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
             plist.display()
         );
     } else if cfg!(target_os = "linux") {
+        // systemd 245 rejects these characters in the executable path even
+        // after correct C-style quoting. Fail before rewriting a working unit.
+        if exe.to_str().is_none_or(|path| {
+            path.chars()
+                .any(|ch| ch.is_ascii_control() || matches!(ch, '"' | '\'' | '\\'))
+        }) {
+            bail!(
+                "systemd requires an executable path without quotes, backslashes or control characters (UTF-8)"
+            );
+        }
         let unit = systemd_unit_path()?;
         std::fs::create_dir_all(unit.parent().expect("systemd user dir"))?;
-        std::fs::write(&unit, render_systemd_unit(&exe, &env))?;
+        write_private_file(&unit, &render_systemd_unit(&exe, &env))?;
         run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
+        run("systemctl", &["--user", "enable", SYSTEMD_UNIT])?;
+        // enable --now only starts inactive services: a reinstall must pick up
+        // a new executable/environment even if the old service is still up.
+        run("systemctl", &["--user", "restart", SYSTEMD_UNIT])?;
         println!("Installed and started {SYSTEMD_UNIT} ({}).", unit.display());
         println!(
             "For start-at-boot without an active login session (VPS): loginctl enable-linger $USER"
@@ -95,8 +119,13 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(err) => return Err(err.into()),
         }
     } else if cfg!(target_os = "linux") {
-        let _ = run_quiet("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]);
         let unit = systemd_unit_path()?;
+        if !unit.try_exists()? {
+            println!("Not installed.");
+            return Ok(());
+        }
+        // Do not claim removal while a service we failed to stop keeps running.
+        run("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT])?;
         match std::fs::remove_file(&unit) {
             Ok(()) => {
                 run("systemctl", &["--user", "daemon-reload"])?;
@@ -203,10 +232,13 @@ pub fn status() -> anyhow::Result<()> {
     } else if cfg!(target_os = "linux") {
         // Passthrough; `status` exits nonzero for inactive units, which is not an
         // error for us to report — the output already says it.
-        let _ = Command::new("systemctl")
+        let status = Command::new("systemctl")
             .args(["--user", "--no-pager", "status", SYSTEMD_UNIT])
             .status()
             .context("running systemctl")?;
+        if !status.success() && !matches!(status.code(), Some(3 | 4)) {
+            bail!("could not query the systemd user service ({status})");
+        }
         Ok(())
     } else {
         bail!("cypher daemon is only supported on macOS (launchd) and Linux (systemd)");
@@ -230,11 +262,13 @@ fn render_systemd_unit(exe: &Path, env: &[(String, String)]) -> String {
     );
     for (key, value) in env {
         // systemd unquotes the value; escape the characters it treats specially.
-        let value = value.replace('\\', "\\\\").replace('"', "\\\"");
-        unit.push_str(&format!("Environment=\"{key}={value}\"\n"));
+        unit.push_str(&format!(
+            "Environment={}\n",
+            systemd_quote(&format!("{key}={value}"))
+        ));
     }
     unit.push_str(&format!(
-        "ExecStart={} headless\nRestart=on-failure\nRestartSec=5\nEnvironmentFile=-%h/.cypher/env\n\n[Install]\nWantedBy=default.target\n",
+        "ExecStart=:{} headless\nRestart=on-failure\nRestartSec=5\nUMask=0077\nEnvironmentFile=-%h/.cypher/env\n\n[Install]\nWantedBy=default.target\n",
         systemd_exec_path(exe)
     ));
     unit
@@ -250,16 +284,58 @@ fn systemd_exec_path(exe: &Path) -> String {
 
 fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
     let Some(home) = home else {
-        return format!("{}", exe.display());
+        return systemd_quote(&exe.to_string_lossy());
     };
     let cypher_root = home.join(".cypher/app");
     if exe.starts_with(&cypher_root) {
         // Point the unit at the installer's `current` symlink so upgrades
         // relink without touching the unit.
-        "%h/.cypher/app/current/cypher".to_string()
+        "\"%h/.cypher/app/current/cypher\"".to_string()
     } else {
-        format!("{}", exe.display())
+        systemd_quote(&exe.to_string_lossy())
     }
+}
+
+/// systemd.syntax C-style quoting, plus specifier expansion. ExecStart uses
+/// the ':' prefix to disable argv environment expansion. Doubling '$' is NOT
+/// correct for its executable path: systemd 245 expands argv, not command->path.
+/// Environment= does not expand '$'; literal '%' must be doubled in both.
+fn systemd_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '%' => quoted.push_str("%%"),
+            ch if ch.is_ascii_control() => quoted.push_str(&format!("\\x{:02x}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn write_private_file(path: &Path, content: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    let result = (|| {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    let _ = std::fs::remove_file(temp);
+    result.context("writing private service configuration")
 }
 
 fn render_launchd_plist(exe: &Path, env: &[(String, String)], log: &Path) -> String {
@@ -329,6 +405,7 @@ fn launchd_plist_path() -> anyhow::Result<PathBuf> {
 fn systemd_unit_path() -> anyhow::Result<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
         .unwrap_or(home_dir()?.join(".config"));
     Ok(config.join("systemd/user").join(SYSTEMD_UNIT))
 }
@@ -390,7 +467,7 @@ mod tests {
                 ("RUST_LOG".into(), "info,cypher=\"debug\"".into()),
             ],
         );
-        assert!(unit.contains("ExecStart=/usr/local/bin/cypher headless\n"));
+        assert!(unit.contains("ExecStart=:\"/usr/local/bin/cypher\" headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Environment=\"CYPHER_EDGE_URL=https://edge.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
@@ -408,10 +485,8 @@ mod tests {
     fn curl_installer_always_starts_the_local_capable_service() {
         let installer = include_str!("../../../edge/src/install.sh");
         assert!(!installer.contains("session.json"));
-        assert!(installer.contains("StartLimitIntervalSec=60\n"));
-        assert!(installer.contains("StartLimitBurst=5\n"));
-        assert!(installer.contains("systemctl --user enable cypher"));
-        assert!(installer.contains("systemctl --user restart cypher"));
+        assert!(installer.contains("\"$app_root/current/cypher\" daemon install"));
+        assert!(!installer.contains("claude.ai"));
     }
 
     #[test]
@@ -423,7 +498,7 @@ mod tests {
                 Path::new("/home/u/.cypher/app/0.3.0/cypher"),
                 Some(Path::new("/home/u")),
             ),
-            "%h/.cypher/app/current/cypher"
+            "\"%h/.cypher/app/current/cypher\""
         );
         // Source build: literal path.
         assert_eq!(
@@ -431,7 +506,7 @@ mod tests {
                 Path::new("/src/target/debug/cypher"),
                 Some(Path::new("/home/u"))
             ),
-            "/src/target/debug/cypher"
+            "\"/src/target/debug/cypher\""
         );
     }
 
@@ -461,6 +536,33 @@ mod tests {
         assert_eq!(
             launchd_plist_path().unwrap().file_name().unwrap(),
             "ai.mvp-lab.cypher.plist"
+        );
+    }
+
+    #[test]
+    fn systemd_escapes_paths_specifiers_and_newlines() {
+        assert_eq!(
+            systemd_quote("/home/a b/100%/$HOME/cypher"),
+            "\"/home/a b/100%%/$HOME/cypher\""
+        );
+        assert_eq!(
+            systemd_quote("X=a\nExecStart=evil\t%h$HOME"),
+            "\"X=a\\nExecStart=evil\\t%%h$HOME\""
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_credentials_are_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cypher.service");
+        std::fs::write(&path, "old").unwrap();
+        write_private_file(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 }
