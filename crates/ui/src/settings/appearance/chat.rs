@@ -7,7 +7,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors, ColorPreset};
+use crate::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::{parser, render};
 use crate::settings::widgets;
@@ -184,10 +184,12 @@ fn parsed_color(raw: &str) -> Result<Option<String>, &'static str> {
 }
 
 pub(super) struct ChatStyleEditor {
+    expanded: bool,
     palette: Appearance,
     follow_current_palette: bool,
     last_colors: ChatColors,
     color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT],
+    color_pickers: [Entity<super::color_picker::ColorPicker>; COLOR_FIELD_COUNT],
     color_errors: [bool; COLOR_FIELD_COUNT],
     fonts: Arc<Vec<String>>,
     font_menu: Option<FontKind>,
@@ -205,18 +207,22 @@ impl ChatStyleEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let palette = Theme::of(cx).appearance;
         let colors = chat_style::settings(cx).colors(palette).clone();
-        let color_inputs = std::array::from_fn(|index| {
-            cx.new(|cx| {
-                let mut input = ComposerInput::settings_field("Theme default", false, cx);
-                input.set_text(
-                    ColorField::ALL[index]
-                        .get(&colors)
-                        .clone()
-                        .unwrap_or_default(),
-                    cx,
-                );
-                input
-            })
+        let color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT] =
+            std::array::from_fn(|index| {
+                cx.new(|cx| {
+                    let mut input = ComposerInput::settings_field("Theme default", false, cx);
+                    input.set_text(
+                        ColorField::ALL[index]
+                            .get(&colors)
+                            .clone()
+                            .unwrap_or_default(),
+                        cx,
+                    );
+                    input
+                })
+            });
+        let color_pickers = std::array::from_fn(|index| {
+            cx.new(|cx| super::color_picker::ColorPicker::new(color_inputs[index].clone(), cx))
         });
         let font_search = cx
             .new(|cx| ComposerInput::with_context("Search installed fonts…", "PaletteSearch", cx));
@@ -263,10 +269,12 @@ impl ChatStyleEditor {
         let preview = Arc::new(parser::parse_full(PREVIEW_MARKDOWN));
         let preview_highlights = preview_highlights(&preview);
         Self {
+            expanded: false,
             palette,
             follow_current_palette: true,
             last_colors: colors,
             color_inputs,
+            color_pickers,
             color_errors: [false; COLOR_FIELD_COUNT],
             fonts,
             font_menu: None,
@@ -357,7 +365,7 @@ impl ChatStyleEditor {
         }
         let plus = buttons.pop().unwrap();
         let minus = buttons.pop().unwrap();
-        widgets::card_row(theme, false)
+        super::setting_row()
             .child(div().flex_1().child(widgets::row_title(theme, key.label())))
             .child(
                 div()
@@ -527,7 +535,7 @@ impl ChatStyleEditor {
             .as_ref()
             .is_some_and(|name| !self.fonts.contains(name));
         let popup = (self.font_menu == Some(kind)).then(|| self.font_popup(theme, cx));
-        widgets::card_row(theme, false)
+        super::setting_row()
             .child(
                 div()
                     .flex_1()
@@ -598,7 +606,10 @@ impl ChatStyleEditor {
         };
         let index = field.index();
         let input = self.color_inputs[index].clone();
-        widgets::card_row(theme, false)
+        self.color_pickers[index].update(cx, |picker, cx| {
+            picker.sync(swatch, self.palette.is_dark(), cx)
+        });
+        super::setting_row()
             .child(
                 div()
                     .flex_1()
@@ -621,15 +632,7 @@ impl ChatStyleEditor {
                         )
                     }),
             )
-            .child(
-                div()
-                    .size(px(22.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .bg(swatch),
-            )
+            .child(self.color_pickers[index].clone())
             .child(
                 div()
                     .id(("chat-color-field", index))
@@ -673,19 +676,47 @@ fn font_label(name: Option<&str>) -> SharedString {
 impl Render for ChatStyleEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let reset = widgets::ghost_action(&theme)
+            .id("reset-chat-appearance")
+            .child("Reset")
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.change(cx, |s| *s = ChatAppearance::default());
+                this.sync_colors(cx);
+            }))
+            .into_any_element();
+        let section = super::section_frame(&theme, false).child(super::section_header(
+            &theme,
+            "Chat interface",
+            self.expanded,
+            Some(reset),
+            cx.listener(|this, _, _, cx| {
+                this.expanded = !this.expanded;
+                if !this.expanded {
+                    this.font_menu = None;
+                    for picker in &this.color_pickers {
+                        picker.update(cx, |picker, cx| picker.close(cx));
+                    }
+                }
+                cx.notify();
+            }),
+        ));
+        if !self.expanded {
+            return section.into_any_element();
+        }
         let settings = chat_style::settings(cx).clone();
         let preview = chat_style::resolve(
             &settings,
-            &Theme::for_appearance(self.palette),
+            &crate::surface_style::apply_preset(
+                Theme::for_appearance(self.palette),
+                crate::surface_style::settings(cx)
+                    .palette(self.palette)
+                    .preset,
+            ),
             0,
             &self.fonts,
         );
-        let mut typography = widgets::section_card(&theme).child(
-            div()
-                .px(px(20.0))
-                .py(px(14.0))
-                .child(widgets::field_label(&theme, "Typography & spacing")),
-        );
+        let mut typography = super::content_group();
         for kind in [FontKind::Body, FontKind::Code] {
             typography = typography.child(self.font_row(kind, &settings, &theme, cx));
         }
@@ -715,39 +746,13 @@ impl Render for ChatStyleEditor {
                     })),
             );
         }
-        let mut presets = div().flex().flex_wrap().gap(px(8.0));
-        for preset in ColorPreset::ALL {
-            let colors = preset.colors(self.palette);
-            let selected = settings.colors(self.palette) == &colors;
-            let swatch = chat_style::color(&colors.accent).unwrap_or(preview.accent);
-            presets = presets.child(
-                widgets::ghost_action(&theme)
-                    .id(SharedString::from(format!(
-                        "chat-preset-{}",
-                        preset.label()
-                    )))
-                    .border_1()
-                    .border_color(if selected { theme.accent } else { theme.border })
-                    .child(div().size(px(10.0)).rounded_full().bg(swatch))
-                    .child(preset.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let palette = this.palette;
-                        this.change(cx, |s| *s.colors_mut(palette) = preset.colors(palette));
-                        this.sync_colors(cx);
-                    })),
-            );
-        }
-        let mut colors = widgets::section_card(&theme)
-            .child(div().px(px(20.0)).py(px(14.0)).flex().flex_col().gap(px(10.0))
-                .child(widgets::field_label(&theme, "Chat colors")).child(palettes).child(presets)
-                .child(div().text_size(px(11.0)).text_color(theme.text_muted)
-                    .child("Light and dark palettes are independent. Empty fields follow the theme. Custom backgrounds are opaque.")));
+        let mut colors = super::content_group().child(palettes);
         for field in ColorField::ALL {
             colors = colors.child(self.color_row(field, &preview, &theme, cx));
         }
         if self.palette != theme.appearance {
             colors = colors.child(
-                div().px(px(20.0)).pb(px(12.0)).text_size(px(11.0)).text_color(theme.text_muted)
+                div().text_size(px(11.0)).text_color(theme.text_muted)
                     .child("Editing the other theme's palette. These colors apply when that theme is active."),
             );
         }
@@ -755,8 +760,6 @@ impl Render for ChatStyleEditor {
         if !warnings.is_empty() {
             colors = colors.child(
                 div()
-                    .px(px(20.0))
-                    .pb(px(14.0))
                     .text_size(px(12.0))
                     .text_color(theme.warning_muted)
                     .child(format!(
@@ -770,70 +773,52 @@ impl Render for ChatStyleEditor {
         let rendered = render::render_tree(&self.preview, &options, &preview, window, &|index| {
             self.preview_highlights.get(&index).cloned()
         });
-        let live_preview = widgets::section_card(&theme)
-            .child(div().px(px(20.0)).py(px(12.0)).child(widgets::field_label(
-                &theme,
-                format!(
-                    "Live preview · {} palette",
-                    if self.palette.is_dark() {
-                        "dark"
-                    } else {
-                        "light"
-                    }
+        let live_preview = super::content_group().child(
+            div()
+                .id("chat-style-preview-scroll")
+                .h(px(280.0))
+                .overflow_y_scroll()
+                .bg(preview.bg)
+                .p(px(16.0))
+                .child(
+                    div()
+                        .w_full()
+                        .when(!settings.wide, |el| el.max_w(px(480.0)))
+                        .mx_auto()
+                        .flex()
+                        .flex_col()
+                        .gap(px(settings.message_spacing))
+                        .child(
+                            div().flex().justify_end().child(
+                                div()
+                                    .max_w(gpui::relative(0.8))
+                                    .p(px(10.0))
+                                    .rounded(px(10.0))
+                                    .bg(chat_style::bubble(&preview))
+                                    .font_family(preview.font_sans.clone())
+                                    .text_size(px(preview.markdown.body_size))
+                                    .line_height(px(preview.markdown.body_line_height))
+                                    .text_color(preview.text)
+                                    .child("Make this chat comfortable to read."),
+                            ),
+                        )
+                        .child(rendered),
                 ),
-            )))
-            .child(
-                div()
-                    .id("chat-style-preview-scroll")
-                    .h(px(280.0))
-                    .overflow_y_scroll()
-                    .bg(preview.bg)
-                    .p(px(16.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .when(!settings.wide, |el| el.max_w(px(480.0)))
-                            .mx_auto()
-                            .flex()
-                            .flex_col()
-                            .gap(px(settings.message_spacing))
-                            .child(
-                                div().flex().justify_end().child(
-                                    div()
-                                        .max_w(gpui::relative(0.8))
-                                        .p(px(10.0))
-                                        .rounded(px(10.0))
-                                        .bg(chat_style::bubble(&preview))
-                                        .font_family(preview.font_sans.clone())
-                                        .text_size(px(preview.markdown.body_size))
-                                        .line_height(px(preview.markdown.body_line_height))
-                                        .text_color(preview.text)
-                                        .child("Make this chat comfortable to read."),
-                                ),
-                            )
-                            .child(rendered),
-                    ),
-            );
-        div().w_full().flex().flex_col()
-            .child(div().mt(px(28.0)).flex().items_center().justify_between()
-                .child(widgets::field_label(&theme, "Chat interface"))
-                .child(widgets::ghost_action(&theme).id("reset-chat-appearance").child("Reset chat style")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.change(cx, |s| *s = ChatAppearance::default());
-                        this.sync_colors(cx);
-                    }))))
-            .child(widgets::page_subtitle(&theme, "Changes apply immediately to chats and their input boxes on this client only."))
+        );
+        section.child(div().w_full().flex().flex_col().mt(px(super::SECTION_BODY_GAP))
+            .child(widgets::page_subtitle(&theme, "Changes apply immediately to chats and their input boxes on this client only.").mt_0())
             .when_some(self.error.clone(), |el, error| el.child(widgets::error_strip(&theme, error)))
             .child(live_preview)
             .child(typography)
-            .child(widgets::section_card(&theme).child(widgets::card_row(&theme, true)
+            .child(super::content_group().child(super::setting_row()
                 .id("chat-wide-mode").cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.change(cx, |s| s.wide = !s.wide)))
                 .child(div().flex_1().child(widgets::row_title(&theme, "Wide-screen mode"))
                     .child(div().mt(px(4.0)).text_size(px(12.0)).text_color(theme.text_muted)
                         .child("Expand messages and the composer to the available chat width. Side panels stay unchanged.")))
                 .child(widgets::toggle_switch(&theme, settings.wide))))
-            .child(colors)
+            .child(colors))
+            .into_any_element()
     }
 }
 

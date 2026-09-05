@@ -2,6 +2,10 @@
 
 Open **Settings → Appearance → Chat interface**.
 
+For coordinated app themes and independent Terminal, Git and Sidebar colors,
+see [Overall and region colors](appearance-colors.md). Chat overrides take
+precedence over the overall palette and are preserved when that palette changes.
+
 These are **client-local preferences**, shared by this client's chats and Side
 Chats. They do not follow the settings device selector and do not change the
 sidebar, settings forms, terminal, remote engine, or stored message content.
@@ -19,8 +23,8 @@ sidebar, settings forms, terminal, remote engine, or stored message content.
 - **Wide-screen mode:** removes the 736 px message / 768 px composer column
   caps. Normal chat gutters remain clear for the message rail; side panels
   keep their existing widths.
-- **Colors:** edit light and dark palettes independently. Default, Ocean,
-  Forest, and Warm presets are available, plus `#RRGGBB` fields for message
+- **Colors:** edit light and dark overrides independently. Overall presets live
+  in **Color theme**; Chat has individual `#RRGGBB` fields for message
   text, chat background, links/accent, user message bubbles, code block
   background, code block base text, inline code text, and inline code background.
 
@@ -43,9 +47,9 @@ theme. Incomplete/invalid colors are not applied. Low-contrast combinations
 are warned about, not silently changed. A custom background is opaque;
 clearing it restores the existing glass treatment.
 
-**Reset chat style** restores typography, both color palettes, spacing, and
-normal width. It does not reset the app's System/Light/Dark choice or other
-settings.
+**Reset** in the Chat interface header restores typography, spacing and normal width, and clears
+both Chat override palettes so they follow the overall theme. It does not reset
+the overall preset, Terminal/Git/Sidebar overrides, or System/Light/Dark choice.
 
 ## Storage and fallback
 

@@ -246,7 +246,7 @@ pub fn theme(cx: &App) -> Theme {
 pub fn resolve(settings: &ChatAppearance, base: &Theme, revision: u64, fonts: &[String]) -> Theme {
     let mut theme = base.clone();
     theme.markdown = settings.metrics();
-    theme.text_style_revision = revision;
+    theme.text_style_revision = base.text_style_revision.wrapping_add(revision);
     for (requested, target) in [
         (&settings.font_family, &mut theme.font_sans),
         (&settings.code_font_family, &mut theme.font_mono),
@@ -269,11 +269,12 @@ pub fn resolve(settings: &ChatAppearance, base: &Theme, revision: u64, fonts: &[
         theme.accent = value;
         theme.markdown_link = Some(value);
     }
-    theme.user_bubble = color(&colors.user_bubble);
+    theme.user_bubble = color(&colors.user_bubble).or(base.user_bubble);
     theme.code_block_background = color(&colors.code_block_background);
     theme.code_block_text = color(&colors.code_block_text);
-    theme.inline_code_text = color(&colors.inline_code_text);
-    theme.inline_code_background = color(&colors.inline_code_background);
+    theme.inline_code_text = color(&colors.inline_code_text).or(base.inline_code_text);
+    theme.inline_code_background =
+        color(&colors.inline_code_background).or(base.inline_code_background);
     theme
 }
 
@@ -292,7 +293,8 @@ pub fn bubble(theme: &Theme) -> Hsla {
 /// Non-chat surfaces retain their app-theme background.
 pub fn panel_background(settings: &ChatAppearance, base: &Theme, is_chat: bool) -> Hsla {
     if is_chat {
-        color(&settings.colors(base.appearance).background).unwrap_or(base.surface)
+        color(&settings.colors(base.appearance).background)
+            .unwrap_or(base.regions.chat_background.unwrap_or(base.surface))
     } else {
         base.surface
     }
@@ -334,39 +336,52 @@ pub fn contrast_warnings(theme: &Theme) -> Vec<&'static str> {
     warnings
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ColorPreset {
+    #[default]
     Default,
-    Ocean,
-    Forest,
-    Warm,
+    #[serde(alias = "ocean")]
+    Catppuccin,
+    #[serde(alias = "forest")]
+    Nord,
+    #[serde(alias = "warm")]
+    Gruvbox,
 }
 impl ColorPreset {
-    pub const ALL: [Self; 4] = [Self::Default, Self::Ocean, Self::Forest, Self::Warm];
+    pub const ALL: [Self; 4] = [Self::Default, Self::Catppuccin, Self::Nord, Self::Gruvbox];
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
-            Self::Ocean => "Ocean",
-            Self::Forest => "Forest",
-            Self::Warm => "Warm",
+            Self::Catppuccin => "Catppuccin",
+            Self::Nord => "Nord",
+            Self::Gruvbox => "Gruvbox Soft",
         }
     }
     pub fn colors(self, appearance: Appearance) -> ChatColors {
         let dark = appearance.is_dark();
         let (background, text, accent, bubble) = match (self, dark) {
             (Self::Default, _) => return ChatColors::default(),
-            (Self::Ocean, true) => ("#101827", "#E2E8F0", "#7DD3FC", "#1E3048"),
-            (Self::Ocean, false) => ("#F5F9FF", "#172B4D", "#075985", "#E0EDF8"),
-            (Self::Forest, true) => ("#101C18", "#E4F2E9", "#A7F3D0", "#23392E"),
-            (Self::Forest, false) => ("#F4FAF6", "#193829", "#166534", "#E0EEE4"),
-            (Self::Warm, true) => ("#211A17", "#F5E9DC", "#FBBF24", "#3B2C23"),
-            (Self::Warm, false) => ("#FFFAF2", "#453322", "#92400E", "#F3E7D5"),
+            // Official palette tokens; links and mapping details in docs/appearance-colors.md.
+            // Catppuccin Mocha / Latte: Base, Text, Mauve, Surface0 / Mantle.
+            (Self::Catppuccin, true) => ("#1E1E2E", "#CDD6F4", "#CBA6F7", "#313244"),
+            (Self::Catppuccin, false) => ("#EFF1F5", "#4C4F69", "#8839EF", "#E6E9EF"),
+            // Nord: Polar Night / Snow Storm. The light accent uses nord3
+            // rather than pale Frost so links remain readable on nord6.
+            (Self::Nord, true) => ("#2E3440", "#D8DEE9", "#88C0D0", "#3B4252"),
+            (Self::Nord, false) => ("#ECEFF4", "#2E3440", "#4C566A", "#E5E9F0"),
+            // Gruvbox soft dark; light uses a less yellow warm-paper
+            // adaptation while retaining the original text/blue accents.
+            (Self::Gruvbox, true) => ("#32302F", "#EBDBB2", "#83A598", "#3C3836"),
+            (Self::Gruvbox, false) => ("#F7F5EF", "#3C3836", "#076678", "#EEEAE1"),
         };
         ChatColors {
             text: Some(text.into()),
             background: Some(background.into()),
             accent: Some(accent.into()),
             user_bubble: Some(bubble.into()),
+            inline_code_text: Some(text.into()),
+            inline_code_background: Some(bubble.into()),
             ..Default::default()
         }
     }
@@ -458,7 +473,7 @@ mod tests {
             wide: true,
             ..Default::default()
         };
-        settings.dark = ColorPreset::Ocean.colors(Appearance::Dark);
+        settings.dark = ColorPreset::Catppuccin.colors(Appearance::Dark);
         settings.save(temp.path()).unwrap();
         assert_eq!(ChatAppearance::load(temp.path()), settings);
         assert_eq!(
@@ -525,7 +540,8 @@ mod tests {
                 let theme = resolve(&settings, &Theme::for_appearance(appearance), 1, &[]);
                 assert!(
                     contrast_warnings(&theme).is_empty(),
-                    "{preset:?} {appearance:?}"
+                    "{preset:?} {appearance:?}: {:?}",
+                    contrast_warnings(&theme)
                 );
             }
         }

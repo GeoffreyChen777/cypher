@@ -2122,7 +2122,7 @@ impl Changes {
         let Some(row) = self.rows.get(ix).copied() else {
             return gpui::Empty.into_any_element();
         };
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         match row {
             DiffRow::FileHeader { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -2356,7 +2356,7 @@ impl Changes {
     /// under it would never see a click. The expand and close buttons ride
     /// alongside, shell-owned (they mutate shell state).
     pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         // Commit-pinned pane: the pin never changes, so a fixed identity
         // chip (mono short sha + subject) replaces the scope dropdown;
         // fold-all still trails.
@@ -2506,7 +2506,9 @@ impl Changes {
             .into_any_element()
     }
 
-    fn render_scope_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_scope_menu(&mut self, _theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let popup_theme = Theme::of(cx).clone();
+        let theme = &popup_theme;
         let current = self.scope;
         popover::popover_card(theme)
             .w(px(180.0))
@@ -2653,7 +2655,9 @@ impl Changes {
         )
     }
 
-    fn render_ref_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_ref_menu(&mut self, _theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let popup_theme = Theme::of(cx).clone();
+        let theme = &popup_theme;
         let (search, active, focus, list_scroll) = {
             let Some(menu) = self.ref_menu.get() else {
                 return div().into_any_element();
@@ -2879,6 +2883,8 @@ fn diff_line_row(
     add_bg.a = 0.055;
     let mut del_bg = del_color(theme);
     del_bg.a = 0.055;
+    let add_bg = theme.regions.git_added.unwrap_or(add_bg);
+    let del_bg = theme.regions.git_deleted.unwrap_or(del_bg);
 
     let (marker, marker_color, row_bg, accent, number_color) = match line.kind {
         LineKind::Add => (
@@ -2909,7 +2915,7 @@ fn diff_line_row(
             .flex_none()
             .font_family(theme.font_mono.clone())
             .text_size(px(11.0))
-            .text_color(color)
+            .text_color(theme.regions.git_line_number.unwrap_or(color))
             .flex()
             .justify_end()
             .pr(px(8.0))
@@ -2980,6 +2986,46 @@ fn diff_line_row(
                 .whitespace_nowrap()
                 .child(diff_text_element(line, runs, theme, select)),
         )
+        .into_any_element()
+}
+
+/// Settings preview uses the same rows, gutters, tinting and syntax renderer
+/// as the real diff, but never loads files or issues engine RPCs.
+pub(crate) fn color_preview(theme: &Theme) -> AnyElement {
+    use cypher_syntax::{HighlightKind, HighlightSpan};
+    let rows = [
+        (
+            LineKind::Context,
+            "let name = \"Cypher\";",
+            Some(1),
+            Some(1),
+        ),
+        (LineKind::Del, "let answer = 41;", Some(2), None),
+        (LineKind::Add, "let answer = 42;", None, Some(2)),
+    ];
+    div()
+        .p(px(10.0))
+        .rounded(px(8.0))
+        .bg(theme.regions.git_background.unwrap_or(theme.surface))
+        .flex()
+        .flex_col()
+        .children(rows.map(|(kind, text, old_no, new_no)| {
+            diff_line_row(
+                &DiffLine {
+                    kind,
+                    text: text.into(),
+                    old_no,
+                    new_no,
+                },
+                &[HighlightSpan {
+                    range: 0..3,
+                    kind: HighlightKind::Keyword,
+                }],
+                theme,
+                32.0,
+                None,
+            )
+        }))
         .into_any_element()
 }
 
@@ -3127,7 +3173,7 @@ impl Render for Changes {
             history.update(cx, |history, cx| history.ensure_loaded(cx));
             return div().size_full().child(history).into_any_element();
         }
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         let active = self.active_diff(cx);
         let scope = self.scope;
         let base = self.base_ref.clone();

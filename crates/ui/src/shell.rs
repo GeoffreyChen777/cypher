@@ -4002,7 +4002,7 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Sidebar, cx);
         let inner: AnyElement = match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
@@ -4071,7 +4071,7 @@ impl Shell {
                         .py(px(6.0))
                         .text_size(px(13.0))
                         .when(selected, |el| {
-                            el.bg(crate::theme::glass_selected_bg())
+                            el.bg(crate::surface_style::sidebar_selected(theme))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                         })
                         .text_color(if selected {
@@ -4080,7 +4080,14 @@ impl Shell {
                             theme.text_muted
                         })
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                        .hover(|s| {
+                            s.bg(if selected {
+                                crate::surface_style::sidebar_selected(theme)
+                            } else {
+                                crate::surface_style::sidebar_hover(theme)
+                            })
+                            .text_color(theme.text)
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.open_settings(item, cx)))
                         .child(
                             icon(section_icon(item))
@@ -4182,7 +4189,10 @@ impl Shell {
                             .text_size(px(13.0))
                             .text_color(theme.text_muted)
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+                            .hover(|s| {
+                                s.bg(crate::surface_style::sidebar_hover(theme))
+                                    .text_color(theme.text)
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                             .child(
                                 // AltArrowLeft chevron (zeron settings-sidebar.tsx),
@@ -4241,8 +4251,8 @@ impl Shell {
                 .child(time_ago)
                 .into_any_element(),
         };
-        let (hover, text) = (theme.glass_hover(), theme.text);
-        let selected_wash = crate::theme::glass_selected_bg();
+        let (hover, text) = (crate::surface_style::sidebar_hover(theme), theme.text);
+        let selected_wash = crate::surface_style::sidebar_selected(theme);
         let subline = theme.text_muted.opacity(0.5);
         let select_id = id.clone();
         let menu_id = id.clone();
@@ -4881,6 +4891,10 @@ impl Shell {
                     }),
             );
         if self.user_menu.get().is_some() {
+            // Floating menus stay on the overall palette, not the sidebar's
+            // independently overridden foreground/background pair.
+            let popup_theme = Theme::of(cx).clone();
+            let theme = &popup_theme;
             let closing = self.user_menu.closing_since();
             // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
             // (exactly as wide as the trigger row — sidebar minus its p-2
@@ -6168,7 +6182,16 @@ impl Shell {
                                 .border_color(theme.border)
                                 .child(controls),
                         )
-                        .child(div().flex_1().min_h_0().child(changes))
+                        // Full-width opaque diff-row tints must end before
+                        // the rounded card's bottom arcs (GPUI clips rects,
+                        // not descendant pixels to the parent's radius).
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .pb(px(PANEL_CORNER_RADIUS))
+                                .child(changes),
+                        )
                         .into_any_element()
                 }
                 RightSurface::Terminal(tab) => {
@@ -6217,6 +6240,19 @@ impl Shell {
             &theme,
             is_side_chat,
         );
+        // The rounded owner paints the selected surface's background; child
+        // viewports stay transparent instead of covering the corner cutouts.
+        let panel_bg = match self.resolved_right_active(cx) {
+            RightSurface::Diff(_) => {
+                let t = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+                t.regions.git_background.unwrap_or(panel_bg)
+            }
+            RightSurface::Terminal(_) => {
+                let t = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
+                t.regions.terminal_background.unwrap_or(panel_bg)
+            }
+            _ => panel_bg,
+        };
         let panel = div()
             .size_full()
             .flex()
@@ -6434,6 +6470,37 @@ impl Shell {
         cx.notify();
     }
 
+    /// Tabs and their toolbar sit on the active pane's background, so they
+    /// must use its text colors too (e.g. a dark terminal in a light app).
+    fn right_header_theme(&self, cx: &App) -> Theme {
+        match self.resolved_right_active(cx) {
+            RightSurface::Terminal(_) => {
+                let mut theme =
+                    crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
+                theme.surface = theme.regions.terminal_background.unwrap_or(theme.surface);
+                theme
+            }
+            RightSurface::Diff(_) => {
+                let mut theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+                theme.surface = theme.regions.git_background.unwrap_or(theme.surface);
+                theme
+            }
+            RightSurface::SideChat(_) => {
+                let mut theme = crate::chat_style::theme(cx);
+                if theme.text != Theme::of(cx).text || theme.bg != Theme::of(cx).bg {
+                    theme.text_muted = theme.bg.blend(theme.text.opacity(0.72));
+                }
+                theme.surface = crate::chat_style::panel_background(
+                    crate::chat_style::settings(cx),
+                    Theme::of(cx),
+                    true,
+                );
+                theme
+            }
+            _ => Theme::of(cx).clone(),
+        }
+    }
+
     /// The titlebar strip over the right pane: one chip per surface tab
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
@@ -6443,7 +6510,7 @@ impl Shell {
         const CHIP_W: f32 = 112.0;
         const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
 
-        let theme = Theme::of(cx).clone();
+        let theme = self.right_header_theme(cx);
         // Heal drag state if the pointer was released outside the strip.
         if self.right_tab_drag.is_some() && !cx.has_active_drag() {
             self.right_tab_drag = None;
@@ -6695,6 +6762,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             );
         if plus_open {
+            let theme = Theme::of(cx).clone();
             let closing = self.right_plus.closing_since();
             let menu = popover::popover_card(&theme)
                 .w(px(168.0))

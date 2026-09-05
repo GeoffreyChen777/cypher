@@ -36,6 +36,7 @@ pub mod side_chats;
 pub mod sound;
 pub mod state;
 pub mod subagents;
+pub mod surface_style;
 pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
@@ -167,6 +168,7 @@ pub fn run_app(config: UiConfig) {
             data_dir.clone(),
             cx,
         );
+        surface_style::init(data_dir.clone(), cx);
         chat_style::init(data_dir, cx);
         composer::init(cx);
         terminal::panel::init(cx);

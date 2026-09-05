@@ -9,6 +9,8 @@
 //! Theme selection plus client-local chat typography, spacing and colors.
 
 mod chat;
+mod color_picker;
+mod surfaces;
 
 use gpui::{
     AnyElement, Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
@@ -16,16 +18,92 @@ use gpui::{
 
 use crate::appearance::{self, AppearanceMode};
 use crate::settings::widgets;
-use crate::theme::{Appearance, Theme};
+use crate::theme::Theme;
+
+const SECTION_SPACING: f32 = 24.0;
+const SECTION_BODY_GAP: f32 = 12.0;
+
+/// Unboxed groups and rows, local to Appearance rather than changing the
+/// card-based layouts used by other settings pages.
+fn content_group() -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(SECTION_BODY_GAP))
+        .mt(px(SECTION_SPACING))
+}
+
+fn setting_row() -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .py(px(10.0))
+}
+
+fn section_frame(theme: &Theme, first: bool) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .mt(px(SECTION_SPACING))
+        .when(!first, |el| {
+            el.border_t_1()
+                .border_color(theme.border)
+                .pt(px(SECTION_SPACING))
+        })
+}
+
+fn section_header(
+    theme: &Theme,
+    title: &'static str,
+    expanded: bool,
+    action: Option<AnyElement>,
+    toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("appearance-section-{title}")))
+        .h(px(36.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .pr(px(8.0))
+        .cursor_pointer()
+        .on_click(toggle)
+        .child(widgets::field_label(theme, title).flex_1())
+        .children(action)
+        .child(
+            crate::icons::icon(if expanded {
+                crate::icons::ALT_ARROW_DOWN
+            } else {
+                crate::icons::ALT_ARROW_RIGHT
+            })
+            .size(px(14.0))
+            .text_color(theme.text_muted),
+        )
+        .into_any_element()
+}
 
 pub struct AppearancePage {
+    mode_expanded: bool,
     chat: gpui::Entity<chat::ChatStyleEditor>,
+    overall: gpui::Entity<surfaces::SurfaceStyleEditor>,
+    regions: Vec<gpui::Entity<surfaces::SurfaceStyleEditor>>,
 }
 
 impl AppearancePage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            mode_expanded: true,
             chat: cx.new(chat::ChatStyleEditor::new),
+            overall: cx.new(|cx| surfaces::SurfaceStyleEditor::new(None, cx)),
+            regions: crate::surface_style::Region::ALL
+                .into_iter()
+                .map(|r| cx.new(|cx| surfaces::SurfaceStyleEditor::new(Some(r), cx)))
+                .collect(),
         }
     }
 }
@@ -149,32 +227,10 @@ fn preview(mode: AppearanceMode) -> AnyElement {
     }
 }
 
-/// Helper copy under the picker.
-fn helper(mode: AppearanceMode, system: Appearance) -> SharedString {
-    match mode {
-        // Naming the resolved appearance makes "System" concrete — otherwise the
-        // card says nothing about what you actually get right now.
-        AppearanceMode::System => {
-            let resolved = if system.is_dark() { "dark" } else { "light" };
-            format!(
-                "Following the system appearance — currently {resolved}. Cypher switches with \
-                 macOS, including scheduled changes."
-            )
-            .into()
-        }
-        AppearanceMode::Light => "Always light, whatever the system is set to.".into(),
-        AppearanceMode::Dark => "Always dark, whatever the system is set to.".into(),
-    }
-}
-
 impl Render for AppearancePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let current = appearance::mode(cx);
-        let system = cx
-            .try_global::<appearance::AppearanceState>()
-            .map(|state| state.system)
-            .unwrap_or_default();
 
         let cards = AppearanceMode::ALL.into_iter().map(|mode| {
             widgets::option_card(&theme, mode.label(), mode == current, preview(mode))
@@ -201,23 +257,18 @@ impl Render for AppearancePage {
                         .line_height(px(20.0)),
                     )
                     .child(
-                        div()
-                            .mt(px(32.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .child(widgets::field_label(&theme, "Theme"))
-                            .child(widgets::option_card_row().children(cards)),
+                        section_frame(&theme, true)
+                            .child(section_header(&theme, "Appearance mode", self.mode_expanded, None,
+                                cx.listener(|this, _, _, cx| {
+                                    this.mode_expanded = !this.mode_expanded;
+                                    cx.notify();
+                                })))
+                            .when(self.mode_expanded, |el| el.child(
+                                widgets::option_card_row().mt(px(SECTION_BODY_GAP)).children(cards))),
                     )
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .line_height(px(18.0))
-                            .child(helper(current, system)),
-                    )
-                    .child(self.chat.clone()),
+                    .child(self.overall.clone())
+                    .child(self.chat.clone())
+                    .children(self.regions.iter().cloned()),
             )
     }
 }
@@ -231,27 +282,6 @@ mod tests {
         assert_eq!(AppearanceMode::ALL.len(), 3);
         for mode in AppearanceMode::ALL {
             assert!(!mode.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn system_helper_names_the_resolved_appearance() {
-        let dark = helper(AppearanceMode::System, Appearance::Dark);
-        let light = helper(AppearanceMode::System, Appearance::Light);
-        assert!(dark.contains("currently dark"), "got {dark}");
-        assert!(light.contains("currently light"), "got {light}");
-    }
-
-    /// The pinned modes must not claim to follow anything — that copy is the only
-    /// thing telling the user the system setting is being ignored.
-    #[test]
-    fn pinned_helpers_do_not_mention_following() {
-        for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
-            for system in [Appearance::Light, Appearance::Dark] {
-                let copy = helper(mode, system).to_lowercase();
-                assert!(!copy.contains("following"), "{mode:?}: {copy}");
-                assert!(copy.contains("whatever the system"), "{mode:?}: {copy}");
-            }
         }
     }
 

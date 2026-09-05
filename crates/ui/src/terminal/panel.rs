@@ -1321,7 +1321,7 @@ impl TerminalPanel {
     // ---- render ----
 
     fn render_tab_bar(&mut self, chat: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
         let tabs = self.chats.get(chat);
         let (active, count) = tabs.map(|t| (t.active, t.tabs.len())).unwrap_or((0, 0));
         let drag = self
@@ -1573,7 +1573,7 @@ enum StreamDisposition {
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
         // Heal drag state if the pointer was released outside the bar.
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
@@ -1585,6 +1585,7 @@ impl Render for TerminalPanel {
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
+                .rounded_b(px(12.0))
                 .when_some(panel_bg, |el, bg| el.bg(bg))
                 .flex()
                 .items_center()
@@ -1602,6 +1603,7 @@ impl Render for TerminalPanel {
             (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
         div()
             .size_full()
+            .rounded_b(px(12.0))
             .flex()
             .flex_col()
             .when_some(panel_bg, |el, bg| el.bg(bg))

@@ -104,4 +104,6 @@ CI, deployment prerequisites and release recovery: [CI/CD operations](docs/ci-cd
 
 Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/chat-appearance.md).
 
+Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/appearance-colors.md).
+
 Licensed under the [MIT License](LICENSE).

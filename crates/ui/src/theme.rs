@@ -307,6 +307,7 @@ impl Default for MarkdownMetrics {
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
+    pub regions: crate::surface_style::RegionTokens,
     pub markdown: MarkdownMetrics,
     /// Distinguishes cached chat runs after typography/custom-color changes.
     pub text_style_revision: u64,
@@ -510,14 +511,15 @@ impl Theme {
     /// Dark: darker than `surface`, a charcoal frost over the blurred desktop.
     /// Light: a near-white frost run heavier than dark's — see
     /// [`Self::GLASS_ALPHA_LIGHT`]. On opaque platforms this IS the surface
-    /// tone (no tint swap).
+    /// tone (no tint swap). These backing tones and opacity are fixed for
+    /// each appearance, independent of overall presets and card overrides.
     pub fn glass(&self) -> Hsla {
         match self.appearance {
             Appearance::Dark => {
                 if Self::GLASS_ALPHA < 1.0 {
                     grey(24).opacity(Self::GLASS_ALPHA)
                 } else {
-                    self.surface
+                    grey(28)
                 }
             }
             Appearance::Light => {
@@ -527,7 +529,7 @@ impl Theme {
                     // as a dingy pane next to the white content card.
                     grey(0xfa).opacity(Self::GLASS_ALPHA_LIGHT)
                 } else {
-                    self.surface
+                    neutral(0.968)
                 }
             }
         }
@@ -627,6 +629,7 @@ impl Theme {
     /// the same shape as before, just lifted.
     pub fn dark() -> Self {
         Self {
+            regions: Default::default(),
             markdown: MarkdownMetrics::default(),
             text_style_revision: 0,
             markdown_link: None,
@@ -692,6 +695,7 @@ impl Theme {
     /// white instead of glowing.
     pub fn light() -> Self {
         Self {
+            regions: Default::default(),
             markdown: MarkdownMetrics::default(),
             text_style_revision: 0,
             markdown_link: None,
@@ -779,7 +783,16 @@ impl Theme {
     /// change — setting the global directly leaves [`current_appearance`] stale.
     pub fn install(appearance: Appearance, cx: &mut App) {
         set_current_appearance(appearance);
-        cx.set_global(Self::for_appearance(appearance));
+        let preset = crate::surface_style::settings(cx)
+            .palette(appearance)
+            .preset;
+        let mut theme =
+            crate::surface_style::apply_preset(Self::for_appearance(appearance), preset);
+        theme.text_style_revision = cx
+            .try_global::<crate::surface_style::SurfaceAppearanceState>()
+            .map(|s| s.revision)
+            .unwrap_or(0);
+        cx.set_global(theme);
     }
 
     /// Read the theme global.

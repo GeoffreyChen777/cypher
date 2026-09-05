@@ -353,6 +353,7 @@ impl Shell {
             // options that used to live here moved into the pane's own
             // second row; expand/close stay in this band (user request).
             let controls = self.render_right_tab_strip(cx);
+            let header_theme = self.right_header_theme(cx);
             Some(
                 right_tab_header_frame()
                     // Right edge already sits at viewport − pr (the row's own
@@ -372,13 +373,13 @@ impl Shell {
                     .child(header_icon_button(
                         "expand-changes",
                         icons::EXPAND_ARROWS,
-                        &theme,
+                        &header_theme,
                         cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
                     ))
                     .child(header_icon_button(
                         "toggle-changes",
                         icons::SIDEBAR_MINIMALISTIC,
-                        &theme,
+                        &header_theme,
                         cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                     ))
                     .into_any_element(),

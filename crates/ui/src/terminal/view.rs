@@ -60,12 +60,28 @@ pub fn terminal_bg() -> Hsla {
     terminal_bg_for(current_appearance())
 }
 
+pub fn background(theme: &Theme) -> Hsla {
+    theme
+        .regions
+        .terminal_background
+        .unwrap_or_else(|| terminal_bg_for(theme.appearance))
+}
+pub fn selection(theme: &Theme) -> Hsla {
+    theme
+        .regions
+        .terminal_selection
+        .unwrap_or_else(|| terminal_selection_for(theme.appearance))
+}
+
 /// The panel fill behind the grid. On glass the opaque tone thins to a
 /// translucent wash so the blurred desktop reads through like the rest of the
 /// chrome (same move as [`Theme::card_glass_bg`]); opaque platforms keep the
 /// true tone. Explicit cell backgrounds (vim colorschemes etc.) still paint
 /// their own opaque quads on top.
 pub fn terminal_panel_bg(theme: &Theme) -> Hsla {
+    if let Some(background) = theme.regions.terminal_background {
+        return background;
+    }
     if theme.is_glass() {
         terminal_bg_for(theme.appearance).opacity(0.4)
     } else {
@@ -201,8 +217,13 @@ pub fn indexed_rgb(appearance: Appearance, index: u8) -> (u8, u8, u8) {
 pub fn resolve_color(color: CellColor, theme: &Theme) -> Hsla {
     match color {
         CellColor::Foreground => theme.text,
-        CellColor::Background => terminal_bg_for(theme.appearance),
+        CellColor::Background => background(theme),
         CellColor::Indexed(ix) => {
+            if ix < 16
+                && let Some(color) = theme.regions.terminal_ansi[ix as usize]
+            {
+                return color;
+            }
             let (r, g, b) = indexed_rgb(theme.appearance, ix);
             rgb8(r, g, b)
         }
@@ -521,7 +542,7 @@ impl gpui::Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
         // Ligatures OFF. A terminal is a fixed grid: the shaper must emit one
         // cell-width advance per character, and a contextual substitution
         // (Geist Mono ligates `--`, `->`, …) collapses several cells into
@@ -600,7 +621,7 @@ impl gpui::Element for TerminalElement {
                                 point(origin.x + cell_w * start as f32, y),
                                 size(cell_w * (col - start) as f32, line_h),
                             ),
-                            terminal_selection_for(theme.appearance),
+                            selection(&theme),
                         ));
                         sel_start = None;
                     }

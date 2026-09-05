@@ -377,7 +377,7 @@ impl GitHistoryFetchButton {
 
 impl Render for GitHistoryFetchButton {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         let fetching = self.history.read(cx).fetching_all;
         let history = self.history.clone();
         div()
@@ -452,7 +452,7 @@ impl GitHistoryCount {
 
 impl Render for GitHistoryCount {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
+        let theme = &crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         let history = self.history.read(cx);
         let count = history.commit_count();
         let branch = history.current_branch(cx);
@@ -996,7 +996,7 @@ impl GitHistory {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if index >= self.commits.len() {
-            let theme = Theme::of(cx).clone();
+            let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
             let has_error = self.error.is_some();
             let label = if self.loading {
                 "Loading…"
@@ -1063,7 +1063,7 @@ impl GitHistory {
         let Some(graph_row) = self.graph.rows.get(index).cloned() else {
             return gpui::Empty.into_any_element();
         };
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         let sha = commit.sha.clone();
         let open_commit = commit.clone();
         let copied = self.copied_sha.as_deref() == Some(sha.as_str());
@@ -1189,7 +1189,7 @@ impl GitHistory {
 impl Render for GitHistory {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_loaded(cx);
-        let theme = Theme::of(cx).clone();
+        let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
         let graph_column = graph_width(self.graph.max_lane_count);
 
         let body: AnyElement = if self.target_key.is_none() {
