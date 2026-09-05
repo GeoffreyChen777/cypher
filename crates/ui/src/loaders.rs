@@ -163,25 +163,23 @@ pub fn mini_gradient_spinner(
         }))
 }
 
-/// Full-window boot splash (zeron App.tsx `Splash`): the animated cypher mark
-/// (`h-16`) over the app background with an uppercase tracked "Loading" line.
+/// Full-window boot splash: a compact ASCII cypher wordmark over an opaque
+/// background with an uppercase tracked "Loading" line.
 /// While `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px
 /// lift); the shell removes it once [`SPLASH_OUT`] has run its course.
 pub fn splash_overlay(theme: &Theme, fading: bool) -> AnyElement {
     let content = div()
         .absolute()
         .inset_0()
-        // Frosted glass, not the opaque page tone (user request): the boot
-        // overlay reads like the rest of the chrome — the frost tint over
-        // the blurred window background (opaque platforms get the surface
-        // tone, since `glass()` collapses to it there).
-        .bg(theme.glass())
+        // Loading uses a fully opaque backing; normal window/sidebar frost
+        // remains unchanged once the splash has faded out.
+        .bg(theme.glass().opacity(1.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .gap(px(28.0))
-        .child(hero_ascii(theme))
+        .child(loading_wordmark(theme))
         .child(loading_word(theme));
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()
@@ -190,27 +188,18 @@ pub fn splash_overlay(theme: &Theme, fading: bool) -> AnyElement {
     }
 }
 
-/// The landing page's hero comet, monochrome (user request: white instead of
-/// the site's purple gradient). One div per row — gpui has no `white-space:
-/// pre`, and the art's leading/interior spaces carry the shading.
-///
-/// The site masks the rectangle behind a radial gradient; here the same
-/// softening comes from an [`crate::edge_fade`] scope on all four edges, so
-/// the block dissolves into the frost instead of ending on a hard edge.
-fn hero_ascii(theme: &Theme) -> AnyElement {
-    /// Glyph cell: the site runs 7.6px/1.25; a hair smaller keeps the 110-col
-    /// art inside a narrow window.
-    const FONT: f32 = 7.0;
-    const LINE: f32 = 8.75;
-    const FADE_BAND: f32 = 72.0;
-    let art = div()
+/// Keep rows left-aligned inside a centered block: centering each line would
+/// break the glyph grid. Unlike the old comet, this compact mark needs no edge
+/// fade, which would erase its ascender and descenders.
+fn loading_wordmark(theme: &Theme) -> AnyElement {
+    const FONT: f32 = 12.0;
+    const LINE: f32 = 14.5;
+    div()
         .flex()
         .flex_col()
+        .items_start()
         .font_family(theme.font_mono.clone())
-        // Ligatures OFF, like the terminal grid and the landing page's own
-        // `.hero-ascii` rule: the art is a character grid full of `--`/`::`
-        // runs, and a contextual substitution would collapse cells and bend
-        // the picture (the `codex --yolo` bug, in still life).
+        // Preserve one advance per ASCII character.
         .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![
             ("liga".into(), 0),
             ("calt".into(), 0),
@@ -220,21 +209,17 @@ fn hero_ascii(theme: &Theme) -> AnyElement {
         .line_height(px(LINE))
         // `theme.text` IS near-white on dark; on light it flips to the ink
         // tone rather than painting an invisible white block.
-        .text_color(theme.text.opacity(0.55))
-        .children(
-            HERO_ASCII
-                .lines()
-                .map(|line| div().child(SharedString::from(line.to_string()))),
-        );
-    crate::edge_fade::edge_faded(FADE_BAND, true, true, art)
-        .fade_left(true)
-        .fade_right(true)
+        .text_color(theme.text.opacity(0.7))
+        .children(LOADING_WORDMARK.lines().map(|line| {
+            div()
+                .whitespace_nowrap()
+                .child(SharedString::from(line.to_string()))
+        }))
         .into_any_element()
 }
 
-/// The landing page's hero comet (apps/landing/public/index.html
-/// `.hero-ascii`), kept as an asset so both surfaces render the same art.
-const HERO_ASCII: &str = include_str!("../assets/hero.txt");
+/// Separate from the landing-page comet asset.
+const LOADING_WORDMARK: &str = include_str!("../assets/loading-wordmark.txt");
 
 /// "L O A D I N G" — `text-[11px] uppercase tracking-[0.32em]
 /// text-muted-foreground/70`; tracking approximated with thin spaces (gpui has
