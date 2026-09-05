@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-and-release-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+      - run: bash scripts/ci/actionlint.sh
+      - run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - run: python3 scripts/test-linux-cli.py
+      - run: bash scripts/test-check-linux-abi.sh
+      - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh
+      - run: sh -n edge/src/install.sh
+
+  edge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - run: npm ci --prefix edge
+      - run: npm --prefix edge run typecheck
+      - run: npm --prefix edge test
+
+  linux-backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update -qq && sudo apt-get install -y cmake pkg-config systemd
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: cargo fmt --all --check
+      - run: cargo test --locked --no-default-features -p cypher -p cypher-engine -p cypher-update -p cypher-rpc
+      - run: cargo clippy --locked -p cypher-update --all-targets -- -D warnings
+      - run: cargo build --locked --no-default-features -p cypher
+      - run: python3 scripts/test-linux-cli.py --binary target/debug/cypher
+
+  macos-workspace:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: cargo check --workspace --locked

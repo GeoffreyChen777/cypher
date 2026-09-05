@@ -1,134 +1,82 @@
 name: deploy
 
-# Autodeploy the edge Worker + Durable Objects (session/device rooms, R2,
-# WorkOS auth routes) on every push to main that touches edge/. Skips
-# gracefully until the CLOUDFLARE_API_TOKEN secret is configured (until then:
-# `npm -C edge run deploy` from a wrangler-authenticated machine).
-#
-# The token needs: Workers Scripts (edit), Workers Routes (edit) — the
-# custom domains (edge/apex/www on the letscypher.app zone) are attached
-# from each wrangler config — and Workers R2 Storage (edit). Account id is
-# pinned in each wrangler config (edge/wrangler.jsonc,
-# apps/landing/wrangler.jsonc, apps/www-redirect/wrangler.jsonc).
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# Shares the lock with release's publish job: readiness checks cannot race
+# channel promotion. Always deploy a single fresh main snapshot, not a delta
+# against github.event.before (pending/cancelled pushes can omit that delta).
 concurrency:
-  group: deploy-main
+  group: cypher-production
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  edge:
-    runs-on: ubuntu-latest
-    env:
-      # `secrets` is not a valid context in step `if:` expressions — surface
-      # the token through job env and gate on that instead.
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # `github.event.before` may precede several commits in a batched push.
-          fetch-depth: 0
-      - name: detect edge changes
-        id: changed
-        shell: bash
+      - name: require main and deployment credential
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(edge/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
+          test "$GITHUB_REF" = refs/heads/main || {
+            echo "::error::Production deployment is main-only"; exit 1;
+          }
+          test -n "$CLOUDFLARE_API_TOKEN" || {
+            echo "::error::NOT DEPLOYED: configure CLOUDFLARE_API_TOKEN in repository Actions secrets."; exit 1;
+          }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: 22
+          ref: main
+          persist-credentials: false
+      - id: source
+        name: record the snapshot all workers will deploy
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
           cache: npm
           cache-dependency-path: edge/package-lock.json
-      - name: install
-        if: steps.changed.outputs.changed == 'true'
-        working-directory: edge
-        run: npm ci
-      - name: typecheck
-        if: steps.changed.outputs.changed == 'true'
-        working-directory: edge
-        run: npm run typecheck
-      - name: test
-        if: steps.changed.outputs.changed == 'true'
-        working-directory: edge
-        run: npm test
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: edge
-        run: npx wrangler deploy
+      - run: npm ci --prefix edge
+      - run: npm --prefix edge run typecheck
+      - run: npm --prefix edge test
+      - name: installer compatibility gate (read-only)
+        run: python3 scripts/ci/release.py check-deploy
+      - name: deployment summary
+        run: echo "Deploying main snapshot $(git rev-parse HEAD); installer prerequisites verified." >> "$GITHUB_STEP_SUMMARY"
 
-  # Static landing page (letscypher.app) — assets-only worker, no build step.
-  landing:
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  workers:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - edge/wrangler.jsonc
+          - apps/landing/wrangler.jsonc
+          - apps/www-redirect/wrangler.jsonc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-      - name: detect landing changes
-        id: changed
-        shell: bash
-        run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(apps/landing/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: apps/landing
-        run: npx wrangler@4 deploy
-
-  # www.letscypher.app → letscypher.app 301 (see apps/www-redirect/wrangler.jsonc).
-  www-redirect:
-    runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: detect www-redirect changes
-        id: changed
-        shell: bash
-        run: |
-          before="${{ github.event.before }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-            || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(apps/www-redirect/|\.github/workflows/deploy\.yml)"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
-        with:
-          node-version: 22
-      - name: deploy
-        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: apps/www-redirect
-        run: npx wrangler@4 deploy
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - run: npm ci --prefix edge
+      - name: deploy with lockfile-pinned Wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONFIG: ${{ matrix.config }}
+        run: node edge/node_modules/wrangler/bin/wrangler.js deploy --config "$CONFIG"

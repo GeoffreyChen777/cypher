@@ -14,9 +14,13 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SPEC="$ROOT/dist/pi-runtime"
 OUT_DIR="${OUT_DIR:-$ROOT/target/package}"
+# npm 11 can mistake a symlinked prefix (/tmp -> /private/tmp on macOS)
+# for an extra root dependency and reject an otherwise valid lockfile.
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) PLATFORM="macos-arm64"; ESBUILD="@esbuild/darwin-arm64" ;;
@@ -25,12 +29,17 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported Pi Runtime platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-PI_VERSION="$(node -p "require('$SPEC/package.json').dependencies['@earendil-works/pi-coding-agent']")"
-RUNTIME_VERSION="${PI_RUNTIME_VERSION:-${PI_VERSION}.4}"
+PI_VERSION="$(node -p "require(process.argv[1]).dependencies['@earendil-works/pi-coding-agent']" "$SPEC/package.json")"
+RELEASE="$SPEC/release.json"
+RUNTIME_VERSION="${PI_RUNTIME_VERSION:-$(node -p "require(process.argv[1]).version" "$RELEASE")}"
 [[ "$RUNTIME_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]] || {
   echo "invalid PI_RUNTIME_VERSION" >&2; exit 1
 }
-CYPHER_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+MINIMUM_CYPHER_VERSION="$(node -p "require(process.argv[1]).minimumCypherVersion" "$RELEASE")"
+NODE_VERSION="$(node -p "require(process.argv[1]).nodeVersion" "$RELEASE")"
+test "$(node -p 'process.versions.node')" = "$NODE_VERSION" || {
+  echo "Pi Runtime requires Node $NODE_VERSION" >&2; exit 1
+}
 NAME="cypher-pi-runtime-$RUNTIME_VERSION-$PLATFORM"
 STAGE="$OUT_DIR/$NAME"
 ARCHIVE="$OUT_DIR/$NAME.tar.gz"
@@ -131,51 +140,22 @@ fs.writeFileSync(process.argv[3], JSON.stringify({
 }, null, 2) + "\n");
 NODE
 
-# Smoke-load the curated extension set from local paths. This catches missing
-# peer/runtime dependencies without downloading or writing to the developer's
-# real Pi configuration.
-PROBE_AGENT="$(mktemp -d)"
-trap 'rm -rf "$PROBE_AGENT"' EXIT
-mkdir -p "$PROBE_AGENT/npm"
-printf '{"name":"cypher-runtime-probe","private":true}\n' >"$PROBE_AGENT/npm/package.json"
-node - "$STAGE/runtime.json" "$STAGE" "$PROBE_AGENT/settings.json" <<'NODE'
-const fs = require("fs");
-const path = require("path");
-const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const packages = Object.keys(manifest.plugins)
-  .sort()
-  .map((name) => {
-    const source = path.join(process.argv[3], "npm", "node_modules", name);
-    return name === "pi-permission-control"
-      ? { source, extensions: ["-index.ts"] }
-      : source;
-  });
-const extensions = [
-  path.join(process.argv[3], "extensions", "cypher-provider-auth.ts"),
-];
-fs.writeFileSync(process.argv[4], JSON.stringify({ packages, extensions }, null, 2) + "\n");
-NODE
-if ! PI_CODING_AGENT_DIR="$PROBE_AGENT" PI_PACKAGE_DIR="$STAGE/pi" \
-  "$STAGE/bin/pi" --help >"$PROBE_AGENT/probe.log" 2>&1; then
-  cat "$PROBE_AGENT/probe.log" >&2
-  echo "Pi Runtime extension smoke test failed" >&2
-  exit 1
-fi
+# RPC startup checks the actual curated extensions and required commands.
+# --help reports success even when extensions fail; never use it as this gate.
+"$STAGE/bin/node" "$ROOT/scripts/ci/pi-runtime-smoke.mjs" "$STAGE"
 PI_PACKAGE_DIR="$STAGE/pi" CYPHER_PROVIDER_HELPER="$STAGE/provider-service.mjs" \
   "$STAGE/bin/node" --test "$SPEC/provider-service.test.mjs"
-rm -rf "$PROBE_AGENT"
-trap - EXIT
 
 # The archive has one root directory; the installer validates every listed
 # path, then extracts with --strip-components=1.
 mkdir -p "$OUT_DIR"
-tar -czf "$ARCHIVE" -C "$OUT_DIR" "$NAME"
+python3 "$ROOT/scripts/ci/deterministic-tar.py" "$STAGE" "$ARCHIVE"
 # GNU stat -f can print filesystem information before returning an error for
 # '%z'; concatenating that with the fallback produced NaN/null Linux sizes.
 SIZE="$(node -p "require('node:fs').statSync(process.argv[1]).size" "$ARCHIVE")"
 SHA="$(shasum -a 256 "$ARCHIVE" 2>/dev/null | awk '{print $1}' || sha256sum "$ARCHIVE" | awk '{print $1}')"
 
-node - "$STAGE/runtime.json" "$META" "$PLATFORM" "$(basename "$ARCHIVE")" "$SIZE" "$SHA" "$CYPHER_VERSION" <<'NODE'
+node - "$STAGE/runtime.json" "$META" "$PLATFORM" "$(basename "$ARCHIVE")" "$SIZE" "$SHA" "$MINIMUM_CYPHER_VERSION" <<'NODE'
 const fs = require("fs");
 const runtime = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const [platform, file, size, sha256, minimumCypherVersion] = process.argv.slice(4);

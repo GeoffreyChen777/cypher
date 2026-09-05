@@ -61,7 +61,9 @@ redaction checks. No real provider credentials are needed.
 
 1. Change exact dependency versions in `package.json`.
 2. Run `npm install --package-lock-only --ignore-scripts` in this directory.
-3. If Pi's version did not change, bump the bundle revision:
+3. Update `release.json`: bump the bundle revision when its contents change,
+   and explicitly set the minimum compatible Cypher and pinned Node version.
+   A local-only packaging override is also available:
 
    ```bash
    PI_RUNTIME_VERSION=0.85.0.4 scripts/package-pi-runtime.sh
@@ -69,8 +71,12 @@ redaction checks. No real provider credentials are needed.
 
 4. Test the generated archive under `target/package/`.
 
-Tagged releases build all supported platforms, merge their metadata, upload
-the archives first, and publish `runtimes/pi/manifest.json` last. Cypher checks
+Tagged releases build and validate all supported platforms, upload immutable
+archives first, and publish `runtimes/pi/manifest.json` only after every artifact
+passes. Existing names with different content are never overwritten. Cypher checks
 that manifest after startup and every six hours. Existing installations update
 in staging, verify SHA-256 and `pi --version`, then switch `current`; older
 version directories remain available for rollback.
+
+See [CI/CD operations](../../docs/ci-cd.md) for release ordering, compatibility
+gates, checksums and failed-publication retries.

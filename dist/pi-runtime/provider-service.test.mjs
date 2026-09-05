@@ -27,6 +27,12 @@ test("isolated Runtime provider lifecycle and credential redaction", {
   const helperSource = process.env.CYPHER_PROVIDER_HELPER ??
     fileURLToPath(new URL("./provider-service.mjs", import.meta.url));
   const helper = join(agent, "provider-service.mjs");
+  // A build launched from Pi must not lend its session marker, credentials,
+  // proxy configuration or home-directory state to the fixture subprocesses.
+  const childEnv = {
+    HOME: agent, PATH: process.env.PATH, TMPDIR: tmpdir(), PI_OFFLINE: "1",
+    PI_CODING_AGENT_DIR: agent, PI_PACKAGE_DIR: process.env.PI_PACKAGE_DIR,
+  };
   // Production invokes the script via current -> versions/<version>.
   await symlink(helperSource, helper);
   const secret = "cypher-fixture-secret-never-log";
@@ -46,7 +52,7 @@ test("isolated Runtime provider lifecycle and credential redaction", {
   const url = `http://127.0.0.1:${server.address().port}`;
   async function call(request, success = true) {
     const child = spawn(process.execPath, [helper], {
-      env: { ...process.env, PI_CODING_AGENT_DIR: agent },
+      cwd: agent, env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let output = "", stderr = "";
@@ -90,7 +96,7 @@ test("isolated Runtime provider lifecycle and credential redaction", {
     const plugin = join(packageRoot, "..", "..", "pi-provider-newapi");
     await writeFile(join(agent, "settings.json"), JSON.stringify({ packages: [plugin] }));
     const pi = spawn(process.execPath, [join(packageRoot, "dist/cli.js"), "--mode", "rpc", "--no-session"], {
-      cwd: agent, env: { ...process.env, PI_CODING_AGENT_DIR: agent },
+      cwd: agent, env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
     try {

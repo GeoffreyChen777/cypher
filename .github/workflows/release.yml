@@ -1,138 +1,93 @@
 name: release
 
-# Build release artifacts and publish them:
-#   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
-#   - macOS dmg (Apple silicon) via scripts/package-macos.sh
-# then create a GitHub Release AND upload everything to the
-# `cypher-releases` R2 bucket (served at edge.letscypher.app/releases/*
-# for `curl -fsSL https://edge.letscypher.app/install.sh | sh`), bumping latest.txt.
-#
-# Trigger: push a tag `cypher-v<version>` matching the workspace version in
-# Cargo.toml (bump it in the same commit) to build AND publish a GitHub
-# Release + R2 update-channel upload; or run manually via workflow_dispatch,
-# which stays build/upload-only (artifacts only — no release/R2 publish).
-
+# Tag pushes publish; workflow_dispatch is ALWAYS build/validate-only, even
+# when a tag is selected. Production writes hold the lock shared with deploy.
 on:
   push:
     tags: ["cypher-v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
-
-concurrency:
-  group: cypher-release-${{ github.ref }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.context.outputs.version }}
+      publish: ${{ steps.context.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: validate tag/version and fail early on missing publication credential
+        id: context
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/ci/release.py context
+
   linux:
+    needs: preflight
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64 host
-          - runner: ubuntu-24.04-arm # aarch64 host
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    # Build inside an Ubuntu 20.04 (glibc 2.31) container. Building on the
-    # host runner (Ubuntu 24.04, glibc 2.39) makes the binaries import
-    # GLIBC_2.39 symbols and crash on older Linux — the 0.1.2 defect this
-    # release fixes. The runner only supplies CPU/arch (x86_64 vs aarch64);
-    # every step below executes in the container, so the produced binaries
-    # link against glibc <= 2.31. No host target caches are reused (no
-    # Swatinem/rust-cache): a cache built on a newer glibc could leak
-    # GLIBC_2.39 artifacts into the package.
+    # Do not build on the host's newer libc. No host Rust cache is imported.
     container:
       image: ubuntu:20.04
-    # Container jobs default `run:` steps to /bin/sh. The release scripts use
-    # bash strict mode and bash conditionals, so make that contract explicit.
     defaults:
       run:
         shell: bash
     steps:
-      # Headless build deps only (no X11/Wayland/GPUI deps — the binary is
-      # built --no-default-features). binutils provides readelf for the ABI
-      # check; git is required by actions/checkout.
-      - name: bootstrap container (headless build deps)
+      - name: bootstrap glibc 2.31 build environment
         run: |
-          set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
-          apt-get install -y -qq \
-            ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd
-      - name: bootstrap rust toolchain (stable/minimal) in container
+          apt-get install -y -qq ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd
+      - name: bootstrap rustup (toolchain version comes from rust-toolchain.toml)
         run: |
-          set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
+            | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-      - name: verify rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: shell tests (check-linux-abi)
-        run: |
-          bash -n scripts/check-linux-abi.sh scripts/package-linux.sh scripts/test-check-linux-abi.sh
-          scripts/test-check-linux-abi.sh
-      - name: package (headless, glibc 2.31 baseline)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - run: bash scripts/test-check-linux-abi.sh
+      - name: package headless application
         run: scripts/package-linux.sh
-      - name: isolated Linux CLI and installer regressions
+      - name: isolated CLI and installer regressions
         run: |
           cargo test --locked --no-default-features -p cypher -p cypher-update --bins --lib
           python3 scripts/test-linux-cli.py --binary target/release/cypher
-      - name: smoke + ABI check (headless on Ubuntu 20.04 / glibc 2.31)
+      - name: smoke extracted artifact and recheck ABI
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
-          arch="$(uname -m)"
-          case "$arch" in
-            x86_64)  pkg_arch="x86_64" ;;
-            aarch64) pkg_arch="aarch64" ;;
-            *) echo "::error::unexpected container arch '$arch'"; exit 1 ;;
-          esac
-          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
-          tarball="target/package/cypher-$version-linux-$pkg_arch.tar.gz"
-          # Verify the container arch maps to the expected artifact suffix.
-          test -f "$tarball" || {
-            echo "::error::expected artifact '$tarball' (container arch $arch) not found"; exit 1
-          }
-          echo "container arch $arch -> $tarball"
-          rm -rf /tmp/cypher-smoke && mkdir -p /tmp/cypher-smoke
-          tar -xzf "$tarball" -C /tmp/cypher-smoke
-          bin="$(find /tmp/cypher-smoke -type f -name cypher | head -1)"
-          test -n "$bin" || { echo "::error::no cypher binary in tarball"; exit 1; }
-          # Run directly inside the Ubuntu 20.04 container (glibc 2.31): a
-          # timeout rc of 124 means the headless engine stayed up the full 8s
-          # (killed by timeout) — a success. Any immediate exit (e.g. missing
-          # libxcb, or an imported GLIBC_2.39 symbol) fails the release.
-          export CYPHER_DATA_DIR=/tmp/cypher
+          archive="target/package/cypher-$VERSION-linux-$(uname -m).tar.gz"
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+          tar -xzf "$archive" -C "$stage" --strip-components=1
+          scripts/check-linux-abi.sh "$stage/cypher"
           set +e
-          timeout 8 "$bin" headless
+          CYPHER_DATA_DIR="$stage/data" CYPHER_IPC_PORT=27973 timeout 8 "$stage/cypher" headless
           rc=$?
           set -e
-          if [ "$rc" = 124 ]; then
-            echo "OK: cypher headless stayed up 8s (timeout 124) on glibc 2.31"
-          else
-            echo "FAIL: cypher headless exited with $rc on Ubuntu 20.04 (glibc 2.31)"
-            exit 1
-          fi
-          # Prove the artifact imports no GLIBC newer than 2.31.
-          scripts/check-linux-abi.sh "$bin"
-      - uses: actions/upload-artifact@v4
+          test "$rc" = 124 || { echo "headless smoke exited with $rc"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-${{ runner.arch }}
           path: target/package/*.tar.gz
           if-no-files-found: error
 
-  # Required job: the publish job consumes these artifacts, so a failure here
-  # blocks the release (there is no Linux-only release path anymore).
-  #
-  # Signing/notarization (both optional — absent secrets fall back to an
-  # ad-hoc-signed build):
-  #   MACOS_CERT_P12 / MACOS_CERT_PASSWORD — base64 "Developer ID Application"
-  #     certificate + private key (.p12) and its export password.
-  #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
-  #     key (raw .p8 contents), for notarytool. All three present → the package
-  #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
-    runs-on: macos-15 # Apple silicon
+    needs: preflight
+    runs-on: macos-15
+    timeout-minutes: 40
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -140,13 +95,13 @@ jobs:
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - name: verify Apple silicon runner
-        run: test "$(uname -m)" = arm64
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: import Developer ID certificate
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: test "$(uname -m)" = arm64
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: import optional Developer ID certificate
         if: env.MACOS_CERT_P12 != ''
         run: |
           keychain="$RUNNER_TEMP/release.keychain-db"
@@ -155,18 +110,15 @@ jobs:
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$pass" "$keychain"
           printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/cert.p12"
-          # Allow codesign to use the imported key without a UI prompt.
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$pass" "$keychain" >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" login.keychain-db
           identity="$(security find-identity -v -p codesigning "$keychain" \
             | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
+          test -n "$identity"
           echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
-      - name: notary credentials
+      - name: optional notary credentials
         if: env.AC_API_KEY_P8 != ''
         run: |
           printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
@@ -175,9 +127,15 @@ jobs:
             echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
             echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
           } >>"$GITHUB_ENV"
-      - name: package dmg
-        run: scripts/package-macos.sh
-      - uses: actions/upload-artifact@v4
+      - run: scripts/package-macos.sh
+      - name: verify macOS package and executable
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          codesign --verify --strict target/package/Cypher.app
+          test "$(target/package/Cypher.app/Contents/MacOS/cypher --version)" = "cypher $VERSION"
+          hdiutil verify "target/package/cypher-$VERSION-macos-arm64.dmg"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-${{ runner.arch }}
           path: |
@@ -185,46 +143,44 @@ jobs:
             target/package/*.tar.gz
           if-no-files-found: error
 
-  # Small Cypher installers fetch this platform-specific Node + Pi + curated
-  # plugin runtime on first use. It is a separate artifact so users who never
-  # use Pi do not pay the ~100 MB download.
   pi-runtime:
+    needs: preflight
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-          - runner: ubuntu-24.04
-          - runner: ubuntu-24.04-arm
+        runner: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.19.0
           cache: npm
           cache-dependency-path: dist/pi-runtime/package-lock.json
-      - name: package isolated Pi runtime
+      - name: package Runtime with real RPC and negative extension tests
         run: scripts/package-pi-runtime.sh
-      - name: Runtime metadata regression
-        run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
-      - name: Pi Runtime smoke on the minimum Linux glibc
+      - run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
+      - name: full Runtime smoke on minimum Linux glibc
         if: runner.os == 'Linux'
         run: |
           docker run --rm \
             -v "$PWD/target/package:/packages:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
             -v "$PWD/dist/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
             ubuntu:20.04 sh -ec '
               mkdir /runtime /agent
               archive=$(find /packages -name "cypher-pi-runtime-*.tar.gz")
               tar -xzf "$archive" -C /runtime --strip-components=1
               cp /provider-service.test.mjs /runtime/provider-service.test.mjs
-              export PI_CODING_AGENT_DIR=/agent PI_PACKAGE_DIR=/runtime/pi
-              /runtime/bin/pi --version
-              CYPHER_PROVIDER_HELPER=/runtime/provider-service.mjs \
+              /runtime/bin/node /ci/pi-runtime-smoke.mjs /runtime
+              PI_CODING_AGENT_DIR=/agent PI_PACKAGE_DIR=/runtime/pi \
+                CYPHER_PROVIDER_HELPER=/runtime/provider-service.mjs \
                 /runtime/bin/node --test /runtime/provider-service.test.mjs
             '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pi-runtime-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -232,157 +188,53 @@ jobs:
             target/package/cypher-pi-runtime-*.json
           if-no-files-found: error
 
-  publish:
-    if: startsWith(github.ref, 'refs/tags/cypher-v')
-    needs: [linux, macos, pi-runtime]
-    runs-on: ubuntu-latest
-    env:
-      # `secrets` is not a valid context in step `if:` expressions — surface
-      # the token through job env and gate on that instead.
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: 1489e726fc5baa8ecc7a6e1a8c8ed3f8
+  validate-artifacts:
+    needs: [preflight, linux, macos, pi-runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          path: dist
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
           merge-multiple: true
-      - name: preflight (R2 channel must be reachable before publishing)
+      - name: validate every artifact before any production write
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN is empty — refusing to publish a release without the R2 update channel."
-            exit 1
-          fi
-          npx wrangler@4 r2 bucket info cypher-releases
-      - name: version guard (tag == artifact version)
-        run: |
-          ver="${GITHUB_REF_NAME#cypher-v}"
-          [ -n "$ver" ] || { echo "::error::empty version from tag $GITHUB_REF_NAME (expected cypher-v<version>)"; exit 1; }
-          echo "VERSION=$ver" >> "$GITHUB_ENV"
-      - name: verify artifact set (exact, non-empty, valid archives)
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          ver="$VERSION"
-          expected=(
-            "cypher-$ver-linux-x86_64.tar.gz"
-            "cypher-$ver-linux-aarch64.tar.gz"
-            "cypher-$ver-macos-arm64.dmg"
-            "cypher-$ver-macos-arm64-app.tar.gz"
-          )
-          ls -la dist/
-          cd dist
-          # Reject extras: every downloaded file must be in the expected set.
-          for f in *; do
-            [[ "$f" == cypher-pi-runtime-*.tar.gz || "$f" == cypher-pi-runtime-*.json ]] && continue
-            match=0
-            for want in "${expected[@]}"; do
-              [[ "$f" == "$want" ]] && match=1
-            done
-            if (( match != 1 )); then
-              echo "::error::unexpected artifact for v$ver: $f"
-              exit 1
-            fi
-            # Reject empty files.
-            test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
-          done
-          # Reject missing: every expected artifact must be present.
-          for want in "${expected[@]}"; do
-            test -e "$want" || { echo "::error::missing artifact for v$ver: $want"; exit 1; }
-          done
-          # Tarballs must be readable gzip archives (the dmg is validated by size above).
-          for want in "${expected[@]}"; do
-            [[ "$want" == *.tar.gz ]] || continue
-            echo "== $want =="
-            tar -tzf "$want" >/dev/null || { echo "::error::$want is not a valid tar.gz"; exit 1; }
-            tar -tzf "$want"
-          done
-          echo "artifact set OK: ${expected[*]}"
-      - name: generate standalone artifact checksums
-        run: |
-          for f in dist/cypher-$VERSION-*; do
-            sha256sum "$f" | cut -d' ' -f1 > "$f.sha256"
-          done
-      - uses: softprops/action-gh-release@v2
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: python3 scripts/ci/release.py validate --dist target/release-dist --version "$VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
         with:
-          files: dist/*
-          generate_release_notes: true
-      - name: upload to R2 (edge.letscypher.app/releases/*)
-        run: |
-          for f in dist/cypher-$VERSION-*; do
-            npx wrangler@4 r2 object put "cypher-releases/$(basename "$f")" \
-              --file "$f" --remote
-          done
-          # Prepare the app manifest, but do not advertise the app version
-          # until the matching Pi Runtime channel has also been published.
-          manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
-          for f in dist/cypher-$VERSION-*; do
-            [[ "$f" == *.sha256 ]] && continue
-            sha=$(sha256sum "$f" | cut -d' ' -f1)
-            manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
-              '.files[$name] = {sha256: $sha}' <<<"$manifest")
-          done
-          printf '%s' "$manifest" > manifest.json
-      - name: publish Pi runtime channel
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          metas=(dist/cypher-pi-runtime-*.json)
-          archives=(dist/cypher-pi-runtime-*.tar.gz)
-          test "${#metas[@]}" -eq 3 || {
-            echo "::error::expected 3 Pi runtime metadata files, found ${#metas[@]}"; exit 1
-          }
-          test "${#archives[@]}" -eq 3 || {
-            echo "::error::expected 3 Pi runtime archives, found ${#archives[@]}"; exit 1
-          }
-          for f in "${archives[@]}"; do
-            test -s "$f"
-            tar -tzf "$f" >/dev/null
-          done
-          for meta in "${metas[@]}"; do
-            jq -e '.version and .piVersion and (.files | length == 1)
-              and ([.files[] | (.size | type == "number") and (.size > 0)] | all)' "$meta" >/dev/null
-            file=$(jq -r '.files[] | .url' "$meta")
-            expected_sha=$(jq -r '.files[] | .sha256' "$meta")
-            test -f "dist/$file" || {
-              echo "::error::$meta references missing archive $file"; exit 1
-            }
-            actual_sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
-            test "$actual_sha" = "$expected_sha" || {
-              echo "::error::checksum mismatch for $file"; exit 1
-            }
-          done
-          manifest=$(jq -s '
-            .[0] as $base |
-            reduce .[] as $item (
-              {
-                version: $base.version,
-                piVersion: $base.piVersion,
-                minimumCypherVersion: $base.minimumCypherVersion,
-                plugins: $base.plugins,
-                files: {}
-              };
-              if $item.version != $base.version
-                 or $item.piVersion != $base.piVersion
-                 or $item.minimumCypherVersion != $base.minimumCypherVersion
-                 or $item.plugins != $base.plugins
-              then error("Pi runtime metadata disagree across platforms")
-              else .files += $item.files
-              end
-            )
-          ' "${metas[@]}")
-          printf '%s\n' "$manifest" > pi-runtime-manifest.json
-          for f in "${archives[@]}"; do
-            npx wrangler@4 r2 object put "cypher-releases/runtimes/pi/$(basename "$f")" \
-              --file "$f" --remote
-          done
-          npx wrangler@4 r2 object put cypher-releases/runtimes/pi/manifest.json \
-            --file pi-runtime-manifest.json --remote
-          # Both app pointers go last. The Rust updater prefers manifest.json,
-          # so delaying only latest.txt did not actually protect that client.
-          npx wrangler@4 r2 object put cypher-releases/manifest.json \
-            --file manifest.json --remote
-          printf '%s' "$VERSION" > latest.txt
-          npx wrangler@4 r2 object put cypher-releases/latest.txt \
-            --file latest.txt --remote
+          name: checksums-and-manifests
+          path: target/release-plan/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-v')
+    needs: [preflight, validate-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: cypher-production
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
+          merge-multiple: true
+      - name: validate, reject conflicts/rollback, upload immutable objects, promote last
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 1489e726fc5baa8ecc7a6e1a8c8ed3f8
+          GITHUB_TOKEN: ${{ github.token }}
+          CYPHER_PRODUCTION_LOCK: held
+        run: python3 scripts/ci/release.py publish --dist target/release-dist --version "$VERSION"

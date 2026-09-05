@@ -100,4 +100,6 @@ On macOS: use the desktop release, or build `cypher` from source and run `cypher
 
 Developing or curious how it works? [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeronsh/comet) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
 
+CI, deployment prerequisites and release recovery: [CI/CD operations](docs/ci-cd.md).
+
 Licensed under the [MIT License](LICENSE).
