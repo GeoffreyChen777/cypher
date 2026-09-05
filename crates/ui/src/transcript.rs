@@ -665,16 +665,75 @@ pub fn fork_tooltip(role: MessageRole, gate: &ForkGate) -> &'static str {
     }
 }
 
-/// The fork affordance's hover tooltip (Session Fork v1).
-struct ForkTooltip {
+/// Text copied by the entry-level action, not by a virtualized markdown row.
+/// Keep Markdown intact; tool payloads and input-wizard internals aren't prose.
+fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
+    let text = entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            MessagePart::Error { message, .. } if entry.role != MessageRole::User => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let text = if entry.role == MessageRole::User {
+        // Match the visible user bubble: no attachment transport paths or
+        // internal file/session mention URLs on the clipboard.
+        let parsed = crate::attachments::parse_user_message_images(&text);
+        crate::composer::sent_mention_display(&parsed.text)
+            .map(|(display, _)| display)
+            .unwrap_or(parsed.text)
+    } else {
+        text
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn message_for_copy<'a>(
+    entries: &'a [SessionMessageEntry],
+    echoes: &'a [SessionMessageEntry],
+    entry_id: &str,
+) -> Option<&'a SessionMessageEntry> {
+    // A durable message wins over an optimistic mirror with the same id.
+    entries
+        .iter()
+        .chain(echoes)
+        .find(|entry| entry.id == entry_id)
+}
+
+fn message_copy_icon(copied: bool, enabled: bool, theme: &Theme) -> gpui::Svg {
+    // Svg::paint reads its own text.color, not the enclosing div's color.
+    let color = if !enabled {
+        theme.text_muted.opacity(0.3)
+    } else if copied {
+        theme.success
+    } else {
+        theme.text_muted
+    };
+    crate::icons::icon(if copied {
+        crate::icons::CHECK
+    } else {
+        crate::icons::COPY
+    })
+    .size(px(10.0))
+    .text_color(color)
+}
+
+/// Shared styling for the message strip's action tooltips.
+struct MessageActionTooltip {
     text: SharedString,
 }
 
-impl Render for ForkTooltip {
+impl Render for MessageActionTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         motion::fade_quick(
-            "fork-tooltip",
+            "message-action-tooltip",
             div()
                 .max_w(px(280.0))
                 .px(px(8.0))
@@ -1594,6 +1653,9 @@ pub struct Transcript {
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
+    /// Entry-level copy feedback is separate from a code block's copy state.
+    copied_message: Option<SharedString>,
+    copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -1721,6 +1783,8 @@ impl Transcript {
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
+            copied_message: None,
+            copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_loads: HashMap::new(),
@@ -2424,6 +2488,8 @@ impl Transcript {
 
         let attached = selected != self.chat_id;
         if attached {
+            self.copied_message = None;
+            self.copied_message_clear = None;
             let keep_own_turn = self
                 .own_turn
                 .as_ref()
@@ -3357,7 +3423,7 @@ impl Transcript {
                             }))
                     })
                     .tooltip(move |_, cx| {
-                        cx.new(|_| ForkTooltip {
+                        cx.new(|_| MessageActionTooltip {
                             text: fork_tip.clone(),
                         })
                         .into()
@@ -3366,6 +3432,60 @@ impl Transcript {
                     .into_any_element(),
             )
         };
+        // Copy belongs to every message strip, including System/Side Chat and
+        // offline/non-Pi chats. Inspect availability only for the hovered last
+        // row; resolve and assemble the complete entry lazily on click.
+        let copy_button = (hovered && row.timestamp.is_some()).then(|| {
+            let can_copy = match &row.kind {
+                RowKind::User { text, .. } => !text.trim().is_empty(),
+                _ => {
+                    let state = self.state.read(cx);
+                    message_for_copy(&state.transcript, state.pending_echoes(), &row.entry_id)
+                        .is_some_and(|entry| {
+                            entry.parts.iter().any(|part| match part {
+                                MessagePart::Text { text, .. } => !text.trim().is_empty(),
+                                MessagePart::Error { message, .. } => !message.trim().is_empty(),
+                                _ => false,
+                            })
+                        })
+                }
+            };
+            let copied = self.copied_message.as_ref() == Some(&row.entry_id);
+            let chat_id = self.chat_id.clone();
+            let entry_id = row.entry_id.clone();
+            let tip: SharedString = if copied {
+                "Copied!"
+            } else if can_copy {
+                "Copy message"
+            } else {
+                "No text to copy"
+            }
+            .into();
+            div()
+                .id((row.id.clone(), 1usize))
+                .size(px(12.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(message_copy_icon(copied, can_copy, &theme))
+                .when(can_copy, |el| {
+                    el.cursor_pointer()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.copy_message(&chat_id, &entry_id, cx);
+                        }))
+                })
+                .tooltip(move |_, cx| {
+                    cx.new(|_| MessageActionTooltip { text: tip.clone() })
+                        .into()
+                })
+                .tooltip_show_delay(Duration::from_millis(350))
+                .into_any_element()
+        });
         let strip = row.timestamp.map(|ms| {
             div()
                 .h(px(if is_user_row { 16.0 } else { 20.0 }))
@@ -3391,7 +3511,8 @@ impl Transcript {
                             .text_size(px(11.0))
                             .text_color(theme.text_muted.opacity(0.55))
                             .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
-                            .when_some(fork_button, |el, button| el.child(button)),
+                            .when_some(fork_button, |el, button| el.child(button))
+                            .when_some(copy_button, |el, button| el.child(button)),
                     ))
                 })
         });
@@ -3442,6 +3563,42 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    fn copy_message(
+        &mut self,
+        chat_id: &Option<String>,
+        entry_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let text = {
+            let state = self.state.read(cx);
+            // Reject an old row's click after navigation, even when a fork
+            // contains entries whose ids also occur in the previous chat.
+            if &self.chat_id != chat_id || &state.selected_chat != chat_id {
+                return;
+            }
+            message_for_copy(&state.transcript, state.pending_echoes(), entry_id)
+                .and_then(message_copy_text)
+        };
+        let Some(text) = text else {
+            // Empty/tool-only entries must not erase the user's clipboard.
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied_message = Some(entry_id.clone());
+        self.copied_message_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied_message = None;
+                this.copied_message_clear = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Copy-button wiring for one row's code blocks ([`render::CopyUi`]):
@@ -4932,6 +5089,139 @@ mod tests {
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
+
+    #[test]
+    fn message_copy_icons_have_explicit_paint_colors() {
+        for theme in [Theme::dark(), Theme::light()] {
+            for copied in [false, true] {
+                for enabled in [false, true] {
+                    let expected = if !enabled {
+                        theme.text_muted.opacity(0.3)
+                    } else if copied {
+                        theme.success
+                    } else {
+                        theme.text_muted
+                    };
+                    let mut glyph = message_copy_icon(copied, enabled, &theme);
+                    assert_eq!(glyph.style().text.color, Some(expected));
+                    assert_eq!(glyph.style().size.width, Some(px(10.0).into()));
+                    assert_eq!(glyph.style().size.height, Some(px(10.0).into()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn message_copy_keeps_whole_markdown_and_skips_tool_internals() {
+        let entry = assistant(
+            "copy-full",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", MD),
+                tool_part("tool", "internal command should not be copied"),
+                text_part("empty", ""),
+                text_part("t1", "中文结尾 🐈\n\n  保留缩进和换行\n"),
+                MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "request".into(),
+                    questions: vec![],
+                    resolved: true,
+                },
+            ],
+        );
+        assert!(rows_for_entry(&entry, false, &mut parse).len() > 3);
+        assert_eq!(
+            message_copy_text(&entry).as_deref(),
+            Some(format!("{MD}\n\n中文结尾 🐈\n\n  保留缩进和换行\n").as_str())
+        );
+    }
+
+    #[test]
+    fn message_copy_user_matches_visible_mentions_and_attachments() {
+        let raw = crate::attachments::with_attachments(
+            "检查 [lib.rs](cypher-file:src/lib.rs)\n保留这一行",
+            &["/private/attachment.png".into()],
+        );
+        let mut entry = assistant(
+            "user-copy",
+            MessageStatus::Complete,
+            vec![text_part("t", &raw)],
+        );
+        entry.role = MessageRole::User;
+        let copied = message_copy_text(&entry).unwrap();
+        assert!(copied.contains("@lib.rs"));
+        assert!(copied.ends_with("\n保留这一行"));
+        assert!(!copied.contains("cypher-file:"));
+        assert!(!copied.contains("/private/attachment.png"));
+        assert!(!copied.contains("Attached images"));
+
+        entry.parts = vec![text_part(
+            "image-only",
+            &crate::attachments::with_attachments("", &["/private/attachment.png".into()]),
+        )];
+        assert_eq!(message_copy_text(&entry), None);
+    }
+
+    #[test]
+    fn message_copy_handles_errors_and_empty_entries_without_internal_payloads() {
+        let mut entry = assistant(
+            "copy-empty",
+            MessageStatus::Complete,
+            vec![text_part("blank", " \n\t"), tool_part("tool", "internal")],
+        );
+        assert_eq!(message_copy_text(&entry), None);
+        entry.role = MessageRole::System;
+        entry.parts.push(MessagePart::Error {
+            id: "error".into(),
+            message: "Request failed\nDetailed reason".into(),
+        });
+        assert_eq!(
+            message_copy_text(&entry).as_deref(),
+            Some("Request failed\nDetailed reason")
+        );
+        entry.parts.clear();
+        assert_eq!(message_copy_text(&entry), None);
+    }
+
+    #[test]
+    fn message_copy_lookup_uses_exact_entry_and_supports_pending_echoes() {
+        let entries = vec![
+            assistant(
+                "first",
+                MessageStatus::Complete,
+                vec![text_part("t0", "first")],
+            ),
+            assistant(
+                "selected",
+                MessageStatus::Complete,
+                vec![
+                    text_part("t1", "whole message"),
+                    text_part("t2", "continued response"),
+                ],
+            ),
+        ];
+        let echoes = vec![
+            assistant(
+                "selected",
+                MessageStatus::Complete,
+                vec![text_part("t", "stale mirror")],
+            ),
+            assistant(
+                "pending",
+                MessageStatus::Complete,
+                vec![text_part("t", "pending text")],
+            ),
+        ];
+        assert_eq!(
+            message_for_copy(&entries, &echoes, "selected").and_then(message_copy_text),
+            Some("whole message\n\ncontinued response".into())
+        );
+        assert_eq!(
+            message_for_copy(&entries, &echoes, "pending").and_then(message_copy_text),
+            Some("pending text".into())
+        );
+        assert!(message_for_copy(&entries, &echoes, "missing").is_none());
+    }
 
     #[test]
     fn live_entry_splits_per_block_with_id_continuity() {
