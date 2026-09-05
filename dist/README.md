@@ -49,13 +49,29 @@ CI runs this on tags
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
      dist/macos/Info.plist > Cypher.app/Contents/Info.plist
    ```
-3. Icon: generate `cypher.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
-   variant of the artwork — squircle mask, margins, and shadow pre-baked, since
-   `sips` can't apply an alpha mask) and place it at
-   `Cypher.app/Contents/Resources/cypher.icns`:
+3. Icon: use `dist/macos/icon-1024.png`, the alpha-normalized macOS variant,
+   rather than copying the shared `dist/cypher.png` directly. The shared artwork
+   already includes its outline and padding, but has near-opaque face pixels.
+   macOS 26 interprets that translucency as a foreground symbol, adds a gray
+   backplate, and shrinks the artwork inside it. The macOS variant restores the
+   face to alpha 255 and removes faint background specks without resizing,
+   cropping, redrawing, or changing visible RGB values. Actual edge
+   antialiasing is retained; older macOS versions keep the existing outline.
+
+   After changing the shared artwork, regenerate and check the macOS variant:
    ```sh
-   mkdir cypher.iconset && sips -z 256 256 dist/macos/icon-1024.png --out cypher.iconset/icon_256x256.png
-   iconutil -c icns cypher.iconset -o Cypher.app/Contents/Resources/cypher.icns
+   xcrun swift scripts/macos-icon.swift generate dist/cypher.png dist/macos/icon-1024.png
+   xcrun swift scripts/macos-icon.swift test
+   xcrun swift scripts/macos-icon.swift check dist/cypher.png dist/macos/icon-1024.png
+   ```
+   This uses macOS ImageIO, without Pillow or additional packages. Packaging and
+   macOS CI both reject a stale or unnormalized variant. `package-macos.sh`
+   generates all five standard sizes and their Retina counterparts, then places
+   `cypher.icns` at `Cypher.app/Contents/Resources/cypher.icns`. To build or test
+   just the icon, without rebuilding Rust, touching an existing app, or signing:
+   ```sh
+   bash scripts/package-macos.sh --icon-only /tmp/cypher.icns
+   bash scripts/test-macos-icon.sh
    ```
 4. Sign + notarize (required for distribution):
    ```sh

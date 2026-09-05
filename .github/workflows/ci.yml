@@ -28,7 +28,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - run: python3 scripts/test-linux-cli.py
       - run: bash scripts/test-check-linux-abi.sh
-      - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh
+      - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh scripts/test-macos-icon.sh
       - run: sh -n edge/src/install.sh
 
   edge:
@@ -70,6 +70,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: validate macOS icon alpha and artwork
+        run: bash scripts/test-macos-icon.sh
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo check --workspace --locked

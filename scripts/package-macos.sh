@@ -5,6 +5,7 @@
 # containing Cypher.app (unsigned unless CODESIGN_IDENTITY is set).
 #
 # Usage: scripts/package-macos.sh
+#        scripts/package-macos.sh --icon-only /path/to/cypher.icns
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
@@ -22,6 +23,42 @@ DMG="$OUT_DIR/cypher-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/cypher-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
+# Reject stale/copied artwork before building or signing an app. Near-opaque
+# pixels make macOS 26 inset the artwork on a second, gray icon backplate.
+xcrun swift "$ROOT/scripts/macos-icon.swift" check \
+  "$ROOT/dist/cypher.png" "$ROOT/dist/macos/icon-1024.png"
+
+# Shared by the release bundle and the fast icon regression/preview path.
+# Use an owned temporary directory, not the existing signed app or iconset.
+package_icon() (
+  output="$1"
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/cypher-icon.XXXXXX")"
+  trap 'rm -rf "$scratch"' EXIT
+  iconset="$scratch/cypher.iconset"
+  mkdir -p "$iconset"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" \
+      --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    retina=$((size * 2))
+    if [[ "$retina" -eq 1024 ]]; then
+      cp "$ROOT/dist/macos/icon-1024.png" "$iconset/icon_${size}x${size}@2x.png"
+    else
+      sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" \
+        --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+    fi
+  done
+  iconutil -c icns "$iconset" -o "$output"
+)
+
+if [[ "${1:-}" == "--icon-only" && $# -eq 2 ]]; then
+  package_icon "$2"
+  echo "packaged icon: $2"
+  exit 0
+elif [[ $# -ne 0 ]]; then
+  echo "Usage: $0 [--icon-only /path/to/cypher.icns]" >&2
+  exit 2
+fi
+
 # Default features (desktop UI): macOS always ships the headed build.
 cargo build --release --locked -p cypher
 
@@ -30,18 +67,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/cypher" "$APP/Contents/MacOS/cypher"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 
-# Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
-# baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
-# applied ahead of time; dist/cypher.png stays the full-bleed shared artwork).
-ICONSET="$OUT_DIR/cypher.iconset"
-rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
-  retina=$((size * 2))
-  sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/cypher.icns"
-rm -rf "$ICONSET"
+# Generate every standard/Retina size from the alpha-normalized macOS variant.
+# Do not copy the shared PNG here: preserve its artwork, but normalize its
+# near-opaque face and transparent background with scripts/macos-icon.swift.
+package_icon "$APP/Contents/Resources/cypher.icns"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
