@@ -7,6 +7,89 @@
 
 use super::*;
 
+const CHAT_TITLEBAR_TOP_PAD: f32 = Theme::TITLEBAR_TOP_PAD + PANEL_EDGE_INSET;
+
+/// The titlebar is window-relative; the card begins PANEL_EDGE_INSET lower.
+/// Use explicit height/start alignment instead of centering a full-height
+/// strip: the first tab's top-left arc must be concentric with the card's.
+fn right_tab_header_frame() -> gpui::Div {
+    div()
+        .flex_none()
+        .self_start()
+        .mt(px(
+            PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD
+        ))
+        .h(px(RIGHT_TAB_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .overflow_hidden()
+        .pl(px(RIGHT_TAB_INSET))
+}
+
+#[cfg(test)]
+mod header_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn surface_tabs_and_panel_have_concentric_top_left_corners() {
+        let mut frame = right_tab_header_frame();
+        let style = frame.style();
+        let margin_top = PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD;
+        assert_eq!(style.margin.top, Some(px(margin_top).into()));
+        assert_eq!(style.padding.left, Some(px(RIGHT_TAB_INSET).into()));
+        assert_eq!(style.size.height, Some(px(RIGHT_TAB_HEIGHT).into()));
+        assert_eq!(style.align_self, Some(gpui::AlignSelf::Start));
+        assert_eq!(RIGHT_TAB_INSET + RIGHT_TAB_RADIUS, PANEL_CORNER_RADIUS);
+        assert_eq!(
+            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_RADIUS,
+            PANEL_EDGE_INSET + PANEL_CORNER_RADIUS,
+        );
+        assert!(
+            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_HEIGHT <= Theme::TITLEBAR_HEIGHT,
+            "tab hit targets must remain inside the titlebar",
+        );
+    }
+
+    #[test]
+    fn surface_header_retains_native_caption_clearance_and_panel_anchor() {
+        for windows in [false, true] {
+            let padding = titlebar_right_padding(windows, PANEL_EDGE_INSET + RIGHT_TAB_INSET);
+            for panel_width in [RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT, 960.0] {
+                let viewport = 1320.0;
+                let header_width = panel_width - padding;
+                let first_tab_left = viewport - padding - header_width + RIGHT_TAB_INSET;
+                assert_eq!(
+                    first_tab_left + RIGHT_TAB_RADIUS,
+                    viewport - panel_width + PANEL_CORNER_RADIUS,
+                );
+            }
+            assert_eq!(
+                padding,
+                PANEL_EDGE_INSET
+                    + RIGHT_TAB_INSET
+                    + if windows { WINDOWS_CAPTION_WIDTH } else { 0.0 },
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_header_accounts_for_collapsed_conversation_margins() {
+        let viewport = 1320.0;
+        let sidebar = 256.0;
+        let padding = PANEL_EDGE_INSET + RIGHT_TAB_INSET;
+        let row_gap = 8.0;
+        let available = viewport - sidebar - padding - row_gap;
+        let strip_left = viewport - padding - available;
+        let panel_left = sidebar + 4.0 + 4.0;
+        assert_eq!(
+            strip_left + RIGHT_TAB_INSET + RIGHT_TAB_RADIUS,
+            panel_left + PANEL_CORNER_RADIUS,
+        );
+    }
+}
+
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
 ///
@@ -224,6 +307,14 @@ impl Shell {
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
         let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let right_padding = titlebar_right_padding(
+            cfg!(target_os = "windows"),
+            if !on_canvas && self.right_pane_open(cx) {
+                PANEL_EDGE_INSET + RIGHT_TAB_INSET
+            } else {
+                Theme::SPACE_LG
+            },
+        );
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -234,17 +325,13 @@ impl Shell {
         // strip doesn't want (it brings its own 8px pad), and doubling up
         // read as a hole after the `+` (user report).
         let row_left = if takeover {
-            // The surface tabs must LEFT-ALIGN with the pane's own rows (the
-            // diff options and stats strip carry an 8px box gutter off the
-            // seam — user report: rows started at different insets). The
-            // strip's width is capped to `avail`, which subtracts the row's
-            // 8px child gap — pulling row_left 8 LEFT of the seam cancels
-            // that, so the uncapped strip starts exactly at the seam and its
-            // own 8px pad lands the first chip on the pane gutter. The
-            // window-control cluster still wins while the sidebar is
-            // collapsed (the chips clear it instead of underlapping).
+            // The collapsed conversation card still has two 4px margins,
+            // so the expanded panel begins 8px after the sidebar seam.
+            // The title row's 8px child gap supplies that same offset;
+            // cancelling it would put the first tab outside the panel's arc.
+            // Keep clearing native/window controls when the sidebar is hidden.
             let cluster_end = self.title_bar_content_start() - 10.0 + plus_inset - 14.0;
-            (sidebar_now - 8.0).max(cluster_end)
+            sidebar_now.max(cluster_end)
         } else {
             content_left
         };
@@ -252,7 +339,7 @@ impl Shell {
             None
         } else if self.right_pane_open(cx) {
             let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
-            let pr = titlebar_right_padding(cfg!(target_os = "windows"), Theme::SPACE_LG);
+            let pr = right_padding;
             // The row's own left padding is part of its content box: a strip
             // wider than what's left after it overflows and clips at the right
             // edge (flex_none never shrinks) — cap to the available width. The
@@ -267,22 +354,11 @@ impl Shell {
             // second row; expand/close stay in this band (user request).
             let controls = self.render_right_tab_strip(cx);
             Some(
-                div()
-                    .flex_none()
-                    .h_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .overflow_hidden()
+                right_tab_header_frame()
                     // Right edge already sits at viewport − pr (the row's own
                     // padding), so this width starts the strip exactly at the
                     // pane's left border — and rides the open/close tween.
                     .w(px((right_now - pr).min(avail).max(0.0)))
-                    // 8 + the trigger's own 8px pad = the pane's 16px text
-                    // gutter, so the scope label sits flush over the stats
-                    // strip below.
-                    .pl(px(8.0))
                     // Clipped: a long base-ref name must truncate inside the
                     // controls, never paint under the buttons to the right.
                     .child(
@@ -326,13 +402,10 @@ impl Shell {
             // The conversation card starts 8px below the window edge. Give
             // its title row matching internal air so the label and trailing
             // controls do not hug the card's top hairline.
-            .pt(px(Theme::TITLEBAR_TOP_PAD + 8.0))
+            .pt(px(CHAT_TITLEBAR_TOP_PAD))
             .gap(px(8.0))
             .pl(px(row_left))
-            .pr(px(titlebar_right_padding(
-                cfg!(target_os = "windows"),
-                Theme::SPACE_LG,
-            )))
+            .pr(px(right_padding))
             // In panel takeover the header strip spans the whole band — the
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.

@@ -101,6 +101,13 @@ pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f3
 /// back/forward: three 24px buttons, 2px gaps).
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + 2.0 * 2.0;
 
+const PANEL_EDGE_INSET: f32 = 8.0;
+const PANEL_CORNER_RADIUS: f32 = 12.0;
+const RIGHT_TAB_RADIUS: f32 = 6.0;
+const RIGHT_TAB_HEIGHT: f32 = 24.0;
+/// Nested rounded rectangles share a corner center when inset by R - r.
+const RIGHT_TAB_INSET: f32 = PANEL_CORNER_RADIUS - RIGHT_TAB_RADIUS;
+
 /// Where the cluster's first button starts, from the window's left edge.
 pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
     if is_macos {
@@ -528,12 +535,12 @@ impl Render for SurfaceTabGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         div()
-            .h(px(24.0))
+            .h(px(RIGHT_TAB_HEIGHT))
             .w(px(112.0))
             .px(px(8.0))
             .flex()
             .items_center()
-            .rounded(px(6.0))
+            .rounded(px(RIGHT_TAB_RADIUS))
             .bg(theme.surface_raised)
             .border_1()
             .border_color(theme.border_strong)
@@ -6214,7 +6221,7 @@ impl Shell {
             .size_full()
             .flex()
             .flex_col()
-            .rounded(px(12.0))
+            .rounded(px(PANEL_CORNER_RADIUS))
             .bg(panel_bg)
             .shadow_sm()
             .overflow_hidden()
@@ -6232,9 +6239,9 @@ impl Shell {
             div()
                 .h_full()
                 .relative()
-                .pt(px(8.0))
-                .pb(px(8.0))
-                .pr(px(8.0))
+                .pt(px(PANEL_EDGE_INSET))
+                .pb(px(PANEL_EDGE_INSET))
+                .pr(px(PANEL_EDGE_INSET))
                 .child(panel)
                 .children(handle)
                 .into_any_element(),
@@ -6514,12 +6521,12 @@ impl Shell {
             let chip = div()
                 .id(("right-surface-tab", ix))
                 .group(group.clone())
-                .h(px(24.0))
+                .h(px(RIGHT_TAB_HEIGHT))
                 .w(px(CHIP_W))
                 .flex_none()
                 .pl(px(4.0))
                 .pr(px(8.0))
-                .rounded(px(6.0))
+                .rounded(px(RIGHT_TAB_RADIUS))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -6639,7 +6646,7 @@ impl Shell {
                 }
                 Some((from, ..)) if ix == from => div()
                     .w(px(CHIP_W))
-                    .h(px(24.0))
+                    .h(px(RIGHT_TAB_HEIGHT))
                     .flex_none()
                     .into_any_element(),
                 _ => chip.into_any_element(),
@@ -6652,12 +6659,12 @@ impl Shell {
         let plus_fade = "right-surface-add-fade";
         let mut plus = div()
             .id("right-surface-add")
-            .size(px(24.0))
+            .size(px(RIGHT_TAB_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.0))
+            .rounded(px(RIGHT_TAB_RADIUS))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 plus_fade,
