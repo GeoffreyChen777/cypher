@@ -448,6 +448,8 @@ class Policies(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("publish=false", output.read_text())
             env["GITHUB_EVENT_NAME"] = "push"
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            env["GITHUB_REF"] = "refs/tags/cypher-v" + values["version"]
             p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("NOT PUBLISHED", p.stderr)
