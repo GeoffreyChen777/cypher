@@ -16,6 +16,7 @@ pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
 pub mod changes;
+pub mod chat_style;
 pub mod comments;
 pub mod composer;
 pub mod edge_fade;
@@ -163,9 +164,10 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         appearance::init(
             settings::UiSettings::load(&data_dir).appearance,
-            data_dir,
+            data_dir.clone(),
             cx,
         );
+        chat_style::init(data_dir, cx);
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);

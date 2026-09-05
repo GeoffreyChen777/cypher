@@ -76,6 +76,10 @@ pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
 pub const INPUT_LINE_HEIGHT: f32 = 22.75;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
+
+fn compact_height_for_line(line_height: f32) -> f32 {
+    COMPACT_TOTAL_HEIGHT.max(COMPACT_TOTAL_HEIGHT + line_height - INPUT_LINE_HEIGHT)
+}
 /// Single-select questions auto-advance after this long.
 pub const AUTO_ADVANCE_MS: u64 = 220;
 /// Keep a question panel with many options inside the composer instead of
@@ -1913,6 +1917,8 @@ pub enum ComposerInputEvent {
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
+    /// Opted in only by real chat composers, never settings/search fields.
+    use_chat_style: bool,
     /// Key context for the binding map ("Composer", or "PaletteSearch" for
     /// palette filters whose navigation keys must bubble).
     key_context: &'static str,
@@ -1997,6 +2003,7 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            use_chat_style: false,
             key_context,
             focus_handle: cx.focus_handle(),
             content: String::new(),
@@ -2071,6 +2078,14 @@ impl ComposerInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    fn text_theme(&self, cx: &App) -> Theme {
+        if self.use_chat_style {
+            crate::chat_style::theme(cx)
+        } else {
+            Theme::of(cx).clone()
+        }
     }
 
     pub fn new_secret(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
@@ -3159,12 +3174,14 @@ impl ComposerInput {
             (SharedString::from(self.projection.display.clone()), false)
         };
         let font_size = style.font_size.to_pixels(window.rem_size());
-        self.line_height = px(INPUT_LINE_HEIGHT);
+        self.line_height = style
+            .line_height
+            .to_pixels(style.font_size, window.rem_size());
 
         // Chips read as inline code: the markdown renderer's recipe (mono font
         // + `code_text` emerald) over the rounded `code_wash` painted beneath.
         let (chip_font, chip_color) = {
-            let theme = Theme::of(cx);
+            let theme = self.text_theme(cx);
             (gpui::font(theme.font_mono.clone()), theme.code_text)
         };
         let run_for = |len: usize, underline: bool, chip: bool| TextRun {
@@ -3245,7 +3262,7 @@ impl ComposerInput {
         self.display_is_placeholder = is_placeholder;
         self.last_lines = lines;
         self.line_starts = line_starts;
-        self.content_height = content_height.max(INPUT_LINE_HEIGHT);
+        self.content_height = content_height.max(f32::from(self.line_height));
         self.max_line_width = if is_placeholder { 0.0 } else { max_line_width };
         self.last_width = f32::from(width);
         self.layout_epoch += 1;
@@ -3545,10 +3562,11 @@ impl gpui::Element for ComposerTextElement {
         let input = self.input.read(cx);
         let scroll = px(input.scroll_top);
         let origin = point(bounds.left(), bounds.top() - scroll);
-        let selection_color = Theme::of(cx).selection;
-        let caret_color = Theme::of(cx).caret;
+        let input_theme = input.text_theme(cx);
+        let selection_color = input_theme.selection;
+        let caret_color = input_theme.caret;
         // The inline-code recipe: chips wash emerald like `code` spans do.
-        let mention_color = Theme::of(cx).code_wash;
+        let mention_color = input_theme.code_wash;
 
         let mut mention_quads = Vec::new();
         let mut mention_hits = Vec::new();
@@ -3760,7 +3778,7 @@ impl gpui::Element for ComposerTextElement {
                 let run = TextRun {
                     len: ghost.len(),
                     font: style.font(),
-                    color: Theme::of(cx).text_faint,
+                    color: self.input.read(cx).text_theme(cx).text_faint,
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -3797,7 +3815,13 @@ impl gpui::Element for ComposerTextElement {
 
 impl Render for ComposerInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
+        let theme = self.text_theme(cx);
+        let (font_size, line_height) = if self.use_chat_style {
+            let style = crate::chat_style::settings(cx);
+            (style.font_size, style.input_line_height())
+        } else {
+            (INPUT_TEXT_SIZE, INPUT_LINE_HEIGHT)
+        };
         let text_color = if self.content.is_empty() {
             theme.text_faint
         } else {
@@ -3848,8 +3872,8 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .w_full()
-            .text_size(px(INPUT_TEXT_SIZE))
-            .line_height(px(INPUT_LINE_HEIGHT))
+            .text_size(px(font_size))
+            .line_height(px(line_height))
             .text_color(text_color)
             .font_family(theme.font_sans.clone())
             .child(ComposerTextElement {
@@ -4198,6 +4222,9 @@ fn slash_error_message(err: &RpcError) -> SharedString {
 }
 
 pub struct Composer {
+    /// A style change needs fresh child measurements, then one pass after a
+    /// possible compact/expanded flip. Never depend on typing to finish sizing.
+    style_relayout_passes: u8,
     state: Entity<AppState>,
     input: Entity<ComposerInput>,
     /// Composer actions row: repo/branch/harness-model/traits (§1.7).
@@ -4289,6 +4316,7 @@ pub struct Composer {
     _pickers_observe: Subscription,
     _catalog_observe: Subscription,
     _hidden_slash_observe: Subscription,
+    _style_observe: Subscription,
     _input_events: Subscription,
 }
 
@@ -4364,6 +4392,9 @@ impl Composer {
     ) -> Self {
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Do anything…", cx);
+            input.use_chat_style = true;
+            input.line_height = px(crate::chat_style::settings(cx).input_line_height());
+            input.content_height = f32::from(input.line_height);
             input.enable_mentions();
             input
         });
@@ -4411,6 +4442,18 @@ impl Composer {
                 cx.notify();
             });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        let style_observe =
+            cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
+                this.flip_morph = None;
+                this.style_relayout_passes = 2;
+                this.flip_epoch = this.input.read(cx).layout_epoch;
+                this.last_seen_width = 0.0;
+                this.width_changed_at = None;
+                this.compact_capacity = 0.0;
+                this.expanded_anchor = 0.0;
+                this.input.update(cx, |_, cx| cx.notify());
+                cx.notify();
+            });
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
@@ -4452,6 +4495,7 @@ impl Composer {
         });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
+            style_relayout_passes: 2,
             state,
             input,
             pickers,
@@ -4497,6 +4541,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             _catalog_observe: catalog_observe,
             _hidden_slash_observe: hidden_slash_observe,
+            _style_observe: style_observe,
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
@@ -7873,7 +7918,15 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+        if self.style_relayout_passes > 0 {
+            self.style_relayout_passes -= 1;
+            let entity = cx.entity_id();
+            window.on_next_frame(move |_, cx| cx.notify(entity));
+        }
+        let theme = crate::chat_style::theme(cx);
+        let wide = crate::chat_style::settings(cx).wide;
+        let compact_height =
+            compact_height_for_line(crate::chat_style::settings(cx).input_line_height());
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -7995,12 +8048,18 @@ impl Render for Composer {
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
-            .max_w(px(768.0))
+            .when(!wide, |el| el.max_w(px(crate::chat_style::COMPOSER_WIDTH)))
             .mx_auto()
             .flex()
             .flex_col()
             .gap(px(Theme::SPACE_SM))
-            .px(px(Theme::SPACE_LG))
+            .px(px(
+                if wide && matches!(self.transport, ComposerTransport::Main) {
+                    48.0
+                } else {
+                    Theme::SPACE_LG
+                },
+            ))
             .pb(px(Theme::SPACE_LG))
             .when_some(failure, |el, message| {
                 // zeron composer.tsx `Notice` (matches the transcript
@@ -8167,7 +8226,7 @@ impl Render for Composer {
         let base_height = if expanded {
             composer_total_height(content_height)
         } else {
-            COMPACT_TOTAL_HEIGHT
+            compact_height
         };
         let target_height = base_height + strip_h;
         let (pill_height, morph_t, morphing) = match self.flip_morph {
@@ -8307,7 +8366,7 @@ impl Render for Composer {
                 .children(strip)
                 .child(
                     div()
-                        .h(px(COMPACT_TOTAL_HEIGHT - PILL_BORDER_V))
+                        .h(px(compact_height - PILL_BORDER_V))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -8391,6 +8450,18 @@ impl Render for Composer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chat_line_height_expands_the_compact_composer_without_clipping() {
+        assert_eq!(
+            super::compact_height_for_line(super::INPUT_LINE_HEIGHT),
+            super::COMPACT_TOTAL_HEIGHT
+        );
+        for line in [16.0, 32.0, 64.0, 104.0] {
+            let height = super::compact_height_for_line(line);
+            assert!(height >= super::COMPACT_TOTAL_HEIGHT);
+            assert!(height - super::PILL_BORDER_V >= line);
+        }
+    }
     use super::*;
 
     fn tooltip_target(range: Range<usize>, path: &str) -> MentionTooltipTarget {

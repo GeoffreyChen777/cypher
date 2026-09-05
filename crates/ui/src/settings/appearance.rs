@@ -6,8 +6,9 @@
 //! The control itself is theme-agnostic; only the previews below know what a
 //! theme is.
 //!
-//! Stateless. The choice lives in the [`crate::appearance`] globals, and
-//! `set_mode` repaints every window, so this page has nothing of its own to hold.
+//! Theme selection plus client-local chat typography, spacing and colors.
+
+mod chat;
 
 use gpui::{
     AnyElement, Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
@@ -17,11 +18,15 @@ use crate::appearance::{self, AppearanceMode};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
 
-pub struct AppearancePage;
+pub struct AppearancePage {
+    chat: gpui::Entity<chat::ChatStyleEditor>,
+}
 
 impl AppearancePage {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
-        Self
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            chat: cx.new(chat::ChatStyleEditor::new),
+        }
     }
 }
 
@@ -190,8 +195,7 @@ impl Render for AppearancePage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "How cypher picks between light and dark. This setting stays on this \
-                             device.",
+                            "Choose the app theme and customize your chat interface. These settings stay on this client.",
                         )
                         .max_w(px(512.0))
                         .line_height(px(20.0)),
@@ -212,7 +216,8 @@ impl Render for AppearancePage {
                             .text_color(theme.text_muted)
                             .line_height(px(18.0))
                             .child(helper(current, system)),
-                    ),
+                    )
+                    .child(self.chat.clone()),
             )
     }
 }

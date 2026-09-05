@@ -282,9 +282,43 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
     color
 }
 
+/// Default markdown metrics, overridden only by a chat's scoped theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MarkdownMetrics {
+    pub body_size: f32,
+    pub body_line_height: f32,
+    pub code_size: f32,
+    pub code_line_height: f32,
+    pub block_gap: f32,
+}
+
+impl Default for MarkdownMetrics {
+    fn default() -> Self {
+        Self {
+            body_size: 14.0,
+            body_line_height: 22.0,
+            code_size: 12.5,
+            code_line_height: 18.0,
+            block_gap: 12.0,
+        }
+    }
+}
+
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
+    pub markdown: MarkdownMetrics,
+    /// Distinguishes cached chat runs after typography/custom-color changes.
+    pub text_style_revision: u64,
+    /// None preserves the original monochrome links and contextual bubble wash.
+    pub markdown_link: Option<Hsla>,
+    pub user_bubble: Option<Hsla>,
+    /// Fenced-code overrides, applied only by the chat Markdown renderer.
+    pub code_block_background: Option<Hsla>,
+    pub code_block_text: Option<Hsla>,
+    /// Markdown inline-code overrides, separate from the mention-chip tokens.
+    pub inline_code_text: Option<Hsla>,
+    pub inline_code_background: Option<Hsla>,
     /// Which appearance these tokens were built for.
     pub appearance: Appearance,
 
@@ -593,6 +627,14 @@ impl Theme {
     /// the same shape as before, just lifted.
     pub fn dark() -> Self {
         Self {
+            markdown: MarkdownMetrics::default(),
+            text_style_revision: 0,
+            markdown_link: None,
+            user_bubble: None,
+            code_block_background: None,
+            code_block_text: None,
+            inline_code_text: None,
+            inline_code_background: None,
             appearance: Appearance::Dark,
             bg: grey(22),      // main panel — #161616
             surface: grey(28), // shell / sidebar — #1c1c1c
@@ -650,6 +692,14 @@ impl Theme {
     /// white instead of glowing.
     pub fn light() -> Self {
         Self {
+            markdown: MarkdownMetrics::default(),
+            text_style_revision: 0,
+            markdown_link: None,
+            user_bubble: None,
+            code_block_background: None,
+            code_block_text: None,
+            inline_code_text: None,
+            inline_code_background: None,
             appearance: Appearance::Light,
             bg: grey(0xff), // main panel — clean white
             // Deeper than ~neutral-100 looks on paper: the content card is pure

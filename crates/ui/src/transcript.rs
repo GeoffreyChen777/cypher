@@ -66,7 +66,7 @@ pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
 pub const GAP_BLOCK: f32 = 8.0;
 /// Transcript column max width (zeron 46rem).
-pub const MAX_CONTENT_WIDTH: f32 = 736.0;
+pub const MAX_CONTENT_WIDTH: f32 = crate::chat_style::CONTENT_WIDTH;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
 /// A row is the guide rail + a 30px chip card centered in it (zeron
 /// tool-chip.tsx: `TOOL_CHIP_HEIGHT = 38`, card `h-[30px]`); rows stack with no
@@ -1186,15 +1186,19 @@ fn part_prefix(id: &str) -> &str {
 /// part — matching the live row's internal spacing exactly, so the
 /// live→split handoff cannot shift a pixel; the block gap otherwise.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
+    top_gap_for_style(prev, row, GAP_TURN, render::MD_BLOCK_GAP)
+}
+
+fn top_gap_for_style(prev: Option<&Row>, row: &Row, message_gap: f32, paragraph_gap: f32) -> f32 {
     if row.turn_start {
-        return GAP_TURN;
+        return message_gap;
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
     let same_part_markdown = prev.is_some_and(|p| {
         is_md(&p.kind) && is_md(&row.kind) && part_prefix(&p.id) == part_prefix(&row.id)
     });
     if same_part_markdown {
-        render::MD_BLOCK_GAP
+        paragraph_gap
     } else {
         GAP_BLOCK
     }
@@ -1684,6 +1688,7 @@ pub struct Transcript {
     /// inert (double-click guard). The shell begins/ends these around the
     /// ForkSession call.
     fork_pending: std::collections::HashSet<(String, String)>,
+    _style_observe: Subscription,
     _observe: Subscription,
 }
 
@@ -1747,6 +1752,18 @@ impl Transcript {
             .ok();
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let style_observe =
+            cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
+                this.dismiss_comment_ui_and_selection(cx);
+                this.render_cache.borrow_mut().clear();
+                // Invalidate measurements without resetting the scroll anchor,
+                // transcript rows, folds, or streamed content.
+                this.list.remeasure_items(0..this.rows.len());
+                this.spring.reset();
+                this.spring_kick = this.pinned;
+                this.own_turn_kick = this.own_turn.is_some();
+                cx.notify();
+            });
         let mut this = Self {
             state,
             list,
@@ -1794,6 +1811,7 @@ impl Transcript {
             blob_fetch_counter: 0,
             comment_popup,
             fork_pending: std::collections::HashSet::new(),
+            _style_observe: style_observe,
             _observe: observe,
         };
         this.sync(cx);
@@ -3117,7 +3135,11 @@ impl Transcript {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
-        let theme = Theme::of(cx).clone();
+        let theme = crate::chat_style::theme(cx);
+        let (wide, message_spacing, paragraph_spacing) = {
+            let style = crate::chat_style::settings(cx);
+            (style.wide, style.message_spacing, style.paragraph_spacing)
+        };
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
         // rests below the chrome it fades under. An embedded panel (temporary
@@ -3126,10 +3148,15 @@ impl Transcript {
             if self.embedded {
                 EMBEDDED_TOP_INSET_PX + 6.0
             } else {
-                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+                Theme::TITLEBAR_HEIGHT + message_spacing + 10.0
             }
         } else {
-            top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
+            top_gap_for_style(
+                ix.checked_sub(1).and_then(|i| self.rows.get(i)),
+                &row,
+                message_spacing,
+                paragraph_spacing,
+            )
         };
         // The last row must clear the composer/status stack the transcript
         // scrolls under PLUS the fade band above it, or the timestamp strip
@@ -3212,13 +3239,15 @@ impl Transcript {
                             div().w_full().flex().justify_end().child(
                                 div()
                                     .min_w_0()
-                                    .max_w(px(MAX_CONTENT_WIDTH * 0.8))
-                                    .bg(crate::theme::user_bubble_bg())
+                                    .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
+                                    .when(wide, |el| el.max_w(gpui::relative(0.8)))
+                                    .bg(crate::chat_style::bubble(&theme))
                                     .rounded(px(Theme::BUBBLE_RADIUS))
                                     .px(px(16.0))
                                     .py(px(10.0))
-                                    .text_size(px(14.0))
-                                    .line_height(px(22.0))
+                                    .font_family(theme.font_sans.clone())
+                                    .text_size(px(theme.markdown.body_size))
+                                    .line_height(px(theme.markdown.body_line_height))
                                     .text_color(theme.text)
                                     .when(pending, |el| el.opacity(0.65))
                                     .child(user_bubble_text(
@@ -3556,7 +3585,7 @@ impl Transcript {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(MAX_CONTENT_WIDTH))
+                    .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH)))
                     .min_w_0()
                     .child(inner)
                     .children(strip)
@@ -4801,6 +4830,8 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
+            // The main/side-chat rounded card owns the background. Keeping
+            // this viewport transparent preserves that card's corner cutouts.
             // FIRST child ⇒ paints first: clears the frame's TRANSCRIPT
             // selection registry before any row's text elements re-register
             // (document paint order = selection order; see markdown/render.rs).
@@ -5049,6 +5080,27 @@ mod tests {
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
         Arc::new(parse_full(text))
+    }
+
+    #[test]
+    fn custom_spacing_preserves_the_streaming_to_settled_layout() {
+        let live = assistant(
+            "spacing",
+            MessageStatus::Streaming,
+            vec![text_part("t", "first\n\nsecond")],
+        );
+        let mut done = live.clone();
+        done.status = Some(MessageStatus::Complete);
+        let live_rows = rows_for_entry(&live, false, &mut parse);
+        let done_rows = rows_for_entry(&done, false, &mut parse);
+        assert_eq!(live_rows.len(), 2);
+        for rows in [&live_rows, &done_rows] {
+            assert_eq!(top_gap_for_style(None, &rows[0], 28.0, 20.0), 28.0);
+            assert_eq!(
+                top_gap_for_style(Some(&rows[0]), &rows[1], 28.0, 20.0),
+                20.0
+            );
+        }
     }
 
     fn assistant(id: &str, status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry {

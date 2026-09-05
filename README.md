@@ -102,4 +102,6 @@ Developing or curious how it works? [![Ask DeepWiki](https://deepwiki.com/badge.
 
 CI, deployment prerequisites and release recovery: [CI/CD operations](docs/ci-cd.md).
 
+Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/chat-appearance.md).
+
 Licensed under the [MIT License](LICENSE).

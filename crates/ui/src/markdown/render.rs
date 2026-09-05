@@ -156,6 +156,7 @@ pub struct RenderCache {
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
     /// The [`crate::theme::theme_generation`] these entries were shaped under.
     generation: u32,
+    style_revision: u64,
 }
 
 /// Cached per-line code runs (validity: code length + highlight identity).
@@ -180,11 +181,12 @@ impl RenderCache {
 
     /// Drop every entry if the palette changed since they were shaped. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
-    fn sync_palette(&mut self) {
+    fn sync_palette(&mut self, theme: &Theme) {
         let generation = crate::theme::theme_generation();
-        if self.generation != generation {
+        if self.generation != generation || self.style_revision != theme.text_style_revision {
             self.clear();
             self.generation = generation;
+            self.style_revision = theme.text_style_revision;
         }
     }
 }
@@ -204,7 +206,7 @@ pub fn render_tree(
     div()
         .flex()
         .flex_col()
-        .gap(px(MD_BLOCK_GAP))
+        .gap(px(theme.markdown.block_gap))
         .children(tree.blocks.iter().enumerate().map(|(ix, top)| {
             let document = highlight(ix);
             render_block(
@@ -237,8 +239,8 @@ pub fn render_block(
     match block {
         Block::Paragraph { runs } => text_element(
             runs,
-            MD_TEXT_SIZE,
-            MD_LINE_HEIGHT,
+            theme.markdown.body_size,
+            theme.markdown.body_line_height,
             false,
             top_ix,
             ix,
@@ -247,6 +249,8 @@ pub fn render_block(
         ),
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
+            let size = size * theme.markdown.body_size / MD_TEXT_SIZE;
+            let line = line * theme.markdown.body_line_height / MD_LINE_HEIGHT;
             text_element(runs, size, line, true, top_ix, ix, opts, theme)
         }
         Block::CodeBlock { language, code } => render_code_block(
@@ -271,7 +275,7 @@ pub fn render_block(
             .py(px(6.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(theme.markdown.block_gap * (8.0 / MD_BLOCK_GAP)))
             .text_color(theme.text_muted)
             .children(children.iter().enumerate().map(|(ci, child)| {
                 render_block(child, top_ix, ix * 100 + ci, opts, theme, window, None)
@@ -283,7 +287,7 @@ pub fn render_block(
         } => div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(theme.markdown.block_gap * (4.0 / MD_BLOCK_GAP)))
             .children(items.iter().enumerate().map(|(item_ix, item)| {
                 // Accent markers (the inline-code hue): ordered numbers as
                 // tinted text, unordered as a REAL 5px disc — the glyph "•"
@@ -292,8 +296,8 @@ pub fn render_block(
                     Some(start) => div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .text_size(px(MD_TEXT_SIZE))
-                        .line_height(px(MD_LINE_HEIGHT))
+                        .text_size(px(theme.markdown.body_size))
+                        .line_height(px(theme.markdown.body_line_height))
                         .text_color(theme.accent.opacity(0.85))
                         .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                         .into_any_element(),
@@ -301,7 +305,7 @@ pub fn render_block(
                         .flex_none()
                         .min_w(px(18.0))
                         // Center the disc on the first text line's cap band.
-                        .h(px(MD_LINE_HEIGHT))
+                        .h(px(theme.markdown.body_line_height))
                         .flex()
                         .items_center()
                         .child(
@@ -320,7 +324,7 @@ pub fn render_block(
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(4.0))
+                        .gap(px(theme.markdown.block_gap * (4.0 / MD_BLOCK_GAP)))
                         .children(item.iter().enumerate().map(|(ci, child)| {
                             render_block(
                                 child,
@@ -454,7 +458,7 @@ fn render_table(
                 };
                 let width = f32::from(
                     text_system
-                        .shape_line(line, px(MD_TEXT_SIZE), &flat.runs, None)
+                        .shape_line(line, px(theme.markdown.body_size), &flat.runs, None)
                         .width(),
                 );
                 if width > *natural {
@@ -471,7 +475,7 @@ fn render_table(
     // rows are the only paint (`table.gap` = 1, borderColor white@10%); the
     // theme's headerBackground is transparent and its radius 0, so there is no
     // header fill, outer box, or rounding.
-    let hairline = table_hairline();
+    let hairline = theme.hairline(0.10);
     let mut inner = div()
         .flex()
         .flex_col()
@@ -489,8 +493,8 @@ fn render_table(
                 .flex_basis(px(0.0))
                 .min_w(px(geo.minimums[c]))
                 .p(px(TABLE_CELL_PADDING))
-                .text_size(px(MD_TEXT_SIZE))
-                .line_height(px(MD_LINE_HEIGHT));
+                .text_size(px(theme.markdown.body_size))
+                .line_height(px(theme.markdown.body_line_height));
             cell = match align.get(c).copied().unwrap_or_default() {
                 TableAlign::Left => cell,
                 TableAlign::Center => cell.text_center(),
@@ -531,13 +535,13 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Inline-code tint: emerald-300 text over an emerald-400 wash on the dark
-/// panel, with darker emerald siblings in light mode.
+/// Scoped inline-code tint. Defaults to emerald text and a translucent wash;
+/// overrides do not change the shared tokens used by mention chips.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text // emerald-300
+    theme.inline_code_text.unwrap_or(theme.code_text)
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash // emerald-400/12
+    theme.inline_code_background.unwrap_or(theme.code_wash)
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 4px past the glyphs, y insets 2px from the 22px line box).
@@ -604,14 +608,14 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         } else {
             FontStyle::Normal
         };
-        // Links stay monochrome — foreground with an underline (zeron's md
-        // theme underlines in the text color; indigo is reserved for primary
-        // actions).
+        // Monochrome by default; a scoped chat theme may override link color.
         let is_link = run.style.link.is_some();
         // Inline code reads emerald (see `inline_code_text`); everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
+        } else if is_link {
+            theme.markdown_link.unwrap_or(theme.text)
         } else {
             theme.text
         };
@@ -645,7 +649,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
             // only be a square box.
             background_color: None,
             underline: is_link.then_some(UnderlineStyle {
-                color: Some(theme.text_muted),
+                color: Some(theme.markdown_link.unwrap_or(theme.text_muted)),
                 thickness: px(1.0),
                 wavy: false,
             }),
@@ -678,7 +682,7 @@ fn flatten_cached(
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_palette(theme);
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -1164,6 +1168,27 @@ fn text_element(
         .into_any_element()
 }
 
+pub fn code_block_background(theme: &Theme) -> Hsla {
+    theme
+        .code_block_background
+        .unwrap_or_else(|| theme.ink(0.035))
+}
+
+/// Scoped to fenced blocks: inline code, tool/diff renderers and the installed
+/// theme keep their original colors. Neutral syntax tokens use the base code
+/// foreground; keywords, strings, comments and other colored tokens do not.
+fn code_block_theme(theme: &Theme) -> Theme {
+    let mut code = theme.clone();
+    if let Some(foreground) = theme.code_block_text {
+        code.text = foreground;
+        code.syntax.variable = foreground;
+        code.syntax.parameter = foreground;
+        code.syntax.operator = foreground;
+        code.syntax.punctuation = foreground;
+    }
+    code
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_code_block(
     language: Option<&str>,
@@ -1175,6 +1200,8 @@ fn render_code_block(
     highlight: CodeHighlight,
 ) -> AnyElement {
     let mono = font(theme.font_mono.clone());
+    let code_theme = code_block_theme(theme);
+    let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
     // Per-line strings + runs through the cross-frame cache (validity: code
     // length + highlight slice identity — a fresh highlight Arc re-derives).
     let hl_key = highlight.map_or((0, 0), |h| (h.as_ptr() as usize, h.len()));
@@ -1189,7 +1216,7 @@ fn render_code_block(
                     .unwrap_or(&[]);
                 (
                     SharedString::from(line.to_string()),
-                    runs_for_syntax_line(line, spans, &mono, theme),
+                    runs_for_syntax_line(line, spans, &mono, &code_theme),
                 )
             })
             .collect();
@@ -1202,7 +1229,7 @@ fn render_code_block(
     let cached: Rc<CachedCode> = match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_palette(theme);
             let entry = cache
                 .code
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -1249,11 +1276,11 @@ fn render_code_block(
             .bg(crate::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
-                crate::theme::ink(0.08),
+                theme.ink(0.08),
             ))
             .on_hover(crate::motion::hover_listener(fade_key))
             .text_size(px(10.5))
-            .text_color(theme.text_muted)
+            .text_color(chrome_color)
             .on_click(move |_, window, cx| handler(ix, code_text.clone(), window, cx))
             .child(
                 crate::icons::icon(if copied {
@@ -1262,7 +1289,7 @@ fn render_code_block(
                     crate::icons::COPY
                 })
                 .size(px(12.0))
-                .text_color(theme.text_muted),
+                .text_color(chrome_color),
             )
             .when(copied, |el| el.child(SharedString::from("Copied")))
     });
@@ -1270,7 +1297,7 @@ fn render_code_block(
         .rounded(px(10.0))
         // Faint white wash over the near-black panel ≈ #101010 (zeron's code
         // surface), with the hairline border.
-        .bg(crate::theme::ink(0.035))
+        .bg(code_block_background(theme))
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
@@ -1283,9 +1310,9 @@ fn render_code_block(
                     .border_b_1()
                     .border_color(theme.border)
                     // A whisper of tone separation between header and body.
-                    .bg(crate::theme::ink(0.02))
+                    .bg(theme.ink(0.02))
                     .text_size(px(11.0))
-                    .text_color(theme.text_muted)
+                    .text_color(chrome_color)
                     .child(SharedString::from(lang.to_string())),
             )
         })
@@ -1296,8 +1323,8 @@ fn render_code_block(
                 .px(px(CODE_PADDING_X))
                 .py(px(CODE_PADDING_Y))
                 .font_family(theme.font_mono.clone())
-                .text_size(px(CODE_TEXT_SIZE))
-                .line_height(px(CODE_LINE_HEIGHT))
+                .text_size(px(theme.markdown.code_size))
+                .line_height(px(theme.markdown.code_line_height))
                 .whitespace_nowrap()
                 .flex()
                 .flex_col()
@@ -1309,7 +1336,7 @@ fn render_code_block(
                     let runs = apply_veil(runs.clone(), &local);
                     Some(
                         div()
-                            .h(px(CODE_LINE_HEIGHT))
+                            .h(px(theme.markdown.code_line_height))
                             .flex_none()
                             .child(StyledText::new(line.clone()).with_runs(runs)),
                     )
@@ -1376,6 +1403,187 @@ pub fn runs_for_syntax_line_with_plain(
 mod tests {
     use super::*;
     use crate::markdown::parser::InlineStyle;
+
+    #[test]
+    fn inline_colors_preserve_prose_fenced_code_and_default_washes() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            assert_eq!(inline_code_text(&theme), theme.code_text);
+            assert_eq!(inline_code_wash(&theme), theme.code_wash);
+            let plain_code_color = code_block_theme(&theme).text;
+            let fenced_background = code_block_background(&theme);
+            let foreground = gpui::rgb(0xaa2266).into();
+            let background = gpui::rgb(0xeeeedd).into();
+            theme.inline_code_text = Some(foreground);
+            theme.inline_code_background = Some(background);
+            assert_eq!(inline_code_text(&theme), foreground);
+            assert_eq!(inline_code_wash(&theme), background);
+            assert_eq!(code_block_theme(&theme).text, plain_code_color);
+            assert_eq!(code_block_background(&theme), fenced_background);
+            let code_run = InlineRun {
+                text: "inline".into(),
+                style: InlineStyle {
+                    code: true,
+                    ..Default::default()
+                },
+            };
+            let flat = flatten_runs(&[code_run], &theme, false);
+            assert_eq!(flat.runs[0].color, foreground);
+            assert_eq!(flat.code_ranges, vec![0..6]);
+            let prose = flatten_runs(
+                &[InlineRun {
+                    text: "prose".into(),
+                    style: InlineStyle::default(),
+                }],
+                &theme,
+                false,
+            );
+            assert_eq!(prose.runs[0].color, theme.text);
+        }
+    }
+
+    #[test]
+    fn inline_color_changes_refresh_cached_runs() {
+        let cache = Rc::new(RefCell::new(RenderCache::default()));
+        let mut opts = RenderOptions::settled("inline-color-cache".into());
+        opts.cache = Some(cache);
+        let runs = [InlineRun {
+            text: "value".into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        }];
+        let mut theme = Theme::dark();
+        theme.text_style_revision = 1;
+        let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+        theme.inline_code_text = Some(gpui::rgb(0xffcc88).into());
+        theme.inline_code_background = Some(gpui::rgb(0x332200).into());
+        theme.text_style_revision = 2;
+        let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert_eq!(after.runs[0].color, theme.inline_code_text.unwrap());
+        assert_eq!(
+            before.code_ranges, after.code_ranges,
+            "color changes must not alter layout"
+        );
+        assert_eq!(before.text, after.text);
+    }
+
+    #[test]
+    fn code_block_base_color_preserves_colored_syntax_and_other_renderers() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            assert_eq!(code_block_background(&theme), theme.ink(0.035));
+            let foreground = gpui::rgb(0x6655aa).into();
+            theme.code_block_text = Some(foreground);
+            theme.code_block_background = Some(gpui::rgb(0xf0f0f0).into());
+            let code = code_block_theme(&theme);
+            assert_eq!(
+                code_block_background(&theme),
+                theme.code_block_background.unwrap()
+            );
+            for kind in [
+                HighlightKind::Variable,
+                HighlightKind::Parameter,
+                HighlightKind::Operator,
+                HighlightKind::Punctuation,
+                HighlightKind::Embedded,
+            ] {
+                assert_eq!(token_color(kind, &code), foreground);
+                assert_eq!(token_color(kind, &theme), theme.text);
+            }
+            for kind in [
+                HighlightKind::Keyword,
+                HighlightKind::String,
+                HighlightKind::Comment,
+                HighlightKind::Number,
+                HighlightKind::Function,
+                HighlightKind::Type,
+                HighlightKind::Boolean,
+                HighlightKind::VariableSpecial,
+            ] {
+                assert_eq!(token_color(kind, &code), token_color(kind, &theme));
+            }
+            let spans = [
+                HighlightSpan {
+                    range: 0..3,
+                    kind: HighlightKind::Keyword,
+                },
+                HighlightSpan {
+                    range: 4..7,
+                    kind: HighlightKind::Variable,
+                },
+                HighlightSpan {
+                    range: 8..11,
+                    kind: HighlightKind::String,
+                },
+            ];
+            let mono = font(theme.font_mono.clone());
+            let runs = runs_for_syntax_line("abc def ghi", &spans, &mono, &code);
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 11);
+            assert_eq!(
+                runs.iter().map(|r| r.color).collect::<Vec<_>>(),
+                vec![
+                    theme.syntax.keyword,
+                    foreground,
+                    foreground,
+                    foreground,
+                    theme.syntax.string,
+                ]
+            );
+            let ordinary = runs_for_syntax_line("plain", &[], &mono, &theme);
+            assert_eq!(
+                ordinary[0].color, theme.text,
+                "generic/diff rendering must not use the fenced override"
+            );
+            assert_eq!(inline_code_text(&code), inline_code_text(&theme));
+        }
+    }
+
+    #[test]
+    fn code_color_change_rebuilds_cached_code_runs() {
+        let cache = Rc::new(RefCell::new(RenderCache::default()));
+        let mut opts = RenderOptions::settled("code-color-cache".into());
+        opts.cache = Some(cache.clone());
+        let mut theme = Theme::dark();
+        theme.text_style_revision = 1;
+        theme.code_block_text = Some(gpui::rgb(0xffccaa).into());
+        let _ = render_code_block(None, "plain", 0, 0, &opts, &theme, None);
+        let key = (opts.row_key.clone(), 0, 0);
+        let before = cache.borrow().code[&key].clone();
+        theme.text_style_revision = 2;
+        theme.code_block_text = Some(gpui::rgb(0xaaccff).into());
+        let _ = render_code_block(None, "plain", 0, 0, &opts, &theme, None);
+        let after = cache.borrow().code[&key].clone();
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert_eq!(before.lines[0].1[0].color, gpui::rgb(0xffccaa).into());
+        assert_eq!(after.lines[0].1[0].color, theme.code_block_text.unwrap());
+    }
+
+    #[test]
+    fn chat_style_revision_invalidates_cached_fonts_and_colors() {
+        let cache = Rc::new(RefCell::new(RenderCache::default()));
+        let mut opts = RenderOptions::settled("style-cache".into());
+        opts.cache = Some(cache.clone());
+        let runs = vec![InlineRun {
+            text: "link".into(),
+            style: InlineStyle {
+                link: Some("https://example.com".into()),
+                ..Default::default()
+            },
+        }];
+        let mut old = Theme::dark();
+        old.text_style_revision = 1;
+        let before = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &old);
+        let mut new = old.clone();
+        new.text_style_revision = 2;
+        new.font_sans = "Test Serif".into();
+        new.markdown_link = Some(gpui::rgb(0x3388cc).into());
+        let after = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &new);
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert_eq!(after.runs[0].font.family.as_ref(), "Test Serif");
+        assert_eq!(after.runs[0].color, new.markdown_link.unwrap());
+        assert_eq!(before.runs[0].font.family, old.font_sans);
+    }
 
     #[test]
     fn code_line_runs_cover_exactly() {

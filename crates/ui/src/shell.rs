@@ -2808,6 +2808,11 @@ impl Shell {
         if section == SettingsSection::Providers {
             self.providers_page = None;
         }
+        // Persisted chat preferences live in the global, not in this editor.
+        // Re-enter without a stale font popup or an unfinished HEX draft.
+        if section == SettingsSection::Appearance {
+            self.appearance_page = None;
+        }
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
@@ -5601,7 +5606,11 @@ impl Shell {
     }
 
     fn render_main(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme_owned = Theme::of(cx).clone();
+        let theme_owned = if matches!(self.route, Route::Chat) {
+            crate::chat_style::theme(cx)
+        } else {
+            Theme::of(cx).clone()
+        };
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
@@ -5741,6 +5750,8 @@ impl Shell {
         let file_drag_active = self.file_drag_active && cx.has_active_drag();
         div()
             .id("chat-dropzone")
+            // Background belongs to the rounded outer card. A rectangular
+            // child fill would cover its corners despite overflow_hidden.
             .relative()
             .flex_1()
             .min_w_0()
@@ -5854,6 +5865,7 @@ impl Shell {
                     div()
                         .absolute()
                         .inset_0()
+                        .rounded(px(12.0))
                         .bg(theme.scrim().opacity(0.4 / 0.6))
                         .flex()
                         .items_center()
@@ -6032,16 +6044,17 @@ impl Shell {
         // ends. Inset both accessories by their sum so the left/right trigger
         // boundaries land exactly on those corner endpoints.
         let accessory_inset = Theme::SPACE_LG + crate::composer::PILL_RADIUS;
+        let wide = crate::chat_style::settings(cx).wide;
         let strip = div()
             .h(px(Theme::STATUS_STRIP_HEIGHT))
             .flex_none()
             .w_full()
-            .max_w(px(768.0))
+            .when(!wide, |el| el.max_w(px(crate::chat_style::COMPOSER_WIDTH)))
             .mx_auto()
             .flex()
             .items_center()
             .gap(px(Theme::SPACE_SM))
-            .px(px(accessory_inset))
+            .px(px(accessory_inset + if wide { 32.0 } else { 0.0 }))
             .text_size(px(11.0));
 
         let left: AnyElement = match state.selected_chat.as_deref() {
@@ -6187,12 +6200,22 @@ impl Shell {
             // clipped into unreachability — user-reported dead resize),
             // overlapping the card's left edge.
             .left(px(0.0));
+        let is_side_chat = self.right_pane_open(cx)
+            && matches!(
+                self.resolved_right_active(cx),
+                RightSurface::SideChat(id) if self.side_chats.contains_key(&id)
+            );
+        let panel_bg = crate::chat_style::panel_background(
+            &crate::chat_style::settings(cx),
+            &theme,
+            is_side_chat,
+        );
         let panel = div()
             .size_full()
             .flex()
             .flex_col()
             .rounded(px(12.0))
-            .bg(theme.surface)
+            .bg(panel_bg)
             .shadow_sm()
             .overflow_hidden()
             // The global titlebar overlays this card; its own content starts
@@ -7527,7 +7550,11 @@ impl Render for Shell {
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let card_bg = Theme::of(cx).surface;
+                let card_bg = crate::chat_style::panel_background(
+                    &crate::chat_style::settings(cx),
+                    Theme::of(cx),
+                    on_chat,
+                );
                 // The main conversation area is a floating rounded card over
                 // the frost (user request): the slightly lifted `surface`
                 // neutral keeps dark mode from reading as pure black, while
