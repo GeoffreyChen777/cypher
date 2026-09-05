@@ -169,6 +169,7 @@ pub fn run_app(config: UiConfig) {
             cx,
         );
         surface_style::init(data_dir.clone(), cx);
+        changes::layout::init(data_dir.clone(), cx);
         chat_style::init(data_dir, cx);
         composer::init(cx);
         terminal::panel::init(cx);

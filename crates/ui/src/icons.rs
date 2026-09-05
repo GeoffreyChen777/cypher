@@ -95,6 +95,9 @@ icon_assets![
     // Hand-drawn fold-all chevrons, drawn as a family with EXPAND_ARROWS
     // (same stroke, caps, 90° joints) — Solar has no unfold-less either.
     (FOLD_VERTICAL, "fold-vertical"),
+    // Hand-drawn layout indicators in the same linear stroke family.
+    (DIFF_UNIFIED, "diff-unified"),
+    (DIFF_SPLIT, "diff-split"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),

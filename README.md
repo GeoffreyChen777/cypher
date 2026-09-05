@@ -106,4 +106,6 @@ Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/chat-ap
 
 Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/appearance-colors.md).
 
+Unified and side-by-side Git comparison: [Git diff layouts](docs/git-diff.md).
+
 Licensed under the [MIT License](LICENSE).

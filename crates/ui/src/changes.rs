@@ -1,5 +1,5 @@
-//! The right-pane "Changes" content (feature-inventory §1.11): a unified-diff
-//! viewer over `WatchCheckoutDiffs`.
+//! The right-pane "Changes" content (feature-inventory §1.11): switchable
+//! unified/split diff views over `WatchCheckoutDiffs`.
 //!
 //! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows,
 //!   with add/delete/rename/binary detection and per-file counts;
@@ -44,6 +44,9 @@ use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 use cypher_syntax::LanguageId as Lang;
+
+pub mod layout;
+use layout::{DiffLayout, Side};
 
 // ---------------------------------------------------------------------------
 // Layout numbers (analytic — they drive the fold tween)
@@ -103,6 +106,16 @@ pub struct DiffHighlights {
 }
 
 impl DiffHighlights {
+    pub fn spans_for_side(&self, line: &DiffLine, side: Side) -> &[cypher_syntax::HighlightSpan] {
+        let (document, number) = match side {
+            Side::Old => (self.old.as_ref(), line.old_no),
+            Side::New => (self.new.as_ref(), line.new_no),
+        };
+        document
+            .and_then(|doc| doc.lines.get(number?.checked_sub(1)? as usize))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
     pub fn source_ref(&self, line: &DiffLine) -> Option<SourceLineRef> {
         match line.kind {
             LineKind::Del => line.old_no.map(|line_number| SourceLineRef {
@@ -823,6 +836,12 @@ pub enum DiffRow {
         /// Flat index across the file's hunks — keys into the highlight slot.
         flat: u32,
     },
+    SplitLine {
+        file: u32,
+        hunk: u32,
+        old: Option<u32>,
+        new: Option<u32>,
+    },
     /// Trailing pad closing an expanded body ([`BODY_BOTTOM_PAD`]).
     BodyPad {
         file: u32,
@@ -954,6 +973,14 @@ struct RefMenu {
 /// The Changes pane entity. Lazy: no RPC until [`Changes::ensure_watch`] runs
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
+    view_layout: DiffLayout,
+    layout_error: Option<SharedString>,
+    split_scopes: [crate::markdown::selection::SelectionScope; 2],
+    horizontal: [f32; 2],
+    max_columns: [usize; 2],
+    max_gutter: f32,
+    pane_width: Rc<std::cell::Cell<f32>>,
+    mono_advance: f32,
     state: Entity<AppState>,
     diffs: Vec<CheckoutDiff>,
     started: bool,
@@ -1011,6 +1038,7 @@ pub struct Changes {
     /// The shared shell-level Comment pill/editor (weak — the shell owns it).
     comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
     _observe: Subscription,
+    _layout_observe: Subscription,
 }
 
 /// Events the host (the right pane's surface strip) listens for.
@@ -1021,17 +1049,270 @@ pub enum ChangesEvent {
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
 
+struct DiffLayoutTooltip(DiffLayout);
+impl Render for DiffLayoutTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(5.0))
+            .bg(theme.surface_raised)
+            .border_1()
+            .border_color(theme.border_strong)
+            .text_size(px(11.0))
+            .text_color(theme.text)
+            .child(match self.0 {
+                DiffLayout::Unified => "Unified diff",
+                DiffLayout::Split => "Side-by-side diff",
+            })
+    }
+}
+
 impl Changes {
+    fn horizontal_limit(&self, side: Side) -> f32 {
+        let gutter = self.max_gutter;
+        let visible = (self.pane_width.get() * 0.5 - gutter - 18.0 - 8.0 - 1.0).max(1.0);
+        (self.max_columns[side.index()] as f32 * self.mono_advance + 16.0 - visible).max(0.0)
+    }
+    fn scroll_side(&mut self, side: Side, amount: f32, cx: &mut Context<Self>) {
+        let next = (self.horizontal[side.index()] + amount).clamp(0.0, self.horizontal_limit(side));
+        if next != self.horizontal[side.index()] {
+            self.horizontal[side.index()] = next;
+            self.invalidate_selection(cx);
+            cx.notify();
+        }
+    }
+    fn split_headers(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .h(px(28.0))
+            .flex_none()
+            .flex()
+            .border_b_1()
+            .border_color(theme.border)
+            .children([Side::Old, Side::New].map(|side| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .when(side == Side::Old, |el| {
+                        el.border_r_1().border_color(theme.border)
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(side.label()),
+                    )
+                    .children(
+                        [
+                            (-120.0, crate::icons::ALT_ARROW_LEFT),
+                            (120.0, crate::icons::ALT_ARROW_RIGHT),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (step, icon))| {
+                            div()
+                                .id(SharedString::from(format!(
+                                    "diff-scroll-{}-{i}",
+                                    side.label()
+                                )))
+                                .size(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .child(
+                                    crate::icons::icon(icon)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.scroll_side(side, step, cx);
+                                }))
+                        }),
+                    )
+            }))
+            .into_any_element()
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn split_cell(
+        &self,
+        row: usize,
+        side: Side,
+        line: Option<&DiffLine>,
+        key: Option<String>,
+        highlights: Option<&DiffHighlights>,
+        gutter: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut cell = div()
+            .id(SharedString::from(format!(
+                "split-cell-{}-{row}",
+                side.label()
+            )))
+            .flex_1()
+            .min_w_0()
+            .h(px(DIFF_LINE_HEIGHT))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .when(side == Side::Old, |el| {
+                el.border_r_1().border_color(theme.border)
+            })
+            .on_scroll_wheel(
+                cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    let (x, y) = match event.delta {
+                        gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+                        gpui::ScrollDelta::Lines(p) => (p.x * 24.0, p.y * 24.0),
+                    };
+                    let delta = if event.modifiers.shift {
+                        if x != 0.0 { x } else { y }
+                    } else if x.abs() > y.abs() {
+                        x
+                    } else {
+                        0.0
+                    };
+                    if delta != 0.0 {
+                        this.scroll_side(side, -delta, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            );
+        let Some(line) = line else {
+            return cell.bg(theme.ink(0.025)).into_any_element();
+        };
+        if line.kind == LineKind::Meta {
+            return cell
+                .child(
+                    div()
+                        .min_w_0()
+                        .px(px(8.0))
+                        .truncate()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .italic()
+                        .child(line.text.clone()),
+                )
+                .into_any_element();
+        }
+        let (marker, tint, number_color) = match line.kind {
+            LineKind::Add => (
+                "+",
+                Some(
+                    theme
+                        .regions
+                        .git_added
+                        .unwrap_or(theme.diff_add.opacity(0.055)),
+                ),
+                theme.diff_add,
+            ),
+            LineKind::Del => (
+                "−",
+                Some(
+                    theme
+                        .regions
+                        .git_deleted
+                        .unwrap_or(theme.diff_del.opacity(0.055)),
+                ),
+                theme.diff_del,
+            ),
+            _ => (" ", None, theme.text_faint.opacity(0.8)),
+        };
+        cell = cell.when_some(tint, |el, color| el.bg(color));
+        let number = match side {
+            Side::Old => line.old_no,
+            Side::New => line.new_no,
+        };
+        let spans = highlights
+            .map(|h| h.spans_for_side(line, side))
+            .unwrap_or(&[]);
+        let mono = font(theme.font_mono.clone());
+        let runs = render::runs_for_syntax_line_with_plain(
+            &line.text,
+            spans,
+            &mono,
+            theme.text.opacity(0.92),
+            theme,
+        );
+        let scope = self.split_scopes[side.index()];
+        let selection = self.selection_ui_for(scope, Some(side), cx);
+        let key = key.expect("non-placeholder cells have source identities");
+        let offset = self.horizontal[side.index()].min(self.horizontal_limit(side));
+        let width = (self.max_columns[side.index()] as f32 * self.mono_advance + 16.0).max(1.0);
+        cell.child(
+            div()
+                .w(px(gutter))
+                .flex_none()
+                .pr(px(8.0))
+                .flex()
+                .justify_end()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(11.0))
+                .text_color(theme.regions.git_line_number.unwrap_or(number_color))
+                .child(number.map(|n| n.to_string()).unwrap_or_default()),
+        )
+        .child(
+            div()
+                .w(px(18.0))
+                .flex_none()
+                .text_size(px(DIFF_TEXT_SIZE))
+                .text_color(number_color)
+                .child(marker),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_hidden()
+                .pl(px(8.0))
+                .child(
+                    div()
+                        .relative()
+                        .left(px(-offset))
+                        .w(px(width))
+                        .h(px(DIFF_LINE_HEIGHT))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(DIFF_TEXT_SIZE))
+                        .line_height(px(DIFF_LINE_HEIGHT))
+                        .whitespace_nowrap()
+                        .child(diff_text_element(
+                            line,
+                            runs,
+                            theme,
+                            Some((scope, &key, &selection)),
+                        )),
+                ),
+        )
+        .into_any_element()
+    }
+
     pub fn new(
         state: Entity<AppState>,
         comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let layout_observe = cx.observe_global::<layout::LayoutState>(|this: &mut Self, cx| {
+            this.apply_layout(layout::current(cx), cx);
+        });
         // Allocate THIS pane's selection scope before the scroll handler
         // (which captures it) — per-pane so hidden panes never touch the
         // active pane's selection/popup.
         let sel_scope = crate::markdown::selection::next_change_scope();
+        let split_scopes = [
+            crate::markdown::selection::next_change_scope(),
+            crate::markdown::selection::next_change_scope(),
+        ];
+        let scopes = [sel_scope, split_scopes[0], split_scopes[1]];
         // Rows are single lines now — a deep overdraw is cheap and keeps
         // fast wheel flicks from outrunning measurement.
         let list = ListState::new(0, ListAlignment::Top, px(1024.0));
@@ -1041,14 +1322,24 @@ impl Changes {
         // selection state is process-global — neither touches `self`).
         let scroll_popup = comment_popup.clone();
         list.set_scroll_handler(move |_event: &ListScrollEvent, _window, cx| {
-            if let Some(popup) = scroll_popup.upgrade() {
-                popup.update(cx, |popup, cx| {
-                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(sel_scope), cx)
-                });
+            for scope in scopes {
+                if let Some(popup) = scroll_popup.upgrade() {
+                    popup.update(cx, |popup, cx| {
+                        popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                    });
+                }
+                crate::markdown::selection::clear(scope);
             }
-            crate::markdown::selection::clear(sel_scope);
         });
         Self {
+            view_layout: layout::current(cx),
+            layout_error: None,
+            split_scopes,
+            horizontal: [0.0; 2],
+            max_columns: [0; 2],
+            max_gutter: GUTTER_WIDTH,
+            pane_width: Rc::new(std::cell::Cell::new(0.0)),
+            mono_advance: DIFF_TEXT_SIZE * 0.6,
             state,
             diffs: Vec::new(),
             started: false,
@@ -1084,7 +1375,109 @@ impl Changes {
             sel_scope,
             comment_popup,
             _observe: observe,
+            _layout_observe: layout_observe,
         }
+    }
+
+    fn apply_layout(&mut self, mode: DiffLayout, cx: &mut Context<Self>) {
+        if self.view_layout == mode {
+            return;
+        }
+        let anchor = self.list.logical_scroll_top();
+        let old_row = self.rows.get(anchor.item_ix).copied();
+        self.view_layout = mode;
+        self.layout_error = None;
+        self.fold_settle = None;
+        for fold in self.folds.values_mut() {
+            fold.toggled_at = None;
+        }
+        if let Some(parsed) = &self.parsed {
+            let (rows, ranges) = layout::flatten(mode, &parsed.files, |i| {
+                self.folds
+                    .get(&parsed.files[i].path)
+                    .is_some_and(|fold| fold.collapsed)
+            });
+            let target = old_row
+                .and_then(|r| layout::relocate(r, &rows))
+                .unwrap_or(0);
+            let offset = if old_row.is_some_and(|r| {
+                matches!(r, DiffRow::Line { .. } | DiffRow::SplitLine { .. })
+                    && matches!(
+                        rows.get(target),
+                        Some(DiffRow::Line { .. } | DiffRow::SplitLine { .. })
+                    )
+            }) {
+                anchor.offset_in_item.min(px(DIFF_LINE_HEIGHT))
+            } else {
+                px(0.0)
+            };
+            self.list
+                .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: target,
+                offset_in_item: offset,
+            });
+            self.rows = rows;
+            self.row_ranges = ranges;
+        }
+        self.invalidate_selection(cx);
+        cx.notify();
+    }
+
+    fn layout_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_none()
+            .flex()
+            .gap(px(2.0))
+            .children(DiffLayout::ALL.map(|mode| {
+                div()
+                    .id(SharedString::from(format!("diff-layout-{}", mode.label())))
+                    .size(px(24.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .role(gpui::Role::Button)
+                    .aria_label(match mode {
+                        DiffLayout::Unified => "Unified diff",
+                        DiffLayout::Split => "Side-by-side diff",
+                    })
+                    .cursor_pointer()
+                    .when(self.view_layout == mode, |el| {
+                        el.bg(theme.element_active).text_color(theme.text)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        match layout::set(mode, cx) {
+                            Ok(()) => {
+                                this.layout_error = None;
+                                this.apply_layout(mode, cx);
+                                cx.notify();
+                            }
+                            Err(error) => {
+                                this.layout_error =
+                                    Some(format!("Could not save diff layout: {error}").into());
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .tooltip(move |_, cx| cx.new(|_| DiffLayoutTooltip(mode)).into())
+                    .tooltip_show_delay(Duration::from_millis(300))
+                    .child(
+                        crate::icons::icon(match mode {
+                            DiffLayout::Unified => crate::icons::DIFF_UNIFIED,
+                            DiffLayout::Split => crate::icons::DIFF_SPLIT,
+                        })
+                        .size(px(16.0))
+                        .text_color(if self.view_layout == mode {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                    )
+            }))
+            .into_any_element()
     }
 
     /// A pane pinned to one commit's diff (a History row click) — fetches
@@ -1120,10 +1513,14 @@ impl Changes {
     /// settle shows the shared Comment pill at the selection endpoint, a new
     /// drag or a clear hides it. Built once per frame; every visible line's
     /// key rides the SAME [`render::SelectionUi`].
-    fn selection_ui_for(&self, cx: &mut Context<Self>) -> render::SelectionUi {
+    fn selection_ui_for(
+        &self,
+        scope: crate::markdown::selection::SelectionScope,
+        side: Option<Side>,
+        cx: &mut Context<Self>,
+    ) -> render::SelectionUi {
         let popup = self.comment_popup.clone();
         let entity = cx.weak_entity();
-        let scope = self.sel_scope;
         // A fresh drag start closes ANY surface's pill — only one floating
         // UI may exist — without touching the just-begun selection. A cleared
         // selection hides only THIS pane's pill (scoped dismissal).
@@ -1173,13 +1570,27 @@ impl Changes {
                     })
                 };
                 // Side Chat source (round 21): the diff pane's scope label
-                // labels the engine's context block (the engine holds no
-                // selection text for diff panes — it rides the user's
-                // request). The selected FILE is not resolved for a generic
-                // markdown selection over diff lines, so it stays `None`.
+                // labels the engine's context block. Split selections name
+                // their version; a path is attached only when all selected
+                // source lines belong to one file.
                 let scope_label = entity
-                    .update(cx, |this: &mut Self, _| this.scope.label().to_string())
+                    .update(cx, |this: &mut Self, _| match side {
+                        Some(side) => format!("{} · {} version", this.scope.label(), side.label()),
+                        None => this.scope.label().to_string(),
+                    })
                     .ok();
+                let file_path = entity
+                    .update(cx, |this: &mut Self, _| {
+                        let files = &this.parsed.as_ref()?.files;
+                        layout::selected_file(
+                            &this.owner,
+                            snapshot.spans.iter().map(|span| span.key.as_str()),
+                            files,
+                            side,
+                        )
+                    })
+                    .ok()
+                    .flatten();
                 if let Some(popup) = popup.upgrade() {
                     popup.update(cx, |popup, cx| {
                         popup.offer(
@@ -1195,7 +1606,7 @@ impl Changes {
                             clear,
                             Some(cypher_proto::SideChatSource::GitDiff {
                                 scope: scope_label,
-                                file_path: None,
+                                file_path,
                             }),
                             cx,
                         );
@@ -1214,12 +1625,13 @@ impl Changes {
     /// selection wash and any popup offer that belongs to THIS pane (never
     /// another surface's).
     fn invalidate_selection(&mut self, cx: &mut Context<Self>) {
-        let scope = self.sel_scope;
-        crate::markdown::selection::clear(scope);
-        if let Some(popup) = self.comment_popup.upgrade() {
-            popup.update(cx, |popup, cx| {
-                popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
-            });
+        for scope in [self.sel_scope, self.split_scopes[0], self.split_scopes[1]] {
+            crate::markdown::selection::clear(scope);
+            if let Some(popup) = self.comment_popup.upgrade() {
+                popup.update(cx, |popup, cx| {
+                    popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                });
+            }
         }
     }
 
@@ -1685,7 +2097,28 @@ impl Changes {
                 };
                 changes.folds.clear();
                 changes.highlights.clear();
-                let (rows, ranges) = flatten_rows(&files, |_| false);
+                let (rows, ranges) = layout::flatten(changes.view_layout, &files, |_| false);
+                changes.max_columns = [0; 2];
+                changes.max_gutter = files.iter().map(gutter_width).fold(GUTTER_WIDTH, f32::max);
+                changes.horizontal = [0.0; 2];
+                for line in files.iter().flat_map(|f| &f.hunks).flat_map(|h| &h.lines) {
+                    if line.kind == LineKind::Meta {
+                        continue;
+                    }
+                    // Conservative width bound: bytes also safely cover wide
+                    // Unicode; tabs reserve their display-cell advance.
+                    let columns: usize = line
+                        .text
+                        .bytes()
+                        .map(|b| if b == b'\t' { 8 } else { 1 })
+                        .sum();
+                    if line.kind != LineKind::Add {
+                        changes.max_columns[0] = changes.max_columns[0].max(columns);
+                    }
+                    if line.kind != LineKind::Del {
+                        changes.max_columns[1] = changes.max_columns[1].max(columns);
+                    }
+                }
                 // The uniform hint keeps offsets for never-rendered rows
                 // sane (most rows ARE lines); real heights land as rows
                 // render.
@@ -1736,6 +2169,20 @@ impl Changes {
         let Some(file) = parsed.files.get(file_ix) else {
             return;
         };
+        if self.view_layout == DiffLayout::Split {
+            let fold = self.folds.entry(file.path.clone()).or_default();
+            fold.collapsed = !fold.collapsed;
+            fold.toggled_at = None;
+            let body = if fold.collapsed {
+                Vec::new()
+            } else {
+                layout::body_rows(self.view_layout, file_ix as u32, file)
+            };
+            self.replace_file_body(file_ix, body);
+            self.invalidate_selection(cx);
+            cx.notify();
+            return;
+        }
         let expanded_height = body_height(file);
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
@@ -1822,7 +2269,7 @@ impl Changes {
             let body = if fold.collapsed {
                 Vec::new()
             } else {
-                body_rows(file_ix as u32, file)
+                layout::body_rows(self.view_layout, file_ix as u32, file)
             };
             self.replace_file_body(file_ix, body);
         }
@@ -1866,15 +2313,16 @@ impl Changes {
             let new_len = if collapse {
                 0
             } else {
-                body_row_count(&files[file_ix])
+                layout::body_rows(self.view_layout, file_ix as u32, &files[file_ix]).len()
             };
             if body.len() != new_len {
                 self.list.splice(body, new_len);
             }
         }
-        let (rows, ranges) = flatten_rows(&files, |_| collapse);
+        let (rows, ranges) = layout::flatten(self.view_layout, &files, |_| collapse);
         self.rows = rows;
         self.row_ranges = ranges;
+        self.invalidate_selection(cx);
         cx.notify();
     }
 
@@ -2108,12 +2556,7 @@ impl Changes {
 
     // ---- rendering ----
 
-    fn render_row(
-        &mut self,
-        ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(parsed) = &self.parsed else {
             return gpui::Empty.into_any_element();
         };
@@ -2123,6 +2566,13 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
+        let mono = font(theme.font_mono.clone());
+        let font_id = window.text_system().resolve_font(&mono);
+        self.mono_advance = window
+            .text_system()
+            .em_advance(font_id, px(DIFF_TEXT_SIZE))
+            .map(f32::from)
+            .unwrap_or(DIFF_TEXT_SIZE * 0.6);
         match row {
             DiffRow::FileHeader { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -2169,7 +2619,7 @@ impl Changes {
                 // never collide) + the shared selection callbacks: ONLY the
                 // code text is selectable (gutters/markers stay inert).
                 let key = diff_line_key(&self.owner, file, hunk, line_ix);
-                let selection = self.selection_ui_for(cx);
+                let selection = self.selection_ui_for(self.sel_scope, None, cx);
                 diff_line_row(
                     line,
                     spans,
@@ -2177,6 +2627,47 @@ impl Changes {
                     gutter_width(file_diff),
                     Some((self.sel_scope, &key, &selection)),
                 )
+            }
+            DiffRow::SplitLine {
+                file,
+                hunk,
+                old,
+                new,
+            } => {
+                let Some(file_diff) = files.get(file as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
+                let Some(h) = file_diff.hunks.get(hunk as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let left = self.split_cell(
+                    ix,
+                    Side::Old,
+                    old.and_then(|i| h.lines.get(i as usize)),
+                    old.map(|i| format!("{}:old", diff_line_key(&self.owner, file, hunk, i))),
+                    highlight.as_deref(),
+                    gutter_width(file_diff),
+                    &theme,
+                    cx,
+                );
+                let right = self.split_cell(
+                    ix,
+                    Side::New,
+                    new.and_then(|i| h.lines.get(i as usize)),
+                    new.map(|i| format!("{}:new", diff_line_key(&self.owner, file, hunk, i))),
+                    highlight.as_deref(),
+                    gutter_width(file_diff),
+                    &theme,
+                    cx,
+                );
+                div()
+                    .w_full()
+                    .h(px(DIFF_LINE_HEIGHT))
+                    .flex()
+                    .child(left)
+                    .child(right)
+                    .into_any_element()
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -2391,6 +2882,7 @@ impl Changes {
                         .text_color(theme.text)
                         .child(SharedString::from(commit.subject.clone())),
                 )
+                .child(self.layout_picker(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2500,7 +2992,9 @@ impl Changes {
             })
             .children(self.render_ref_selector(&theme, cx))
             .when(scope != DiffScope::History, |element| {
-                element.child(div().flex_1())
+                element
+                    .child(div().flex_1())
+                    .child(self.layout_picker(&theme, cx))
             })
             .child(trailing)
             .into_any_element()
@@ -3074,6 +3568,7 @@ fn diff_text_element(
     .size_full();
     div()
         .relative()
+        .min_h(px(DIFF_LINE_HEIGHT))
         .child(underlay)
         .child(styled)
         .into_any_element()
@@ -3269,6 +3764,9 @@ impl Render for Changes {
                             .flex()
                             .flex_col()
                             .children(self.render_header_strip(&theme))
+                            .when(self.view_layout == DiffLayout::Split, |el| {
+                                el.child(self.split_headers(&theme, cx))
+                            })
                             // The frame's CHANGES selection registry is
                             // cleared FIRST (before any diff line registers) —
                             // scoped so the transcript's own reset never
@@ -3282,6 +3780,12 @@ impl Render for Changes {
                                     .flex_col()
                                     .child(crate::markdown::render::selection_frame_reset(
                                         self.sel_scope,
+                                    ))
+                                    .child(crate::markdown::render::selection_frame_reset(
+                                        self.split_scopes[0],
+                                    ))
+                                    .child(crate::markdown::render::selection_frame_reset(
+                                        self.split_scopes[1],
                                     ))
                                     .child(
                                         list(self.list.clone(), cx.processor(Self::render_row))
@@ -3310,10 +3814,30 @@ impl Render for Changes {
             }
         };
 
+        let measure = self.pane_width.clone();
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measure.set(f32::from(bounds.size.width)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .when_some(self.layout_error.clone(), |el, error| {
+                el.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.warning)
+                        .child(error),
+                )
+            })
             .when_some(error, |el, message| {
                 el.child(
                     div()
@@ -3889,6 +4413,46 @@ rename to new_name.rs
                 .spans(&added)
                 .iter()
                 .any(|span| span.kind == cypher_syntax::HighlightKind::Function)
+        );
+    }
+
+    #[test]
+    fn split_context_uses_each_versions_lexical_state() {
+        let parse = |source| {
+            Arc::new(
+                cypher_syntax::highlight(cypher_syntax::HighlightRequest {
+                    source,
+                    path: Some("x.rs"),
+                    fence_tag: None,
+                })
+                .unwrap(),
+            )
+        };
+        let highlights = DiffHighlights {
+            old: Some(parse("/*\nlet value = 1;\n*/\n")),
+            new: Some(parse("// changed\nlet value = 1;\n// end\n")),
+        };
+        let line = DiffLine {
+            kind: LineKind::Context,
+            old_no: Some(2),
+            new_no: Some(2),
+            text: "let value = 1;".into(),
+        };
+        assert!(
+            highlights
+                .spans_for_side(&line, Side::Old)
+                .iter()
+                .any(|s| s.kind == cypher_syntax::HighlightKind::Comment)
+        );
+        assert!(
+            highlights
+                .spans_for_side(&line, Side::New)
+                .iter()
+                .any(|s| s.kind == cypher_syntax::HighlightKind::Keyword)
+        );
+        assert_ne!(
+            highlights.spans_for_side(&line, Side::Old),
+            highlights.spans_for_side(&line, Side::New)
         );
     }
 

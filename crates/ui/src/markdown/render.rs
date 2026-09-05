@@ -948,7 +948,11 @@ fn resolve_drag(
             .get(head.0)
             .map(|e| e.key.to_string())
             .unwrap_or_else(|| anchor_key.to_string());
-        let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
+        let spans = if matches!(scope, super::selection::SelectionScope::Changes(_)) {
+            super::selection::resolve_line_spans(&elements, (anchor_ei, anchor_ix), head)
+        } else {
+            super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head)
+        };
         super::selection::update_drag(scope, &head_key, head.1, spans)
     })
 }
@@ -966,6 +970,10 @@ fn register_selection_listeners(
     selection: Option<SelectionUi>,
 ) {
     use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+    // A long (or horizontally scrolled) line may lay out beyond its column.
+    // Only its visible clipped area can start a selection; otherwise a click
+    // on the other split-diff column would activate both sides' listeners.
+    let visible_bounds = layout.bounds().intersect(&window.content_mask().bounds);
     {
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
         let selection = selection.clone();
@@ -973,7 +981,7 @@ fn register_selection_listeners(
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
-            if layout.bounds().contains(&e.position) {
+            if visible_bounds.contains(&e.position) {
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };
@@ -1404,6 +1412,15 @@ mod tests {
     use super::*;
     use crate::markdown::parser::InlineStyle;
 
+    #[test]
+    fn clipped_long_line_cannot_start_selection_in_the_other_diff_column() {
+        let text = Bounds::new(point(px(-80.0), px(0.0)), gpui::size(px(900.0), px(21.0)));
+        let left_column = Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(200.0), px(300.0)));
+        let visible = text.intersect(&left_column);
+        assert!(text.contains(&point(px(250.0), px(10.0))));
+        assert!(!visible.contains(&point(px(250.0), px(10.0))));
+        assert!(visible.contains(&point(px(100.0), px(10.0))));
+    }
     #[test]
     fn inline_colors_preserve_prose_fenced_code_and_default_washes() {
         for mut theme in [Theme::dark(), Theme::light()] {

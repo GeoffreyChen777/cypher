@@ -36,9 +36,9 @@ use std::sync::{Mutex, OnceLock};
 pub enum SelectionScope {
     /// The conversation transcript (markdown rows + user bubbles).
     Transcript,
-    /// A Git diff pane, allocated a fresh id per pane ([`next_change_scope`])
-    /// so two diff tabs never share a scope and a closed pane's scope is
-    /// never reused.
+    /// A Git diff surface, allocated fresh ids for each pane and each of its
+    /// split columns ([`next_change_scope`]). Tabs/versions never share a
+    /// selection registry and closed panes' scopes are never reused.
     Changes(u64),
     /// A temporary Side Chat transcript ([`next_side_chat_scope`]): one fresh
     /// scope per panel, so a side chat beside the main transcript — or two
@@ -147,6 +147,25 @@ fn state() -> &'static Mutex<HashMap<SelectionScope, Option<MdSelection>>> {
 /// `(element index, byte offset)` into `elements` (document-ordered
 /// `(key, text)` pairs). Handles either direction; empty slices are skipped.
 pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, usize)) -> Vec<Span> {
+    resolve_spans_inner(elements, a, b, false)
+}
+
+/// Diff registries contain source lines rather than paragraphs. Keep genuine
+/// empty lines between the endpoints; split-view padding is never registered.
+pub fn resolve_line_spans(
+    elements: &[(&str, &str)],
+    a: (usize, usize),
+    b: (usize, usize),
+) -> Vec<Span> {
+    resolve_spans_inner(elements, a, b, true)
+}
+
+fn resolve_spans_inner(
+    elements: &[(&str, &str)],
+    a: (usize, usize),
+    b: (usize, usize),
+    lines: bool,
+) -> Vec<Span> {
     let (start, end) = if (a.0, a.1) <= (b.0, b.1) {
         (a, b)
     } else {
@@ -157,7 +176,7 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
         let from = if ei == start.0 { start.1 } else { 0 };
         let to = if ei == end.0 { end.1 } else { text.len() };
         let (from, to) = (from.min(text.len()), to.min(text.len()));
-        if from < to {
+        if from < to || (lines && text.is_empty() && ei > start.0 && ei < end.0) {
             spans.push(Span {
                 key: (*key).to_string(),
                 range: from..to,
@@ -328,7 +347,7 @@ pub fn selected_text() -> Option<String> {
 fn join_spans(spans: &[Span]) -> String {
     spans
         .iter()
-        .filter(|s| !s.range.is_empty())
+        .filter(|s| !s.range.is_empty() || s.text.is_empty())
         .map(|s| &s.text[s.range.clone()])
         .collect::<Vec<_>>()
         .join("\n")
@@ -372,6 +391,23 @@ pub fn word_range(text: &str, ix: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_quotes_keep_real_empty_source_lines() {
+        let rows = [
+            ("old-0", "before"),
+            ("old-1", ""),
+            ("old-2", ""),
+            ("old-3", "after"),
+        ];
+        for (start, end) in [((0, 0), (3, 5)), ((3, 5), (0, 0))] {
+            let spans = resolve_line_spans(&rows, start, end);
+            assert_eq!(join_spans(&spans), "before\n\n\nafter");
+            assert_eq!(spans.len(), 4);
+        }
+        // Paragraph selection keeps its original empty-element behavior.
+        assert_eq!(resolve_spans(&rows, (0, 0), (3, 5)).len(), 2);
+    }
 
     const S: SelectionScope = SelectionScope::Transcript;
     // A fixed pane id — real panes allocate via `next_change_scope`, but the
