@@ -82,7 +82,7 @@ struct ChatGroup {
     /// cwd) — the new-session target for this group, authoritative without
     /// ListRefs. `None` for ordinary checkouts.
     worktree_path: Option<String>,
-    /// `icons::FOLDER_WITH_FILES` for linked worktrees, `icons::GIT_BRANCH`
+    /// `icons::GIT_WORKTREE` for linked worktrees, `icons::GIT_BRANCH`
     /// for ordinary checkouts/branches (and every synthetic card).
     icon: &'static str,
     chats: Vec<(ChatIndicator, Chat)>,
@@ -229,7 +229,7 @@ fn group_chats(chats: Vec<(ChatIndicator, Chat)>, space_path: Option<&str>) -> V
             worktree,
             worktree_path: worktree.then(|| chat.cwd.clone()).flatten(),
             icon: if worktree {
-                icons::FOLDER_WITH_FILES
+                icons::GIT_WORKTREE
             } else {
                 icons::GIT_BRANCH
             },

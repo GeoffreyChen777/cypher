@@ -69,6 +69,8 @@ icon_assets![
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no branch icon.
     (GIT_BRANCH, "git-branch"),
+    // Linked worktree: a shared root branching into independent checkouts.
+    (GIT_WORKTREE, "git-worktree"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),
