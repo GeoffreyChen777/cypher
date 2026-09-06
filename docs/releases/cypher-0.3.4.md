@@ -1,8 +1,4 @@
-# Cypher 0.3.3 — Guided Linux setup and private Unix IPC
-
-**Not published.** The Ubuntu 20.04 release test runner exposed a Python 3.8
-test-script compatibility issue before publication. The Git tag is retained;
-the corrected public release is [0.3.4](cypher-0.3.4.md).
+# Cypher 0.3.4 — Guided Linux setup and private Unix IPC
 
 - Introduce `cypher setup` for Linux: account connection (or local-only mode),
   verified Pi Runtime installation, background service setup and readiness
@@ -22,7 +18,10 @@ the corrected public release is [0.3.4](cypher-0.3.4.md).
   system Pi credentials and unrelated devices are not silently changed.
 - Improve Runtime installation progress and device-specific missing-Runtime
   guidance. Refresh model caches after setup/configuration changes.
-- Refresh the website with the Pi workspace screenshot gallery.
+- Refresh the website with the Pi workspace screenshot gallery, working cached
+  image switching, and current fallback download links.
+- Keep the release tests compatible with Ubuntu 20.04's Python 3.8 while
+  retaining the glibc 2.31 baseline and all installation checks.
 
 **Development configuration change:** `CYPHER_IPC_PORT` is no longer supported.
 Remove it from local commands and service environments. Use `CYPHER_DATA_DIR`
@@ -35,4 +34,5 @@ this release does not add end-to-end encryption.
 
 macOS ARM64 and Linux x86_64/ARM64 are included. No iOS release is published.
 Existing chats and provider/MCP configuration are retained.
-Release tag: `cypher-v0.3.3`; earlier release artifacts are not overwritten.
+Release tag: `cypher-v0.3.4`. The 0.3.3 build was not published; its failed tag
+and all earlier public release artifacts are left unchanged.

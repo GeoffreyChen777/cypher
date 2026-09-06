@@ -27,6 +27,14 @@ jobs:
       - run: bash scripts/ci/actionlint.sh
       - run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - run: python3 scripts/test-linux-cli.py
+      - name: installer regressions on release container Python 3.8
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo ubuntu:20.04 bash -ec '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq python3 curl ca-certificates
+            python3 scripts/test-linux-cli.py
+          '
       - run: node --test scripts/test-landing.mjs
       - run: bash scripts/test-check-linux-abi.sh
       - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh scripts/test-macos-icon.sh

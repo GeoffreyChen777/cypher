@@ -219,7 +219,8 @@ esac
                 got,status=os.waitpid(pid,os.WNOHANG)
                 if got:
                     reaped=True
-                    self.assertEqual(os.waitstatus_to_exitcode(status),0,output.decode(errors="replace"))
+                    self.assertTrue(os.WIFEXITED(status),output.decode(errors="replace"))
+                    self.assertEqual(os.WEXITSTATUS(status),0,output.decode(errors="replace"))
                     break
             self.assertTrue(reaped,output.decode(errors="replace"))
             self.assertEqual((self.root/"actions").read_text(),"setup:confirm-fixture\n")
