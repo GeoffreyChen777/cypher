@@ -5,8 +5,8 @@
 - **`ci.yml`**: pull requests, pushes to `main`, and manual runs. Runs workflow
   lint, release/installer regressions, Edge typechecking and unit/workerd tests,
   Linux backend tests (including Engine integration tests), updater Clippy,
-  formatting, and macOS workspace compilation. No deployment credentials are
-  available to these jobs. UI unit tests are not currently part of this gate.
+  formatting, macOS workspace compilation, and focused setup/runtime/MCP/Unix
+  IPC UI regressions. No deployment credentials are available to these jobs.
 - **`deploy.yml`**: pushes to `main` and main-only manual runs. Captures a fresh
   `main` SHA once, tests it, checks installer compatibility, then deploys all
   three workers from that same SHA. It deliberately does not use per-push path

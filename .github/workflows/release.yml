@@ -74,7 +74,7 @@ jobs:
           tar -xzf "$archive" -C "$stage" --strip-components=1
           scripts/check-linux-abi.sh "$stage/cypher"
           set +e
-          CYPHER_DATA_DIR="$stage/data" CYPHER_IPC_PORT=27973 timeout 8 "$stage/cypher" headless
+          CYPHER_DATA_DIR="$stage/data" timeout 8 "$stage/cypher" headless
           rc=$?
           set -e
           test "$rc" = 124 || { echo "headless smoke exited with $rc"; exit 1; }

@@ -1,6 +1,6 @@
 # Guided Linux setup
 
-This flow targets the **next release (0.3.3+)**. The deployment gate prevents
+This flow requires **Cypher 0.3.3 or newer**. The deployment gate prevents
 the new installer from going live while the public client channel is still
 0.3.2, which has no `setup` command.
 

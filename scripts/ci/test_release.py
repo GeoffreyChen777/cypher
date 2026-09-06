@@ -443,6 +443,11 @@ class GitHubPublication(Fixture):
 
 
 class Policies(unittest.TestCase):
+    def test_release_smoke_does_not_reintroduce_removed_tcp_ipc(self):
+        workflow = (release.ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("CYPHER_IPC_PORT=", workflow)
+        self.assertIn('CYPHER_DATA_DIR="$stage/data" timeout 8', workflow)
+
     def test_manual_tag_context_is_never_a_publish(self):
         with tempfile.TemporaryDirectory() as root:
             output = Path(root) / "outputs"
