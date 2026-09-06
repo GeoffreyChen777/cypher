@@ -202,8 +202,12 @@ actor ChatRoomClient {
         guard let stateFrame = frames.first,
               stateFrame.kind == ChatFrameType.state,
               let state = ChatStateHeader(stateFrame.header) else { return }
-        let contained = state.checkpointSize == 0
-            || await delegate.containsFrontier(stateFrame.payload)
+        let contained: Bool
+        if state.checkpointSize == 0 {
+            contained = true
+        } else {
+            contained = await delegate.containsFrontier(stateFrame.payload)
+        }
         let plan = chatPlanCatchUp(cursor: after, state: state,
                                    frontierContained: contained)
         let plannedAfter: UInt64

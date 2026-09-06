@@ -4,6 +4,7 @@
 // token, rotated tokens persist once, transient failures preserve the refresh
 // token, permanent rejections clear every credential).
 
+import CryptoKit
 import XCTest
 @testable import Cypher
 

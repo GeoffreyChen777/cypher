@@ -166,16 +166,6 @@ final class SessionStore {
                 self.saver?.poke()
                 return true
             },
-            clampCursor: { [weak self] seq in
-                guard let self, self.cursor != seq else { return }
-                self.cursor = seq
-                self.saver?.poke()
-            },
-            setCursor: { [weak self] seq in
-                guard let self, self.cursor != seq else { return }
-                self.cursor = seq
-                self.saver?.poke()
-            },
             applyRow: { [weak self] bytes, seq in
                 guard let self else { return }
                 // Malformed remote bytes cost the row, never the doc. The
@@ -191,6 +181,16 @@ final class SessionStore {
             advanceCursor: { [weak self] seq in
                 guard let self else { return }
                 self.cursor = max(self.cursor, seq)
+                self.saver?.poke()
+            },
+            clampCursor: { [weak self] seq in
+                guard let self, self.cursor != seq else { return }
+                self.cursor = seq
+                self.saver?.poke()
+            },
+            setCursor: { [weak self] seq in
+                guard let self, self.cursor != seq else { return }
+                self.cursor = seq
                 self.saver?.poke()
             },
             event: { [weak self] event in self?.handle(event) }
