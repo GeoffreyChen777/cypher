@@ -36,7 +36,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 app_root.join(&manifest.version).display(),
                 manifest.version
             );
-            match cypher_update::restart_service() {
+            match cypher_update::restart_service(&cypher_env::data_dir()) {
                 Ok(()) => println!("engine service restarted."),
                 Err(err) => println!(
                     "note: service restart failed ({err:#}) — restart the engine manually to finish."

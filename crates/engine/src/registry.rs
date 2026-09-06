@@ -306,14 +306,14 @@ impl HarnessRegistry {
 /// `pi --mode rpc --session-dir` at (callers pass
 /// `profile.store_root().join("agent-sessions")`).
 /// [`default_registry`] with the optional Cypher bridge: production assembly
-/// passes `ws://127.0.0.1:<ipc_port>` so pi children get `CYPHER_ENGINE_WS_URL`
+/// passes the instance's private Unix socket path so pi children get `CYPHER_ENGINE_SOCKET`
 /// and the subagents extension can reach the engine's `StartSubagent` /
 /// `WatchAgentEvents` bridge. Test-only assembly keeps `None` (no IPC server).
 pub fn default_registry_with_bridge(
     pi_sessions_root: PathBuf,
-    engine_ws_url: Option<String>,
+    engine_socket: Option<String>,
 ) -> HarnessRegistry {
-    default_registry_with_bridge_and_runtime(pi_sessions_root, engine_ws_url, None)
+    default_registry_with_bridge_and_runtime(pi_sessions_root, engine_socket, None)
 }
 
 /// Production registry with a Cypher-owned Pi runtime. The executable path is
@@ -322,14 +322,14 @@ pub fn default_registry_with_bridge(
 /// atomically publishes `current`, without ever falling back to system Pi.
 pub fn default_registry_with_bridge_and_runtime(
     pi_sessions_root: PathBuf,
-    engine_ws_url: Option<String>,
+    engine_socket: Option<String>,
     runtime: Option<crate::pi_runtime::PiRuntimePaths>,
 ) -> HarnessRegistry {
     let registry = default_registry_with_runtime(pi_sessions_root.clone(), runtime.clone());
-    if let Some(url) = engine_ws_url {
+    if let Some(url) = engine_socket {
         // Re-arm the plain Pi slot IN PLACE with a bridge-aware PiHarness:
         // every pi child gets the local engine IPC WebSocket as
-        // `CYPHER_ENGINE_WS_URL` (the subagents extension's StartSubagent /
+        // `CYPHER_ENGINE_SOCKET` (the subagents extension's StartSubagent /
         // WatchAgentEvents bridge). The slot's order entry is untouched, so
         // Pi stays listed exactly once.
         let pi_sessions = pi_sessions_root;
@@ -682,7 +682,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join("agent-sessions");
         let plain = default_registry(sessions.clone());
-        let bridge = default_registry_with_bridge(sessions, Some("ws://127.0.0.1:4242".into()));
+        let bridge = default_registry_with_bridge(
+            sessions,
+            Some("/tmp/cypher-ipc-fixture/engine.sock".into()),
+        );
         let plain_ids: Vec<HarnessId> = plain.descriptors().iter().map(|d| d.id).collect();
         let bridge_ids: Vec<HarnessId> = bridge.descriptors().iter().map(|d| d.id).collect();
         assert_eq!(

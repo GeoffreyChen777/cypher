@@ -105,8 +105,8 @@ pub struct EngineConfig {
     /// Explicit development bearer for edge room joins. Synced WorkOS runtimes
     /// obtain their bearer from [`Auth`]; development stays offline when this is absent.
     pub edge_token: Option<String>,
-    /// Localhost IPC port for the UI.
-    pub ipc_port: u16,
+    /// Private Unix IPC socket for the UI.
+    pub ipc_socket: PathBuf,
     /// Harness for doc-command runs on chats without a workspace `config` row.
     pub default_harness: HarnessId,
     /// Workspace-doc org (`ws/{orgId}` room). `None` = `$CYPHER_ORG_ID` or the
@@ -196,13 +196,13 @@ impl EngineCore {
         std::fs::create_dir_all(data_dir)?;
         // Single-instance guard: two engines on one data dir would race the
         // SQLite snapshots + journals. Taken before any store opens or the IPC
-        // port binds; held (and kernel-released on crash) for the engine's life.
+        // socket binds; held (and kernel-released on crash) for the engine's life.
         let lock = InstanceLock::acquire(data_dir)?;
         Self::assemble_with_profile_locked(profile, registry, default_harness, edge, lock)
     }
 
     /// Assemble against a pre-acquired [`InstanceLock`]. The headed app takes
-    /// the lock before binding the IPC port so the listener owner and the
+    /// the lock before binding the IPC socket so the listener owner and the
     /// data-dir owner cannot diverge when several viewports bootstrap at once.
     pub fn assemble_with_profile_locked(
         profile: EngineProfile,
@@ -779,18 +779,18 @@ impl Engine {
         // `current` symlink makes the lazy harness become installed.
         let pi_runtime_data_dir = profile.device_root().to_path_buf();
         let pi_runtime_paths = pi_runtime::PiRuntimePaths::for_data_dir(profile.device_root());
-        // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_WS_URL`:
+        // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_SOCKET`:
         // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
         // headless and headed modes). Test-only `EngineCore::assemble` keeps
         // `None` — it never serves IPC.
-        let engine_ws_url = Some(format!("ws://127.0.0.1:{}", config.ipc_port));
+        let engine_socket = Some(config.ipc_socket.to_string_lossy().into_owned());
         let synced_scope = profile.scope() == WorkspaceScope::Synced;
         let core = match lock {
             Some(lock) => EngineCore::assemble_with_profile_locked(
                 profile,
                 Arc::new(default_registry_with_bridge_and_runtime(
                     pi_sessions_root,
-                    engine_ws_url,
+                    engine_socket,
                     Some(pi_runtime_paths.clone()),
                 )),
                 config.default_harness,
@@ -801,7 +801,7 @@ impl Engine {
                 profile,
                 Arc::new(default_registry_with_bridge_and_runtime(
                     pi_sessions_root,
-                    engine_ws_url,
+                    engine_socket,
                     Some(pi_runtime_paths),
                 )),
                 config.default_harness,
@@ -840,7 +840,11 @@ impl Engine {
             let terminals = core.terminals.clone();
             Arc::new(move || !sessions.any_active() && !terminals.any_open())
         };
-        let updater = cypher_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        let updater = cypher_update::Updater::spawn(
+            config.edge_url.clone(),
+            Some(quiescent),
+            config.data_dir.clone(),
+        );
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();
             let wake = tokio::spawn(async move {
@@ -900,17 +904,22 @@ impl Engine {
     /// relay + peer link cache (targetDeviceId routing).
     pub async fn run(self) -> anyhow::Result<()> {
         let config = self.config;
+        anyhow::ensure!(
+            config.ipc_socket == cypher_env::ipc_socket(&config.data_dir)?,
+            "Engine IPC socket does not match its data directory"
+        );
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
         std::fs::create_dir_all(&config.data_dir)?;
         // Auth construction can persist a sanitized session, and its refresh
         // loop rotates single-use credentials. Own the directory BEFORE either.
         let lock = InstanceLock::acquire(&config.data_dir)?;
+        let listener = cypher_rpc::LocalListener::bind(&config.ipc_socket).await?;
         let auth = Self::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
         let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
-        let _refresh_loop = auth.spawn_refresh_loop();
+        let _refresh_loop = tokio_util::task::AbortOnDropHandle::new(auth.spawn_refresh_loop());
 
         // A captured cloud session without an organization must finish onboarding
         // before its profile can open. A clean signed-out install is local and never
@@ -932,7 +941,7 @@ impl Engine {
             inner: runtime.core().rpc_service(),
             stop_tx,
         });
-        let server = serve_ipc(config.ipc_port, service).await?;
+        let server = tokio::spawn(listener.serve(service));
 
         tokio::select! {
             result = shutdown_signal() => result?,
@@ -952,6 +961,9 @@ impl Engine {
         }
         tracing::info!("shutting down");
         server.abort();
+        let _ = server.await;
+        _refresh_loop.abort();
+        let _ = _refresh_loop.await;
         runtime.shutdown().await;
         Ok(())
     }
@@ -968,17 +980,19 @@ async fn wait_for_signed_out(state: &mut tokio::sync::watch::Receiver<AuthState>
     }
 }
 
-/// Ctrl-C or SIGTERM. systemd/launchd stop (and the auto-updater's service
+/// Ctrl-C, SIGTERM, or SSH terminal hangup. systemd/launchd stop (and the auto-updater's service
 /// restart) deliver SIGTERM — without catching it the daemon dies mid-write
 /// and every stop takes the crash-recovery path instead of the graceful drain.
-async fn shutdown_signal() -> std::io::Result<()> {
+pub async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         tokio::select! {
             result = tokio::signal::ctrl_c() => result,
             _ = sigterm.recv() => Ok(()),
+            _ = sighup.recv() => Ok(()),
         }
     }
     #[cfg(not(unix))]
@@ -987,25 +1001,16 @@ async fn shutdown_signal() -> std::io::Result<()> {
     }
 }
 
-/// Serve the typed RPC on the localhost IPC port.
-///
-/// Both engines call this: the headless daemon, and the headed app's embedded
-/// engine. That second case is the point — an embedded engine that keeps the
-/// port to itself forces anyone wanting a second viewport (the terminal app) to
-/// stop the desktop app, start a daemon, and start it again in the right order.
-/// Serving here means any viewport can just attach.
-///
-/// Localhost only, exactly as before: this widens *which process* can serve the
-/// port, not who can reach it.
+/// Serve an embedded engine to same-user viewports over private Unix IPC.
+/// The caller must own its data-directory lock. Binding/validation failures
+/// are fatal; there is no TCP or unserved embedded-engine fallback.
 pub async fn serve_ipc(
-    port: u16,
+    path: &std::path::Path,
     service: std::sync::Arc<dyn cypher_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(cypher_rpc::serve_ws_listener(
-        listener, service,
-    )))
+    let listener = cypher_rpc::LocalListener::bind(path).await?;
+    tracing::info!(socket = %path.display(), "IPC server listening");
+    Ok(tokio::spawn(listener.serve(service)))
 }
 
 const DEFAULT_PERSONAL_ORG_NAME: &str = "Personal";
@@ -1016,6 +1021,16 @@ const DEFAULT_PERSONAL_ORG_NAME: &str = "Personal";
 /// TTY this errors immediately — a daemon under systemd/launchd must load the
 /// session that `cypher login` persisted, never wait on a prompt nobody can see.
 pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
+    terminal_sign_in_until(auth, std::future::pending()).await
+}
+
+/// Cancellable CLI onboarding. Reader tasks are aborted and joined before
+/// returning, so a caller may safely release its auth lock/restart a service.
+pub async fn terminal_sign_in_until(
+    auth: &Auth,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> Result<(), EngineError> {
+    tokio::pin!(cancelled);
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal();
     let mut state_rx = auth.watch_state();
@@ -1100,6 +1115,9 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
         // EOF, a failed workspace request, or a reader panic does not change
         // auth state. Waiting only for that state used to hang login forever.
         tokio::select! {
+            _ = &mut cancelled => {
+                break Err(EngineError::Other("sign-in canceled; run `cypher setup` to continue".into()));
+            }
             changed = state_rx.changed() => {
                 if changed.is_err() {
                     break Err(EngineError::Other("authentication closed before sign-in completed".into()));
@@ -1121,9 +1139,11 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     };
     if let Some(reader) = stdin_reader {
         reader.abort();
+        let _ = reader.await;
     }
     if let Some(reader) = org_reader {
         reader.abort();
+        let _ = reader.await;
     }
     outcome
 }

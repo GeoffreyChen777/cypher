@@ -498,31 +498,37 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
 /// Restart the installed engine service (the same units `cypher daemon` and the
 /// curl|sh installer manage). Called after a symlink swap so the running daemon
 /// picks up the new binary.
-pub fn restart_service() -> anyhow::Result<()> {
+pub fn restart_service(data_dir: &Path) -> anyhow::Result<()> {
+    let (unit, label) = cypher_env::service_names(data_dir)?;
     if cfg!(target_os = "macos") {
         let output = std::process::Command::new("id").arg("-u").output()?;
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/ai.mvp-lab.cypher")],
+            &["kickstart", "-k", &format!("gui/{uid}/{label}")],
         )
         .map_err(|_| anyhow::anyhow!("no cypher service is loaded to restart"))
     } else {
-        run("systemctl", &["--user", "restart", "cypher.service"])
+        run("systemctl", &["--user", "restart", &unit])
     }
 }
 
-fn restart_service_from_engine() -> anyhow::Result<()> {
+fn restart_service_from_engine(data_dir: &Path) -> anyhow::Result<()> {
     if cfg!(target_os = "linux") {
         // A synchronous restart waits for THIS service to exit, while runtime
         // teardown waits for this worker to return: systemd eventually SIGKILLs
         // it at TimeoutStopSec. Queue the restart instead of waiting on ourselves.
         run(
             "systemctl",
-            &["--user", "--no-block", "restart", "cypher.service"],
+            &[
+                "--user",
+                "--no-block",
+                "restart",
+                &cypher_env::service_names(data_dir)?.0,
+            ],
         )
     } else {
-        restart_service()
+        restart_service(data_dir)
     }
 }
 
@@ -674,6 +680,7 @@ pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 /// [`IDLE_RECHECK`].
 #[derive(Clone)]
 pub struct Updater {
+    data_dir: PathBuf,
     edge_url: String,
     status_tx: Arc<watch::Sender<UpdateStatus>>,
     check_tx: Arc<watch::Sender<u64>>,
@@ -686,7 +693,7 @@ pub struct Updater {
 
 impl Updater {
     /// Spawn the check loop (must run on a tokio runtime).
-    pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
+    pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>, data_dir: PathBuf) -> Self {
         let (status_tx, _) = watch::channel(UpdateStatus::initial());
         // Create the loop's receivers synchronously. If they were subscribed
         // inside the spawned task, an immediate `check_now` could be lost and
@@ -695,6 +702,7 @@ impl Updater {
         let (check_tx, checks) = watch::channel(0);
         let (shutdown_tx, shutdown) = watch::channel(false);
         let updater = Self {
+            data_dir,
             edge_url,
             status_tx: Arc::new(status_tx),
             check_tx: Arc::new(check_tx),
@@ -854,9 +862,10 @@ impl Updater {
         }
         stage_headless(&self.edge_url, &manifest, &app_root).await?;
         apply_headless(&app_root, &manifest.version)?;
-        tokio::spawn(async {
+        let data_dir = self.data_dir.clone();
+        tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            if let Err(err) = restart_service_from_engine() {
+            if let Err(err) = restart_service_from_engine(&data_dir) {
                 tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
             }
         });
@@ -958,7 +967,11 @@ mod tests {
 
     #[tokio::test]
     async fn immediate_shutdown_cannot_miss_the_loop_receiver() {
-        let updater = Updater::spawn("http://127.0.0.1:1".into(), None);
+        let updater = Updater::spawn(
+            "http://127.0.0.1:1".into(),
+            None,
+            std::env::temp_dir().join("cypher-update-test"),
+        );
         tokio::time::timeout(std::time::Duration::from_secs(1), updater.shutdown())
             .await
             .expect("immediate updater shutdown must not hang");

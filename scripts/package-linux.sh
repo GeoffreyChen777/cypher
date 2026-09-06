@@ -57,8 +57,12 @@ tmp="$(mktemp "$HOME/.local/bin/.cypher-XXXXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 install -m755 "$HERE/cypher" "$tmp"
 mv -Tf "$tmp" "$HOME/.local/bin/cypher"
-echo "Installed. Make sure ~/.local/bin is on your PATH."
-echo "Manual installation: cypher update is report-only. Use the online installer for managed updates."
+echo "✓ Cypher installed"
+if ( : </dev/tty ) >/dev/null 2>&1; then
+  trap - EXIT
+  exec "$HOME/.local/bin/cypher" setup </dev/tty
+fi
+echo 'Run: ~/.local/bin/cypher setup'
 INSTALL
 chmod 755 "$STAGE/install.sh"
 

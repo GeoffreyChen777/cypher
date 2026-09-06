@@ -561,20 +561,24 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let fixture = Arc::new(RuntimeFixture::default());
+        let engine_dir = data.path().to_path_buf();
+        std::fs::create_dir_all(&engine_dir).unwrap();
+        std::fs::write(engine_dir.join("device-id"), "setup-test").unwrap();
+        let port = cypher_env::ipc_socket(&engine_dir).unwrap();
         let listener = runtime
-            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .block_on(cypher_rpc::LocalListener::bind(&port))
             .unwrap();
-        let port = listener.local_addr().unwrap().port();
-        runtime.spawn(cypher_rpc::serve_ws_listener(listener, fixture.clone()));
+        runtime.spawn(listener.serve(fixture.clone()));
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
             cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),
+                data.path().join("preferences"),
                 crate::state::EngineBootConfig {
                     data_dir: data.path().into(),
-                    ipc_port: port,
+                    ipc_socket: port.clone(),
                     edge_url: "http://127.0.0.1:1".into(),
                     edge_token: None,
                     org_id: None,

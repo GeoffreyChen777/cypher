@@ -230,6 +230,11 @@ def check_deploy(base):
     v = manifest.get("version")
     version(v)
     require(get("latest.txt").decode().strip() == v, "Deployment blocked: release pointers disagree")
+    installer = (ROOT / "edge/src/install.sh").read_text()
+    floor = re.search(r"^MINIMUM_SETUP_VERSION=([0-9.]+)$", installer, re.M)
+    if floor:
+        require(version(v) >= version(floor.group(1)),
+                "Deployment blocked: publish a client release supporting guided setup first (>= " + floor.group(1) + ")")
     for name in app_files(v)[:2]:
         expected = manifest.get("files", {}).get(name, {}).get("sha256")
         require(isinstance(expected, str) and re.fullmatch("[0-9a-fA-F]{64}", expected),

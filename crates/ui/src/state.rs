@@ -36,7 +36,7 @@ use cypher_proto::{
     AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, SideChatStatus, Space,
     WorkspaceScope,
 };
-use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
 
 // ---------------------------------------------------------------------------
 // Engine handle
@@ -47,8 +47,8 @@ use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_c
 pub struct EngineBootConfig {
     /// Data directory for the embedded engine (`~/.cypher`).
     pub data_dir: PathBuf,
-    /// Localhost IPC port to probe / serve.
-    pub ipc_port: u16,
+    /// Private Unix IPC socket to probe / serve.
+    pub ipc_socket: PathBuf,
     /// Edge base URL for the embedded engine.
     pub edge_url: String,
     /// Bearer for edge room joins; `None` runs offline.
@@ -84,11 +84,10 @@ trait EngineBackend: Send + Sync {
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
-    boot_task: tokio::task::JoinHandle<()>,
-    refresh_task: tokio::task::JoinHandle<()>,
-    /// Serves this engine to other viewports over the IPC port. `None` when the
-    /// port was already taken — the window still works over its own transport.
-    ipc_task: Option<tokio::task::JoinHandle<()>>,
+    boot_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Listener task, taken and joined during shutdown before releasing ownership.
+    ipc_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: RpcClient,
 }
 
@@ -101,16 +100,20 @@ impl EngineBackend for InProcessEngine {
         EngineMode::InProcess
     }
     async fn shutdown(&self) {
-        self.boot_task.abort();
+        async fn stop(slot: &tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>) {
+            if let Some(task) = slot.lock().await.take() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        stop(&self.boot_task).await;
         // Stop accepting first: a viewport must not connect midway through the
         // drain and queue work against stores that are closing.
-        if let Some(ipc) = &self.ipc_task {
-            ipc.abort();
-        }
+        stop(&self.ipc_task).await;
+        stop(&self.refresh_task).await;
         if let Some(runtime) = self.runtime.lock().await.take() {
             runtime.shutdown().await;
         }
-        self.refresh_task.abort();
     }
 }
 
@@ -185,7 +188,7 @@ async fn wait_for_deferred_engine(
     }
 }
 
-/// External daemon over `ws://127.0.0.1:{port}`.
+/// External same-user daemon over a private Unix socket.
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
@@ -219,10 +222,14 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    /// Probe the IPC port and connect (daemon listening) or embed (nothing there).
+    /// Probe the IPC socket and connect (daemon listening) or embed (nothing there).
     /// Must run on the tokio runtime (`Tokio::spawn`): both transports spawn
     /// tokio tasks.
     pub async fn bootstrap(config: EngineBootConfig) -> anyhow::Result<EngineHandle> {
+        anyhow::ensure!(
+            config.ipc_socket == cypher_env::ipc_socket(&config.data_dir)?,
+            "Engine IPC socket does not match the selected data directory"
+        );
         // Invariant: at most one bootstrap in this process runs probe+embed at
         // a time. The winner binds the deferred IPC listener before releasing
         // the gate, so a concurrent viewport's probe finds it and attaches as
@@ -230,23 +237,23 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port).await {
+        if let Some(handle) = Self::attach_to_daemon(&config.ipc_socket, &config.data_dir).await? {
             return Ok(handle);
         }
 
-        tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
+        tracing::info!(data_dir = %config.data_dir.display(), "no daemon on Unix socket; embedding engine");
         let engine_config = EngineConfig {
             data_dir: config.data_dir,
             edge_url: config.edge_url,
             edge_token: config.edge_token,
-            ipc_port: config.ipc_port,
+            ipc_socket: config.ipc_socket,
             default_harness: config.default_harness,
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
         };
 
         // Own the data dir before opening anything under it or binding IPC —
-        // the lock, not the port bind, is the ownership decision. A failed
+        // the lock, not the socket bind, is the ownership decision. A failed
         // acquire means an out-of-process engine holds the dir but was not
         // serving IPC at probe time (a daemon mid-start): wait for its
         // listener, re-trying the lock in case it dies instead.
@@ -260,7 +267,10 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port).await {
+                    if let Some(handle) =
+                        Self::attach_to_daemon(&engine_config.ipc_socket, &engine_config.data_dir)
+                            .await?
+                    {
                         return Ok(handle);
                     }
                 }
@@ -283,25 +293,14 @@ impl EngineHandle {
         });
         let client = memory_client(service.clone());
 
-        // Serve the same service on the IPC port so a terminal viewport can
+        // Serve the same service on the IPC socket so a terminal viewport can
         // attach to this window's engine with no setup. Deliberately the
         // *deferred* service, not the assembled one: a viewport that connects
         // during cloud onboarding gets EngineInfo and AuthRpc immediately, and
         // its data subscriptions wait exactly as this window's do.
         //
-        // Best-effort — losing the bind race with another engine costs other
-        // viewports, not this one.
-        let ipc_task = match cypher_engine::serve_ipc(engine_config.ipc_port, service).await {
-            Ok(task) => Some(task),
-            Err(err) => {
-                tracing::warn!(
-                    port = engine_config.ipc_port,
-                    error = %err,
-                    "IPC port unavailable; other viewports cannot attach to this window"
-                );
-                None
-            }
-        };
+        // Fail closed: an embedded engine must own its private IPC endpoint.
+        let ipc_task = Some(cypher_engine::serve_ipc(&engine_config.ipc_socket, service).await?);
         let runtime = Arc::new(tokio::sync::Mutex::new(None));
         let runtime_for_boot = runtime.clone();
         let service_for_boot = assembled_service.clone();
@@ -358,9 +357,9 @@ impl EngineHandle {
         let handle = EngineHandle {
             inner: Arc::new(InProcessEngine {
                 runtime,
-                boot_task,
-                refresh_task,
-                ipc_task,
+                boot_task: tokio::sync::Mutex::new(Some(boot_task)),
+                refresh_task: tokio::sync::Mutex::new(Some(refresh_task)),
+                ipc_task: tokio::sync::Mutex::new(ipc_task),
                 client,
             }),
             engine_info,
@@ -377,23 +376,26 @@ impl EngineHandle {
         Ok(handle)
     }
 
-    /// Probe the IPC port and, if a live engine answers, attach as a remote
+    /// Probe the IPC socket and, if a live engine answers, attach as a remote
     /// viewport. `None` means embed: nothing listening, a non-engine listener,
     /// or a listener without an identity.
-    async fn attach_to_daemon(ipc_port: u16) -> Option<EngineHandle> {
-        let url = format!("ws://127.0.0.1:{ipc_port}");
-        let probe = tokio::time::timeout(
-            std::time::Duration::from_millis(750),
-            tokio::net::TcpStream::connect(("127.0.0.1", ipc_port)),
-        )
-        .await;
-        if !matches!(probe, Ok(Ok(_))) {
-            return None;
+    async fn attach_to_daemon(
+        ipc_socket: &std::path::Path,
+        data_dir: &std::path::Path,
+    ) -> anyhow::Result<Option<EngineHandle>> {
+        let url = format!("unix:{}", ipc_socket.display());
+        if !cypher_rpc::probe_local(ipc_socket).await? {
+            return Ok(None);
         }
         tracing::info!(%url, "engine daemon detected; connecting");
-        match connect_ws(&url).await {
+        match cypher_rpc::connect_local(ipc_socket).await {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
+                    let expected = std::fs::read_to_string(data_dir.join("device-id"))?;
+                    anyhow::ensure!(
+                        !expected.trim().is_empty() && expected.trim() == engine_info.device_id,
+                        "IPC engine identity does not match the selected data directory"
+                    );
                     let client = Arc::new(client);
                     let (state_tx, state_rx) =
                         tokio::sync::watch::channel(DeferredEngineState::Waiting);
@@ -404,19 +406,11 @@ impl EngineHandle {
                             .await
                         {
                             Ok(_) => DeferredEngineState::Ready,
-                            // EngineReady was added after EngineInfo. An older daemon
-                            // that does not expose the barrier is already assembled.
-                            Err(RpcError::Failed(message))
-                                if message
-                                    == format!("unknown method: {}", methods::ENGINE_READY) =>
-                            {
-                                DeferredEngineState::Ready
-                            }
                             Err(err) => DeferredEngineState::Failed(err.to_string()),
                         };
                         state_tx.send_replace(state);
                     });
-                    Some(EngineHandle {
+                    Ok(Some(EngineHandle {
                         inner: Arc::new(RemoteEngine {
                             client,
                             url,
@@ -424,23 +418,21 @@ impl EngineHandle {
                         }),
                         engine_info,
                         deferred_state: Some(state_rx),
-                    })
+                    }))
                 }
                 Err(err) => {
                     tracing::warn!(
                         %url,
                         error = %err,
-                        "listener did not provide engine identity; embedding instead"
+                        "listener did not provide engine identity; refusing to attach"
                     );
-                    None
+                    Err(anyhow::anyhow!("IPC engine identity unavailable: {err}"))
                 }
             },
-            // Something is on the port but it is not an engine (or it is
-            // wedged). Fall through and embed: a stranger holding 27654
-            // should cost other viewports, not this window.
+            // An unresponsive endpoint is not an empty slot. Do not embed.
             Err(err) => {
-                tracing::warn!(%url, error = %err, "not an engine; embedding instead");
-                None
+                tracing::warn!(%url, error = %err, "IPC handshake failed; refusing to attach");
+                Err(anyhow::anyhow!("IPC handshake failed: {err}"))
             }
         }
     }
@@ -469,29 +461,12 @@ impl EngineHandle {
 /// Query the current protocol first, with a conservative fallback for daemons
 /// from before `EngineInfo` existed. Old daemons are always treated as synced.
 async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
-    match client
-        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
-        .await
-    {
-        Ok(info) => Ok(info),
-        Err(RpcError::Failed(message))
-            if message == format!("unknown method: {}", methods::ENGINE_INFO) =>
-        {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct LocalDevice {
-                device_id: String,
-            }
-            let legacy: LocalDevice = client
-                .call_as(methods::LOCAL_DEVICE, serde_json::json!({}))
-                .await?;
-            Ok(EngineInfo {
-                device_id: legacy.device_id,
-                workspace_scope: WorkspaceScope::Synced,
-            })
-        }
-        Err(err) => Err(err),
-    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.call_as(methods::ENGINE_INFO, serde_json::json!({})),
+    )
+    .await
+    .map_err(|_| RpcError::Transport("Engine identity check timed out".into()))?
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,8 +1563,12 @@ impl AppState {
 
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
-    pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
-        let data_dir = config.data_dir.clone();
+    pub fn bootstrap(
+        state: Entity<AppState>,
+        data_dir: PathBuf,
+        config: EngineBootConfig,
+        cx: &mut App,
+    ) {
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
             s.workspace_scope = None;
@@ -2411,12 +2390,6 @@ mod tests {
     // itself derives everything through `cypher_proto::view`.
     use cypher_proto::{SessionStatus, UserProfile};
 
-    /// A localhost port that was just free (bind :0, read, drop).
-    async fn free_port() -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    }
-
     struct LegacyIdentityRpc;
 
     #[async_trait]
@@ -2462,57 +2435,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_daemon_identity_falls_back_to_synced_scope() {
+    async fn legacy_identity_is_rejected() {
         let client = memory_client(Arc::new(LegacyIdentityRpc));
-
-        let info = query_engine_info(&client).await.unwrap();
-
-        assert_eq!(info.device_id, "legacy-device");
-        assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
-        assert_eq!(
-            gate_phase(
-                &ConnectionStatus::Ready,
-                Some(info.workspace_scope),
-                Some(&AuthState::SignedOut),
-            ),
-            GatePhase::SignIn
-        );
+        assert!(query_engine_info(&client).await.is_err());
     }
 
     #[tokio::test]
-    async fn remote_viewport_treats_legacy_daemon_as_ready() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(cypher_rpc::serve_ws_listener(
-            listener,
-            Arc::new(LegacyIdentityRpc),
-        ));
+    async fn wrong_device_identity_is_rejected_without_creating_a_second_engine() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = EngineHandle::bootstrap(EngineBootConfig {
-            data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+        std::fs::write(dir.path().join("device-id"), "expected-device").unwrap();
+        let socket = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&socket).await.unwrap();
+        let (_tx, state) = tokio::sync::watch::channel(DeferredEngineState::Ready);
+        let server = tokio::spawn(listener.serve(Arc::new(DeferredIdentityRpc {
+            engine_info: EngineInfo {
+                device_id: "different-device".into(),
+                workspace_scope: WorkspaceScope::Local,
+            },
+            state,
+        })));
+        let result = EngineHandle::bootstrap(EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_socket: socket.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
             workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
-        .await
-        .expect("legacy daemon remains attachable");
-
-        let mut deferred = handle
-            .deferred_state()
-            .expect("remote viewport tracks readiness");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            wait_for_deferred_engine(&mut deferred),
-        )
-        .await
-        .expect("legacy readiness fallback completes")
-        .expect("unknown EngineReady means the old daemon is assembled");
-
-        handle.shutdown().await;
+        .await;
+        assert!(result.is_err());
+        assert!(cypher_rpc::probe_local(&socket).await.unwrap());
+        assert!(!dir.path().join("profiles").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("device-id")).unwrap(),
+            "expected-device"
+        );
         server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
@@ -2520,7 +2480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: free_port().await,
+            ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
@@ -2559,7 +2519,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: free_port().await,
+            ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
             // Unreachable — the 20s initial check is never reached inside this
             // test, so no real network happens.
             edge_url: "http://127.0.0.1:1".into(),
@@ -2605,11 +2565,11 @@ mod tests {
         cypher_engine::EngineProfile::local(dir.path()).unwrap();
         std::fs::create_dir(dir.path().join("profiles")).unwrap();
         std::fs::write(dir.path().join("profiles/local"), b"not a directory").unwrap();
-        let port = free_port().await;
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
 
         let error = match EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -2627,9 +2587,7 @@ mod tests {
 
         assert!(!format!("{error:#}").is_empty());
         assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err(),
+            tokio::net::UnixStream::connect(&port).await.is_err(),
             "failed bootstrap must release the IPC listener"
         );
     }
@@ -2647,24 +2605,22 @@ mod tests {
 
     #[tokio::test]
     async fn remote_viewport_observes_deferred_engine_failure() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let server = tokio::spawn(cypher_rpc::serve_ws_listener(
-            listener,
-            Arc::new(DeferredIdentityRpc {
-                engine_info: EngineInfo {
-                    device_id: "owner-device".into(),
-                    workspace_scope: WorkspaceScope::Local,
-                },
-                state: state_rx,
-            }),
-        ));
-
         let dir = tempfile::tempdir().unwrap();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
+        let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
+        let server = tokio::spawn(listener.serve(Arc::new(DeferredIdentityRpc {
+            engine_info: EngineInfo {
+                device_id: "owner-device".into(),
+                workspace_scope: WorkspaceScope::Local,
+            },
+            state: state_rx,
+        })));
+
+        std::fs::write(dir.path().join("device-id"), "owner-device").unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -2694,15 +2650,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_embedded_engine_serves_the_ipc_port_for_other_viewports() {
+    async fn an_embedded_engine_serves_the_ipc_socket_for_other_viewports() {
         // The whole point of embedding-and-serving: a second viewport (the
         // terminal app) can attach to this window's engine with no setup, no
         // separate daemon, and no launch ordering.
         let dir = tempfile::tempdir().unwrap();
-        let port = free_port().await;
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
@@ -2714,7 +2670,7 @@ mod tests {
         assert_eq!(handle.mode(), EngineMode::InProcess);
 
         // Attach the way an external viewport would, and speak the same protocol.
-        let attached = connect_ws(&format!("ws://127.0.0.1:{port}"))
+        let attached = cypher_rpc::connect_local(&port)
             .await
             .expect("a second viewport must be able to attach");
         let harnesses = attached
@@ -2727,9 +2683,7 @@ mod tests {
         // starts its own engine rather than talking to closing stores.
         handle.shutdown().await;
         assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err(),
+            tokio::net::UnixStream::connect(&port).await.is_err(),
             "the port must be released on shutdown"
         );
     }
@@ -2741,10 +2695,10 @@ mod tests {
         // the data-dir lock. The bootstrap gate must elect exactly one owner
         // and turn the other into a plain remote attach.
         let dir = tempfile::tempdir().unwrap();
-        let port = free_port().await;
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
         let config = EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
@@ -2792,37 +2746,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stranger_on_the_ipc_port_does_not_wedge_the_window() {
+    async fn a_stranger_on_the_ipc_socket_does_not_wedge_the_window() {
+        let dir = tempfile::tempdir().unwrap();
         // The port probe only proves *something* is listening. A process that
         // accepts TCP and never speaks WebSocket used to hang the dial forever;
         // now it times out and we embed instead, losing only the ability to
         // serve other viewports.
-        let squatter = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let port = squatter.local_addr().unwrap().port();
-        let dir = tempfile::tempdir().unwrap();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let squatter = cypher_rpc::LocalListener::bind(&port).await.unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
             workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
-        .await
-        .expect("a taken port must not fail the boot");
-        assert_eq!(handle.mode(), EngineMode::InProcess);
-        assert!(
-            handle
-                .client()
-                .call(methods::LIST_HARNESSES, serde_json::json!({}))
-                .await
-                .is_ok(),
-            "the window still works over its own transport"
-        );
-        handle.shutdown().await;
+        .await;
+        assert!(handle.is_err(), "a foreign IPC endpoint must fail closed");
         drop(squatter);
     }
 
@@ -2831,7 +2773,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: free_port().await,
+            ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -2882,7 +2824,7 @@ mod tests {
         .unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: free_port().await,
+            ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -2924,7 +2866,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_connects_when_daemon_is_listening() {
-        // Stand in for `cypher headless`: an engine served over the WS IPC port.
+        // Stand in for `cypher headless`: an engine served over the WS IPC socket.
         let daemon_dir = tempfile::tempdir().unwrap();
         let core = EngineCore::assemble(
             daemon_dir.path(),
@@ -2933,14 +2875,13 @@ mod tests {
             None,
         )
         .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(cypher_rpc::serve_ws_listener(listener, core.rpc_service()));
+        let port = cypher_env::ipc_socket(daemon_dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
+        tokio::spawn(listener.serve(core.rpc_service()));
 
-        let ui_dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
-            data_dir: ui_dir.path().to_path_buf(),
-            ipc_port: port,
+            data_dir: daemon_dir.path().to_path_buf(),
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -2952,7 +2893,7 @@ mod tests {
         assert_eq!(
             handle.mode(),
             EngineMode::Remote {
-                url: format!("ws://127.0.0.1:{port}")
+                url: format!("unix:{}", port.display())
             }
         );
         assert_eq!(

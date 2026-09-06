@@ -4,6 +4,7 @@
 
 mod auth_cli;
 mod daemon;
+mod setup_cli;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -21,6 +22,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Connect a Linux device to desktop, install Runtime, and start its service.
+    Setup(setup_cli::SetupOptions),
+    /// Show recent engine logs (use --follow to stream).
+    Logs {
+        #[arg(long, short)]
+        follow: bool,
+    },
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
     /// Sign in and enable sync on the next engine start.
@@ -28,7 +36,11 @@ enum Command {
     /// Remove the saved session and return to local-only on the next start.
     Logout,
     /// Show workspace mode, optional auth, and engine status.
-    Status,
+    Status {
+        /// Include account, data directory and IPC diagnostics.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
@@ -110,6 +122,10 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    anyhow::ensure!(
+        std::env::var_os("CYPHER_IPC_PORT").is_none(),
+        "CYPHER_IPC_PORT has been removed. Unset it; local IPC uses a private Unix socket selected by CYPHER_DATA_DIR."
+    );
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
     // loro's internal block-encode diagnostics log at info and flood
@@ -159,6 +175,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
+        Some(Command::Setup(options)) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(setup_cli::run(engine_config_from_env()?, options));
+            // A canceled terminal read may still own a blocking stdin thread.
+            // Auth tasks are drained by the wizard; do not wait for a new
+            // keystroke just to let this short-lived CLI process exit.
+            runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+            result
+        }
+        Some(Command::Logs { follow }) => setup_cli::logs(engine_config_from_env()?, follow),
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
@@ -174,9 +200,13 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(auth_cli::logout(engine_config_from_env()?))
         }
-        Some(Command::Status) => {
+        Some(Command::Status { verbose }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::status(engine_config_from_env()?))
+            if verbose || !cfg!(target_os = "linux") {
+                runtime.block_on(auth_cli::status(engine_config_from_env()?))
+            } else {
+                runtime.block_on(setup_cli::status(engine_config_from_env()?))
+            }
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -204,11 +234,12 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "ui")]
         None => {
             let edge_token = cypher_env::var("EDGE_TOKEN");
-            // Headed: the UI probes CYPHER_IPC_PORT and connects to a running
+            // Headed: the UI resolves the selected Engine data directory and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
             cypher_ui::run_app(cypher_ui::UiConfig {
                 data_dir: cypher_env::data_dir(),
-                ipc_port: ipc_port_from_env()?,
+                engine_data_dir: std::path::absolute(engine_data_dir())?,
+                ipc_socket: cypher_env::ipc_socket(&engine_data_dir())?,
                 edge_url: edge_url_from_env(),
                 workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
                 edge_token,
@@ -221,9 +252,18 @@ fn main() -> anyhow::Result<()> {
         // launch. Point at the headless entrypoint instead of a cryptic gpui
         // link failure.
         #[cfg(not(feature = "ui"))]
-        None => Err(anyhow::anyhow!(
-            "this build has no desktop UI — run `cypher headless` (or a subcommand like `cypher status`)"
-        )),
+        None => {
+            if cfg!(target_os = "linux") {
+                let runtime = tokio::runtime::Runtime::new()?;
+                let result = runtime.block_on(setup_cli::default_entry(engine_config_from_env()?));
+                runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+                result
+            } else {
+                Err(anyhow::anyhow!(
+                    "this build has no desktop UI — run `cypher headless` or `cypher status`"
+                ))
+            }
+        }
     }
 }
 
@@ -234,9 +274,9 @@ fn engine_config_from_env() -> anyhow::Result<cypher_engine::EngineConfig> {
     // Dev-mode bearer (no WorkOS): an explicit token enables sync.
     let edge_token = cypher_env::var("EDGE_TOKEN");
     Ok(cypher_engine::EngineConfig {
-        data_dir: cypher_env::data_dir(),
+        data_dir: std::path::absolute(cypher_env::data_dir())?,
         edge_url: edge_url_from_env(),
-        ipc_port: ipc_port_from_env()?,
+        ipc_socket: cypher_env::ipc_socket(&cypher_env::data_dir())?,
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; CYPHER_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
@@ -248,18 +288,11 @@ fn engine_config_from_env() -> anyhow::Result<cypher_engine::EngineConfig> {
     })
 }
 
-fn ipc_port_from_env() -> anyhow::Result<u16> {
-    match std::env::var("CYPHER_IPC_PORT") {
-        Err(std::env::VarError::NotPresent) => Ok(27654),
-        Ok(value) if value.trim().is_empty() => Ok(27654),
-        Ok(value) => value
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port != 0)
-            .ok_or_else(|| anyhow::anyhow!("CYPHER_IPC_PORT must be an integer in 1..65535")),
-        Err(_) => anyhow::bail!("CYPHER_IPC_PORT must be an integer in 1..65535"),
-    }
+#[cfg(feature = "ui")]
+fn engine_data_dir() -> std::path::PathBuf {
+    cypher_env::var_os("ENGINE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(cypher_env::data_dir)
 }
 
 /// `CYPHER_HARNESS` picks the default harness for chats without a config row.
@@ -280,14 +313,13 @@ fn dirs_data_dir() -> std::path::PathBuf {
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
 async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
-    let ipc_port = config.ipc_port;
-    let client = cypher_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "no engine listening on 127.0.0.1:{ipc_port} ({e}) — is cypher running?"
-            )
-        })?;
+    let ipc_socket = config.ipc_socket;
+    let client = cypher_rpc::connect_local(&ipc_socket).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no engine listening on {} ({e}) — is cypher running?",
+            ipc_socket.display()
+        )
+    })?;
     let status = client
         .call(cypher_rpc::methods::SYNC_STATUS, serde_json::json!({}))
         .await
@@ -296,9 +328,7 @@ async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
     if expected.trim().is_empty()
         || status.get("deviceId").and_then(|v| v.as_str()) != Some(expected.trim())
     {
-        anyhow::bail!(
-            "the engine on port {ipc_port} does not match this data directory; check CYPHER_DATA_DIR and CYPHER_IPC_PORT"
-        );
+        anyhow::bail!("the engine does not match this data directory; check CYPHER_DATA_DIR");
     }
     let now = status.get("nowMs").and_then(|v| v.as_i64()).unwrap_or(0);
     let age = |ms: i64| -> String {

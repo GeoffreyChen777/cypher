@@ -79,9 +79,9 @@ pub(crate) const ENV_CHILD_INDEX: &str = "PI_SUBAGENT_CHILD_INDEX";
 /// harness as `CYPHER_CHAT_ID`, consumed by the subagents extension for the
 /// Cypher bridge.
 pub(crate) const ENV_CYPHER_CHAT_ID: &str = "CYPHER_CHAT_ID";
-/// Local engine IPC WebSocket URL the extension's Cypher bridge helper dials
+/// Local engine IPC socket path the extension's Cypher bridge helper dials
 /// (`StartSubagent` / `WatchAgentEvents`).
-pub(crate) const ENV_CYPHER_ENGINE_WS_URL: &str = "CYPHER_ENGINE_WS_URL";
+pub(crate) const ENV_CYPHER_ENGINE_SOCKET: &str = "CYPHER_ENGINE_SOCKET";
 const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 
@@ -503,18 +503,52 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
 /// Every Cypher-spawned Pi needs this: the login keychain rejects writes/reads
 /// from these children, so MCP OAuth is stored below `PI_CODING_AGENT_DIR` and
 /// served through a keyring shim.
-fn inject_mcp_keyring_preload(cmd: &mut Command) {
-    let preload = std::env::temp_dir().join("cypher-mcp-keyring-preload.cjs");
-    if std::fs::write(&preload, include_str!("mcp_keyring_preload.cjs")).is_err() {
-        return;
-    }
+fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
+    static DIRECTORY: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
+        std::sync::OnceLock::new();
+    let directory = DIRECTORY.get_or_init(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("cypher-private-support-")
+            .tempdir()
+            .map_err(|e| e.to_string())?;
+        for (name, content) in [
+            ("mcp-keyring.cjs", include_str!("mcp_keyring_preload.cjs")),
+            ("engine-client.mjs", include_str!("engine-client.mjs")),
+        ] {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(dir.path().join(name))
+                .map_err(|e| e.to_string())?;
+            file.write_all(content.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(dir)
+    });
+    directory
+        .as_ref()
+        .map(|dir| dir.path())
+        .map_err(|e| std::io::Error::other(e.clone()))
+}
+
+fn inject_mcp_keyring_preload(cmd: &mut Command) -> std::io::Result<()> {
+    let directory = private_support_dir()?;
+    let preload = directory.join("mcp-keyring.cjs");
     let mut node_options = std::env::var("NODE_OPTIONS").unwrap_or_default();
     if !node_options.is_empty() {
         node_options.push(' ');
     }
     node_options.push_str("--require ");
-    node_options.push_str(&preload.display().to_string());
+    node_options.push_str(&serde_json::to_string(&preload.to_string_lossy()).unwrap());
     cmd.env("NODE_OPTIONS", node_options);
+    cmd.env(
+        "CYPHER_ENGINE_CLIENT_MODULE",
+        directory.join("engine-client.mjs"),
+    );
+    Ok(())
 }
 
 /// Resolve the pi CLI: `PI_EXECUTABLE` override, then the shared CLI resolver
@@ -553,12 +587,12 @@ pub struct PiHarness {
     /// non-empty. pi's RPC snapshot is empty until the catalog refresh
     /// finishes (`--list-models` awaits that refresh; RPC does not).
     model_catalog_wait: Duration,
-    /// Local engine IPC WebSocket URL (`ws://127.0.0.1:<ipc_port>`) — injected
-    /// into every pi child as `CYPHER_ENGINE_WS_URL` so the subagents
+    /// Local engine private Unix socket path — injected
+    /// into every pi child as `CYPHER_ENGINE_SOCKET` so the subagents
     /// extension can reach the engine's `StartSubagent`/`WatchAgentEvents`
     /// bridge. Set by `default_registry_with_bridge` (production assembly
-    /// knows `ipc_port`); `None` in bare tests and edge-less engines.
-    engine_ws_url: Option<String>,
+    /// knows `ipc_socket`); `None` in bare tests and edge-less engines.
+    engine_socket: Option<String>,
     /// Discovery result cache: the RAW `get_commands` probe result (extension /
     /// prompt / skill commands) survives across calls until
     /// [`Self::invalidate_discovery`]. It stays the interception authority —
@@ -582,16 +616,16 @@ impl PiHarness {
             handshake_timeout: Duration::from_secs(120),
             no_activity_grace: Duration::from_secs(2),
             model_catalog_wait: Duration::from_secs(8),
-            engine_ws_url: None,
+            engine_socket: None,
             commands: Mutex::new(None),
             models_cache: Mutex::new(None),
         }
     }
 
-    /// Point pi children at the local engine IPC WebSocket URL (production
+    /// Point pi children at the local engine IPC socket path (production
     /// assembly). `None` keeps the harness standalone (tests, edge-less).
-    pub fn with_engine_bridge(mut self, url: Option<String>) -> Self {
-        self.engine_ws_url = url;
+    pub fn with_engine_bridge(mut self, socket: Option<String>) -> Self {
+        self.engine_socket = socket;
         self
     }
 
@@ -681,7 +715,7 @@ impl PiHarness {
 
     /// Test seam: the `std::process::Command` a run would spawn — CLI args,
     /// PATH composition, cwd, and the bridge env — without spawning a child.
-    /// Lets tests assert `CYPHER_ENGINE_WS_URL` (and child-env) injection
+    /// Lets tests assert `CYPHER_ENGINE_SOCKET` (and child-env) injection
     /// deterministically.
     #[doc(hidden)]
     pub fn spawn_command(
@@ -776,19 +810,22 @@ impl PiHarness {
         if let Some(package_dir) = &self.package_dir {
             cmd.env(ENV_PACKAGE_DIR, package_dir);
         }
-        inject_mcp_keyring_preload(&mut cmd);
+        inject_mcp_keyring_preload(&mut cmd)?;
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
         // Cypher bridge identity: the chat this run belongs to plus the local
-        // engine IPC WebSocket URL (so the extension can StartSubagent +
+        // engine IPC socket path (so the extension can StartSubagent +
         // WatchAgentEvents). Discovery processes pass an empty host context
         // and therefore never receive a parent chat id.
+        cmd.env_remove(ENV_CYPHER_CHAT_ID);
+        cmd.env_remove(ENV_CYPHER_ENGINE_SOCKET);
+        cmd.env_remove("CYPHER_ENGINE_WS_URL");
         if let Some(chat_id) = host.chat_id.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_CHAT_ID, chat_id);
         }
-        if let Some(url) = self.engine_ws_url.as_deref().filter(|s| !s.is_empty()) {
-            cmd.env(ENV_CYPHER_ENGINE_WS_URL, url);
+        if let Some(url) = self.engine_socket.as_deref().filter(|s| !s.is_empty()) {
+            cmd.env(ENV_CYPHER_ENGINE_SOCKET, url);
         }
         if let Some(child) = &host.child {
             cmd.env(ENV_ROLE, ROLE_CHILD);

@@ -91,8 +91,9 @@ pub use state::EngineBootConfig;
 pub struct UiConfig {
     /// Data directory — engine stores + `ui-settings.json`.
     pub data_dir: PathBuf,
-    /// Localhost IPC port: connect if an engine daemon is listening, embed if not.
-    pub ipc_port: u16,
+    pub engine_data_dir: PathBuf,
+    /// Private Unix IPC socket: connect if an engine daemon is listening, embed if not.
+    pub ipc_socket: PathBuf,
     /// Edge base URL for the embedded engine.
     pub edge_url: String,
     /// Edge bearer; `None` runs offline.
@@ -109,8 +110,8 @@ pub struct UiConfig {
 impl UiConfig {
     fn boot(&self) -> EngineBootConfig {
         EngineBootConfig {
-            data_dir: self.data_dir.clone(),
-            ipc_port: self.ipc_port,
+            data_dir: self.engine_data_dir.clone(),
+            ipc_socket: self.ipc_socket.clone(),
             edge_url: self.edge_url.clone(),
             edge_token: self.edge_token.clone(),
             org_id: self.org_id.clone(),
@@ -125,6 +126,7 @@ impl UiConfig {
 struct ReopenState {
     state: gpui::Entity<state::AppState>,
     boot: EngineBootConfig,
+    data_dir: PathBuf,
 }
 
 impl gpui::Global for ReopenState {}
@@ -151,8 +153,12 @@ pub fn run_app(config: UiConfig) {
         if cx.windows().is_empty()
             && let Some(reopen) = cx.try_global::<ReopenState>()
         {
-            let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
-            open_main_window(state, boot, cx);
+            let (state, boot, data_dir) = (
+                reopen.state.clone(),
+                reopen.boot.clone(),
+                reopen.data_dir.clone(),
+            );
+            open_main_window(state, boot, data_dir, cx);
         }
     });
     app.run(move |cx: &mut App| {
@@ -162,7 +168,7 @@ pub fn run_app(config: UiConfig) {
         // Appearance before anything paints: the theme global has to be the
         // final one on the very first frame, or the window flashes the wrong
         // palette while settings load.
-        let data_dir = config.boot().data_dir.clone();
+        let data_dir = config.data_dir.clone();
         appearance::init(
             settings::UiSettings::load(&data_dir).appearance,
             data_dir.clone(),
@@ -176,7 +182,7 @@ pub fn run_app(config: UiConfig) {
         app_menus::init(cx);
 
         let state = cx.new(|_| state::AppState::new());
-        state::AppState::bootstrap(state.clone(), config.boot(), cx);
+        state::AppState::bootstrap(state.clone(), config.data_dir.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
         // doc snapshots before the process exits (remote engines outlive us).
@@ -197,8 +203,9 @@ pub fn run_app(config: UiConfig) {
         cx.set_global(ReopenState {
             state: state.clone(),
             boot: config.boot(),
+            data_dir: config.data_dir.clone(),
         });
-        open_main_window(state, config.boot(), cx);
+        open_main_window(state, config.boot(), config.data_dir.clone(), cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
         // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
         // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
@@ -214,7 +221,12 @@ pub fn run_app(config: UiConfig) {
 /// Open the 1320×880 main window (min 900×600) with [`shell::Shell`] as the
 /// root view. Called at boot and again from `on_reopen` if the dock icon is
 /// clicked after ⌘W closed the window.
-fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig, cx: &mut App) {
+fn open_main_window(
+    state: gpui::Entity<state::AppState>,
+    boot: EngineBootConfig,
+    data_dir: PathBuf,
+    cx: &mut App,
+) {
     // zeron window geometry: 1320×880, min 900×600 (feature-inventory §1.1).
     let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
     cx.open_window(
@@ -262,7 +274,7 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             // the subscription lives as long as the window does, and the window
             // owns nothing that would drop it early.
             appearance::observe_window(window, cx).detach();
-            cx.new(|cx| shell::Shell::new(state, boot, cx))
+            cx.new(|cx| shell::Shell::new(state, boot, data_dir, cx))
         },
     )
     .expect("failed to open window");

@@ -20,7 +20,7 @@ fn config(
         data_dir: data_dir.to_path_buf(),
         edge_url,
         edge_token: edge_token.map(str::to_string),
-        ipc_port: 0,
+        ipc_socket: cypher_env::ipc_socket(data_dir).unwrap(),
         default_harness: HarnessId::Mock,
         org_id: None,
         workos_client_id: workos_client_id.map(str::to_string),

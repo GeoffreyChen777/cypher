@@ -28,28 +28,24 @@ export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 cargo build -p cypher -q
 ```
 
-Start a local engine on a dedicated IPC port:
+Start a local engine with private Unix IPC:
 
 ```sh
 mkdir -p /tmp/cypher-dev-daemon /tmp/cypher-dev-ui
 
 CYPHER_DATA_DIR=/tmp/cypher-dev-daemon \
-CYPHER_IPC_PORT=27921 \
 CYPHER_HARNESS=mock \
 RUST_LOG=warn \
 ./target/debug/cypher headless > /tmp/cypher-dev-engine.log 2>&1 &
 ENGINE_PID=$!
 ```
 
-Wait until the engine is listening before starting the UI. On macOS, a simple
-probe is:
+Wait until the engine's Unix RPC is ready before starting the UI:
 
 ```sh
 for _ in $(seq 1 40); do
-  (exec 3<>/dev/tcp/127.0.0.1/27921) 2>/dev/null && {
-    exec 3>&-
-    break
-  }
+  CYPHER_DATA_DIR=/tmp/cypher-dev-daemon ./target/debug/cypher sync \
+    >/dev/null 2>&1 && break
   sleep 0.25
 done
 ```
@@ -58,7 +54,7 @@ Launch the headed app:
 
 ```sh
 CYPHER_DATA_DIR=/tmp/cypher-dev-ui \
-CYPHER_IPC_PORT=27921 \
+CYPHER_ENGINE_DATA_DIR=/tmp/cypher-dev-daemon \
 RUST_LOG=warn \
 nohup ./target/debug/cypher > /tmp/cypher-dev-ui.log 2>&1 &
 UI_PID=$!
@@ -123,15 +119,22 @@ Then prepend the containing toolchain `bin` directory to `PATH`, for example:
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 ```
 
-### Port `27921` is already in use
+### Engine already running or unsafe socket
 
-Find and stop the stale local engine, or choose another unused port and use it
-consistently for both `CYPHER_IPC_PORT` values:
+Run `cypher status --verbose` with the intended `CYPHER_DATA_DIR`. Socket
+addresses are derived from UID and the canonical Engine data directory.
+`CYPHER_IPC_PORT` has been removed. To run another instance, choose a different
+Engine data directory, not another port.
+
+Verify PID, cwd, data directory and logs before stopping any process:
 
 ```sh
 ps -axo pid,command | grep -E 'target/debug/cypher headless' | grep -v grep
-kill <engine-pid>
 ```
+
+Do not blindly unlink an existing socket or repair another user's directory.
+Use `CYPHER_ENGINE_DATA_DIR` for a UI whose preferences live in a different
+directory from the Engine. See `docs/unix-ipc.md`.
 
 ### UI opens without seeded chats
 

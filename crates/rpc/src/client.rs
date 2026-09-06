@@ -32,7 +32,7 @@ impl Shared {
 }
 
 /// A multiplexing RPC client over any string-frame duplex ([`crate::memory_client`] or
-/// [`connect_ws`]). Cheap to clone-by-Arc internally; use one per connection.
+/// [`crate::connect_local`]). Cheap to clone-by-Arc internally; use one per connection.
 pub struct RpcClient {
     out: mpsc::Sender<String>,
     shared: Arc<Shared>,
@@ -204,20 +204,10 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
     }
 }
 
-/// How long a dial may take before we give up.
-///
-/// This is localhost: a real engine answers in milliseconds. Without a bound,
-/// *any* other process holding the port accepts the TCP connection and then
-/// never completes the WebSocket handshake, and the caller waits forever — a
-/// stranger on port 27654 would hang the app at boot rather than degrade it.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
-pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
-    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
-        .await
-        .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
-        .map_err(|e| RpcError::Transport(e.to_string()))?;
+pub(crate) fn client_from_websocket<S>(ws: tokio_tungstenite::WebSocketStream<S>) -> RpcClient
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
@@ -247,5 +237,5 @@ pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
             }
         }
     });
-    Ok(RpcClient::new(out_tx, in_rx))
+    RpcClient::new(out_tx, in_rx)
 }

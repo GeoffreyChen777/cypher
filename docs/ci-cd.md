@@ -66,6 +66,12 @@ checksum sidecars exist. Until ready, deployment fails and the existing workers
 remain in place. This is intentional: the installer and release workflows are
 not made into a new download protocol or migrated to a different storage model.
 
+The guided Linux installer additionally declares `MINIMUM_SETUP_VERSION=0.3.3`.
+Publish a client with the `setup` command before deploying this installer. The
+deployment gate reads that floor from the installer source; the installer also
+checks the channel version and probes `cypher setup --help` before activation.
+Do not weaken the gate to deploy it against the existing 0.3.2 channel.
+
 ## Publication transaction and retries
 
 `scripts/ci/release.py` is the single implementation used for validation,

@@ -170,16 +170,15 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
         Some(pid) => println!("Engine:   running (pid {pid})"),
         None => println!("Engine:   not running"),
     }
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], config.ipc_port));
-    let ipc = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500));
+    let ipc = cypher_rpc::probe_local(&config.ipc_socket).await?;
     println!(
-        "IPC:      {} 127.0.0.1:{}",
-        if ipc.is_ok() {
+        "IPC:      {} {}",
+        if ipc {
             "listening on"
         } else {
             "not listening on"
         },
-        config.ipc_port
+        config.ipc_socket.display()
     );
     if !account.healthy {
         std::process::exit(1);
@@ -192,9 +191,7 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
 /// daemons that predate EngineInfo.
 async fn live_engine_scope(config: &EngineConfig) -> Option<WorkspaceScope> {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let client = cypher_rpc::connect_ws(&format!("ws://127.0.0.1:{}", config.ipc_port))
-            .await
-            .ok()?;
+        let client = cypher_rpc::connect_local(&config.ipc_socket).await.ok()?;
         let value = client
             .call(cypher_rpc::methods::ENGINE_INFO, serde_json::json!({}))
             .await
@@ -246,7 +243,7 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
-            ipc_port: 0,
+            ipc_socket: cypher_env::ipc_socket(data_dir).unwrap(),
             default_harness: HarnessId::Mock,
             org_id: None,
             workos_client_id: Some("client_test".into()),
@@ -275,9 +272,10 @@ mod tests {
     #[tokio::test]
     async fn status_does_not_wait_forever_for_a_non_websocket_listener() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&socket).await.unwrap();
         let mut config = config(dir.path());
-        config.ipc_port = listener.local_addr().unwrap().port();
+        config.ipc_socket = socket;
         let silent = tokio::spawn(async move {
             let _stream = listener.accept().await.unwrap();
             std::future::pending::<()>().await;

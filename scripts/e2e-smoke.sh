@@ -19,8 +19,6 @@ EDGE_PORT="${CYPHER_E2E_EDGE_PORT:-27640}"
 EDGE_URL="http://localhost:${EDGE_PORT}"
 TOKEN="alice@org1"
 ORG="org1"
-A_PORT=27801
-B_PORT=27802
 A_DIR=/tmp/e2e-a
 B_DIR=/tmp/e2e-b
 LOG_DIR="$(mktemp -d /tmp/cypher-e2e-logs.XXXXXX)"
@@ -100,21 +98,21 @@ DRIVER="$ROOT/target/debug/examples/e2e_driver"
 rm -rf "$A_DIR" "$B_DIR"
 mkdir -p "$A_DIR" "$B_DIR"
 
-start_engine() { # start_engine <data_dir> <ipc_port> <name> <log>
-  CYPHER_DATA_DIR="$1" CYPHER_IPC_PORT="$2" CYPHER_DEVICE_NAME="$3" \
+start_engine() { # start_engine <data_dir> <name> <log>
+  CYPHER_DATA_DIR="$1" CYPHER_DEVICE_NAME="$2" \
     CYPHER_EDGE_URL="$EDGE_URL" CYPHER_EDGE_TOKEN="$TOKEN" CYPHER_ORG_ID="$ORG" \
     CYPHER_HARNESS=mock RUST_LOG=info \
-    "$CYPHER" headless >"$4" 2>&1 &
+    "$CYPHER" headless >"$3" 2>&1 &
 }
 
-start_engine "$A_DIR" "$A_PORT" "e2e-device-a" "$LOG_DIR/engine-a.log"; A_PID=$!
-start_engine "$B_DIR" "$B_PORT" "e2e-device-b" "$LOG_DIR/engine-b.log"; B_PID=$!
+start_engine "$A_DIR" "e2e-device-a" "$LOG_DIR/engine-a.log"; A_PID=$!
+start_engine "$B_DIR" "e2e-device-b" "$LOG_DIR/engine-b.log"; B_PID=$!
 
-wait_for "engine A ipc :$A_PORT" 60 bash -c "exec 3<>/dev/tcp/127.0.0.1/$A_PORT"
-wait_for "engine B ipc :$B_PORT" 60 bash -c "exec 3<>/dev/tcp/127.0.0.1/$B_PORT"
-echo "engines: A pid=$A_PID ipc=:$A_PORT  B pid=$B_PID ipc=:$B_PORT"
+wait_for "engine A Unix IPC" 60 env CYPHER_DATA_DIR="$A_DIR" "$CYPHER" sync
+wait_for "engine B Unix IPC" 60 env CYPHER_DATA_DIR="$B_DIR" "$CYPHER" sync
+echo "engines: A pid=$A_PID  B pid=$B_PID (private Unix sockets)"
 
 # ── 4. Drive the cross-device flow through both IPCs ───────────────────────────
-"$DRIVER" "$A_PORT" "$B_PORT"
+"$DRIVER" "$A_DIR" "$B_DIR"
 STATUS=$?
 exit "$STATUS"

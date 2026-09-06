@@ -20,6 +20,7 @@ ui = ["dep:cypher-ui"]
 cypher-env.workspace = true
 cypher-engine.workspace = true
 cypher-rpc.workspace = true
+cypher-proto.workspace = true
 cypher-ui = { workspace = true, optional = true }
 cypher-update.workspace = true
 tokio.workspace = true

@@ -322,6 +322,12 @@ class HttpTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "pointers"):
             release.check_deploy(self.url)
 
+    def test_installer_gate_blocks_clients_without_guided_setup(self):
+        self.routes["/releases/manifest.json"] = (200, release.json_bytes({"version":"0.3.2","files":{}}), None)
+        self.routes["/releases/latest.txt"] = (200,b"0.3.2",None)
+        with self.assertRaisesRegex(release.ReleaseError,"guided setup"):
+            release.check_deploy(self.url)
+
     def test_authenticated_put_streams_file_and_read_errors_are_not_missing(self):
         api = release.Api(self.url, "fixture-token")
         with tempfile.TemporaryDirectory() as root:

@@ -22,13 +22,15 @@ mod client;
 pub mod device_room;
 mod server;
 
-pub use client::{RpcClient, connect_ws};
+pub use client::RpcClient;
+mod local;
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, StaticToken, TokenSource, decode_device_frame, device_room_ws_url,
     encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use local::{LocalListener, connect_local, probe_local};
+pub use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -344,11 +346,12 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_round_trip() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let dir = tempfile::tempdir().unwrap();
+        let path = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = LocalListener::bind(&path).await.unwrap();
+        let server = tokio::spawn(listener.serve(Arc::new(TestService)));
 
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = connect_local(&path).await.unwrap();
         let echoed = client
             .call("Echo", serde_json::json!("hello"))
             .await
@@ -362,24 +365,28 @@ mod tests {
         assert_eq!(items.recv().await, Some(serde_json::json!(0)));
         assert_eq!(items.recv().await, Some(serde_json::json!(1)));
         assert_eq!(items.recv().await, None);
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
     async fn handshake_with_origin_header_is_rejected() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let dir = tempfile::tempdir().unwrap();
+        let path = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = LocalListener::bind(&path).await.unwrap();
+        let server = tokio::spawn(listener.serve(Arc::new(TestService)));
 
         // A browser page opening ws://127.0.0.1:{port} always sends Origin;
         // the server must refuse the handshake before serving any RPC.
-        let mut req = format!("ws://127.0.0.1:{port}")
-            .into_client_request()
-            .unwrap();
+        let mut req = "ws://localhost/ipc".into_client_request().unwrap();
         req.headers_mut()
             .insert("origin", "https://evil.example".parse().unwrap());
-        let result = tokio_tungstenite::connect_async(req).await;
+        req.headers_mut()
+            .insert("sec-websocket-protocol", "cypher.rpc.v1".parse().unwrap());
+        let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let result = tokio_tungstenite::client_async(req, stream).await;
         assert!(
             result.is_err(),
             "handshake carrying an Origin header must be rejected"
@@ -387,9 +394,11 @@ mod tests {
 
         // A native viewport (no Origin) still connects and can call RPC — the
         // reject must not be a blanket denial.
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = connect_local(&path).await.unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

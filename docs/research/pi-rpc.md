@@ -211,11 +211,15 @@ extension's own `spawnInteractiveSubagent` fallback untouched.
 - Parent delete **cascades**: the child chat rows/docs are tombstoned and live
   child runs interrupted (best-effort — see the deletion tests).
 
-### Bridge surface (local engine IPC, `ws://127.0.0.1:<ipc_port>`)
+### Bridge surface (local engine IPC, private Unix socket)
 
-The harness injects `CYPHER_ENGINE_WS_URL` (production `Engine::assemble_runtime`
-knows `ipc_port`) and `CYPHER_CHAT_ID` into every pi child; discovery processes
-never receive a parent id (they have no `RunControls`).
+The harness injects `CYPHER_ENGINE_SOCKET`, `CYPHER_ENGINE_CLIENT_MODULE`, and
+`CYPHER_CHAT_ID` into Pi children. Extensions import `connectEngine()` from the
+injected module to use unary RPC and cancellable async subscriptions over
+WebSocket-over-UnixStream. Discovery processes never receive a parent id (they
+have no `RunControls`); an unbridged harness clears inherited bridge addresses.
+The adapter ships inside the Engine binary and resolves `ws` from the isolated
+Runtime's locked dependency tree, never from global npm.
 
 - **`StartSubagent`** (unary, strict bounded params): validates the parent exists
   and is hosted locally, idempotently creates the same-device child chat

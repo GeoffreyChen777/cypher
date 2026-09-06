@@ -4,20 +4,27 @@ Control your coding agents (Claude Code, Codex, Cursor, Grok, Hermes, Pi) locall
 
 ![Cypher driving a Claude Code session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
 
-Every device runs a small engine that stores sessions on that device. A new installation starts in local-only mode without an account or a network connection.
+Every device runs a small engine that stores sessions on that device. The engine
+remains local-only unless you explicitly connect an account.
 
-## Install and run locally (Linux)
+## Set up a Linux device
+
+Guided setup requires the next client release, **0.3.3 or newer**.
 
 ```bash
 curl -fsSL https://edge.letscypher.app/install.sh | sh
-cypher status
 ```
 
-The installer starts a **systemd user service** when a working user bus is
-available. Otherwise run `cypher headless` under your own process supervisor.
-For operation after logout and at boot, enable lingering:
-`loginctl enable-linger "$USER"` (administrator permission may be required).
-No Cypher account is required to start the local-only engine.
+The installer opens one setup wizard: connect your account, install Pi Runtime,
+start a **systemd user service**, and verify the device connection. Choose
+local-only mode to skip account connection. If persistent startup needs
+administrator permission, setup asks before invoking sudo.
+Without a usable user service, setup offers foreground operation and clearly
+states that it stops when the terminal closes.
+
+In a non-interactive shell, only the binary is installed; run
+`~/.local/bin/cypher setup` later in an SSH terminal. No login prompt hangs on
+the installation pipe. See [Linux setup](docs/linux-setup.md).
 
 Official Linux binaries support glibc-based x86_64 and aarch64 systems with
 glibc 2.31 or newer (for example Ubuntu 20.04 or Debian 11 and newer).
@@ -27,36 +34,45 @@ This is a headless engine, not a terminal chat UI or Linux desktop application.
 Day-to-day:
 
 ```bash
-cypher status      # local/synced mode and engine status
+cypher             # setup on first use; concise status afterwards
+cypher setup       # continue or repair setup
+cypher status      # concise device status
+cypher logs        # recent engine logs; --follow streams them
 cypher update      # update to the latest release
-cypher daemon start|stop|restart|status
-journalctl --user -u cypher.service -f
 ```
 
 `cypher --version` prints the installed binary's version. `cypher update --check`
 exits 1 when an update is available; download/network errors also fail, so check
-the diagnostic output. `cypher status` inspects saved account state without
-refreshing credentials; it is not an online credential-validity test.
+the diagnostic output. `cypher status --verbose` includes the original account,
+data-directory and IPC diagnostics. Status does not refresh credentials.
+Advanced `cypher daemon start|stop|restart|status` commands remain available.
 
 ### Pi and configuration
 
 System Pi and `~/.pi` are not used. Pi Runtime (Node, Pi and curated plugins) is a
 separate download, with per-device configuration under
 `$CYPHER_DATA_DIR/pi-runtime/agent` (default `~/.cypher/pi-runtime/agent`).
-For desktop-to-Linux setup, sign both devices into the same Cypher account,
-select Linux in the desktop Settings sidebar, install its Runtime under Agents,
-then configure Providers and MCP there. Account login is not provider login.
+The Linux setup wizard installs Runtime automatically. Sign the desktop into
+the same account, select the Linux device in Settings, and configure Providers
+and MCP there. Account login is not provider login.
 
-`cypher headless` does not install the first Runtime automatically. Dedicated
-terminal-only Runtime/Provider/MCP management subcommands are not available yet.
+The low-level `cypher headless` command remains non-interactive and does not
+perform first-use setup. Dedicated terminal-only Provider/MCP management
+subcommands are not available yet.
 
-Use the same `CYPHER_DATA_DIR` and `CYPHER_IPC_PORT` for CLI commands and the
-service. `cypher daemon install` captures these and other supported `CYPHER_*`
+Use the same `CYPHER_DATA_DIR` for CLI commands and the service. Local IPC uses
+a private per-user, per-data-directory Unix socket; there is no port to choose.
+`CYPHER_IPC_PORT` is no longer supported. `cypher daemon install` captures data-directory and other supported `CYPHER_*`
 overrides, resolving a relative data directory to an absolute path.
 The optional `~/.cypher/env` is a **systemd EnvironmentFile**, not a shell script;
 it overrides captured service values and is **not** automatically loaded by
 one-shot CLI commands. Set matching shell variables when using it, especially
 for account/data-directory settings. Do not put provider API keys there.
+
+When a development UI uses a separate preferences directory, set
+`CYPHER_ENGINE_DATA_DIR` to the headless engine's data directory. This setting
+is UI-only; CLI commands use `CYPHER_DATA_DIR`. See [Unix IPC](docs/unix-ipc.md)
+for ownership, permissions and multi-instance service behavior.
 
 ### Installation integrity and release compatibility
 
@@ -65,21 +81,20 @@ The online installer requires an adjacent `<artifact>.sha256` containing the
 the executable and only then replaces the `current` link. Missing/mismatched
 checksums stop installation; existing versions and user data remain unchanged.
 An existing conflicting version directory is not overwritten automatically.
-The new installer must be deployed with a release containing these checksum
-files; it deliberately does not silently accept older checksum-less
-downloads. SHA-256 is an integrity check, **not** a release signature.
+The new installer must be deployed after a release containing both these
+checksum files and the guided `setup` command (>= 0.3.3). Older incompatible
+downloads are refused. SHA-256 is an integrity check, **not** a release signature.
 
 The tarball's own `install.sh` is a manual, unmanaged installation to
 `~/.local/bin`; use the online installer for managed self-updates.
 
 ## Optional multi-device sync
 
-Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
+On Linux, run the setup wizard when you want to connect to desktop. It handles
+safe service coordination around sign-in:
 
 ```bash
-cypher daemon stop
-cypher login
-cypher daemon start
+cypher setup
 ```
 
 You can then start an agent on one synced device and follow or drive it from another. An always-on machine such as a VPS can keep those agents working after you close your laptop.

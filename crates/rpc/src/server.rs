@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -14,6 +13,21 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
 
+struct AbortRequests(HashMap<u64, tokio::task::AbortHandle>);
+impl Drop for AbortRequests {
+    fn drop(&mut self) {
+        for task in self.0.values() {
+            task.abort();
+        }
+    }
+}
+struct AbortPump(tokio::task::AbortHandle);
+impl Drop for AbortPump {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
 /// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
 pub async fn serve_connection(
@@ -21,7 +35,8 @@ pub async fn serve_connection(
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
 ) {
-    let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    let mut requests = AbortRequests(HashMap::new());
+    let running = &mut requests.0;
     while let Some(payload) = inbound.recv().await {
         // ndjson: a transport may batch several frames per message.
         for line in payload.lines() {
@@ -54,11 +69,10 @@ pub async fn serve_connection(
                 method,
                 frame.params,
             ));
-            running.insert(frame.id, task.abort_handle());
+            if let Some(previous) = running.insert(frame.id, task.abort_handle()) {
+                previous.abort();
+            }
         }
-    }
-    for (_, task) in running {
-        task.abort();
     }
 }
 
@@ -121,34 +135,17 @@ async fn handle_request(
     }
 }
 
-/// Accept WebSocket connections forever, serving each with `service`.
-pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "rpc: accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
-    // Native viewports dial this socket with a bare `connect_async` and send
-    // no `Origin` header. A browser always attaches `Origin` to a WebSocket
-    // handshake and cannot forge or suppress it from script, and WebSockets
-    // are exempt from the Same-Origin Policy — so only rejecting any handshake
-    // that carries `Origin` keeps a page the user happens to visit from
-    // reaching this local socket. Keep this check.
+pub(crate) async fn serve_ws_socket<S>(stream: S, service: Arc<dyn RpcService>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // Native Unix clients negotiate cypher.rpc.v1 and never send Origin.
+    // Preserve the Origin rejection as defense against accidental proxies.
     //
     // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
     // trait requires; it can't be boxed away here.
     #[allow(clippy::result_large_err)]
-    let reject_cross_origin = |req: &HandshakeRequest, resp: HandshakeResponse| {
+    let reject_cross_origin = |req: &HandshakeRequest, mut resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
             tracing::warn!(
                 origin = %String::from_utf8_lossy(origin.as_bytes()),
@@ -158,12 +155,33 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
         }
+        {
+            if req
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+                != Some("cypher.rpc.v1")
+            {
+                let mut error = ErrorResponse::new(Some("unsupported Engine IPC protocol".into()));
+                *error.status_mut() = StatusCode::BAD_REQUEST;
+                return Err(error);
+            }
+            resp.headers_mut()
+                .insert("sec-websocket-protocol", "cypher.rpc.v1".parse().unwrap());
+        }
         Ok(resp)
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
-        Ok(ws) => ws,
-        Err(err) => {
-            tracing::warn!(error = %err, "rpc: websocket handshake failed");
+    let ws = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin),
+    )
+    .await
+    {
+        Ok(Ok(ws)) => ws,
+        _ => {
+            tracing::debug!(
+                "rpc: websocket handshake failed or timed out (possibly a liveness probe)"
+            );
             return;
         }
     };
@@ -199,6 +217,7 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
     });
 
+    let _pump_guard = AbortPump(pump.abort_handle());
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
 }

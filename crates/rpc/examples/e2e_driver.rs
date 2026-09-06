@@ -1,6 +1,6 @@
 //! Two-device e2e smoke driver (`scripts/e2e-smoke.sh` runs it).
 //!
-//! Connects to two running headless engines over their localhost IPC ports and proves
+//! Connects to two running headless engines over their private Unix IPC sockets and proves
 //! the cross-device command plane end to end against a real edge:
 //!
 //! 1. `LocalDevice` on both — distinct device ids;
@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use cypher_rpc::{RpcClient, connect_ws, methods};
+use cypher_rpc::{RpcClient, connect_local, methods};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(90);
 const MOCK_TEXT: &str = "Mock harness reporting in.";
@@ -108,23 +108,16 @@ fn apply_transcript_item(
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    let a_port: u16 = args
-        .next()
-        .unwrap_or_else(|| "27801".into())
-        .parse()
-        .expect("A port");
-    let b_port: u16 = args
-        .next()
-        .unwrap_or_else(|| "27802".into())
-        .parse()
-        .expect("B port");
-
-    let a = connect_ws(&format!("ws://127.0.0.1:{a_port}"))
+    let a_dir = args.next().expect("device A data directory");
+    let b_dir = args.next().expect("device B data directory");
+    let a_socket = cypher_env::ipc_socket(std::path::Path::new(&a_dir)).unwrap();
+    let b_socket = cypher_env::ipc_socket(std::path::Path::new(&b_dir)).unwrap();
+    let a = connect_local(&a_socket)
         .await
-        .unwrap_or_else(|err| fail(&format!("connect device A ipc :{a_port}: {err}")));
-    let b = connect_ws(&format!("ws://127.0.0.1:{b_port}"))
+        .unwrap_or_else(|err| fail(&format!("connect device A IPC: {err}")));
+    let b = connect_local(&b_socket)
         .await
-        .unwrap_or_else(|err| fail(&format!("connect device B ipc :{b_port}: {err}")));
+        .unwrap_or_else(|err| fail(&format!("connect device B IPC: {err}")));
 
     // 1. Distinct identities.
     let a_dev = device_id(&a, "A").await;

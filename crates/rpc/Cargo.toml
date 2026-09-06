@@ -20,6 +20,8 @@ async-trait.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 url = "2"
+libc.workspace = true
 
 [dev-dependencies]
 cypher-doc.workspace = true
+tempfile.workspace = true

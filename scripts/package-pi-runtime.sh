@@ -145,6 +145,8 @@ NODE
 "$STAGE/bin/node" "$ROOT/scripts/ci/pi-runtime-smoke.mjs" "$STAGE"
 PI_PACKAGE_DIR="$STAGE/pi" CYPHER_PROVIDER_HELPER="$STAGE/provider-service.mjs" \
   "$STAGE/bin/node" --test "$SPEC/provider-service.test.mjs"
+PI_PACKAGE_DIR="$STAGE/pi" \
+  "$STAGE/bin/node" --test "$ROOT/crates/harness/src/pi/engine-client.test.mjs"
 
 # The archive has one root directory; the installer validates every listed
 # path, then extracts with --strip-components=1.

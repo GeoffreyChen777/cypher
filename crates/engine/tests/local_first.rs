@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use cypher_engine::{AuthState, Engine, EngineConfig, EngineInfo, HarnessId, WorkspaceScope};
-use cypher_rpc::{connect_ws, memory_client, methods};
+use cypher_rpc::{memory_client, methods};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -24,7 +24,7 @@ fn config(
         data_dir: data_dir.to_path_buf(),
         edge_url,
         edge_token: edge_token.map(str::to_string),
-        ipc_port: 0,
+        ipc_socket: cypher_env::ipc_socket(data_dir).unwrap(),
         default_harness: HarnessId::Mock,
         org_id: None,
         workos_client_id: workos_client_id.map(str::to_string),
@@ -527,22 +527,19 @@ async fn explicit_dev_bearer_keeps_online_routing_enabled() {
 #[tokio::test]
 async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
     let dir = tempfile::tempdir().unwrap();
-    let port = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    let port = cypher_env::ipc_socket(dir.path()).unwrap();
     let mut engine_config = config(
         dir.path(),
         "http://127.0.0.1:1".into(),
         Some("client_test"),
         None,
     );
-    engine_config.ipc_port = port;
+    engine_config.ipc_socket = port.clone();
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) = cypher_rpc::connect_local(&port).await {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -564,7 +561,7 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
         .expect("headless task panicked")
         .expect("headless shutdown failed");
 
-    tokio::net::TcpListener::bind(("127.0.0.1", port))
+    cypher_rpc::LocalListener::bind(&port)
         .await
         .expect("headless IPC port remained occupied after shutdown");
 }
@@ -578,17 +575,14 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     )
     .unwrap();
     let edge = DaemonEdge::start().await;
-    let port = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    let port = cypher_env::ipc_socket(dir.path()).unwrap();
     let mut engine_config = config(dir.path(), edge.url.clone(), Some("client_test"), None);
-    engine_config.ipc_port = port;
+    engine_config.ipc_socket = port.clone();
     let daemon = tokio::spawn(Engine::new(engine_config).run());
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+            if let Ok(client) = cypher_rpc::connect_local(&port).await {
                 break client;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -625,7 +619,7 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     )
     .await;
 
-    tokio::net::TcpListener::bind(("127.0.0.1", port))
+    cypher_rpc::LocalListener::bind(&port)
         .await
         .expect("headless IPC port remained occupied after sign-out");
 }

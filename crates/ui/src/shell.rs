@@ -687,20 +687,15 @@ const RUNTIME_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Wait until a stopped daemon can no longer win the next bootstrap probe and
 /// has released the data directory for the replacement runtime.
 async fn wait_for_remote_engine_shutdown(
-    ipc_port: u16,
+    ipc_socket: std::path::PathBuf,
     data_dir: &std::path::Path,
     timeout: Duration,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let port_closed = !matches!(
-            tokio::time::timeout(
-                Duration::from_millis(200),
-                tokio::net::TcpStream::connect(("127.0.0.1", ipc_port)),
-            )
-            .await,
-            Ok(Ok(_))
-        );
+        let port_closed = !cypher_rpc::probe_local(&ipc_socket)
+            .await
+            .map_err(|e| e.to_string())?;
         if port_closed && InstanceLock::holder(data_dir).is_none() {
             return Ok(());
         }
@@ -715,10 +710,10 @@ async fn wait_for_remote_engine_shutdown(
 }
 
 /// Stop the engine that owns the synced profile and wait until a local runtime
-/// can safely acquire both its IPC port and data-directory lock.
+/// can safely acquire both its IPC socket and data-directory lock.
 async fn stop_synced_runtime(
     engine: crate::state::EngineHandle,
-    ipc_port: u16,
+    ipc_socket: std::path::PathBuf,
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
     let stop_error = if matches!(engine.mode(), EngineMode::Remote { .. }) {
@@ -732,7 +727,7 @@ async fn stop_synced_runtime(
         None
     };
     engine.shutdown().await;
-    match wait_for_remote_engine_shutdown(ipc_port, data_dir, RUNTIME_CHANGE_TIMEOUT).await {
+    match wait_for_remote_engine_shutdown(ipc_socket, data_dir, RUNTIME_CHANGE_TIMEOUT).await {
         Ok(()) => Ok(()),
         Err(error) => match stop_error {
             Some(stop_error) => Err(format!("{stop_error}; {error}")),
@@ -1205,7 +1200,12 @@ fn update_strip_view(
 }
 
 impl Shell {
-    pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        boot: EngineBootConfig,
+        data_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.on_state_changed(&state, cx);
             cx.notify();
@@ -1328,7 +1328,6 @@ impl Shell {
                 }
             }
         });
-        let data_dir = boot.data_dir.clone();
         let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
         let settings = UiSettings::load(&data_dir);
         crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
@@ -2726,7 +2725,12 @@ impl Shell {
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
-        AppState::bootstrap(self.state.clone(), self.boot.clone(), cx);
+        AppState::bootstrap(
+            self.state.clone(),
+            self.data_dir.clone(),
+            self.boot.clone(),
+            cx,
+        );
     }
 
     // ---- routes / settings ----
@@ -3213,8 +3217,8 @@ impl Shell {
         };
         self.sync_flow = SyncFlow::SigningOut;
         self.runtime_change_error = None;
-        let ipc_port = self.boot.ipc_port;
-        let data_dir = self.data_dir.clone();
+        let ipc_socket = self.boot.ipc_socket.clone();
+        let data_dir = self.boot.data_dir.clone();
         let shutdown_dir = data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
             if sign_out {
@@ -3224,7 +3228,7 @@ impl Shell {
                     .await
                     .map_err(|error| format!("Sign out failed: {error}"))?;
             }
-            stop_synced_runtime(engine, ipc_port, &shutdown_dir).await
+            stop_synced_runtime(engine, ipc_socket, &shutdown_dir).await
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
@@ -3243,7 +3247,7 @@ impl Shell {
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
-                        AppState::bootstrap(state.clone(), boot, cx);
+                        AppState::bootstrap(state.clone(), shell.data_dir.clone(), boot, cx);
                     }
                     Err(error) => {
                         shell.sync_flow = SyncFlow::SignedOutRestartRequired;
@@ -3354,10 +3358,10 @@ impl Shell {
         self.sync_flow = SyncFlow::Switching { import };
         self.runtime_change_error = None;
         self.import_current = None;
-        let ipc_port = self.boot.ipc_port;
-        let data_dir = self.data_dir.clone();
+        let ipc_socket = self.boot.ipc_socket.clone();
+        let data_dir = self.boot.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
-            stop_synced_runtime(engine, ipc_port, &data_dir).await
+            stop_synced_runtime(engine, ipc_socket, &data_dir).await
         });
         let state = self.state.clone();
         let boot = self.boot.clone();
@@ -3377,7 +3381,7 @@ impl Shell {
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
-                        AppState::bootstrap(state.clone(), boot, cx);
+                        AppState::bootstrap(state.clone(), shell.data_dir.clone(), boot, cx);
                     }
                     Err(error) => {
                         shell.sync_flow = SyncFlow::RestartPending { notice_open: true };
@@ -3554,15 +3558,15 @@ impl Shell {
         }
 
         self.runtime_change_error = None;
-        let ipc_port = self.boot.ipc_port;
-        let data_dir = self.data_dir.clone();
+        let ipc_socket = self.boot.ipc_socket.clone();
+        let data_dir = self.boot.data_dir.clone();
         let shutdown = Tokio::spawn(cx, async move {
             engine
                 .client()
                 .call(methods::STOP_ENGINE, serde_json::json!({}))
                 .await
                 .map_err(|err| err.to_string())?;
-            wait_for_remote_engine_shutdown(ipc_port, &data_dir, RUNTIME_CHANGE_TIMEOUT).await
+            wait_for_remote_engine_shutdown(ipc_socket, &data_dir, RUNTIME_CHANGE_TIMEOUT).await
         });
         self.runtime_change_task = Some(cx.spawn(async move |this, cx| {
             let result = match shutdown.await {
@@ -4758,7 +4762,7 @@ impl Shell {
 
     /// Swap the staged bundle over the installed one, arm the detached
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
-    /// process (and its engine lock / IPC port) is gone.
+    /// process (and its engine lock / IPC socket) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         let cypher_update::InstallKind::MacApp { bundle } = self.install.clone() else {
             return;
@@ -7766,6 +7770,54 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::TestAppContext) {
+        let ui = tempfile::tempdir().unwrap();
+        let engine = tempfile::tempdir().unwrap();
+        let ui_settings = UiSettings {
+            sidebar_width: 333.,
+            ..Default::default()
+        };
+        let engine_settings = UiSettings {
+            sidebar_width: 222.,
+            ..Default::default()
+        };
+        ui_settings.save(ui.path()).unwrap();
+        engine_settings.save(engine.path()).unwrap();
+        let engine_bytes = std::fs::read(UiSettings::path(engine.path())).unwrap();
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            crate::composer::init(cx);
+            crate::terminal::panel::init(cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| state.data_dir = Some(ui.path().into()));
+            let boot = EngineBootConfig {
+                data_dir: engine.path().into(),
+                ipc_socket: cypher_env::ipc_socket(engine.path()).unwrap(),
+                edge_url: "http://127.0.0.1:1".into(),
+                edge_token: None,
+                org_id: None,
+                workos_client_id: None,
+                default_harness: cypher_proto::HarnessId::Mock,
+            };
+            let shell = cx.new(|cx| Shell::new(state.clone(), boot, ui.path().into(), cx));
+            assert_eq!(shell.read(cx).data_dir, ui.path());
+            assert_eq!(shell.read(cx).boot.data_dir, engine.path());
+            assert_eq!(shell.read(cx).settings.sidebar_width, 333.);
+            assert_eq!(state.read(cx).data_dir.as_deref(), Some(ui.path()));
+            shell
+                .read(cx)
+                .settings
+                .save(&shell.read(cx).data_dir)
+                .unwrap();
+        });
+        assert_eq!(
+            std::fs::read(UiSettings::path(engine.path())).unwrap(),
+            engine_bytes
+        );
+    }
+
     #[test]
     fn every_default_shortcut_binds_on_this_platform() {
         // `apply_keymap` silently falls back on an unparseable combo, so a
@@ -7923,8 +7975,8 @@ mod tests {
     #[tokio::test]
     async fn remote_shutdown_waits_for_ipc_release() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
         let release = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             drop(listener);
@@ -8130,12 +8182,12 @@ mod tests {
             r#"{"refreshToken":"still-valid","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
         )
         .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
         drop(listener);
         let boot = EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
-            ipc_port: port,
+            ipc_socket: port.clone(),
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
@@ -8169,8 +8221,8 @@ mod tests {
     async fn remote_shutdown_waits_for_engine_lock_release() {
         let dir = tempfile::tempdir().unwrap();
         let lock = InstanceLock::acquire(dir.path()).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
         drop(listener);
         let lock_released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let released_by_task = lock_released.clone();
@@ -8190,8 +8242,8 @@ mod tests {
     #[tokio::test]
     async fn remote_shutdown_times_out_while_ipc_remains_open() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let port = cypher_env::ipc_socket(dir.path()).unwrap();
+        let listener = cypher_rpc::LocalListener::bind(&port).await.unwrap();
 
         let error = wait_for_remote_engine_shutdown(port, dir.path(), Duration::from_millis(100))
             .await

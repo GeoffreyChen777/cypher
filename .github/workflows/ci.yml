@@ -58,7 +58,7 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo fmt --all --check
-      - run: cargo test --locked --no-default-features -p cypher -p cypher-engine -p cypher-update -p cypher-rpc
+      - run: cargo test --locked --no-default-features -p cypher -p cypher-env -p cypher-harness -p cypher-engine -p cypher-update -p cypher-rpc
       - run: cargo clippy --locked -p cypher-update --all-targets -- -D warnings
       - run: cargo build --locked --no-default-features -p cypher
       - run: python3 scripts/test-linux-cli.py --binary target/debug/cypher
@@ -80,3 +80,5 @@ jobs:
           cargo test --locked -p cypher-ui --lib settings::setup::tests
           cargo test --locked -p cypher-ui --lib runtime_
           cargo test --locked -p cypher-ui --lib mcp_
+          cargo test --locked -p cypher-ui --lib state::tests
+          cargo test --locked -p cypher-ui --lib unix_engine_directory_does_not_redirect_client_preferences

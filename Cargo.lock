@@ -1549,6 +1549,7 @@ dependencies = [
  "clap",
  "cypher-engine",
  "cypher-env",
+ "cypher-proto",
  "cypher-rpc",
  "cypher-ui",
  "cypher-update",
@@ -1616,6 +1617,11 @@ dependencies = [
 [[package]]
 name = "cypher-env"
 version = "0.3.2"
+dependencies = [
+ "libc",
+ "sha2",
+ "tempfile",
+]
 
 [[package]]
 name = "cypher-harness"
@@ -1660,8 +1666,10 @@ dependencies = [
  "cypher-proto",
  "cypher-sync",
  "futures",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",

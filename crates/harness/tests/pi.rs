@@ -113,17 +113,17 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
         .collect()
 }
 
-/// The engine bridge (`CYPHER_ENGINE_WS_URL`) must be injected into every pi
+/// The engine bridge (`CYPHER_ENGINE_SOCKET`) must be injected into every pi
 /// child when `with_engine_bridge` is set — and absent otherwise. The spawn
 /// seam builds the exact command a run would spawn, so no child is needed.
 #[test]
 fn engine_bridge_url_is_injected_into_children() {
-    let url = std::ffi::OsStr::new("ws://127.0.0.1:4242");
-    let key = std::ffi::OsStr::new("CYPHER_ENGINE_WS_URL");
+    let url = std::ffi::OsStr::new("/tmp/cypher-ipc-fixture/engine.sock");
+    let key = std::ffi::OsStr::new("CYPHER_ENGINE_SOCKET");
 
     let bridged = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path())
-        .with_engine_bridge(Some("ws://127.0.0.1:4242".into()));
+        .with_engine_bridge(Some("/tmp/cypher-ipc-fixture/engine.sock".into()));
     let cmd = bridged
         .spawn_command(None, &RunHostContext::default(), None)
         .expect("command builds");
@@ -131,7 +131,7 @@ fn engine_bridge_url_is_injected_into_children() {
     assert_eq!(
         envs.get(key),
         Some(&Some(url)),
-        "bridged children receive CYPHER_ENGINE_WS_URL"
+        "bridged children receive CYPHER_ENGINE_SOCKET"
     );
 
     let plain = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
@@ -140,8 +140,10 @@ fn engine_bridge_url_is_injected_into_children() {
         .spawn_command(None, &RunHostContext::default(), None)
         .expect("command builds");
     assert!(
-        cmd.as_std().get_envs().all(|(k, _)| k != key),
-        "unbridged children must not receive the engine WS URL"
+        cmd.as_std()
+            .get_envs()
+            .any(|(k, value)| k == key && value.is_none()),
+        "unbridged children must clear any inherited engine socket"
     );
 }
 

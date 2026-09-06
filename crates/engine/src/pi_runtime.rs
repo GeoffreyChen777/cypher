@@ -679,7 +679,12 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
         if provider_auth_available
             && !extensions
                 .iter()
-                .any(|entry| entry.as_str() == Some(&provider_auth_extension))
+                .any(|entry| entry.as_str().is_some_and(|source| {
+                    source == provider_auth_extension || (Path::new(source).is_absolute() && matches!(
+                        (std::fs::canonicalize(source), std::fs::canonicalize(&provider_auth_extension)),
+                        (Ok(existing), Ok(expected)) if existing == expected
+                    ))
+                }))
         {
             extensions.push(Value::String(provider_auth_extension));
             let bytes = serde_json::to_vec_pretty(&root).map_err(|err| err.to_string())?;
@@ -814,6 +819,12 @@ mod tests {
     fn agent_initialization_uses_bundled_paths_but_keeps_user_npm_mutable() {
         let temp = tempfile::tempdir().unwrap();
         let paths = PiRuntimePaths::for_data_dir(temp.path());
+        std::fs::create_dir_all(paths.current.join("extensions")).unwrap();
+        std::fs::write(
+            paths.current.join("extensions/cypher-provider-auth.ts"),
+            "export default () => {};",
+        )
+        .unwrap();
         let package = paths.current.join("npm/node_modules/pi-web-search");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
@@ -845,5 +856,15 @@ mod tests {
         assert!(user_npm.is_dir());
         assert!(!user_npm.is_symlink());
         assert!(user_npm.join("package.json").is_file());
+        let before = std::fs::read(paths.agent_dir.join("settings.json")).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        let alias_paths = PiRuntimePaths::for_data_dir(&alias);
+        initialize_agent(&alias_paths, &alias_paths.current).unwrap();
+        assert_eq!(
+            std::fs::read(paths.agent_dir.join("settings.json")).unwrap(),
+            before,
+            "data-directory aliases must not duplicate provider extensions or rewrite settings"
+        );
     }
 }

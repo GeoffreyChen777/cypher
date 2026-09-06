@@ -1,20 +1,21 @@
 //! Ad-hoc RPC probe: call or subscribe against a running engine's IPC socket.
 //!
 //! Usage:
-//!   cargo run -p cypher-rpc --example rpc_probe -- ws://127.0.0.1:27801 LocalDevice '{}'
-//!   cargo run -p cypher-rpc --example rpc_probe -- ws://127.0.0.1:27801 WatchSessions '{}' --stream 3
+//!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data LocalDevice '{}'
+//!   cargo run -p cypher-rpc --example rpc_probe -- /tmp/engine-data WatchSessions '{}' --stream 3
 
-use cypher_rpc::connect_ws;
+use cypher_rpc::connect_local;
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [url, method, params, rest @ ..] = args.as_slice() else {
-        eprintln!("usage: rpc_probe <ws-url> <method> <params-json> [--stream [n]]");
+    let [data_dir, method, params, rest @ ..] = args.as_slice() else {
+        eprintln!("usage: rpc_probe <engine-data-dir> <method> <params-json> [--stream [n]]");
         std::process::exit(2);
     };
     let params: serde_json::Value = serde_json::from_str(params).expect("params json");
-    let client = connect_ws(url).await.expect("connect");
+    let path = cypher_env::ipc_socket(std::path::Path::new(data_dir)).expect("IPC path");
+    let client = connect_local(&path).await.expect("connect");
     if rest.first().map(String::as_str) == Some("--stream") {
         let count: usize = rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(1);
         let mut rx = client.subscribe(method, params).await.expect("subscribe");

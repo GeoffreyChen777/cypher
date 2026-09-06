@@ -38,13 +38,18 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
 
 ### Headed / headless
 Single binary `cypher`:
-- `cypher` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
+- `cypher` — headed. If its engine is listening on the private Unix socket, verify its identity and connect;
   otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
-  serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
-  port**. The embedded engine is not private: any other viewport can attach to the running app
-  without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
-  window still opens, having lost only the ability to host peers.
-- `cypher headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
+  serialization shortcuts, so the boundary stays honest) **and serve that same engine over Unix
+  IPC**. Other same-user viewports can attach without restarting the desktop app as a daemon.
+  Binding and identity failures fail closed; an unrelated listener is not permission to embed
+  a second engine. Endpoints derive from UID and canonical data directory, with private
+  permissions, peer-UID checks and the `cypher.rpc.v1` subprotocol.
+- `cypher headless` — engine only. A clean installation immediately serves its local profile over Unix IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
+
+See [Unix IPC](docs/unix-ipc.md) for endpoint ownership, service names, Pi bridge,
+and separate UI/Engine data directories. TCP IPC and its environment setting
+have been removed; remote Edge transports are unchanged.
 
 ### Local-first workspace profiles
 

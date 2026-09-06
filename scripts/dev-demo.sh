@@ -11,25 +11,25 @@ cd "$(dirname "$0")/.."
 
 DAEMON_DIR=/tmp/cypher-demo-daemon
 UI_DIR=/tmp/cypher-demo-ui
-IPC=27921
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
 
 echo "▸ building (first run takes a few minutes)…"
 cargo build -p cypher -q
+cargo build -p cypher-rpc --example rpc_probe -q
 
-echo "▸ starting engine daemon on :$IPC"
-env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_IPC_PORT=$IPC CYPHER_HARNESS=mock \
+echo "▸ starting engine daemon with private Unix IPC"
+env CYPHER_DATA_DIR="$DAEMON_DIR" CYPHER_HARNESS=mock \
   ${DELAY:+CYPHER_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
   ./target/debug/cypher headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
+probe() { ./target/debug/examples/rpc_probe "$DAEMON_DIR" "$@"; }
 for _ in $(seq 1 40); do
-  (exec 3<>/dev/tcp/127.0.0.1/$IPC) 2>/dev/null && { exec 3>&-; break; }
+  probe EngineReady '{}' >/dev/null 2>&1 && break
   sleep 0.25
 done
 
-probe() { cargo run -q -p cypher-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo chats"
@@ -62,4 +62,4 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
 fi
 
 echo "▸ opening cypher (composer is live — type into it; --slow shows streaming)"
-CYPHER_DATA_DIR="$UI_DIR" CYPHER_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/cypher
+CYPHER_DATA_DIR="$UI_DIR" CYPHER_ENGINE_DATA_DIR="$DAEMON_DIR" RUST_LOG=warn ./target/debug/cypher
