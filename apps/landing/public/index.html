@@ -18,6 +18,7 @@
 <meta name="theme-color" content="#0a0d0b" />
 <link rel="icon" href="/assets/cypher-favicon-v4.png" type="image/png" sizes="128x128" />
 <link rel="apple-touch-icon" href="/assets/cypher-app-icon.png" />
+<script src="/site.js" defer></script>
 <style>
   :root {
     --bg: #0a0d0b;
@@ -100,6 +101,13 @@
   .term-tag { margin-left: auto; font-size: 11px; color: var(--faint); }
 
   .term-body { padding: 26px 28px 30px; }
+  .cypher-ascii {
+    margin: 0 0 22px;
+    color: var(--accent);
+    font: 14px/1.02 var(--mono);
+    letter-spacing: 1px;
+    opacity: .9;
+  }
   .line {
     margin: 0;
     color: var(--ink-bright);
@@ -164,16 +172,20 @@
 
   @media (max-width: 520px) {
     body { padding: 24px 12px; font-size: 13px; }
-    .term-body { padding: 20px 18px 22px; }
+    .term-body { padding: 24px 18px 28px; }
+    .cypher-ascii { font-size: 12px; margin-bottom: 18px; }
     .term-tag { display: none; }
     .out { padding-left: 20px; }
   }
+  .preview{width:min(1040px,100%);margin:42px auto 0;text-align:left}.preview-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:13px;font-size:11px;color:var(--faint)}.preview-tabs{display:flex;gap:5px}.preview-tab{border:1px solid var(--border);background:transparent;color:var(--dim);border-radius:5px;padding:5px 9px;font:inherit;font-size:11px;cursor:pointer}.preview-tab:hover,.preview-tab[aria-selected=true]{color:var(--accent);border-color:var(--accent-dim);background:#3fbf6f0f}.preview-frame{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel);box-shadow:0 30px 80px -45px #000}.preview-frame img{display:block;width:100%;height:auto;opacity:0;transition:opacity .18s ease}.preview-frame img.is-ready{opacity:1}.preview-caption{display:flex;justify-content:space-between;padding-top:10px;color:var(--faint);font-size:11px}@media(prefers-reduced-motion:reduce){.preview-frame img{transition:none}}
+  .transition-stage{width:min(1040px,calc(100vw - 32px));min-height:200vh;position:relative;margin-inline:auto}.transition-stage>.term{margin-inline:auto;position:sticky;top:calc(50vh - 290px);z-index:2;opacity:calc(1 - var(--swap));filter:blur(calc(var(--swap) * 12px));transform:translateY(calc(var(--swap) * -48px)) scale(calc(1 - var(--swap) * .04));transition:filter .08s linear,opacity .08s linear,transform .08s linear}.transition-stage>.preview{width:100%;position:sticky;z-index:3;top:0;height:100vh;margin-top:-100vh;padding-top:13vh;opacity:var(--swap);filter:blur(calc((1 - var(--swap) * 1) * 12px));transform:translateY(calc((1 - var(--swap)) * 55px)) scale(calc(.96 + var(--swap) * .04));pointer-events:none;transition:filter .08s linear,opacity .08s linear,transform .08s linear}.transition-stage>.preview .preview-head,.transition-stage>.preview .preview-caption{pointer-events:auto}@media(max-width:560px){.transition-stage>.term{top:calc(50vh - 270px)}}@media(prefers-reduced-motion:reduce){.transition-stage>.term,.transition-stage>.preview{filter:none;transform:none;transition:none}}
 </style>
 </head>
 <body>
 
 <h1 class="sr-only">Cypher — control coding agents from any device</h1>
 
+<div class="transition-stage" id="transition-stage">
 <main class="term" aria-label="Cypher terminal">
   <header class="term-bar">
     <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -182,6 +194,7 @@
   </header>
 
   <div class="term-body">
+    <pre class="cypher-ascii" aria-label="Cypher">C Y P H E R</pre>
     <p class="line"><span class="ps1" aria-hidden="true">$</span>cypher --about</p>
     <p class="out">
       Cypher controls coding agents from any device.<br />
@@ -209,6 +222,22 @@
     <p class="line cursor-line"><span class="ps1" aria-hidden="true">$</span><span class="cursor" aria-hidden="true"></span></p>
   </div>
 </main>
+
+<section class="preview" aria-labelledby="preview-title">
+  <div class="preview-head">
+    <span id="preview-title">cypher — app preview</span>
+    <div class="preview-tabs" role="tablist" aria-label="App screenshots">
+      <button class="preview-tab" role="tab" aria-selected="true" aria-controls="preview-image" data-shot="workspace">workspace</button>
+      <button class="preview-tab" role="tab" aria-selected="false" aria-controls="preview-image" data-shot="sessions">sessions</button>
+      <button class="preview-tab" role="tab" aria-selected="false" aria-controls="preview-image" data-shot="diff">git diff</button>
+    </div>
+  </div>
+  <div class="preview-frame">
+    <img id="preview-image" class="is-ready" src="/assets/app-workspace.png" alt="Cypher workspace showing a Pi conversation and project sidebar">
+  </div>
+  <div class="preview-caption"><span id="preview-description">The Pi workspace: projects, sessions, and the full conversation.</span><span>macOS · Pi workspace</span></div>
+</section>
+</div>
 
 <script>
   // Version pinning: the static markup above is the fallback (0.1.3). When the
