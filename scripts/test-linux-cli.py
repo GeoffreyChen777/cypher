@@ -483,7 +483,8 @@ class Cli(Fixture):
             units.append(unit)
             path=self.home/".config/systemd/user"/unit
             self.assertTrue(path.is_file())
-            self.assertIn(str((self.home/name).resolve()),path.read_text())
+            escaped_data_dir=str((self.home/name).resolve()).replace("%","%%")
+            self.assertIn('Environment="CYPHER_DATA_DIR='+escaped_data_dir+'"',path.read_text())
         self.assertNotEqual(units[0],units[1])
         actions=(self.root/"actions").read_text()
         for unit in units:self.assertIn("--user restart "+unit,actions)
