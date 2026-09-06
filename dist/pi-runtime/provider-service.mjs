@@ -78,6 +78,22 @@ async function probe(baseUrl, key) {
   return data;
 }
 
+// registerProvider schedules a fire-and-forget refresh. A simultaneous explicit
+// refresh can supersede it (or be superseded by it) inside pi-ai, returning an
+// empty snapshot even though the catalog is already persisted. Serialize this
+// helper instance's refreshes, including SDK-initiated calls, so the final
+// awaited refresh observes a completed snapshot. Do not patch SDK globals.
+export function serializeModelRefreshes(runtime) {
+  const refresh = runtime.refresh.bind(runtime);
+  let tail = Promise.resolve();
+  runtime.refresh = (...args) => {
+    const result = tail.then(() => refresh(...args));
+    tail = result.then(() => undefined, () => undefined);
+    return result;
+  };
+  return runtime;
+}
+
 export async function providerRequest(request) {
   const agent = process.env.PI_CODING_AGENT_DIR;
   const pkg = process.env.PI_PACKAGE_DIR;
@@ -93,10 +109,10 @@ export async function providerRequest(request) {
   const { ModelRuntime } = await import(pathToFileURL(join(pkg, "dist/core/model-runtime.js")));
   const { AuthStorage } = await import(pathToFileURL(join(pkg, "dist/core/auth-storage.js")));
   const auth = AuthStorage.create(join(agent, "auth.json"));
-  const runtime = await ModelRuntime.create({
+  const runtime = serializeModelRefreshes(await ModelRuntime.create({
     credentials: auth, modelsPath: join(agent, "models.json"),
     modelsStorePath: join(agent, "models-store.json"), refreshOnCreate: false,
-  });
+  }));
   const configPath = join(agent, "extension-settings/provider-newapi.json");
   const statusPath = join(agent, "cypher-provider-status.json");
   const config = await jsonFile(configPath, { version: 1, providers: {}, settings: {} });

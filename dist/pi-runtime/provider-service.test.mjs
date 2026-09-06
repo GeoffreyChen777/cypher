@@ -6,7 +6,36 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { normalizeUrl, validateId } from "./provider-service.mjs";
+import { normalizeUrl, validateId, serializeModelRefreshes } from "./provider-service.mjs";
+
+test("SDK background refreshes and explicit refreshes are serialized, including failures", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = [];
+  let active = 0;
+  const runtime = serializeModelRefreshes({
+    async refresh(name) {
+      assert.equal(active++, 0, "refreshes must not overlap");
+      started.push(name);
+      try {
+        if (name === "background") await gate;
+        if (name === "failure") throw new Error("fixture failure");
+        return name;
+      } finally { active--; }
+    },
+    registerProvider() { void this.refresh("background"); },
+  });
+  runtime.registerProvider();
+  const failed = runtime.refresh("failure");
+  const rejected = assert.rejects(failed, /fixture failure/);
+  const final = runtime.refresh("final snapshot");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ["background"]);
+  release();
+  await rejected;
+  assert.equal(await final, "final snapshot");
+  assert.deepEqual(started, ["background", "failure", "final snapshot"]);
+});
 
 test("provider input validation", () => {
   assert.equal(normalizeUrl("https://example.com/v1/"), "https://example.com");

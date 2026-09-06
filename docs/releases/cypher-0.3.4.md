@@ -1,5 +1,9 @@
 # Cypher 0.3.4 — Guided Linux setup and private Unix IPC
 
+**Not published.** A reproducible provider-catalog refresh race was caught by
+the macOS Runtime gate. The corrected release is [0.3.5](cypher-0.3.5.md), with
+Runtime 0.85.1.2. The failed Git tag is retained.
+
 - Introduce `cypher setup` for Linux: account connection (or local-only mode),
   verified Pi Runtime installation, background service setup and readiness
   checks. Add concise status and `cypher logs` commands.
