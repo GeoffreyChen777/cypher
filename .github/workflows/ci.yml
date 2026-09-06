@@ -75,7 +75,8 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo check --workspace --locked
-      - name: Runtime setup UI installation regression
+      - name: Runtime and MCP settings UI regressions
         run: |
           cargo test --locked -p cypher-ui --lib settings::setup::tests
           cargo test --locked -p cypher-ui --lib runtime_
+          cargo test --locked -p cypher-ui --lib mcp_

@@ -65,6 +65,14 @@ The package script runs `provider-service.test.mjs` against the staged Runtime
 and a local fixture endpoint, including the full credential lifecycle and
 redaction checks. No real provider credentials are needed.
 
+## Adding MCP servers
+
+Open **Settings → MCP**, select the intended device, and click **Add MCP**.
+Use the HTTP or stdio form, or import JSON. Entries are added to that device's
+`pi-runtime/agent/mcp.json`; existing servers and unrelated root settings are
+preserved. The importer rejects duplicate names and malformed existing files
+rather than overwriting them. See [MCP settings](../../docs/mcp-settings.md).
+
 ## Updating the bundle
 
 1. Change exact dependency versions in `package.json`.

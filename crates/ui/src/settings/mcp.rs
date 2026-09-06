@@ -15,6 +15,13 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+mod add;
+
+struct DeleteConfirmation {
+    name: String,
+    ticket: super::device_target::DeviceTicket,
+}
+
 pub struct McpPage {
     state: Entity<AppState>,
     target: Entity<DeviceTarget>,
@@ -24,6 +31,9 @@ pub struct McpPage {
     error: Option<String>,
     busy: Option<String>,
     load_task: Option<Task<()>>,
+    form: Option<add::AddForm>,
+    notice: Option<String>,
+    delete: Option<DeleteConfirmation>,
 }
 
 impl McpPage {
@@ -41,6 +51,9 @@ impl McpPage {
                 page.snapshot = Loadable::Idle;
                 page.busy = None;
                 page.error = None;
+                page.form = None;
+                page.notice = None;
+                page.delete = None;
                 page.load(cx);
             }
             cx.notify();
@@ -54,6 +67,9 @@ impl McpPage {
             error: None,
             busy: None,
             load_task: None,
+            form: None,
+            notice: None,
+            delete: None,
         };
         page.load(cx);
         page
@@ -152,7 +168,18 @@ impl McpPage {
                 .client()
                 .call(method, ticket.params(params))
                 .await
-                .map_err(|err| format!("{}: {err}", ticket.label));
+                .map_err(|err| {
+                    if matches!(method, methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER)
+                        && err.to_string().contains("unknown method")
+                    {
+                        format!(
+                            "{}: update Cypher on this device to manage MCP servers from Settings.",
+                            ticket.label
+                        )
+                    } else {
+                        format!("{}: {err}", ticket.label)
+                    }
+                });
             drop(lease);
             target.update(cx, |_, cx| {
                 cx.notify();
@@ -162,7 +189,23 @@ impl McpPage {
                 if !page.target.read(cx).matches(&ticket) {
                     return;
                 }
+                let added = method == methods::ADD_MCP_SERVERS && result.is_ok();
+                let removed = method == methods::REMOVE_MCP_SERVER && result.is_ok();
                 page.apply_snapshot(result);
+                if added {
+                    page.form = None;
+                    page.notice = Some(format!(
+                        "Saved to {}. Servers connect when used; OAuth servers may need Sign in.",
+                        ticket.label
+                    ));
+                }
+                if removed {
+                    page.delete = None;
+                    page.notice = Some(format!(
+                        "Deleted from {} and removed its Cypher OAuth login data. Server-side authorization was not revoked.",
+                        ticket.label
+                    ));
+                }
                 cx.notify();
             })
             .ok();
@@ -180,9 +223,76 @@ impl McpPage {
         );
     }
 
+    fn request_delete(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.busy.is_some()
+            || !self.target.read(cx).can_write(cx)
+            || self.generation != self.target.read(cx).generation()
+        {
+            return;
+        }
+        let Ok(ticket) = self.target.read(cx).ticket(cx) else {
+            return;
+        };
+        self.form = None;
+        self.error = None;
+        self.notice = None;
+        self.delete = Some(DeleteConfirmation { name, ticket });
+        cx.notify();
+    }
+
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(confirmation) = &self.delete else {
+            return;
+        };
+        if !self.target.read(cx).matches(&confirmation.ticket) {
+            self.delete = None;
+            self.error = Some(
+                "The selected device changed. Select the server again before deleting.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let name = confirmation.name.clone();
+        self.call(methods::REMOVE_MCP_SERVER, name, cx);
+    }
+
+    fn render_delete_confirmation(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let confirmation = self.delete.as_ref().unwrap();
+        let busy = self.busy.is_some();
+        let enabled = !busy && self.target.read(cx).can_write(cx);
+        widgets::section_card(theme).id("mcp-delete-confirmation").mt(px(16.0)).p(px(20.0))
+            .flex().flex_col().gap(px(12.0))
+            .child(widgets::row_title(theme, format!(
+                "Delete “{}” from “{}”?", confirmation.name, confirmation.ticket.label
+            )))
+            .child(widgets::page_subtitle(theme,
+                "This removes the server configuration, including embedded tokens, and its Cypher-only OAuth login data on this device. Other servers and system Pi credentials are kept. It does not revoke authorization on the server. Active runs must finish first."))
+            .child(div().flex().justify_end().gap(px(8.0))
+                .child(widgets::ghost_action(theme).id("mcp-delete-cancel")
+                    .debug_selector(|| "mcp-delete-cancel".into())
+                    .text_color(theme.text).child("Cancel")
+                    .when(busy, |el| el.opacity(0.45))
+                    .when(!busy, |el| el.on_click(cx.listener(|page,_,_,cx| {
+                        page.delete = None; page.error = None; cx.notify();
+                    }))))
+                .child(widgets::ghost_action(theme).id("mcp-delete-confirm")
+                    .debug_selector(|| "mcp-delete-confirm".into())
+                    .text_color(theme.danger).child(if busy { "Deleting…" } else { "Delete server" })
+                    .when(!enabled, |el| el.opacity(0.45))
+                    .when(enabled, |el| el.on_click(cx.listener(|page,_,_,cx| page.confirm_delete(cx))))))
+            .into_any_element()
+    }
+
     fn status_badge(theme: &Theme, server: &McpServer) -> gpui::Div {
         if !server.enabled {
             return widgets::badge(theme, "disabled");
+        }
+        if server.auth_kind == McpAuthKind::Bearer {
+            return widgets::badge(theme, "configured");
         }
         match server.auth_status {
             McpAuthStatus::SignedIn => widgets::badge_active(theme, "signed in"),
@@ -199,8 +309,11 @@ impl McpPage {
         index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let busy = self.busy.as_deref() == Some(server.name.as_str());
-        let blocked = self.busy.is_some() || !self.target.read(cx).can_write(cx);
+        let busy = self.busy.as_deref() == Some(server.name.as_str()) && self.delete.is_none();
+        let blocked = self.busy.is_some()
+            || self.delete.is_some()
+            || self.form.is_some()
+            || !self.target.read(cx).can_write(cx);
         let icon = if server.transport.starts_with("http") {
             icons::GLOBAL
         } else {
@@ -286,6 +399,7 @@ impl McpPage {
         }
 
         let enabled = server.enabled;
+        let delete_name = name.clone();
         row = row.child(
             widgets::toggle_switch(theme, enabled)
                 .flex_none()
@@ -296,6 +410,20 @@ impl McpPage {
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.set_enabled(name.clone(), !enabled, cx);
                         }))
+                }),
+        );
+        row = row.child(
+            widgets::ghost_action(theme)
+                .id(("mcp-delete", index))
+                .role(gpui::Role::Button)
+                .aria_label(format!("Delete {}", delete_name))
+                .text_color(theme.danger_muted)
+                .child("Delete")
+                .when(blocked, |el| el.opacity(0.45))
+                .when(!blocked, |el| {
+                    el.on_click(cx.listener(move |page, _, _, cx| {
+                        page.request_delete(delete_name.clone(), cx);
+                    }))
                 }),
         );
         row.into_any_element()
@@ -363,19 +491,35 @@ impl Render for McpPage {
             }
         };
 
+        let adding = self.form.is_some();
+        let can_add = self.target.read(cx).can_write(cx)
+            && self.busy.is_none()
+            && !adding
+            && self.delete.is_none();
+        let form = adding.then(|| self.render_add_form(&theme, cx));
+        let delete = self
+            .delete
+            .as_ref()
+            .map(|_| self.render_delete_confirmation(&theme, cx));
         div()
             .id("mcp-page")
             .size_full()
             .overflow_y_scroll()
             .child(
                 widgets::page_column()
-                    .child(widgets::page_header(
+                    .child(div().flex().items_center().justify_between().child(widgets::page_header(
                         &theme,
                         "MCP",
                         match &self.snapshot {
                             Loadable::Ready(snapshot) => Some(snapshot.servers.len()),
                             _ => None,
                         },
+                    )).child(
+                        popover::btn_primary(&theme, "Add MCP")
+                            .id("mcp-add")
+                            .debug_selector(|| "mcp-add".into())
+                            .when(!can_add, |el| el.opacity(0.45))
+                            .when(can_add, |el| el.on_click(cx.listener(|page, _, window, cx| page.open_add(window, cx)))),
                     ))
                     .child(
                         widgets::page_subtitle(
@@ -394,6 +538,9 @@ impl Render for McpPage {
                             .clone()
                             .map(|message| widgets::error_strip(&theme, message).into_any_element()),
                     )
+                    .children(self.notice.clone().map(|notice| widgets::page_subtitle(&theme, notice)))
+                    .children(form)
+                    .children(delete)
                     .child(body),
             )
     }

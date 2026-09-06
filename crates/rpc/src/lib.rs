@@ -54,6 +54,8 @@ pub mod methods {
     /// Explicit retry/repair of the latest isolated Pi runtime bundle.
     pub const APPLY_PI_UPDATES: &str = "ApplyPiUpdates";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
+    pub const ADD_MCP_SERVERS: &str = "AddMcpServers";
+    pub const REMOVE_MCP_SERVER: &str = "RemoveMcpServer";
     pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
     pub const START_MCP_AUTH: &str = "StartMcpAuth";
     pub const LOGOUT_MCP_SERVER: &str = "LogoutMcpServer";

@@ -966,10 +966,16 @@ impl EngineRpc {
                 "cannot reach device {target}: remote routing unavailable (offline)"
             )));
         };
-        if method == methods::SAVE_PI_PROVIDER && !links.credential_transport_allowed() {
-            return Err(RpcError::Failed(
+        if matches!(
+            method,
+            methods::SAVE_PI_PROVIDER | methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER
+        ) && !links.credential_transport_allowed()
+        {
+            return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
+                "Remote MCP configuration requires an HTTPS/WSS relay (loopback development is allowed).".into()
+            } else {
                 "Remote provider credentials require an HTTPS/WSS relay (loopback development is allowed).".into()
-            ));
+            }));
         }
         let client = links.client(target).await?;
         if is_stream_method(method) {
@@ -1173,6 +1179,8 @@ fn forwardable(method: &str) -> bool {
             | methods::PI_UPDATE_STATUS
             | methods::APPLY_PI_UPDATES
             | methods::LIST_MCP_SERVERS
+            | methods::ADD_MCP_SERVERS
+            | methods::REMOVE_MCP_SERVER
             | methods::SET_MCP_SERVER_ENABLED
             | methods::START_MCP_AUTH
             | methods::LOGOUT_MCP_SERVER
@@ -1461,6 +1469,42 @@ impl RpcService for EngineRpc {
                     .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
             }
         }
+        if method == methods::ADD_MCP_SERVERS {
+            if !params
+                .get("targetDeviceId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                return Err(RpcError::BadParams(
+                    "Select a target device before adding MCP servers.".into(),
+                ));
+            }
+            let mut body = params.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove("targetDeviceId");
+            }
+            let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
+                .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
+            request.validate().map_err(RpcError::BadParams)?;
+        }
+        if method == methods::REMOVE_MCP_SERVER {
+            if !params
+                .get("targetDeviceId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            {
+                return Err(RpcError::BadParams(
+                    "Select a target device before deleting an MCP server.".into(),
+                ));
+            }
+            let mut body = params.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove("targetDeviceId");
+            }
+            let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
+                .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
+            request.validate().map_err(RpcError::BadParams)?;
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -1563,12 +1607,44 @@ impl RpcService for EngineRpc {
             methods::LIST_MCP_SERVERS => {
                 RpcReply::value(&crate::mcp::list(&self.pi_runtime()?.paths().agent_dir))
             }
+            methods::ADD_MCP_SERVERS => {
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
+                    .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
+                let snapshot =
+                    crate::mcp::add_servers(&self.pi_runtime()?.paths().agent_dir, request)
+                        .map_err(RpcError::Failed)?;
+                self.reload_pi_runtime().await;
+                RpcReply::value(&snapshot)
+            }
             methods::SET_MCP_SERVER_ENABLED => {
                 let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
                 let snapshot = crate::mcp::set_enabled(&self.pi_runtime()?.paths().agent_dir, p)
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
+            }
+            methods::REMOVE_MCP_SERVER => {
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let request = serde_json::from_value::<crate::mcp::RemoveMcpServer>(body)
+                    .map_err(|_| RpcError::BadParams("Invalid MCP deletion request.".into()))?;
+                if self.sessions.any_active() {
+                    return Err(RpcError::Failed(
+                        "Finish or stop active runs on this device before deleting an MCP server."
+                            .into(),
+                    ));
+                }
+                self.sessions.recycle_idle_sessions().await;
+                let result =
+                    crate::mcp::remove_server(&self.pi_runtime()?.paths().agent_dir, request);
+                self.registry.invalidate_discovery(HarnessId::Pi);
+                RpcReply::value(&result.map_err(RpcError::Failed)?)
             }
             methods::START_MCP_AUTH => {
                 let p: crate::mcp::McpServerName = parse_params(params)?;

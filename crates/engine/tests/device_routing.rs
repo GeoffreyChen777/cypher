@@ -699,6 +699,83 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
         .await
         .unwrap();
     assert_eq!(local_mcp["servers"][0]["enabled"], true);
+    let added = client.call(methods::ADD_MCP_SERVERS, serde_json::json!({
+        "targetDeviceId":"device-b", "servers":{
+            "new-web":{"url":"https://example.com/mcp","auth":"bearer","bearerToken":"fixture-mcp-key"}
+        }
+    })).await.unwrap();
+    assert_eq!(added["servers"].as_array().unwrap().len(), 2);
+    assert!(!added.to_string().contains("fixture-mcp-key"));
+    let local_after = client
+        .call(methods::LIST_MCP_SERVERS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(local_after["servers"].as_array().unwrap().len(), 1);
+    let remote_bytes = std::fs::read(b_dir.join("pi-runtime/agent/mcp.json")).unwrap();
+    assert!(
+        String::from_utf8(remote_bytes)
+            .unwrap()
+            .contains("fixture-mcp-key")
+    );
+    assert!(
+        client
+            .call(
+                methods::ADD_MCP_SERVERS,
+                serde_json::json!({
+                    "servers":{"missing-target":{"command":"node"}}
+                })
+            )
+            .await
+            .is_err()
+    );
+    let malformed = client
+        .call(
+            methods::ADD_MCP_SERVERS,
+            serde_json::json!({
+                "targetDeviceId":"device-b", "servers":{"bad":{"command":{"key":"fixture-mcp-key"}}}
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(!malformed.to_string().contains("fixture-mcp-key"));
+    let account = cypher_engine::mcp::oauth_account("new-web");
+    for folder in [&a_dir, &b_dir] {
+        let oauth = folder.join("pi-runtime/agent/mcp-oauth").join(&account);
+        std::fs::create_dir_all(&oauth).unwrap();
+        std::fs::write(oauth.join("tokens.json"), "fixture-oauth").unwrap();
+    }
+    let removed = client
+        .call(
+            methods::REMOVE_MCP_SERVER,
+            serde_json::json!({
+                "targetDeviceId":"device-b","name":"new-web"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed["servers"].as_array().unwrap().len(), 1);
+    assert!(
+        !b_dir
+            .join("pi-runtime/agent/mcp-oauth")
+            .join(&account)
+            .exists()
+    );
+    assert!(
+        a_dir
+            .join("pi-runtime/agent/mcp-oauth")
+            .join(&account)
+            .join("tokens.json")
+            .exists()
+    );
+    assert!(
+        client
+            .call(
+                methods::REMOVE_MCP_SERVER,
+                serde_json::json!({"name":"device-a-mcp"})
+            )
+            .await
+            .is_err()
+    );
     let bad = client
         .call(
             methods::SAVE_PI_PROVIDER,
@@ -761,4 +838,24 @@ async fn remote_provider_errors_never_fall_back_to_local_and_insecure_relays_are
         .unwrap_err();
     assert!(error.to_string().contains("HTTPS/WSS"));
     assert!(!dir.path().join("pi-runtime/agent/observed.json").exists());
+    let before = std::fs::read(dir.path().join("pi-runtime/agent/mcp.json")).unwrap();
+    let error = client.call(methods::ADD_MCP_SERVERS, serde_json::json!({
+        "targetDeviceId":"device-b","servers":{"test":{"command":"node","env":{"KEY":"fixture-mcp-key"}}}
+    })).await.unwrap_err();
+    assert!(error.to_string().contains("HTTPS/WSS"));
+    assert!(!error.to_string().contains("fixture-mcp-key"));
+    let error = client
+        .call(
+            methods::REMOVE_MCP_SERVER,
+            serde_json::json!({
+                "targetDeviceId":"device-b","name":"device-a-mcp"
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("HTTPS/WSS"));
+    assert_eq!(
+        std::fs::read(dir.path().join("pi-runtime/agent/mcp.json")).unwrap(),
+        before
+    );
 }

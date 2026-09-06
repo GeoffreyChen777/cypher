@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 use cypher_harness::Harness;
 
+mod config;
+pub use config::{AddMcpServers, RemoveMcpServer, add_servers, remove_server};
+static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum McpAuthKind {
@@ -86,10 +90,17 @@ fn write_mcp_root(agent_dir: &Path, value: &Value) -> Result<(), String> {
         .parent()
         .ok_or_else(|| "Invalid MCP settings path.".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| "Could not stage MCP configuration.".to_string())?;
+    temporary
+        .write_all(text.as_bytes())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| "Could not write MCP configuration.".to_string())?;
+    temporary
+        .persist(path)
+        .map_err(|_| "Could not save MCP configuration.".to_string())?;
     Ok(())
 }
 
@@ -231,7 +242,10 @@ pub fn list(agent_dir: &Path) -> McpSnapshot {
 }
 
 pub fn set_enabled(agent_dir: &Path, params: SetMcpServerEnabled) -> Result<McpSnapshot, String> {
-    let mut root = read_mcp_root(agent_dir);
+    let _guard = CONFIG_WRITE
+        .lock()
+        .map_err(|_| "MCP configuration is busy.".to_string())?;
+    let mut root = config::read_for_update(agent_dir)?;
     let servers = root
         .as_object_mut()
         .ok_or_else(|| "MCP settings are not a JSON object.".to_string())?
