@@ -36,6 +36,7 @@ jobs:
             python3 scripts/test-linux-cli.py
           '
       - run: node --test scripts/test-landing.mjs
+      - run: node --test dist/pi-runtime/provider-service.test.mjs
       - run: bash scripts/test-check-linux-abi.sh
       - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh scripts/test-macos-icon.sh
       - run: sh -n edge/src/install.sh
