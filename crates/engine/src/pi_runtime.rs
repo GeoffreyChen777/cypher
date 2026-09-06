@@ -401,7 +401,7 @@ impl PiRuntimeManager {
     fn base_url(&self) -> String {
         cypher_env::var("PI_RUNTIME_BASE_URL")
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| format!("{}/runtimes/pi", self.inner.edge_url.trim_end_matches('/')))
+            .unwrap_or_else(|| public_runtime_base_url(&self.inner.edge_url))
             .trim_end_matches('/')
             .to_string()
     }
@@ -480,6 +480,10 @@ fn sanitize_version(version: &str) -> String {
             }
         })
         .collect()
+}
+
+fn public_runtime_base_url(edge_url: &str) -> String {
+    format!("{}/releases/runtimes/pi", edge_url.trim_end_matches('/'))
 }
 
 fn read_installed(paths: &PiRuntimePaths) -> Option<InstalledRuntime> {
@@ -747,6 +751,24 @@ fn activate(paths: &PiRuntimePaths, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_downloads_use_the_public_release_route() {
+        for edge in [
+            "https://edge.letscypher.app",
+            "https://edge.letscypher.app/",
+        ] {
+            let base = public_runtime_base_url(edge);
+            assert_eq!(
+                format!("{base}/manifest.json"),
+                "https://edge.letscypher.app/releases/runtimes/pi/manifest.json"
+            );
+            assert_eq!(
+                format!("{base}/cypher-pi-runtime-0.85.1.1-macos-arm64.tar.gz"),
+                "https://edge.letscypher.app/releases/runtimes/pi/cypher-pi-runtime-0.85.1.1-macos-arm64.tar.gz"
+            );
+        }
+    }
 
     #[test]
     fn runtime_paths_are_device_scoped() {
