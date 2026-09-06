@@ -48,6 +48,7 @@ jobs:
       - run: npm ci --prefix edge
       - run: npm --prefix edge run typecheck
       - run: npm --prefix edge test
+      - run: node --test scripts/test-landing.mjs
       - name: installer compatibility gate (read-only)
         run: python3 scripts/ci/release.py check-deploy
       - name: deployment summary

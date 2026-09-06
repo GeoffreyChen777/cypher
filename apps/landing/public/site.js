@@ -30,14 +30,16 @@
   document.querySelectorAll("[data-shot]").forEach(tab => {
     tab.addEventListener("click", () => {
       const shot = tab.dataset.shot;
+      if (!image || !Object.hasOwn(descriptions, shot)) return;
       document.querySelectorAll("[data-shot]").forEach(item => {
         item.setAttribute("aria-selected", String(item === tab));
       });
       image.classList.remove("is-ready");
       image.alt = descriptions[shot];
+      image.onload = () => image.classList.add("is-ready");
+      image.onerror = () => image.classList.add("is-ready");
       image.src = `/assets/app-${shot}.png`;
       if (description) description.textContent = descriptions[shot];
-      image.onload = () => image.classList.add("is-ready");
     });
   });
   const hero = document.querySelector(".terminal-hero");
@@ -60,7 +62,10 @@
   }).catch(() => {});
   const button = document.getElementById("copy");
   const status = document.getElementById("copy-status");
-  const command = document.getElementById("install-command").textContent;
+  const commandNode = document.getElementById("install-command");
+  // The compact terminal layout has its own inline copy handler.
+  if (!button || !status || !commandNode) return;
+  const command = commandNode.textContent;
   const fallback = () => {
     const area = document.createElement("textarea");
     area.value = command; area.style.cssText = "position:fixed;left:-9999px;opacity:0";
