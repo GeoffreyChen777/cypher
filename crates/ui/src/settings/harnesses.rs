@@ -6,6 +6,7 @@ use gpui::{
 };
 
 use cypher_engine::pi_packages::{PiPackage, PiPackagesSnapshot};
+use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
@@ -23,6 +24,9 @@ pub struct HarnessesPage {
     busy: bool,
     error: Option<String>,
     load_task: Option<Task<()>>,
+    progress_task: Option<Task<()>>,
+    runtime_status: Option<PiRuntimeStatus>,
+    installing_runtime: bool,
 }
 
 impl HarnessesPage {
@@ -40,6 +44,9 @@ impl HarnessesPage {
                 page.packages = Loadable::Idle;
                 page.error = None;
                 page.busy = false;
+                page.progress_task = None;
+                page.runtime_status = None;
+                page.installing_runtime = false;
                 page.load(cx);
             }
             cx.notify();
@@ -53,6 +60,9 @@ impl HarnessesPage {
             busy: false,
             error: None,
             load_task: None,
+            progress_task: None,
+            runtime_status: None,
+            installing_runtime: false,
         };
         page.load(cx);
         page
@@ -138,6 +148,51 @@ impl HarnessesPage {
         self.error = None;
         let target = self.target.clone();
         let lease = target.update(cx, |target, cx| target.lock(cx));
+        self.installing_runtime = method == methods::INSTALL_PI;
+        self.runtime_status = None;
+        if self.installing_runtime {
+            let progress_engine = engine.clone();
+            let progress_ticket = ticket.clone();
+            self.progress_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(350))
+                        .await;
+                    if !this
+                        .update(cx, |page, _| page.installing_runtime)
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                    let result = progress_engine
+                        .client()
+                        .call(
+                            methods::PI_RUNTIME_STATUS,
+                            progress_ticket.params(serde_json::json!({})),
+                        )
+                        .await;
+                    let keep_polling = this
+                        .update(cx, |page, cx| {
+                            if !page.installing_runtime
+                                || !page.target.read(cx).matches(&progress_ticket)
+                            {
+                                return false;
+                            }
+                            if let Ok(value) = result
+                                && let Ok(status) = serde_json::from_value::<PiRuntimeStatus>(value)
+                            {
+                                page.runtime_status = Some(status);
+                                cx.notify();
+                            }
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !keep_polling {
+                        break;
+                    }
+                }
+            }));
+        }
         cx.spawn(async move |this, cx| {
             let result = engine.client().call(method, ticket.params(params)).await;
             drop(lease);
@@ -150,6 +205,9 @@ impl HarnessesPage {
                     return;
                 }
                 page.busy = false;
+                page.installing_runtime = false;
+                page.progress_task = None;
+                page.runtime_status = None;
                 match result {
                     Ok(value) => {
                         if let Ok(snapshot) = serde_json::from_value::<PiPackagesSnapshot>(value) {
@@ -331,9 +389,14 @@ impl Render for HarnessesPage {
                                         )),
                                 )
                                 .child(
-                                    Self::action_button(&theme, "Download runtime")
+                                    Self::action_button(&theme, if self.installing_runtime {
+                                        super::setup::runtime_progress_label(self.runtime_status.as_ref())
+                                    } else {
+                                        "Download runtime".into()
+                                    })
                                         .id("install-pi")
-                                        .when(!self.target.read(cx).can_write(cx), |el| el.opacity(0.45))
+                                        .debug_selector(|| "agents-install-runtime".into())
+                                        .when(!self.target.read(cx).can_write(cx) && !self.installing_runtime, |el| el.opacity(0.45))
                                         .on_click(cx.listener(|page, _, _, cx| page.install_pi(cx))),
                                 ),
                         ),
@@ -482,6 +545,132 @@ pub(crate) fn package_initial(name: &str) -> SharedString {
 mod tests {
     use super::*;
     use crate::icons;
+
+    #[gpui::test]
+    fn runtime_install_progress_is_device_scoped_and_stops_after_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::setup::tests::{RuntimeFixture, pump_until};
+        use gpui::AppContext;
+        use std::{
+            sync::{Arc, atomic::Ordering},
+            time::Duration,
+        };
+
+        cx.background_executor.allow_parking();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let fixture = Arc::new(RuntimeFixture::default());
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        runtime.spawn(cypher_rpc::serve_ws_listener(listener, fixture.clone()));
+        let state = cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            let state = cx.new(|_| AppState::new());
+            AppState::bootstrap(
+                state.clone(),
+                crate::state::EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: port,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: cypher_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            state
+        });
+        pump_until(cx, || cx.update(|cx| state.read(cx).engine().is_some()));
+        let target = cx.update(|cx| {
+            state.update(cx, |state, _| {
+                state.devices.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "remote-test", "name": "Remote Linux", "platform": "linux",
+                        "lastSeenAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                )
+            });
+            let target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
+            target.update(cx, |target, cx| {
+                target.select(Some("remote-test".into()), cx).unwrap()
+            });
+            target
+        });
+        let window = cx.open_window(gpui::size(px(960.0), px(800.0)), |_, cx| {
+            HarnessesPage::new(state, target.clone(), cx)
+        });
+        let page = window.root(cx).unwrap();
+        pump_until(cx, || {
+            cx.update(|cx| matches!(page.read(cx).packages, Loadable::Ready(_)))
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        for attempt in 1..=2 {
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            let button = visual.debug_bounds("agents-install-runtime").unwrap();
+            visual.simulate_click(button.center(), Default::default());
+            pump_until(cx, || fixture.installs.load(Ordering::SeqCst) == attempt);
+            assert!(
+                target
+                    .update(cx, |target, cx| target.select(None, cx))
+                    .is_err()
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(350));
+            pump_until(cx, || {
+                cx.update(|cx| page.read(cx).runtime_status.is_some())
+            });
+            cx.update(|cx| {
+                assert_eq!(
+                    super::super::setup::runtime_progress_label(
+                        page.read(cx).runtime_status.as_ref()
+                    ),
+                    "Downloading… 50%"
+                )
+            });
+            fixture.finish.notify_one();
+            pump_until(cx, || cx.update(|cx| !page.read(cx).busy));
+            cx.update(|cx| {
+                assert!(page.read(cx).progress_task.is_none());
+                assert!(!target.read(cx).locked());
+                if attempt == 1 {
+                    assert!(
+                        page.read(cx)
+                            .error
+                            .as_ref()
+                            .unwrap()
+                            .contains("Remote Linux")
+                    );
+                } else {
+                    assert!(
+                        matches!(&page.read(cx).packages, Loadable::Ready(s) if s.pi_installed)
+                    );
+                }
+            });
+        }
+        let requests = fixture.requests.lock().unwrap();
+        for (method, params) in requests.iter().filter(|(method, _)| {
+            matches!(
+                method.as_str(),
+                methods::INSTALL_PI | methods::PI_RUNTIME_STATUS
+            )
+        }) {
+            assert_eq!(params["targetDeviceId"], "remote-test", "{method}");
+        }
+        drop(requests);
+        let polls = fixture.polls.load(Ordering::SeqCst);
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(fixture.polls.load(Ordering::SeqCst), polls);
+    }
 
     #[test]
     fn recommended_packages_keep_semantic_icons() {

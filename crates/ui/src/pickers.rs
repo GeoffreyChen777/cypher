@@ -57,6 +57,36 @@ pub fn bump_harness_catalog(cx: &mut App) {
     cx.set_global(HarnessCatalogChanged);
 }
 
+#[derive(Clone)]
+pub enum PickerEvent {
+    OpenAgentSettings { target_device: String },
+}
+
+impl gpui::EventEmitter<PickerEvent> for Pickers {}
+
+fn missing_pi_runtime(harness: Option<HarnessId>, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    harness == Some(HarnessId::Pi)
+        && message.contains("harness binary not found")
+        && message.contains("runtime")
+        && message.contains("not installed")
+}
+
+fn runtime_install_guidance(device: &str, remote: bool) -> String {
+    if remote {
+        format!(
+            "Pi Runtime is not installed on the remote device “{device}” that runs this chat. \
+             Open Settings → Agents, select “{device}”, and click Download runtime. \
+             Installing it on this Mac will not install it on the remote device."
+        )
+    } else {
+        format!(
+            "Pi Runtime is not installed on “{device}”. \
+             Open Settings → Agents and click Download runtime."
+        )
+    }
+}
+
 fn concrete_pi_model(id: &str) -> bool {
     id.split_once('/').is_some_and(|(provider, model)| {
         !provider.is_empty() && !model.is_empty() && provider != "unknown" && model != "unknown"
@@ -524,6 +554,10 @@ impl Pickers {
         let catalog_observe = cx.observe_global::<HarnessCatalogChanged>(|this: &mut Self, cx| {
             this.model_generation = this.model_generation.wrapping_add(1);
             this.models.clear();
+            // Cancel an older in-flight catalog request as well. Otherwise its
+            // generation is stale, but Loading prevents the fresh request.
+            this.load_task = None;
+            this.harnesses = Loadable::Idle;
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
@@ -866,6 +900,11 @@ impl Pickers {
         // t3 ModelPickerContent's initial selection — else the effective
         // harness. Locked chats stay on their own harness.
         if kind == PickerKind::HarnessModel {
+            // A failure is not a permanent catalog: the remote device may
+            // have installed its Runtime or connected a provider elsewhere.
+            self.models
+                .retain(|_, slot| !matches!(slot, Loadable::Error(_)));
+            self.prefetch_models(cx);
             self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
@@ -965,6 +1004,7 @@ impl Pickers {
             return;
         };
         let target = self.space_target(cx);
+        let generation = self.model_generation;
         if !matches!(self.harnesses, Loadable::Ready(_)) {
             self.harnesses = Loadable::Loading;
         }
@@ -981,6 +1021,9 @@ impl Pickers {
                 .call(methods::LIST_HARNESSES, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |pickers, cx| {
+                if generation != pickers.model_generation {
+                    return;
+                }
                 pickers.harnesses = match result {
                     Ok(value) => match serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
                         Ok(list) => Loadable::Ready(list),
@@ -2843,6 +2886,35 @@ impl Pickers {
             .into_any_element()
     }
 
+    fn runtime_missing_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.state.read(cx);
+        let target_device = self
+            .space_target(cx)
+            .or_else(|| state.local_device_id.clone());
+        let Some(target_device) = target_device else {
+            return popover::error_row(
+                theme,
+                "The engine is not connected. Reconnect before installing Pi Runtime.",
+            )
+            .into_any_element();
+        };
+        let remote = Some(&target_device) != state.local_device_id.as_ref();
+        let label = state.device_name(&target_device).unwrap_or(&target_device);
+        popover::error_row(theme, &runtime_install_guidance(label, remote))
+            .child(
+                popover::btn_primary(theme, "Open Agents settings")
+                    .id("model-open-agents")
+                    .debug_selector(|| "model-open-agents".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close(cx);
+                        cx.emit(PickerEvent::OpenAgentSettings {
+                            target_device: target_device.clone(),
+                        });
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// The ref picker (t3code BranchToolbarBranchSelector): search on top,
     /// rows with right-aligned muted `current`/`worktree` tags, and a
     /// "Showing X of Y refs" footer when the list is capped.
@@ -3371,13 +3443,17 @@ impl Pickers {
             match effective_models {
                 Some(Loadable::Error(message)) => {
                     let message = message.clone();
-                    vec![self.retry_row(
-                        "model-retry",
-                        &message,
-                        PickerKind::HarnessModel,
-                        &theme,
-                        cx,
-                    )]
+                    if missing_pi_runtime(effective, &message) {
+                        vec![self.runtime_missing_row(&theme, cx)]
+                    } else {
+                        vec![self.retry_row(
+                            "model-retry",
+                            &message,
+                            PickerKind::HarnessModel,
+                            &theme,
+                            cx,
+                        )]
+                    }
                 }
                 Some(Loadable::Ready(models)) if models.is_empty() => {
                     vec![empty_list_note(
@@ -3997,6 +4073,102 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use cypher_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn runtime_install_errors_support_old_and_new_engines_without_hiding_other_errors() {
+        for message in [
+            "harness binary not found: Cypher runtime is not installed",
+            "harness binary not found: Cypher Pi Runtime is not installed (/isolated/current/bin/pi)",
+        ] {
+            assert!(missing_pi_runtime(Some(HarnessId::Pi), message));
+            assert!(!missing_pi_runtime(Some(HarnessId::Codex), message));
+        }
+        assert!(!missing_pi_runtime(
+            Some(HarnessId::Pi),
+            "Device is offline"
+        ));
+        assert!(!missing_pi_runtime(
+            Some(HarnessId::Pi),
+            "model discovery timed out"
+        ));
+        let remote = runtime_install_guidance("Training server", true);
+        assert!(remote.contains("Training server"));
+        assert!(remote.contains("Settings → Agents"));
+        assert!(remote.contains("Download runtime"));
+        assert!(remote.contains("will not install it on the remote device"));
+        assert!(!runtime_install_guidance("My Mac", false).contains("remote device"));
+    }
+
+    #[gpui::test]
+    fn missing_runtime_button_keeps_the_chat_device_and_refresh_clears_errors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        use std::{cell::RefCell, rc::Rc};
+
+        struct ErrorView(Entity<Pickers>);
+        impl gpui::Render for ErrorView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                div().w(px(500.0)).child(
+                    self.0
+                        .update(cx, |pickers, cx| pickers.runtime_missing_row(&theme, cx)),
+                )
+            }
+        }
+        let pickers = cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            crate::composer::init(cx);
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local-mac".into());
+                state.selected_space = Some("remote-space".into());
+                state.spaces.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "remote-space", "deviceId": "remote-linux", "path": "/repo",
+                        "gitDetected": true, "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                );
+                state
+            });
+            cx.new(|cx| Pickers::new(state, cx))
+        });
+        let emitted = Rc::new(RefCell::new(None));
+        let captured = emitted.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&pickers, move |_, event, _| {
+                let PickerEvent::OpenAgentSettings { target_device } = event;
+                *captured.borrow_mut() = Some(target_device.clone());
+            })
+        });
+        let window = cx.open_window(gpui::size(px(600.0), px(400.0)), |_, _| {
+            ErrorView(pickers.clone())
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let button = visual.debug_bounds("model-open-agents").unwrap();
+        visual.simulate_click(button.center(), Default::default());
+        assert_eq!(emitted.borrow().as_deref(), Some("remote-linux"));
+
+        let generation = pickers.update(cx, |pickers, _| {
+            pickers
+                .models
+                .insert(HarnessId::Pi, Loadable::Error("old install error".into()));
+            pickers.harnesses = Loadable::Loading;
+            pickers.model_generation
+        });
+        cx.update(bump_harness_catalog);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(pickers.read(cx).models.is_empty());
+            assert!(matches!(pickers.read(cx).harnesses, Loadable::Idle));
+            assert_ne!(pickers.read(cx).model_generation, generation);
+        });
+    }
 
     fn bare_model(id: &str, label: &str) -> Model {
         Model {

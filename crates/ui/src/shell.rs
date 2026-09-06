@@ -1223,6 +1223,17 @@ impl Shell {
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::OpenAgentSettings { target_device } => {
+                    let result = this.settings_target.update(cx, |target, cx| {
+                        target.select(Some(target_device.clone()), cx)
+                    });
+                    match result {
+                        Ok(()) => this.open_settings(SettingsSection::Harnesses, cx),
+                        Err(error) => this
+                            .composer
+                            .update(cx, |composer, cx| composer.report_error(error, cx)),
+                    }
+                }
                 ComposerEvent::OpenProviders {
                     intent,
                     target_device,

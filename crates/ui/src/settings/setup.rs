@@ -28,6 +28,24 @@ pub fn setup_should_show(completed: bool, debug: bool, dismissed: bool) -> bool 
     !dismissed && (debug || !completed)
 }
 
+pub(super) fn runtime_progress_label(status: Option<&PiRuntimeStatus>) -> String {
+    let Some(status) = status else {
+        return "Preparing…".into();
+    };
+    match status.total_bytes.filter(|total| *total > 0) {
+        Some(total) if status.downloaded_bytes >= total => "Installing…".into(),
+        Some(total) => format!(
+            "Downloading… {}%",
+            status.downloaded_bytes.saturating_mul(100) / total
+        ),
+        None if status.downloaded_bytes > 0 => format!(
+            "Downloading… {:.1} MB",
+            status.downloaded_bytes as f64 / 1_000_000.0
+        ),
+        None => "Preparing…".into(),
+    }
+}
+
 enum Busy {
     Pi,
 }
@@ -151,6 +169,7 @@ impl SetupPage {
                 .map_err(|err| err.to_string());
             this.update(cx, |page, cx| {
                 page.apply_snapshot(result);
+                crate::pickers::bump_harness_catalog(cx);
                 cx.notify();
             })
             .ok();
@@ -224,17 +243,7 @@ impl SetupPage {
         } else {
             let can_install = self.busy.is_none();
             let label = if busy {
-                self.runtime_status
-                    .as_ref()
-                    .and_then(|status| {
-                        status.total_bytes.filter(|total| *total > 0).map(|total| {
-                            format!(
-                                "Downloading… {}%",
-                                status.downloaded_bytes.saturating_mul(100) / total
-                            )
-                        })
-                    })
-                    .unwrap_or_else(|| "Preparing…".to_string())
+                runtime_progress_label(self.runtime_status.as_ref())
             } else {
                 "Download runtime".to_string()
             };
@@ -383,7 +392,7 @@ impl Render for SetupPage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::sync::{
@@ -391,10 +400,12 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct RuntimeFixture {
-        installs: AtomicUsize,
-        polls: AtomicUsize,
-        finish: tokio::sync::Notify,
+    #[derive(Default)]
+    pub(crate) struct RuntimeFixture {
+        pub(crate) installs: AtomicUsize,
+        pub(crate) polls: AtomicUsize,
+        pub(crate) finish: tokio::sync::Notify,
+        pub(crate) requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     #[async_trait::async_trait]
@@ -402,8 +413,9 @@ mod tests {
         async fn handle(
             &self,
             method: &str,
-            _: serde_json::Value,
+            params: serde_json::Value,
         ) -> Result<cypher_rpc::RpcReply, cypher_rpc::RpcError> {
+            self.requests.lock().unwrap().push((method.into(), params));
             let value = match method {
                 methods::ENGINE_INFO => serde_json::json!({
                     "deviceId": "setup-test", "workspaceScope": "local"
@@ -437,7 +449,7 @@ mod tests {
         }
     }
 
-    fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
+    pub(crate) fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             cx.run_until_parked();
@@ -457,11 +469,7 @@ mod tests {
         cx.background_executor.allow_parking();
         let data = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let fixture = Arc::new(RuntimeFixture {
-            installs: AtomicUsize::new(0),
-            polls: AtomicUsize::new(0),
-            finish: tokio::sync::Notify::new(),
-        });
+        let fixture = Arc::new(RuntimeFixture::default());
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
@@ -546,6 +554,27 @@ mod tests {
         cx.background_executor.advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         assert_eq!(fixture.polls.load(Ordering::SeqCst), polls);
+    }
+
+    #[test]
+    fn runtime_progress_covers_preparing_download_and_activation() {
+        assert_eq!(runtime_progress_label(None), "Preparing…");
+        let mut status = PiRuntimeStatus {
+            installed: false,
+            version: None,
+            installing: true,
+            downloaded_bytes: 50,
+            total_bytes: Some(100),
+            error: None,
+        };
+        assert_eq!(runtime_progress_label(Some(&status)), "Downloading… 50%");
+        status.downloaded_bytes = 100;
+        assert_eq!(runtime_progress_label(Some(&status)), "Installing…");
+        status.downloaded_bytes = 110;
+        assert_eq!(runtime_progress_label(Some(&status)), "Installing…");
+        status.total_bytes = Some(0);
+        status.downloaded_bytes = 2_000_000;
+        assert_eq!(runtime_progress_label(Some(&status)), "Downloading… 2.0 MB");
     }
 
     #[test]

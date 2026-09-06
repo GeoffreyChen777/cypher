@@ -3896,6 +3896,9 @@ impl Render for ComposerInput {
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
+    OpenAgentSettings {
+        target_device: String,
+    },
     OpenProviders {
         intent: crate::settings::providers::ProviderIntent,
         target_device: Option<String>,
@@ -3903,7 +3906,10 @@ pub enum ComposerEvent {
     /// A prompt was sent optimistically — give the transcript its exact row
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
-    Sent { chat_id: String, message_id: String },
+    Sent {
+        chat_id: String,
+        message_id: String,
+    },
 }
 
 /// Where this Composer's turns go. [`ComposerTransport::Main`] is the normal
@@ -4314,6 +4320,7 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    _picker_events: Subscription,
     _catalog_observe: Subscription,
     _hidden_slash_observe: Subscription,
     _style_observe: Subscription,
@@ -4412,6 +4419,13 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        let picker_events = cx.subscribe(&pickers, |_: &mut Self, _, event, cx| match event {
+            crate::pickers::PickerEvent::OpenAgentSettings { target_device } => {
+                cx.emit(ComposerEvent::OpenAgentSettings {
+                    target_device: target_device.clone(),
+                });
+            }
+        });
         let hidden_slash_observe = cx
             .observe_global::<crate::settings::commands::HiddenSlashCommands>(
                 |this: &mut Self, cx| {
@@ -4539,6 +4553,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            _picker_events: picker_events,
             _catalog_observe: catalog_observe,
             _hidden_slash_observe: hidden_slash_observe,
             _style_observe: style_observe,

@@ -151,7 +151,7 @@ impl SideChatPanel {
             let transcript = transcript.clone();
             move |_this: &mut SideChatPanel, _, event: &ComposerEvent, cx| match event {
                 // Settings navigation is emitted only by the main composer.
-                ComposerEvent::OpenProviders { .. } => {}
+                ComposerEvent::OpenProviders { .. } | ComposerEvent::OpenAgentSettings { .. } => {}
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,

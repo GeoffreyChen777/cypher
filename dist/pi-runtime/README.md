@@ -39,6 +39,14 @@ remain compatible. The native TUI auth bridge remains available outside RPC.
   refresh keeps the cached catalog and shows an error, not a connected badge.
 - Mutations recycle idle Pi sessions and invalidate model discovery/picker caches.
   Existing chats and their selected model are not deleted or silently switched.
+- The setup screen and Settings → Agents show preparation, download progress,
+  and activation status. Agents progress requests use the selected device's
+  identity, and the device selector remains locked until installation settles.
+- Model catalogs are loaded lazily and cached per picker/device. Runtime setup
+  completion and provider/package changes invalidate those caches; reopening the
+  model menu retries failed loads. A missing-Runtime error names the chat's host
+  and offers **Open Agents settings**, selecting that same device. Installing on
+  the viewer does not install Runtime on a remote chat host.
 - A single device selector is pinned at the top of the Settings sidebar.
   Agents, Providers, Commands and MCP form the **Device settings** group and
   follow that selection; the individual pages do not repeat the selector.
