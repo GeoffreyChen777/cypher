@@ -61,6 +61,9 @@ struct Chat: Identifiable, Hashable {
     /// Sync room generation (docs/chat2-sync.md M2): absent/1 = legacy s2
     /// (never dialed from mobile), 2 = chat2. The host flips it when seeding.
     var roomGen: Int? = nil
+    var child: ChildChat? = nil
+
+    var isChild: Bool { child != nil }
 
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
@@ -85,6 +88,7 @@ struct SessionRow: Hashable {
     var status: SessionStatus
     var startedAt: Int64?
     var updatedAt: Int64
+    var subagents: [SubagentRun] = []
 }
 
 // MARK: - Derived display status (entities.rs / state.rs ports)
@@ -173,6 +177,8 @@ struct RenderToolCall: Hashable {
     var tag: String
     /// Loose payload — only render-relevant fields survive in the doc.
     var fields: [String: AnyHashable]
+    var subagent: SubagentCallMetadata? = nil
+    var progress: String? = nil
 
     var string: (String) -> String? { { key in self.fields[key] as? String } }
 }
@@ -269,8 +275,8 @@ struct RunRequest: Codable {
 }
 
 enum SessionCommandPayload {
-    case run(request: RunRequest, messageId: String)
-    case steer(prompt: String, messageId: String?)
+    case run(request: RunRequest, messageId: String, agentPrompt: String? = nil)
+    case steer(prompt: String, messageId: String?, agentPrompt: String? = nil)
     case interrupt
     case respondInput(requestId: String, answers: [UserInputAnswer])
 

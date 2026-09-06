@@ -23,7 +23,7 @@ struct SpaceView: View {
                 Button {
                     path.append(.chat(chat.id))
                 } label: {
-                    ChatRow(chat: chat, showLocation: true)
+                    ChatRow(chat: chat, showLocation: false)
                 }
                 .buttonStyle(PressWashButtonStyle())
                 .listRowBackground(Color.clear)
@@ -47,12 +47,12 @@ struct SpaceView: View {
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(Theme.surface.ignoresSafeArea())
-        .navigationTitle(space?.displayName ?? "Space")  // feeds the back menu
+        .navigationTitle(space?.displayName ?? "Project")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
-                    Text(space?.displayName ?? "Space")
+                    Text(space?.displayName ?? "Project")
                         .font(Theme.sans(13, weight: .medium))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
@@ -76,6 +76,7 @@ struct SpaceView: View {
                     Image(systemName: "plus")
                 }
                 .accessibilityLabel("New session")
+                .disabled(space == nil)
             }
         }
         .onAppear {
@@ -91,7 +92,7 @@ struct SpaceView: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(Theme.textFaint)
-            Text("No sessions in this space")
+            Text("No sessions in this project")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.textFaint)
             Button {
@@ -134,6 +135,8 @@ struct NewSpaceSheet: View {
     @State private var loading = false
     @State private var error: String?
     @State private var creating = false
+    @State private var loadGeneration = UUID()
+    @State private var listingDeviceId: String?
 
     private var devices: [DeviceRow] {
         // Engines own folders; this phone can't. Offer every other device.
@@ -163,7 +166,7 @@ struct NewSpaceSheet: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(SheetStyle.panel)
-            .navigationTitle("New space")
+            .navigationTitle("New project")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -190,6 +193,7 @@ struct NewSpaceSheet: View {
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
         .preferredColorScheme(.dark)
+        .interactiveDismissDisabled(creating)
         .task(id: selectedDeviceId) {
             await load(path: nil)
         }
@@ -206,7 +210,10 @@ struct NewSpaceSheet: View {
                         guard deviceId != device.id else { return }
                         UISelectionFeedbackGenerator().selectionChanged()
                         deviceId = device.id
+                        loadGeneration = UUID()
                         listing = nil
+                        listingDeviceId = nil
+                        currentIsRepo = false
                     } label: {
                         HStack(spacing: 7) {
                             Circle()
@@ -225,14 +232,16 @@ struct NewSpaceSheet: View {
                 }
             }
         }
+        .disabled(creating)
     }
 
     private var breadcrumbBar: some View {
         HStack(spacing: 10) {
             Button {
                 if let parent = listing?.parent {
+                    let target = listingDeviceId
                     currentIsRepo = false
-                    Task { await load(path: parent) }
+                    Task { await load(path: parent, deviceId: target) }
                 }
             } label: {
                 Image(systemName: "chevron.left")
@@ -242,7 +251,7 @@ struct NewSpaceSheet: View {
                     .background(whiteAlpha(0.06), in: Circle())
             }
             .buttonStyle(.plain)
-            .disabled(listing?.parent == nil)
+            .disabled(listing?.parent == nil || loading || creating)
 
             Text(listing?.path ?? " ")
                 .font(Theme.mono(12))
@@ -267,6 +276,8 @@ struct NewSpaceSheet: View {
                         .font(Theme.sans(13))
                         .foregroundStyle(Theme.danger)
                         .padding(.horizontal, 4)
+                    Button("Retry") { Task { await load(path: nil) } }
+                        .disabled(loading || creating)
                 }
                 let folders = (listing?.entries ?? []).filter(\.isDir)
                 if folders.isEmpty, !loading, error == nil, listing != nil {
@@ -302,9 +313,10 @@ struct NewSpaceSheet: View {
     private func folderRow(_ entry: FolderEntry) -> some View {
         Button {
             guard let base = listing?.path else { return }
+            let target = listingDeviceId
             let child = base.hasSuffix("/") ? base + entry.name : "\(base)/\(entry.name)"
             currentIsRepo = entry.isRepo
-            Task { await load(path: child) }
+            Task { await load(path: child, deviceId: target) }
         } label: {
             HStack(spacing: 12) {
                 LineIconView(entry.isRepo ? .folderWithFiles : .folder, size: 16,
@@ -332,13 +344,14 @@ struct NewSpaceSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(SheetRowButtonStyle())
+        .disabled(loading || creating)
     }
 
     private var useFolderButton: some View {
         let name = (listing?.path as NSString?)?.lastPathComponent ?? ""
         return SheetPrimaryButton(
             title: creating ? "Creating…" : (name.isEmpty ? "Use this folder" : "Use “\(name)”"),
-            enabled: listing != nil && !creating && !loading
+            enabled: listing != nil && listingDeviceId == selectedDeviceId && !creating && !loading
         ) {
             create()
         }
@@ -363,23 +376,31 @@ struct NewSpaceSheet: View {
 
     // MARK: Data
 
-    private func load(path: String?) async {
-        guard let selectedDeviceId else { return }
+    private func load(path: String?, deviceId: String? = nil) async {
+        guard let selectedDeviceId = deviceId ?? selectedDeviceId,
+              selectedDeviceId == self.selectedDeviceId else { return }
+        let ticket = UUID()
+        loadGeneration = ticket
         loading = true
         error = nil
         let result = await model.listFolders(deviceId: selectedDeviceId, path: path)
+        guard loadGeneration == ticket, self.selectedDeviceId == selectedDeviceId, !Task.isCancelled else { return }
         loading = false
         if let result {
             withAnimation(Motion.fadeQuick) {
                 listing = result
+                listingDeviceId = selectedDeviceId
             }
-        } else if listing == nil {
+        } else {
+            listing = nil
+            listingDeviceId = nil
             error = "Couldn't reach \(model.deviceName(selectedDeviceId)). Make sure it's online."
         }
     }
 
     private func create() {
-        guard let selectedDeviceId, let listing else { return }
+        guard !creating, !loading, let selectedDeviceId, listingDeviceId == selectedDeviceId,
+              let listing else { return }
         creating = true
         // Initial git flag = the isRepo the engine stamped when we descended
         // into this folder; the owning device's SpacesSync re-verifies anyway.
@@ -391,6 +412,8 @@ struct NewSpaceSheet: View {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 dismiss()
                 onCreated(id)
+            } else {
+                error = "Couldn't create the project on \(model.deviceName(selectedDeviceId)). Please retry."
             }
         }
     }

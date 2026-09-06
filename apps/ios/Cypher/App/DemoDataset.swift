@@ -40,12 +40,12 @@ final class DemoDataset {
                          path: "/srv/deploys/edge", name: nil, gitDetected: true,
                          gitCheckedAt: now, checkoutId: nil, createdAt: now - 86_400_000 * 4)
 
-        let claude = ChatConfig(harness: "claude-code", model: "claude-fable-5",
-                                reasoning: "xhigh", sandbox: "workspace-write")
-        let codex = ChatConfig(harness: "codex", model: "gpt-5.6-terra",
+        let claude = ChatConfig(harness: "pi", model: "demo/pi",
+                                reasoning: "high", sandbox: "workspace-write")
+        let codex = ChatConfig(harness: "pi", model: "demo/pi",
                                reasoning: "high", sandbox: "workspace-write")
 
-        let chats = [
+        var chats = [
             Chat(id: "chat-veil", deviceId: "dev-mac", title: "Streaming veil on transcript rows",
                  archived: false, cwd: "/Users/dev/.cypher/worktrees/cypher-veil-fade",
                  branch: "veil-fade", checkoutId: nil,
@@ -79,12 +79,43 @@ final class DemoDataset {
                  lastMessageAt: now - 86_400_000 * 6, createdAt: now - 86_400_000 * 7,
                  spaceId: edge.id, lastSeenAt: now - 86_400_000 * 6),
         ]
-        let sessions: [String: SessionRow] = [
+        var sessions: [String: SessionRow] = [
             "chat-veil": SessionRow(chatId: "chat-veil", deviceId: "dev-mac", status: .working,
                                     startedAt: now - 95_000, updatedAt: now - 5_000),
             "chat-picker": SessionRow(chatId: "chat-picker", deviceId: "dev-mac",
                                       status: .awaitingInput, startedAt: now - 400_000,
                                       updatedAt: now - 10_000),
+        ]
+        // Explicitly offline fixtures for the mobile Subagents inspector.
+        // Durable children remain reopenable even without parent snapshots.
+        var planner = chats[0]
+        planner.id = "demo-child-planner"
+        planner.title = "Planner · mobile implementation"
+        planner.child = ChildChat(parentChatId: "chat-veil", parentRunId: "demo-run-planner",
+            agent: "planner", task: "Plan the mobile subagents inspector.", mode: .async,
+            toolCallId: "demo-tool-planner")
+        planner.createdAt = now - 40_000
+        var reviewer = planner
+        reviewer.id = "demo-child-reviewer"
+        reviewer.title = "Reviewer · state semantics"
+        reviewer.child = ChildChat(parentChatId: "chat-veil", parentRunId: "demo-run-reviewer",
+            agent: "reviewer", task: "Check stale status and durable child navigation.", mode: .sync,
+            toolCallId: "demo-tool-reviewer")
+        chats += [planner, reviewer]
+        sessions[planner.id] = SessionRow(chatId: planner.id, deviceId: "dev-mac",
+            status: .working, startedAt: now - 40_000, updatedAt: now)
+        sessions[reviewer.id] = SessionRow(chatId: reviewer.id, deviceId: "dev-mac",
+            status: .idle, startedAt: nil, updatedAt: now - 5_000)
+        sessions["chat-veil"]?.subagents = [
+            SubagentRun(runId: "demo-run-planner", toolCallId: "demo-tool-planner",
+                agent: "planner", model: "demo/pi", task: "Plan the mobile subagents inspector.",
+                mode: .async, status: .running, progress: "Checking the shared session schema…",
+                startedAt: now - 40_000, updatedAt: now, childChatId: planner.id),
+            SubagentRun(runId: "demo-run-reviewer", toolCallId: "demo-tool-reviewer",
+                agent: "reviewer", model: "demo/pi", task: "Check state semantics.",
+                mode: .sync, status: .done, progress: "Review complete.",
+                startedAt: now - 50_000, updatedAt: now - 5_000, endedAt: now - 5_000,
+                childChatId: reviewer.id),
         ]
         return DemoDataset(devices: [mac, vps], spaces: [cypher, edge],
                            chats: chats, sessions: sessions)
@@ -175,6 +206,21 @@ final class DemoDataset {
     private static func transcript(for chatId: String) -> [MessageEntry] {
         let now = nowMs()
         switch chatId {
+        case "demo-child-planner", "demo-child-reviewer":
+            return [
+                MessageEntry(id: "child-user", role: .user,
+                    parts: [.text(id: "task", text: "Review the mobile subagent experience.")],
+                    createdAt: now - 40_000, deviceId: "dev-mac", status: .complete),
+                MessageEntry(id: "child-reply", role: .assistant,
+                    parts: [.text(id: "result", text: """
+                    This is a **demo child session**. In a live workspace, this page shows the \
+                    subagent's real transcript on its host device.
+
+                    - Open the parent with the return arrow in the title bar.
+                    - Continue here using the same Pi profile and working directory.
+                    - Child sessions stay out of the project's main session list.
+                    """)], createdAt: now - 30_000, deviceId: "dev-mac", status: .complete),
+            ]
         case "chat-veil":
             return [
                 MessageEntry(id: "m1", role: .user, parts: [

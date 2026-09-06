@@ -2,8 +2,8 @@
 //
 // Every constant here mirrors the desktop values so the two apps read the same:
 // body 14/22, headings (19/27, 16/24, 15/22, 14/22), code 12.5/18, block gap 12.
-// Code blocks render one fixed-height row per line, so their height is analytic
-// (lines × 18 + padding) and syntax highlighting is a pure recolor.
+// Code blocks use a single selectable native text layout with fixed line
+// metrics; syntax highlighting remains a paint-only recolor.
 
 import SwiftUI
 
@@ -143,19 +143,13 @@ struct MarkdownBlockView: View {
     var body: some View {
         switch block {
         case .paragraph(let runs):
-            runs.styled()
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(runs))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .tint(Theme.text)
 
         case .heading(let level, let runs):
             let m = MD.headingMetrics(level)
-            runs.styled(size: m.size, weight: .semibold)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
+                runs, size: m.size, weight: .semibold, lineHeight: m.line))
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .codeBlock(let language, let code):
@@ -187,8 +181,6 @@ struct CodeBlockView: View {
 
     @State private var spans: [[TokenSpan]] = []
 
-    private var lines: [String] { code.components(separatedBy: "\n") }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
@@ -204,16 +196,9 @@ struct CodeBlockView: View {
                     }
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { ix, line in
-                        Text(attributedLine(line, spans: ix < spans.count ? spans[ix] : []))
-                            .font(Theme.mono(MD.codeTextSize))
-                            .lineLimit(1)
-                            .frame(height: MD.codeLineHeight, alignment: .leading)
-                    }
-                }
-                .padding(.horizontal, MD.codePaddingX)
-                .padding(.vertical, MD.codePaddingY)
+                SelectableTranscriptText(attributed: TranscriptTextStyle.code(code, spans: spans), wraps: false)
+                    .padding(.horizontal, MD.codePaddingX)
+                    .padding(.vertical, MD.codePaddingY)
             }
         }
         .background(whiteAlpha(0.035))
@@ -222,55 +207,17 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
         )
-        .contextMenu {
-            Button {
-                UIPasteboard.general.string = code
-            } label: {
-                Label("Copy code", systemImage: "doc.on.doc")
-            }
-        }
         .task(id: code) {
             guard let lang = HighlightLanguage.forTag(language) else { return }
             let source = code
             let result = await Task.detached(priority: .utility) {
                 Highlighter.highlight(code: source, language: lang)
             }.value
+            guard !Task.isCancelled else { return }
             spans = result
         }
     }
 
-    /// Recolor a line by its token spans — same string, same font, paint only.
-    private func attributedLine(_ line: String, spans: [TokenSpan]) -> AttributedString {
-        var attr = AttributedString(line)
-        attr.foregroundColor = Theme.text.opacity(0.9)
-        guard !spans.isEmpty else { return attr }
-        let chars = Array(line)
-        for span in spans {
-            guard span.range.lowerBound < chars.count else { continue }
-            let upper = min(span.range.upperBound, chars.count)
-            let prefix = String(chars[0..<span.range.lowerBound])
-            let body = String(chars[span.range.lowerBound..<upper])
-            guard let start = attr.index(afterCharacters: prefix.count),
-                  let end = attr.index(afterCharacters: prefix.count + body.count) else { continue }
-            attr[start..<end].foregroundColor = color(for: span.cls)
-        }
-        return attr
-    }
-
-    private func color(for cls: TokenClass) -> Color {
-        switch cls {
-        case .keyword: return Theme.tokenKeyword
-        case .stringLit: return Theme.tokenString
-        case .number: return Theme.tokenNumber
-        case .comment: return Theme.textFaint
-        }
-    }
-}
-
-private extension AttributedString {
-    func index(afterCharacters count: Int) -> AttributedString.Index? {
-        characters.index(startIndex, offsetBy: count, limitedBy: endIndex)
-    }
 }
 
 // MARK: - Blockquote
@@ -384,9 +331,8 @@ struct TableBlockView: View {
         let alignment: Alignment = column < align.count
             ? (align[column] == .center ? .center : align[column] == .right ? .trailing : .leading)
             : .leading
-        return runs.styled(weight: weight)
-            .textRenderer(InlineCodeRenderer())
-            .lineSpacing(MD.lineHeight - MD.textSize - 4)
+        return SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
+            runs, weight: weight == .bold ? .bold : .regular), wraps: false, hugsContent: true)
             .padding(12)
             .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
     }

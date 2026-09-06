@@ -19,6 +19,7 @@ struct ComposerShell<Chips: View>: View {
     var sendEnabled: Bool
     var showStop: Bool
     var busy = false
+    var hasComments = false
     /// New-session composers stay expanded — the picker chips ARE the page.
     var alwaysExpanded = false
     /// Hold the expanded layout while a picker sheet is up: presenting the
@@ -42,7 +43,7 @@ struct ComposerShell<Chips: View>: View {
     @FocusState private var focused: Bool
 
     private var expanded: Bool {
-        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
+        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty || hasComments
             || draft.contains("\n") || draft.count > 26
     }
 
@@ -86,6 +87,7 @@ struct ComposerShell<Chips: View>: View {
             if expanded, !attachments.isEmpty {
                 AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
                     .padding(.bottom, 10)
+                    .disabled(busy)
             }
             input
                 .padding(.leading, expanded ? 4 : 13)
@@ -101,6 +103,7 @@ struct ComposerShell<Chips: View>: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             chips
+                                .disabled(busy)
                         }
                     }
                     .scrollClipDisabled(false)
@@ -136,6 +139,7 @@ struct ComposerShell<Chips: View>: View {
             .tint(Theme.text)
             .lineLimit(1...7)
             .focused($focused)
+            .disabled(busy)
     }
 
     private var attachButton: some View {
@@ -156,7 +160,8 @@ struct ComposerShell<Chips: View>: View {
 
     /// Attachments count as content: an image-only send is a send, never a stop.
     private var hasContent: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        CommentPrompt.hasSendContent(text: draft, attachmentCount: attachments.count,
+                                     commentCount: hasComments ? 1 : 0)
     }
 
     private var actionButton: some View {
@@ -205,6 +210,8 @@ struct ComposerShell<Chips: View>: View {
 /// config row for the next dispatch), and the morphing action button.
 struct ComposerView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.commentDrafts) private var commentDrafts
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
@@ -217,20 +224,29 @@ struct ComposerView: View {
     @State private var uploadError: String?
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
-    /// Live catalog for the chat's harness from its space's device.
-    @State private var catalogs: [String: [ModelInfo]] = [:]
+    @State private var catalog = RemotePiCatalog()
+    @State private var catalogRevision = 0
 
-    private var harness: String { chat.config?.harness ?? "claude-code" }
+    private var harness: String { chat.config?.harness ?? "" }
 
     private var models: [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        catalog.models(for: chat.deviceId)
     }
 
-    private var currentModel: ModelInfo {
-        models.first { $0.id == chat.config?.model } ?? HarnessCatalog.defaultModel(for: harness)
+    private var currentModel: ModelInfo? {
+        models.first { $0.id == chat.config?.model }
+    }
+
+    private var canControl: Bool {
+        harness == "pi" && (model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId)))
+    }
+
+    private var canSend: Bool {
+        canControl && (runLive || currentModel != nil)
     }
 
     private var currentReasoning: String? {
+        guard let currentModel else { return nil }
         guard !currentModel.reasoningLevels.isEmpty else { return nil }
         if let r = chat.config?.reasoning, currentModel.reasoningLevels.contains(r) { return r }
         return HarnessCatalog.defaultReasoning(for: currentModel)
@@ -238,6 +254,26 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            if !canControl {
+                Text(harness == "pi"
+                     ? "\(model.deviceName(chat.deviceId)) is unavailable. You can read synced messages; reconnect to continue."
+                     : "This session uses \(HarnessCatalog.label(for: harness)). iOS currently supports Pi only; this session is read-only.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+            }
+            if harness == "pi" {
+                PiCatalogNotice(catalog: catalog, deviceName: model.deviceName(chat.deviceId)) {
+                    catalogRevision += 1
+                }
+                if !catalog.loading, catalog.error == nil, currentModel == nil, !models.isEmpty {
+                    Text("Select an available model on this device to continue. The previous selection hasn't been changed.")
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 20)
+                }
+            }
             if let uploadError {
                 Text(uploadError)
                     .font(Theme.sans(12))
@@ -246,22 +282,30 @@ struct ComposerView: View {
                     .padding(.horizontal, 24)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let commentDrafts {
+                PendingCommentsBar(drafts: commentDrafts)
+            }
             ComposerShell(
                 draft: $text,
-                sendEnabled: true,
-                showStop: runLive,
+                sendEnabled: canSend,
+                showStop: runLive && canControl,
                 busy: uploading,
+                hasComments: !(commentDrafts?.comments.isEmpty ?? true),
                 keepExpanded: showModelPicker || showTraitPicker,
                 onSend: send,
-                onStop: { store.sendInterrupt() },
+                onStop: {
+                    guard canControl else { return }
+                    if !store.sendInterrupt() { uploadError = "Couldn't queue Stop. Please retry." }
+                },
                 attachments: attachments,
                 onAttach: { showPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 autoFocus: model.launchFocusComposer
             ) {
-                ComposerChip(label: currentModel.label, badgeHarness: harness) {
+                ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model") {
                     showModelPicker = true
                 }
+                .disabled(harness != "pi" || !canControl)
                 if let currentReasoning {
                     ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
                         showTraitPicker = true
@@ -279,7 +323,7 @@ struct ComposerView: View {
             ModelPickerSheet(
                 harness: .constant(harness),
                 modelId: Binding(
-                    get: { currentModel.id },
+                    get: { currentModel?.id ?? "" },
                     set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
                 ),
                 reasoning: Binding(
@@ -287,7 +331,9 @@ struct ComposerView: View {
                     set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
                 lockedHarness: true,
-                catalogs: catalogs
+                catalogs: [harness: models],
+                loading: catalog.loading,
+                onRefresh: { catalogRevision += 1 }
             )
         }
         .sheet(isPresented: $showTraitPicker) {
@@ -296,12 +342,15 @@ struct ComposerView: View {
                     get: { currentReasoning },
                     set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
-                levels: currentModel.reasoningLevels
+                levels: currentModel?.reasoningLevels ?? []
             )
         }
-        .task(id: "\(chat.id)/\(harness)") {
-            guard let space = model.space(for: chat) else { return }
-            catalogs[harness] = await model.listModels(space: space, harness: harness)
+        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)") {
+            guard harness == "pi" else { return }
+            await catalog.load(deviceId: chat.deviceId, fetch: model.listPiModels)
+        }
+        .onChange(of: showModelPicker) { _, showing in
+            if showing { catalogRevision += 1 }
         }
         .onAppear {
             if model.launchSheet == "config" {
@@ -314,10 +363,11 @@ struct ComposerView: View {
     /// Merge a model/effort change into the chat's config row (LWW; the host
     /// picks it up on the next run dispatch). Copies preserve modelOptions.
     private func writeConfig(model newModel: String?, reasoning newReasoning: String?) {
+        guard canControl, let selected = models.first(where: { $0.id == newModel }) else { return }
         var config = chat.config ?? ChatConfig(harness: harness, model: nil,
                                                reasoning: nil, sandbox: "workspace-write")
         config.model = newModel
-        config.reasoning = newReasoning
+        config.reasoning = newReasoning.flatMap { selected.reasoningLevels.contains($0) ? $0 : nil }
         model.setChatConfig(chatId: chat.id, config: config)
     }
 
@@ -346,13 +396,20 @@ struct ComposerView: View {
     }
 
     private func send() {
+        guard canSend, !uploading else { return }
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let staged = attachments
-        guard !prompt.isEmpty || !staged.isEmpty else { return }
+        let batch = commentDrafts?.snapshot()
+        let hasComments = !(batch?.comments.isEmpty ?? true)
+        guard CommentPrompt.hasSendContent(text: prompt, attachmentCount: staged.count,
+                                           commentCount: batch?.comments.count ?? 0) else { return }
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: hasComments) else {
+            uploadError = "Comments accompany a normal message, not a slash command. Send or remove the comments first."
+            return
+        }
 
         if staged.isEmpty {
-            deliver(content: prompt, paths: [])
-            clearDraft()
+            if deliver(content: prompt, paths: [], comments: batch) { clearDraft() }
             return
         }
         // Upload first, send after: the refs trailer needs the committed
@@ -372,21 +429,41 @@ struct ComposerView: View {
                                                      name: att.name, data: att.data)
                     paths.append(path)
                 }
-                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths)
-                attachments = []
-                clearDraft()
+                if deliver(content: withAttachments(text: prompt, paths: paths), paths: paths, comments: batch) {
+                    attachments = []
+                    clearDraft()
+                }
             } catch {
                 uploadError = "Attachment upload failed — \(error.localizedDescription)"
             }
         }
     }
 
-    private func deliver(content: String, paths: [String]) {
-        if runLive {
-            store.sendSteer(prompt: content)
-        } else {
-            store.sendRun(prompt: content, chat: chat, attachments: paths)
+    private func deliver(content: String, paths: [String], comments batch: CommentBatch?) -> Bool {
+        if let batch, commentDrafts?.generation != batch.generation {
+            uploadError = "The session changed. The message wasn't sent."
+            return false
         }
+        guard canSend else {
+            uploadError = "The device is no longer available. Your draft has been kept."
+            return false
+        }
+        let agentPrompt: String?
+        do {
+            agentPrompt = try CommentPrompt.agentPrompt(batch?.comments ?? [], visible: content)
+        } catch {
+            uploadError = "Couldn't prepare the comments. Your draft has been kept."
+            return false
+        }
+        let queued = runLive
+            ? store.sendSteer(prompt: content, agentPrompt: agentPrompt)
+            : store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt)
+        if !queued { uploadError = "Couldn't queue the message. Your draft has been kept." }
+        else {
+            uploadError = nil
+            if let batch { commentDrafts?.consume(batch) }
+        }
+        return queued
     }
 
     private func clearDraft() {

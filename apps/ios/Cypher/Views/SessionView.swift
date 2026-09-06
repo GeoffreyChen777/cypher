@@ -7,6 +7,7 @@ import SwiftUI
 struct SessionView: View {
     @Environment(AppModel.self) private var model
     let chatId: String
+    @Binding var path: [Route]
 
     /// Width the nav bar's own controls need around a LEADING title — the
     /// back button ahead of it, bar margins, and slack. Generous on purpose:
@@ -23,6 +24,8 @@ struct SessionView: View {
     /// this view composes) can report its global top edge — the measured
     /// bottom boundary TranscriptView's correctPin re-pins against.
     @State private var scroll = ScrollState()
+    @State private var controlError: String?
+    @State private var commentDrafts = CommentDrafts()
 
 
     private var chat: Chat? { model.chat(id: chatId) }
@@ -57,24 +60,18 @@ struct SessionView: View {
                 // Static, left-aligned session header — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarLeading) {
-                    // Badge OUTSIDE the text stack so the subtitle starts
-                    // under the title's text, not under the harness mark.
-                    HStack(alignment: .top, spacing: 6) {
-                        HarnessBadge(harness: chat.config?.harness ?? "claude-code", size: 12)
-                            .padding(.top, 2)  // optically on the title line
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(chat.displayTitle)
-                                .font(Theme.sans(13, weight: .medium))
-                                .foregroundStyle(Theme.text)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(chat.displayTitle)
+                            .font(Theme.sans(13, weight: .medium))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        if let subtitle {
+                            Text(subtitle)
+                                .font(Theme.sans(10.5))
+                                .foregroundStyle(Theme.textMuted.opacity(0.6))
                                 .lineLimit(1)
-                                .truncationMode(.tail)
-                            if let subtitle {
-                                Text(subtitle)
-                                    .font(Theme.sans(10.5))
-                                    .foregroundStyle(Theme.textMuted.opacity(0.6))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
+                                .truncationMode(.middle)
                         }
                     }
                     // A FIXED width, not a max: iOS 26 proposes leading items
@@ -87,12 +84,51 @@ struct SessionView: View {
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
+                if let relation = chat.child,
+                   let parent = model.chat(id: relation.parentChatId),
+                   parent.id != chat.id, parent.deviceId == chat.deviceId {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            path = SessionNavigation.opening(parent.id, in: path)
+                        } label: {
+                            Image(systemName: "arrow.turn.up.left")
+                        }
+                        .accessibilityLabel("Return to parent session")
+                    }
+                }
             }
         }
         .onAppear {
+            commentDrafts.bind(to: chatId)
             model.markSeen(chatId: chatId)
+            if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
+                let showList = model.launchSheet == "comments"
+                model.launchSheet = nil
+                commentDrafts.begin(quote: "The transcript stays glued to the bottom until you scroll up.")
+                if showList, let source = commentDrafts.editor {
+                    _ = commentDrafts.save(source: source, quote: source.text,
+                                          comment: "Explain what happens when the keyboard opens.")
+                    commentDrafts.showList()
+                }
+            }
+        }
+        .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
+        .sheet(isPresented: $commentDrafts.presented) {
+            CommentsPanel(drafts: commentDrafts)
+        }
+        .onChange(of: path) { _, routes in
+            if routes.last != .chat(chatId) {
+                commentDrafts.reset()
+            }
+        }
+        .onChange(of: model.workspace.map { ObjectIdentifier($0) }) { _, _ in
+            // Account/workspace replacement invalidates an in-flight send's
+            // annotation snapshot even if the navigation path hasn't changed.
+            commentDrafts.reset()
+            commentDrafts.bind(to: chatId)
         }
         .onDisappear {
+            if path.last != .chat(chatId) { commentDrafts.reset() }
             model.markSeen(chatId: chatId)
             model.releaseSessionStore(chatId: chatId)
         }
@@ -111,7 +147,7 @@ struct SessionView: View {
 
     private func content(chat: Chat, store: SessionStore) -> some View {
         let status = liveStatus(chat: chat)
-        // The composer is a bottom SAFE-AREA INSET on the transcript, not a
+        // The composer is a bottom SAFE-AREA BAR on the transcript, not a
         // VStack sibling: the scroll view then spans the full height down to
         // the keyboard, which is what lets UIKit's interactive
         // keyboard-dismiss (scrollDismissesKeyboard(.interactively) in
@@ -157,18 +193,36 @@ struct SessionView: View {
                 scroll.keyboardTransitioning = false
                 scroll.requestCorrection()
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            .safeAreaBar(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    // The strip reserves its 24pt whether or not a run is
-                    // live, so the composer never shifts. It sits on the
-                    // solid floor right where the transcript's fade completes.
-                    statusStrip(chat: chat, status: status)
-                        .allowsHitTesting(false)
+                    HStack(spacing: 8) {
+                        statusStrip(chat: chat, store: store, status: status)
+                            .allowsHitTesting(false)
+                            .lineLimit(1)
+                        SubagentsAccessory(parent: chat, store: store,
+                                           maxWidth: max(130, viewWidth * 0.5)) { childId in
+                            path = SessionNavigation.opening(childId, in: path)
+                        }
+                        .padding(.trailing, 20)
+                    }
+                    .frame(minHeight: 44)
+                    if let controlError {
+                        Text(controlError).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                    }
                     Group {
-                        if let request = store.openInputRequest {
-                            QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
-                                store.respondInput(requestId: requestId, answers: answers)
+                        if let request = store.openInputRequest, chat.config?.harness == "pi" {
+                            Button("Stop task") {
+                                guard canControl(chat) else { return }
+                                controlError = store.sendInterrupt() ? nil : "Couldn't queue Stop. Please retry."
                             }
+                            .font(Theme.sans(12))
+                            .disabled(!canControl(chat))
+                            QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
+                                guard canControl(chat) else { return }
+                                controlError = store.respondInput(requestId: requestId, answers: answers)
+                                    ? nil : "Couldn't queue your answer. Please retry."
+                            }
+                            .disabled(!canControl(chat))
                         } else {
                             ComposerView(store: store, chat: chat, runLive: status == .working)
                         }
@@ -183,25 +237,9 @@ struct SessionView: View {
                     scroll.insetTopGlobalY = new
                     scroll.insetTopChangedAt = Date().timeIntervalSinceReferenceDate
                 }
-                // One continuous dissolve: starts 44pt above the strip and
-                // reaches full bg only at the PHYSICAL bottom edge, so rows
-                // stay faintly visible sliding beneath the glass shell
-                // instead of vanishing at the composer's top. `.container`
-                // keeps it off the keyboard's safe-area region.
-                .background {
-                    LinearGradient(
-                        stops: [
-                            .init(color: Theme.bg.opacity(0), location: 0),
-                            .init(color: Theme.bg.opacity(0.45), location: 0.25),
-                            .init(color: Theme.bg.opacity(0.72), location: 0.6),
-                            .init(color: Theme.bg, location: 1),
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                    .padding(.top, -44)  // ramp begins above the strip
-                    .ignoresSafeArea(.container, edges: .bottom)
-                    .allowsHitTesting(false)
-                }
+                // safeAreaBar gives this custom control area the system's
+                // scroll-edge treatment, like the navigation title above.
+                // No additional material slab or tinted overlay.
             }
             .background(Theme.bg.ignoresSafeArea())
             .motionAnimation(Motion.fadeQuick, value: store.openInputRequest?.requestId)
@@ -214,13 +252,25 @@ struct SessionView: View {
         return effectiveStatus(model.workspace?.sessions[chat.id], now: nowMs())
     }
 
+    private func canControl(_ chat: Chat) -> Bool {
+        chat.config?.harness == "pi"
+            && (model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId)))
+    }
+
     /// Reserved 24pt status strip (shell.rs render_status_strip) — Working
     /// shows the sunrise spinner + rotating flavour word + elapsed; Errored
     /// shows "Run failed"; the strip always reserves its height so the
     /// composer never shifts.
-    private func statusStrip(chat: Chat, status: SessionStatus?) -> some View {
+    private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             HStack(spacing: 6) {
+                if model.demo == nil, !model.deviceOnline(chat.deviceId) {
+                    Text("Device offline · synced history")
+                        .font(Theme.sans(11)).foregroundStyle(Theme.warning)
+                } else if model.demo == nil, !store.connected {
+                    Text("Reconnecting session…")
+                        .font(Theme.sans(11)).foregroundStyle(Theme.textMuted)
+                } else {
                 switch status {
                 case .working:
                     WorkingSpinner()
@@ -239,6 +289,7 @@ struct SessionView: View {
                         .foregroundStyle(Theme.danger)
                 default:
                     EmptyView()
+                }
                 }
             }
             .frame(height: 24)

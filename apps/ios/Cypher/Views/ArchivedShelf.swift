@@ -16,6 +16,7 @@ struct ArchivedSection: View {
     /// Scope, matching the list above it: nil = All.
     var spaceId: String?
     @Binding var path: [Route]
+    var orphanedOnly = false
 
     // spaces.rs INITIAL/PAGE. Both session-transient, like the desktop's.
     @State private var open = true
@@ -26,7 +27,9 @@ struct ArchivedSection: View {
     private static let rowInsets = EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
 
     var body: some View {
-        let archived = model.archivedChats(in: spaceId)
+        let archived = model.archivedChats(in: spaceId).filter { chat in
+            !orphanedOnly || !model.spaces.contains(where: { $0.id == chat.spaceId })
+        }
         if !archived.isEmpty {
             Section {
                 header(count: archived.count)

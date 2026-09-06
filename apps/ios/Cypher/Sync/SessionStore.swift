@@ -390,7 +390,16 @@ final class SessionStore {
             }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
-            return .tool(id: id, call: RenderToolCall(tag: tag, fields: fields),
+            var call = RenderToolCall(tag: tag, fields: fields)
+            if tag == "unknown", callMap["name"]?.stringValue == "subagent",
+               let input = callMap["input"]?.mapValue,
+               let agent = input["agent"]?.stringValue, !agent.isEmpty {
+                call.subagent = SubagentCallMetadata(agent: String(agent.prefix(120)),
+                    task: String((input["task"]?.stringValue ?? "").prefix(500)),
+                    isAsync: input["async"]?.boolValue ?? false)
+                call.progress = SubagentProjection.boundedProgress(m["progress"]?.stringValue)
+            }
+            return .tool(id: id, call: call,
                          isError: isError ?? false, resolved: isError != nil)
         case "input":
             var questions: [UserInputQuestion] = []
@@ -449,10 +458,12 @@ final class SessionStore {
 
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
 
-    func sendRun(prompt: String, chat: Chat, attachments: [String] = []) {
+    @discardableResult
+    func sendRun(prompt: String, chat: Chat, attachments: [String] = [], agentPrompt: String? = nil) -> Bool {
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if offline {
             demoResponder?(prompt)
-            return
+            return true
         }
         let messageId = UUID().uuidString.lowercased()
         let request = RunRequest(prompt: prompt,
@@ -463,35 +474,45 @@ final class SessionStore {
                                  cwd: chat.cwd ?? "",
                                  sandbox: chat.config?.sandbox ?? "workspace-write",
                                  attachments: attachments)
-        queueCommand(kind: "run", payload: [
+        var payload: [String: Any] = [
             "kind": "run",
             "request": encodableJSON(request),
             "messageId": messageId,
-        ])
+        ]
+        if let agentPrompt { payload["agentPrompt"] = agentPrompt }
+        guard queueCommand(kind: "run", payload: payload) else { return false }
         pendingSends.append((messageId, prompt, nowMs()))
         revision &+= 1
+        return true
     }
 
-    func sendSteer(prompt: String) {
+    @discardableResult
+    func sendSteer(prompt: String, agentPrompt: String? = nil) -> Bool {
+        guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if offline {
             demoResponder?(prompt)
-            return
+            return true
         }
         let messageId = UUID().uuidString.lowercased()
-        queueCommand(kind: "steer", payload: [
+        var payload: [String: Any] = [
             "kind": "steer",
             "prompt": prompt,
             "messageId": messageId,
-        ])
+        ]
+        if let agentPrompt { payload["agentPrompt"] = agentPrompt }
+        guard queueCommand(kind: "steer", payload: payload) else { return false }
         pendingSends.append((messageId, prompt, nowMs()))
         revision &+= 1
+        return true
     }
 
-    func sendInterrupt() {
+    @discardableResult
+    func sendInterrupt() -> Bool {
         queueCommand(kind: "interrupt", payload: ["kind": "interrupt"])
     }
 
-    func respondInput(requestId: String, answers: [UserInputAnswer]) {
+    @discardableResult
+    func respondInput(requestId: String, answers: [UserInputAnswer]) -> Bool {
         queueCommand(kind: "respondInput", payload: [
             "kind": "respondInput",
             "requestId": requestId,
@@ -500,7 +521,7 @@ final class SessionStore {
     }
 
     /// schema.rs queue_command, field for field.
-    private func queueCommand(kind: String, payload: [String: Any]) {
+    private func queueCommand(kind: String, payload: [String: Any]) -> Bool {
         let commands = doc.getList(id: "commands")
         do {
             let map = try commands.pushContainer(child: LoroMap())
@@ -518,8 +539,9 @@ final class SessionStore {
             try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
             try map.insert(key: "status", v: "pending")
             doc.commit()
-        } catch {}
+        } catch { return false }
         nudgeHost()
+        return true
     }
 
     /// Durable-nudge the host device so a cold host opens the doc and drains

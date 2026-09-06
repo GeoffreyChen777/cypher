@@ -71,6 +71,7 @@ struct TranscriptView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollPosition($scrollPosition)
+        .scrollEdgeEffectStyle(.soft, for: .bottom)
         .defaultScrollAnchor(.bottom)
         // Drag past the composer and the keyboard follows the finger down —
         // the Messages-style interactive dismissal.
@@ -78,9 +79,8 @@ struct TranscriptView: View {
         // Tap anywhere in the transcript to put the keyboard away (t3's
         // tap-to-blur; TapGesture already cancels on drag-sized movement).
         // Simultaneous so fold toggles and row buttons still receive theirs.
-        .simultaneousGesture(TapGesture().onEnded {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
-                                            to: nil, from: nil, for: nil)
+        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { event in
+            TranscriptKeyboardDismissal.dismiss(at: event.location)
         })
         // Held invisible until it has settled at the bottom, then faded in.
         // The settling itself is unavoidable (see settleToBottom) — what is
@@ -538,6 +538,7 @@ final class VeilStore {
 // MARK: - User bubble (transcript.rs:1671)
 
 struct UserBubble: View {
+    @Environment(\.commentDrafts) private var commentDrafts
     let text: String
     var pending = false
     /// The chat's host device — where attachment files live (read-back key).
@@ -553,21 +554,13 @@ struct UserBubble: View {
                 UserAttachmentsStrip(deviceId: deviceId, attachments: parsed.attachments)
             }
             if !parsed.text.isEmpty {
-                Text(parsed.text)
-                    .font(Theme.sans(MD.textSize))
-                    .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                    .foregroundStyle(Theme.text)
+                SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
+                    [InlineRun(text: parsed.text, style: .plain)]), hugsContent: true)
+                    .environment(\.commentDrafts, pending ? nil : commentDrafts)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
                     .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.string = parsed.text
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
-                        }
-                    }
             }
         }
         .opacity(pending ? 0.65 : 1)
@@ -584,13 +577,17 @@ struct MarkdownRowView: View {
     let veils: VeilStore
 
     var body: some View {
-        if streaming, isVeilable {
-            TimelineView(.animation) { _ in
-                veiledText
+        Group {
+            if isVeilable {
+                // Keep the native text view's identity when a live paragraph
+                // settles, so an active selection is not destroyed.
+                TimelineView(.animation(paused: !streaming)) { _ in
+                    veiledText
+                }
+                .onDisappear { veils.drop(row.id) }
+            } else {
+                MarkdownBlockView(block: block, cacheKey: row.id)
             }
-            .onDisappear { veils.drop(row.id) }
-        } else {
-            MarkdownBlockView(block: block, cacheKey: row.id)
         }
     }
 
@@ -603,22 +600,17 @@ struct MarkdownRowView: View {
 
     @ViewBuilder
     private var veiledText: some View {
-        let veil = veils.veil(for: row.id, seeded: false)
+        let veil = streaming ? veils.veil(for: row.id, seeded: false) : nil
         switch block {
         case .paragraph(let runs):
-            let _ = veil.noteLength(runs.map(\.text.count).reduce(0, +))
-            runs.styledVeiled(veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            let _ = veil?.noteLength(runs.map(\.text.count).reduce(0, +))
+            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(runs, veil: veil))
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .heading(let level, let runs):
             let m = MD.headingMetrics(level)
-            let _ = veil.noteLength(runs.map(\.text.count).reduce(0, +))
-            runs.styledVeiled(size: m.size, weight: .semibold, veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            let _ = veil?.noteLength(runs.map(\.text.count).reduce(0, +))
+            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
+                runs, size: m.size, weight: .semibold, lineHeight: m.line, veil: veil))
                 .frame(maxWidth: .infinity, alignment: .leading)
         default:
             MarkdownBlockView(block: block, cacheKey: row.id)

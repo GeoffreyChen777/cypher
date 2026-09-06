@@ -11,12 +11,22 @@ enum Route: Hashable {
     case newSession(spaceId: String)
 }
 
+enum SessionNavigation {
+    /// Reuse an existing ancestor instead of building duplicate/cyclic stacks.
+    static func opening(_ chatId: String, in path: [Route]) -> [Route] {
+        if let index = path.lastIndex(of: .chat(chatId)) {
+            return Array(path.prefix(index + 1))
+        }
+        return path + [.chat(chatId)]
+    }
+}
+
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
-    @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
+    @AppStorage("homeProjectFilter") private var spaceFilter: String = ""
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
@@ -25,10 +35,13 @@ struct HomeView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                sessionsSection
-                // The desktop's archived shelf sits under the active list,
-                // scoped by the same space filter.
-                ArchivedSection(spaceId: selectedSpace?.id, path: $path)
+                if let selectedSpace {
+                    sessionsSection
+                    ArchivedSection(spaceId: selectedSpace.id, path: $path)
+                } else {
+                    projectsSection
+                    ArchivedSection(spaceId: nil, path: $path, orphanedOnly: true)
+                }
             }
             .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 10)
@@ -42,7 +55,7 @@ struct HomeView: View {
             .navigationDestination(for: Route.self) { route in
                 switch route {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
-                case .chat(let id): SessionView(chatId: id)
+                case .chat(let id): SessionView(chatId: id, path: $path).id(id)
                 case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
                 }
             }
@@ -123,7 +136,7 @@ struct HomeView: View {
     /// three-line title wraps. Selection carries a checkmark in the icon slot.
     private var spaceDropdown: some View {
         Menu {
-            spaceMenuButton(id: "", title: "All", subtitle: nil)
+            spaceMenuButton(id: "", title: "Projects", subtitle: nil)
             ForEach(model.spaces) { space in
                 spaceMenuButton(id: space.id, title: space.displayName,
                                 subtitle: deviceTag(space))
@@ -132,11 +145,11 @@ struct HomeView: View {
             Button {
                 showNewSpace = true
             } label: {
-                Label("New space…", systemImage: "folder.badge.plus")
+                Label("New project…", systemImage: "folder.badge.plus")
             }
         } label: {
             HStack(spacing: 5) {
-                Text(selectedSpace?.displayName ?? "All")
+                Text(selectedSpace?.displayName ?? "Projects")
                     .font(Theme.sans(14, weight: .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
@@ -153,7 +166,7 @@ struct HomeView: View {
             .frame(height: 44)
             .glassEffect(.regular.interactive(), in: Capsule())
         }
-        .accessibilityLabel("Filter by space")
+        .accessibilityLabel("Select project")
     }
 
     private func deviceTag(_ space: Space) -> String {
@@ -190,31 +203,83 @@ struct HomeView: View {
                 Image(systemName: "plus")
             }
             .accessibilityLabel("New session")
-        } else if model.spaces.isEmpty {
+        } else {
             Button {
                 showNewSpace = true
             } label: {
                 Image(systemName: "plus")
             }
-            .accessibilityLabel("New space")
-        } else {
-            Menu {
-                Section("New session in…") {
-                    ForEach(model.spaces) { space in
-                        Button {
-                            path.append(.newSession(spaceId: space.id))
-                        } label: {
-                            // Button rows render the second Text as the
-                            // subtitle line (same pattern as the space menu).
+            .accessibilityLabel("New project")
+        }
+    }
+
+    private var projectsSection: some View {
+        Section {
+            if model.spaces.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Your projects, across devices")
+                        .font(Theme.sans(16, weight: .medium))
+                    Text("Connect Cypher on a Mac or Linux device, then add a project folder with +. This phone is a remote control — no Runtime is needed here.")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.textMuted)
+                }
+                .padding(.vertical, 20)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
+            ForEach(model.spaces) { space in
+                Button { path.append(.space(space.id)) } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Text(model.deviceName(space.deviceId))
+                                .font(Theme.sans(12))
+                                .foregroundStyle(Theme.textMuted)
+                                .lineLimit(1)
+                            Circle()
+                                .fill(model.deviceOnline(space.deviceId)
+                                      ? Theme.statusCompleted.opacity(0.9)
+                                      : Theme.textFaint.opacity(0.4))
+                                .frame(width: 6, height: 6)
+                                .accessibilityLabel(model.deviceOnline(space.deviceId)
+                                                    ? "Device online" : "Device offline")
+                        }
+                        HStack {
                             Text(space.displayName)
-                            Text(deviceTag(space))
+                                .font(Theme.sans(15, weight: .medium))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("\(model.chats(in: space.id).count)")
+                                .font(Theme.mono(12)).foregroundStyle(Theme.textFaint)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
                         }
                     }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 64)
+                    .contentShape(Rectangle())
                 }
-            } label: {
-                Image(systemName: "plus")
+                .buttonStyle(PressWashButtonStyle())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
             }
-            .accessibilityLabel("New session")
+            // Preserve access to history whose project row is gone; never
+            // invent a project/device association for an orphaned chat.
+            let orphaned = model.overviewChats.filter { chat in
+                !model.spaces.contains(where: { $0.id == chat.spaceId })
+            }
+            if !orphaned.isEmpty {
+                Section("Other sessions") {
+                    ForEach(orphaned) { chat in
+                        Button { path.append(.chat(chat.id)) } label: {
+                            ChatRow(chat: chat, showLocation: true)
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
         }
     }
 
@@ -225,7 +290,7 @@ struct HomeView: View {
             let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
             if chats.isEmpty {
                 Text(model.spaces.isEmpty
-                    ? "No spaces yet — add one from a desktop device"
+                    ? "No projects yet — add a folder from a connected device"
                     : "No sessions yet")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.textFaint)
@@ -236,9 +301,7 @@ struct HomeView: View {
                 Button {
                     path.append(.chat(chat.id))
                 } label: {
-                    // Location shows even when scoped — without it the row's
-                    // first line is just a floating dot and a timestamp.
-                    ChatRow(chat: chat, showLocation: true)
+                    ChatRow(chat: chat, showLocation: selectedSpace == nil)
                 }
                 .buttonStyle(PressWashButtonStyle())
                 .listRowBackground(Color.clear)
@@ -265,16 +328,8 @@ struct HomeView: View {
 
 // MARK: - Rows
 
-/// The desktop session row (shell.rs `render_chat_row`), line for line: a
-/// muted context line with the status word in the corner (dot + word, muted;
-/// Done keeps its pop with a check; Idle rows carry the time-ago there
-/// instead); the title on its own line; harness mark and branch close it out,
-/// with the mini spinner riding the row's bottom-right while Working.
-///
-/// The one addition the phone needs: the desktop row names only the space
-/// because its sidebar sits on the machine running the work. Here the Sessions
-/// list interleaves every device, and a session whose host has gone offline
-/// can't be driven at all — so the context line reads "space @ device".
+/// Two-line session row: project-scoped rows show checkout context above
+/// the title. Cross-project history retains its project/device context.
 struct ChatRow: View {
     @Environment(AppModel.self) private var model
     let chat: Chat
@@ -284,8 +339,8 @@ struct ChatRow: View {
 
     var body: some View {
         let indicator = model.indicator(for: chat)
-        VStack(alignment: .leading, spacing: 2) {
-            // Line 1: space @ device, status corner (time-ago when idle).
+        VStack(alignment: .leading, spacing: 5) {
+            // Line 1: context and status (time-ago when idle).
             HStack(spacing: 8) {
                 if showLocation {
                     Text(location)
@@ -295,7 +350,16 @@ struct ChatRow: View {
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    Spacer(minLength: 4)
+                    HStack(spacing: 4) {
+                        LineIconView(isWorktree ? .folderWithFiles : .gitBranch,
+                                     size: 11, color: subline)
+                        Text(checkoutLabel)
+                            .font(Theme.sans(11))
+                            .foregroundStyle(subline)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if indicator == .idle {
                     Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
@@ -307,36 +371,40 @@ struct ChatRow: View {
                 }
             }
 
-            // Line 2: the session title.
-            Text(chat.displayTitle)
-                .font(Theme.sans(13))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Line 3: harness brand mark, then the branch when the engine
-            // stamped one; the Working spinner rides bottom-right.
-            HStack(spacing: 4) {
+            // Line 2: title with its live-run spinner.
+            HStack(spacing: 6) {
                 if let harness = chat.config?.harness {
                     HarnessBadge(harness: harness, size: 11, neutral: subline)
                 }
-                if let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
-                    LineIconView(.gitBranch, size: 11, color: subline)
-                    Text(branch)
-                        .font(Theme.sans(11))
-                        .foregroundStyle(subline)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Spacer(minLength: 0)
+                Text(chat.displayTitle)
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if indicator == .working {
                     MiniSpinner()
                 }
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, 10)
+        .frame(minHeight: 56)
         .contentShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var isWorktree: Bool {
+        guard let cwd = chat.cwd, !cwd.isEmpty, let space = model.space(for: chat) else { return false }
+        return (cwd as NSString).standardizingPath != (space.path as NSString).standardizingPath
+    }
+
+    private var checkoutLabel: String {
+        let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branchLabel = branch.flatMap { $0.isEmpty ? nil : $0 }
+        if isWorktree, let cwd = chat.cwd {
+            let name = ((cwd as NSString).standardizingPath as NSString).lastPathComponent
+            return [branchLabel, "Worktree · \(name)"].compactMap { $0 }.joined(separator: " / ")
+        }
+        return branchLabel ?? "Current checkout"
     }
 
     /// "space @ device" (the session header's format). The space name (not

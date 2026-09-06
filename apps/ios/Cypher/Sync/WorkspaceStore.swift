@@ -35,9 +35,10 @@ final class WorkspaceStore {
     @ObservationIgnored private var presenceReceivedAt: [String: Int64] = [:]
     private let config: AppConfig
 
-    init(config: AppConfig) {
+    init(config: AppConfig, initialDocument: RegistryDoc? = nil) {
         self.config = config
-        self.doc = RegistryDoc(deviceId: config.deviceId)
+        self.doc = initialDocument ?? RegistryDoc(deviceId: config.deviceId)
+        project()
     }
 
     func start() {
@@ -197,6 +198,9 @@ final class WorkspaceStore {
         chats = doc.overlayRows(kind: "chats").compactMap { row in
             let f = row.fields
             guard let deviceId = f["deviceId"]?.stringValue else { return nil }
+            let child = SubagentProjection.decode(f["child"], as: ChildChat.self)
+            // Don't promote a malformed child relation into the root list.
+            if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
             var chatConfig: ChatConfig?
             if let c = f["config"]?.objectValue {
                 chatConfig = ChatConfig(harness: c["harness"]?.stringValue ?? "claude-code",
@@ -217,7 +221,8 @@ final class WorkspaceStore {
                         createdAt: f["createdAt"]?.int64Value ?? 0,
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        roomGen: f["roomGen"]?.int64Value.map(Int.init))
+                        roomGen: f["roomGen"]?.int64Value.map(Int.init),
+                        child: child)
         }
 
         var rows: [String: SessionRow] = [:]
@@ -229,7 +234,8 @@ final class WorkspaceStore {
                   let status = SessionStatus(rawValue: statusStr) else { continue }
             rows[chatId] = SessionRow(chatId: chatId, deviceId: deviceId, status: status,
                                       startedAt: f["startedAt"]?.int64Value,
-                                      updatedAt: f["updatedAt"]?.int64Value ?? 0)
+                                      updatedAt: f["updatedAt"]?.int64Value ?? 0,
+                                      subagents: SubagentProjection.snapshot(f["subagents"]))
         }
         sessions = rows
     }
@@ -240,7 +246,7 @@ final class WorkspaceStore {
     /// attention-sorted.
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.archived && $0.spaceId.map(liveSpaceIds.contains) == true }
+        let live = chats.filter { !$0.isChild && !$0.archived && $0.spaceId.map(liveSpaceIds.contains) == true }
         return sortActive(live)
     }
 
@@ -251,7 +257,7 @@ final class WorkspaceStore {
     /// no tabs — a space opens into the same list, with the same rows, as the
     /// Sessions section — so it follows that list's ordering instead.
     func chats(in spaceId: String) -> [Chat] {
-        sortActive(chats.filter { !$0.archived && $0.spaceId == spaceId })
+        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
     }
 
     /// Archived chats under an optional space scope, recency order — feeds the
@@ -259,7 +265,7 @@ final class WorkspaceStore {
     /// `overviewChats`, a live space is not required: an archived session of a
     /// deleted space should still be reachable for unarchive.
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
-        sortActive(chats.filter { $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
+        sortActive(chats.filter { !$0.isChild && $0.archived && (spaceId == nil || $0.spaceId == spaceId) })
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {
@@ -309,45 +315,32 @@ final class WorkspaceStore {
         try? await relay(for: deviceId).call(method: "ListRefs", params: ["repoPath": repoPath])
     }
 
-    /// ListModels — the target device's live harness catalog (the desktop
-    /// discovers models from the CLI itself; static lists are only fallback).
-    /// The device's harness catalog (`ListHarnesses` → `[HarnessDescriptor]`),
-    /// filtered to what the composer may offer: installed AND enabled (the
-    /// Settings → Agents gate; absent `enabled` falls back to the engine's
-    /// `default_enabled()` pair, matching `descriptor_enabled`).
-    func listHarnesses(deviceId: String) async -> [HarnessInfo]? {
-        struct WireHarness: Decodable {
-            var id: String
-            var name: String
-            var installed: Bool?
-            var enabled: Bool?
-        }
-        let wire: [WireHarness]? = try? await relay(for: deviceId)
+    /// Only the target engine's installed/enabled Pi models may be offered.
+    /// Empty catalogs and transport errors are not replaced with static data.
+    func listPiModels(deviceId: String) async throws -> [ModelInfo] {
+        let wire: [PiHarnessDescriptor] = try await relay(for: deviceId)
             .call(method: "ListHarnesses", params: [:])
-        return wire.map { list in
-            list.filter { h in
-                h.id != "mock"
-                    && (h.installed ?? true)
-                    && (h.enabled ?? ["claude-code", "codex"].contains(h.id))
-            }
-            .map { HarnessInfo(id: $0.id, label: $0.name) }
+        guard wire.contains(where: \.available) else {
+            throw PiCatalogError.runtimeUnavailable
         }
+        return try await listModels(deviceId: deviceId, harness: "pi")
     }
 
-    func listModels(deviceId: String, harness: String) async -> [ModelInfo]? {
+    /// Raw RPC also used by the isolated mock E2E rig. Production UI calls
+    /// listPiModels, which applies the installed/enabled Pi gate first.
+    func listModels(deviceId: String, harness: String) async throws -> [ModelInfo] {
         struct WireModel: Decodable {
             var id: String
             var label: String
             var description: String?
             var reasoningLevels: [String]?
         }
-        let wire: [WireModel]? = try? await relay(for: deviceId)
+        let wire: [WireModel] = try await relay(for: deviceId)
             .call(method: "ListModels", params: ["harness": harness])
-        return wire.map { models in
-            models.map {
-                ModelInfo(id: $0.id, label: $0.label, description: $0.description,
-                          reasoningLevels: $0.reasoningLevels ?? [])
-            }
+        var seen = Set<String>()
+        return wire.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }.map {
+            ModelInfo(id: $0.id, label: $0.label, description: $0.description,
+                      reasoningLevels: $0.reasoningLevels ?? [])
         }
     }
 

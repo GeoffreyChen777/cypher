@@ -295,13 +295,22 @@ final class AppModel {
     // MARK: Unified data accessors (demo or live — one path for views)
 
     var spaces: [Space] { demo?.spaces ?? workspace?.spaces ?? [] }
+    var allChats: [Chat] { demo?.chats ?? workspace?.chats ?? [] }
+    var sessionRows: [String: SessionRow] { demo?.sessions ?? workspace?.sessions ?? [:] }
+
+    func subagents(for parent: Chat, store: SessionStore, now: Int64) -> [SubagentPanelEntry] {
+        let session = sessionRows[parent.id]
+        let snapshot = session?.deviceId == parent.deviceId ? session?.subagents ?? [] : []
+        return SubagentProjection.aggregate(parent: parent, transcript: store.entries,
+            snapshot: snapshot, chats: allChats, sessions: sessionRows, now: now)
+    }
 
     var connected: Bool { demo != nil || workspace?.connected == true }
 
     var overviewChats: [Chat] {
         if let demo {
             let liveIds = Set(demo.spaces.map(\.id))
-            let live = demo.chats.filter { !$0.archived && $0.spaceId.map(liveIds.contains) == true }
+            let live = demo.chats.filter { !$0.isChild && !$0.archived && $0.spaceId.map(liveIds.contains) == true }
             return sortActive(live)
         }
         return workspace?.overviewChats ?? []
@@ -309,7 +318,7 @@ final class AppModel {
 
     func chats(in spaceId: String) -> [Chat] {
         if let demo {
-            return sortActive(demo.chats.filter { !$0.archived && $0.spaceId == spaceId })
+            return sortActive(demo.chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
         }
         return workspace?.chats(in: spaceId) ?? []
     }
@@ -347,33 +356,15 @@ final class AppModel {
         return workspace?.deviceOnline(deviceId) ?? false
     }
 
-    /// Live harness catalog from the space's owning device (Settings → Agents
-    /// gates which agents a device offers); static pair when unreachable.
-    func listHarnesses(space: Space) async -> [HarnessInfo] {
+    /// The phone never resolves a local Runtime or substitutes a model list.
+    func listPiModels(deviceId: String) async throws -> [ModelInfo] {
         if demo != nil {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            return HarnessCatalog.harnesses
+            return HarnessCatalog.demoModels
         }
-        if let live = await workspace?.listHarnesses(deviceId: space.deviceId),
-           !live.isEmpty {
-            return live
+        guard let workspace, deviceOnline(deviceId) else {
+            throw PiCatalogError.unavailable
         }
-        return HarnessCatalog.harnesses
-    }
-
-    /// Live model catalog from the space's owning device (the desktop's
-    /// "catalog source = the device that runs the session" rule); static
-    /// fallback when the device is unreachable.
-    func listModels(space: Space, harness: String) async -> [ModelInfo] {
-        if demo != nil {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            return HarnessCatalog.models(for: harness)
-        }
-        if let live = await workspace?.listModels(deviceId: space.deviceId, harness: harness),
-           !live.isEmpty {
-            return live
-        }
-        return HarnessCatalog.models(for: harness)
+        return try await workspace.listPiModels(deviceId: deviceId)
     }
 
     /// Refs of the space's repo (git spaces only).
@@ -489,7 +480,7 @@ final class AppModel {
     func archivedChats(in spaceId: String? = nil) -> [Chat] {
         if let demo {
             return sortActive(demo.chats.filter {
-                $0.archived && (spaceId == nil || $0.spaceId == spaceId)
+                !$0.isChild && $0.archived && (spaceId == nil || $0.spaceId == spaceId)
             })
         }
         return workspace?.archivedChats(in: spaceId) ?? []

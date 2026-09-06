@@ -10,12 +10,13 @@ import SwiftUI
 
 struct NewSessionView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     let spaceId: String
     @Binding var path: [Route]
 
     // Sticky run config (the old app persisted these to prefs.db).
-    @AppStorage("newSessionHarness") private var harness = "claude-code"
-    @AppStorage("newSessionModel") private var storedModel = ""
+    private let harness = "pi"
+    @AppStorage("newSessionPiModels") private var storedModels = "{}"
     @AppStorage("newSessionReasoning") private var storedReasoning = ""
 
     @State private var draft = ""
@@ -27,11 +28,8 @@ struct NewSessionView: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
     @State private var attachError: String?
-    /// Live harness list from the space's device (Settings → Agents gate);
-    /// static pair until it loads.
-    @State private var liveHarnesses: [HarnessInfo]?
-    /// Live per-harness catalogs from the space's device (static fallback).
-    @State private var catalogs: [String: [ModelInfo]] = [:]
+    @State private var catalog = RemotePiCatalog()
+    @State private var catalogRevision = 0
     @State private var refs: [RepoRef] = []
     @State private var selectedRef: String?
     @State private var checkoutKind: CheckoutKind = .local
@@ -46,18 +44,33 @@ struct NewSessionView: View {
     }
 
     private var harnesses: [HarnessInfo] {
-        liveHarnesses ?? HarnessCatalog.harnesses
+        HarnessCatalog.harnesses
     }
 
     private var models: [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        catalog.models(for: space?.deviceId ?? "")
     }
 
-    private var selectedModel: ModelInfo {
-        models.first { $0.id == storedModel } ?? models[0]
+    private var storedModel: String {
+        let picks = (try? JSONDecoder().decode([String: String].self, from: Data(storedModels.utf8))) ?? [:]
+        return picks[space?.deviceId ?? ""] ?? ""
+    }
+
+    private func rememberModel(_ id: String) {
+        guard let deviceId = space?.deviceId else { return }
+        var picks = (try? JSONDecoder().decode([String: String].self, from: Data(storedModels.utf8))) ?? [:]
+        picks[deviceId] = id
+        if let data = try? JSONEncoder().encode(picks), let json = String(data: data, encoding: .utf8) {
+            storedModels = json
+        }
+    }
+
+    private var selectedModel: ModelInfo? {
+        models.first { $0.id == storedModel } ?? models.first
     }
 
     private var reasoning: String? {
+        guard let selectedModel else { return nil }
         if selectedModel.reasoningLevels.isEmpty { return nil }
         if selectedModel.reasoningLevels.contains(storedReasoning) { return storedReasoning }
         return HarnessCatalog.defaultReasoning(for: selectedModel)
@@ -87,6 +100,10 @@ struct NewSessionView: View {
             if let space, !model.deviceOnline(space.deviceId), model.demo == nil {
                 offlineNotice(space: space)
             }
+            PiCatalogNotice(catalog: catalog,
+                            deviceName: model.deviceName(space?.deviceId ?? "")) {
+                catalogRevision += 1
+            }
 
             // Where-it-runs scope row (checkout + base ref), left-aligned
             // above the composer — the composer pill keeps only the agent chip.
@@ -105,6 +122,7 @@ struct NewSessionView: View {
                     .padding(.horizontal, 16)
                 }
                 .padding(.bottom, 8)
+                .disabled(busy)
             }
 
             composer
@@ -147,49 +165,39 @@ struct NewSessionView: View {
                 pickCheckout(kind)
             }
         }
-        .task(id: spaceId) {
+        .task(id: "\(spaceId)/\(space?.deviceId ?? "")") {
             // Load refs for the branch chip (git spaces only).
             guard let space, space.gitDetected else { return }
             if let loaded = await model.listRefs(space: space) {
+                guard !Task.isCancelled, self.space?.deviceId == space.deviceId else { return }
                 refs = loaded
                 if selectedRef == nil {
                     selectedRef = loaded.first(where: \.current)?.name ?? loaded.first?.name
                 }
             }
         }
-        .task(id: spaceId) {
-            // Live harness list + a model catalog per harness, all from the
-            // device that will run the session (the picker shows one sectioned
-            // list across harnesses, so it needs every catalog up front).
+        .task(id: "\(space?.deviceId ?? "")/\(model.connected)/\(space.map { model.deviceOnline($0.deviceId) } ?? false)/\(scenePhase)/\(catalogRevision)") {
             guard let space else { return }
-            let list = await model.listHarnesses(space: space)
-            liveHarnesses = list
-            if !list.contains(where: { $0.id == harness }), let first = list.first {
-                harness = first.id
-            }
-            await withTaskGroup(of: (String, [ModelInfo]).self) { group in
-                for h in list {
-                    group.addTask { (h.id, await model.listModels(space: space, harness: h.id)) }
-                }
-                for await (id, catalog) in group {
-                    catalogs[id] = catalog
-                }
-            }
+            await catalog.load(deviceId: space.deviceId, fetch: model.listPiModels)
         }
         .sheet(isPresented: $showPicker) {
-            ModelPickerSheet(harness: $harness, modelId: Binding(
-                get: { selectedModel.id },
-                set: { storedModel = $0 }
+            ModelPickerSheet(harness: .constant(harness), modelId: Binding(
+                get: { selectedModel?.id ?? "" },
+                set: { rememberModel($0) }
             ), reasoning: Binding(
                 get: { reasoning },
                 set: { storedReasoning = $0 ?? "" }
-            ), harnesses: harnesses, catalogs: catalogs)
+            ), lockedHarness: true, harnesses: harnesses, catalogs: [harness: models],
+               loading: catalog.loading, onRefresh: { catalogRevision += 1 })
+        }
+        .onChange(of: showPicker) { _, showing in
+            if showing { catalogRevision += 1 }
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(reasoning: Binding(
                 get: { reasoning },
                 set: { storedReasoning = $0 ?? "" }
-            ), levels: selectedModel.reasoningLevels)
+            ), levels: selectedModel?.reasoningLevels ?? [])
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
                       maxSelectionCount: 8, matching: .images)
@@ -225,7 +233,7 @@ struct NewSessionView: View {
             ComposerShell(
                 draft: $draft,
                 placeholder: "Do anything…",
-                sendEnabled: space != nil,
+                sendEnabled: targetReady && selectedModel != nil,
                 showStop: false,
                 busy: busy,
                 alwaysExpanded: true,
@@ -236,7 +244,7 @@ struct NewSessionView: View {
             ) {
                 // Model + trait chips, split like the desktop's footer pickers
                 // (they ride right of the shell's attach button).
-                ComposerChip(label: selectedModel.label, badgeHarness: harness) {
+                ComposerChip(label: selectedModel?.label ?? "Select model") {
                     focused = false
                     showPicker = true
                 }
@@ -347,13 +355,18 @@ struct NewSessionView: View {
     }
 
     private var canSend: Bool {
-        guard !busy, space != nil else { return false }
+        guard !busy, targetReady, selectedModel != nil else { return false }
         return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
     }
 
+    private var targetReady: Bool {
+        guard let space else { return false }
+        return model.demo != nil || (model.connected && model.deviceOnline(space.deviceId))
+    }
+
     private func offlineNotice(space: Space) -> some View {
-        Text("\(model.deviceName(space.deviceId)) is offline — the run will start when it reconnects.")
+        Text("\(model.deviceName(space.deviceId)) is offline. Reconnect it to start a session. Your draft stays here.")
             .font(Theme.sans(12))
             .foregroundStyle(Theme.warning.opacity(0.9))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -368,33 +381,41 @@ struct NewSessionView: View {
     /// live session (composer.rs on-send: current checkout as-is, reuse the
     /// picked ref's worktree, or CreateWorktree off the base first).
     private func send() {
-        guard let space, canSend else { return }
+        guard let space, canSend, let selectedModel else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
         let config = ChatConfig(harness: harness, model: selectedModel.id,
                                 reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
+            defer { busy = false }
             var cwd: String?
             var branch = selectedRef
             switch checkoutKind {
             case .newWorktree:
-                if let base = selectedRef {
-                    guard let worktreePath = await model.createWorktree(space: space, base: base) else {
-                        busy = false
-                        return
-                    }
-                    cwd = worktreePath
-                    branch = base
+                guard let base = selectedRef else {
+                    attachError = "Select a base branch before creating a worktree."
+                    return
                 }
+                guard let worktreePath = await model.createWorktree(space: space, base: base) else {
+                    attachError = "Couldn't create the worktree on \(model.deviceName(space.deviceId)). Your draft has been kept."
+                    return
+                }
+                cwd = worktreePath
+                branch = base
             case .local:
                 if let worktree = selectedRefRow?.worktreePath {
                     cwd = worktree  // reuse the ref's existing checkout
                 }
             }
+            guard targetReady, self.space?.deviceId == space.deviceId else {
+                attachError = "The project device is no longer available. Your draft has been kept."
+                return
+            }
             guard let chatId = model.createChat(space: space, config: config,
                                                 branch: branch, cwd: cwd),
                   let chat = model.chat(id: chatId),
                   let store = model.sessionStore(for: chat) else {
+                attachError = "Couldn't create the session. Check your connection and retry."
                 busy = false
                 return
             }
@@ -413,8 +434,12 @@ struct NewSessionView: View {
                     return
                 }
             }
-            store.sendRun(prompt: paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths),
-                          chat: chat, attachments: paths)
+            guard targetReady,
+                  store.sendRun(prompt: paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths),
+                                chat: chat, attachments: paths) else {
+                attachError = "Couldn't queue the message. Your draft has been kept."
+                return
+            }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             draft = ""
             attachments = []
@@ -476,20 +501,22 @@ struct ModelPickerSheet: View {
     @Binding var reasoning: String?
     /// True when reconfiguring a live chat: the harness can't change mid-chat.
     var lockedHarness = false
-    /// Harness sections to offer (the device's live list; static fallback).
+    /// Pi-only; legacy harnesses are displayable in history, never selectable.
     var harnesses: [HarnessInfo] = []
-    /// Live per-harness catalogs from the device (static fallback when absent).
+    /// Empty means unavailable, never a static fallback.
     var catalogs: [String: [ModelInfo]] = [:]
+    var loading = false
+    var onRefresh: (() -> Void)?
 
     private func models(for harness: String) -> [ModelInfo] {
-        catalogs[harness] ?? HarnessCatalog.models(for: harness)
+        harness == "pi" ? (catalogs[harness] ?? []) : []
     }
 
     private var sections: [HarnessInfo] {
-        if lockedHarness {
+        if lockedHarness, harness == "pi" {
             return [HarnessInfo(id: harness, label: HarnessCatalog.label(for: harness))]
         }
-        return harnesses.isEmpty ? HarnessCatalog.harnesses : harnesses
+        return harnesses.filter { $0.id == "pi" }
     }
 
     /// Accordion state: which harness sections show their models. Seeded with
@@ -503,6 +530,13 @@ struct ModelPickerSheet: View {
                 VStack(alignment: .leading, spacing: 22) {
                     VStack(alignment: .leading, spacing: 4) {
                         SheetLabel("Model")
+                        if loading {
+                            ProgressView("Loading models…").font(Theme.sans(13))
+                        } else if !sections.contains(where: { !models(for: $0.id).isEmpty }) {
+                            Text("No models loaded. Close this picker and retry from the session.")
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textMuted)
+                        }
                         ForEach(sections) { h in
                             if sections.count > 1 {
                                 sectionHeader(h)
@@ -527,6 +561,11 @@ struct ModelPickerSheet: View {
             .navigationTitle("Select model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if let onRefresh {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Refresh", action: onRefresh).disabled(loading)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
                         dismiss()
