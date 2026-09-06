@@ -88,6 +88,7 @@ impl SetupPage {
     }
 
     fn apply_snapshot(&mut self, result: Result<serde_json::Value, String>) {
+        self.progress_task = None;
         self.busy = None;
         self.runtime_status = None;
         match result {
@@ -114,7 +115,11 @@ impl SetupPage {
         let progress_engine = engine.clone();
         self.progress_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                tokio::time::sleep(Duration::from_millis(350)).await;
+                // cx.spawn polls on GPUI's foreground executor, not Tokio.
+                // Tokio timers panic here even when the engine has a runtime.
+                cx.background_executor()
+                    .timer(Duration::from_millis(350))
+                    .await;
                 let result = progress_engine
                     .client()
                     .call(methods::PI_RUNTIME_STATUS, serde_json::json!({}))
@@ -237,6 +242,7 @@ impl SetupPage {
                 popover::btn_primary(theme, &label)
                     .flex_none()
                     .id("setup-install-pi")
+                    .debug_selector(|| "setup-install-pi".into())
                     .when(!can_install && !busy, |el| el.opacity(0.5))
                     .when(can_install, |el| {
                         el.on_click(cx.listener(|page, _, _, cx| page.install_pi(cx)))
@@ -378,7 +384,169 @@ impl Render for SetupPage {
 
 #[cfg(test)]
 mod tests {
-    use super::setup_should_show;
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct RuntimeFixture {
+        installs: AtomicUsize,
+        polls: AtomicUsize,
+        finish: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl cypher_rpc::RpcService for RuntimeFixture {
+        async fn handle(
+            &self,
+            method: &str,
+            _: serde_json::Value,
+        ) -> Result<cypher_rpc::RpcReply, cypher_rpc::RpcError> {
+            let value = match method {
+                methods::ENGINE_INFO => serde_json::json!({
+                    "deviceId": "setup-test", "workspaceScope": "local"
+                }),
+                methods::ENGINE_READY => serde_json::json!({}),
+                methods::LIST_PI_PACKAGES => serde_json::json!({
+                    "piInstalled": false, "npmAvailable": false, "packages": []
+                }),
+                methods::INSTALL_PI => {
+                    let attempt = self.installs.fetch_add(1, Ordering::SeqCst);
+                    self.finish.notified().await;
+                    if attempt == 0 {
+                        return Err(cypher_rpc::RpcError::Failed(
+                            "fixture download failed".into(),
+                        ));
+                    }
+                    serde_json::json!({
+                        "piInstalled": true, "npmAvailable": true, "packages": []
+                    })
+                }
+                methods::PI_RUNTIME_STATUS => {
+                    self.polls.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({
+                        "installed": false, "installing": true,
+                        "downloadedBytes": 50, "totalBytes": 100
+                    })
+                }
+                other => return Err(cypher_rpc::RpcError::UnknownMethod(other.into())),
+            };
+            Ok(cypher_rpc::RpcReply::Value(value))
+        }
+    }
+
+    fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if predicate() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "UI fixture timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    // Deliberately NOT a tokio::test: install_pi runs on GPUI's foreground
+    // executor, where Tokio timers panic even if the engine has a runtime.
+    #[gpui::test]
+    fn installation_progress_works_without_a_foreground_tokio_runtime(cx: &mut TestAppContext) {
+        // The loopback RPC server wakes the UI from a real Tokio worker.
+        cx.background_executor.allow_parking();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let fixture = Arc::new(RuntimeFixture {
+            installs: AtomicUsize::new(0),
+            polls: AtomicUsize::new(0),
+            finish: tokio::sync::Notify::new(),
+        });
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        runtime.spawn(cypher_rpc::serve_ws_listener(listener, fixture.clone()));
+        let state = cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            let state = cx.new(|_| AppState::new());
+            AppState::bootstrap(
+                state.clone(),
+                crate::state::EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: port,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: cypher_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            state
+        });
+        pump_until(cx, || cx.update(|cx| state.read(cx).engine().is_some()));
+        let window = cx.open_window(gpui::size(px(960.0), px(800.0)), |_, cx| {
+            SetupPage::new(state, cx)
+        });
+        let page = window.root(cx).unwrap();
+        pump_until(cx, || {
+            cx.update(|cx| matches!(page.read(cx).packages, Loadable::Ready(_)))
+        });
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let button = visual
+            .debug_bounds("setup-install-pi")
+            .expect("Install button rendered");
+        visual.simulate_click(button.center(), Default::default());
+        pump_until(cx, || fixture.installs.load(Ordering::SeqCst) == 1);
+        cx.background_executor
+            .advance_clock(Duration::from_millis(350));
+        pump_until(cx, || {
+            cx.update(|cx| page.read(cx).runtime_status.is_some())
+        });
+        assert!(fixture.polls.load(Ordering::SeqCst) > 0);
+        fixture.finish.notify_one();
+        pump_until(cx, || cx.update(|cx| page.read(cx).busy.is_none()));
+        cx.update(|cx| {
+            assert_eq!(
+                page.read(cx).error.as_deref(),
+                Some("fixture download failed")
+            );
+            assert!(page.read(cx).runtime_status.is_none());
+            assert!(page.read(cx).progress_task.is_none());
+        });
+        // Retry through the same UI control, and reject duplicate starts.
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let button = visual.debug_bounds("setup-install-pi").unwrap();
+        visual.simulate_click(button.center(), Default::default());
+        page.update(cx, |page, cx| page.install_pi(cx));
+        pump_until(cx, || fixture.installs.load(Ordering::SeqCst) == 2);
+        cx.background_executor
+            .advance_clock(Duration::from_millis(350));
+        pump_until(cx, || {
+            cx.update(|cx| page.read(cx).runtime_status.is_some())
+        });
+        fixture.finish.notify_one();
+        pump_until(cx, || cx.update(|cx| page.read(cx).busy.is_none()));
+        cx.update(|cx| {
+            assert!(page.read(cx).error.is_none());
+            assert!(page.read(cx).progress_task.is_none());
+            assert!(matches!(&page.read(cx).packages, Loadable::Ready(snapshot) if snapshot.pi_installed));
+        });
+        let polls = fixture.polls.load(Ordering::SeqCst);
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(fixture.polls.load(Ordering::SeqCst), polls);
+    }
 
     #[test]
     fn first_run_shows_until_dismissed() {
