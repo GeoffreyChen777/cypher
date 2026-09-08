@@ -1702,11 +1702,16 @@ async fn run_session(session: Session) {
                 params.insert("level".into(), Value::String(requested.into()));
                 client.request("set_thinking_level", params).await?;
                 state = client.request("get_state", Map::new()).await?;
-                if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
-                    let actual = state
-                        .get("thinkingLevel")
-                        .and_then(Value::as_str)
-                        .unwrap_or("<none>");
+                let actual_level = state.get("thinkingLevel").and_then(Value::as_str);
+                // Older pi runtimes (and some provider adapters) normalize the
+                // lowest setting from `minimal` to `low`.  That is a compatible
+                // downgrade, not a protocol failure: rejecting it makes
+                // best-effort jobs such as automatic chat titling fail even
+                // though the model is ready to run.
+                let compatible = actual_level == Some(requested)
+                    || (level == ReasoningLevel::Minimal && actual_level == Some("low"));
+                if !compatible {
+                    let actual = actual_level.unwrap_or("<none>");
                     return Err(HarnessError::Protocol(format!(
                         "pi selected thinking level {actual} instead of requested {requested}"
                     )));
