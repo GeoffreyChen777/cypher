@@ -12,6 +12,11 @@ interface Registration {
 export class PushDevice implements DurableObject {
   constructor(private ctx: DurableObjectState, private env: Env) {}
   fetch(request: Request): Promise<Response> {
+    // Do not hold blockConcurrencyWhile across Apple's external fetch:
+    // Cloudflare can suspend outbound I/O while a DO input gate is held,
+    // turning every APNs request into the exact 10s timeout. Delivery state
+    // and the lease check below still make concurrent sends safe.
+    if (new URL(request.url).pathname === "/send") return this.handle(request);
     return this.ctx.blockConcurrencyWhile(() => this.handle(request));
   }
   private async handle(request: Request): Promise<Response> {

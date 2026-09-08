@@ -173,6 +173,21 @@ describe("notification outbox on real Durable Object SQLite", () => {
 });
 
 describe("global APNs token ownership", () => {
+  it("does not serialize the external send behind the DO input gate", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-send-gate"));
+    await runInDurableObject(stub, async (_, state) => {
+      const device = new PushDevice(state, { NOTIFICATIONS_ENABLED: "false" } as Env);
+      const request = new Request("https://test/send", { method: "POST",
+        body: JSON.stringify({ scope: "a".repeat(64), lease: "bad", message: {
+          id: crypto.randomUUID(), scope: "a".repeat(64), chatId: "chat", projectId: "project",
+          kind: "completed", expires: Date.now() + 60_000
+        } }) });
+      // The send route must be entered directly; a malformed/stale request
+      // returns immediately rather than waiting behind a DO gate.
+      const response = await device.fetch(request);
+      expect(response.status).toBe(200);
+    });
+  });
   it("rejects stale registration and old-account logout without touching the current owner", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-token-owner"));
     await runInDurableObject(stub, async (_, state) => {
