@@ -34,6 +34,10 @@ is no Smart/Always/Off policy.
   archiving/deleting the chat or muting it can cancel the event.
 - The target is updated by a real session open/view/send/answer action. A
   project-list view or presence heartbeat does not change it.
+- When the last target is desktop, its target heartbeat expires after 45 seconds
+  without a report (for example, the app closes before completion). The event
+  then falls back to all valid iOS registrations for the account. A live desktop
+  target does not fall back; an iOS target always remains unique.
 - Same chat visible on iPhone is silent in-app; another page gets a short
   in-app banner. Background delivery uses a normal APNs alert.
 - Lock-screen content is generic, e.g. “Task completed / Open Cypher to view the

@@ -11,6 +11,37 @@ const row = (kind: string, id: string, fields: Row["fields"]): Row =>
   ({ kind, id, seq: 1, deleted: false, fields, clocks: {} });
 
 describe("notification outbox on real Durable Object SQLite", () => {
+  it("falls back from an expired desktop session target to iOS recipients", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-desktop-fallback"));
+    await runInDurableObject(stub, async (_, state) => {
+      const start = Date.now(), sends: unknown[] = [];
+      const rows = new Map<string, Row>([
+        ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
+        ["spaces/project", row("spaces", "project", {})]
+      ]);
+      const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
+        sends.push(await r.json()); return Response.json({ sent: true });
+      } }) };
+      const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
+        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as unknown as Env;
+      const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
+        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
+        JSON.stringify({ clientId: "desktop", platform: "desktop", at: start }));
+      const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working",
+        startedAt: start - 60_000, updatedAt: start });
+      const done = row("sessions", "chat", { ...running.fields, status: "idle" });
+      rows.set("sessions/chat", done);
+      service.observe([{ before: running, after: done }], "host");
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start + 11_000);
+      try {
+        await service.flush(); expect(sends).toHaveLength(0);
+        clock.mockReturnValue(start + 60_000);
+        await service.flush(); expect(sends).toHaveLength(1);
+      } finally { clock.mockRestore(); }
+    });
+  });
   it.each(["done", "error"] as const)("aggregates async children (%s) without announcing the parent's launch acknowledgement", async status => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName(`notifications-async-${status}`));
     await runInDurableObject(stub, async (_, state) => {

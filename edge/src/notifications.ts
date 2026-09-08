@@ -4,7 +4,7 @@ import { notificationsAvailable } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
   readNotificationJSON, notificationJSON as json, notificationDecision,
-  NOTICE_DELAY_MS, SHORT_RUN_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
+  NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
 } from "./notifications-model";
 
 interface Recipient { id: string; lease: string; installationId: string; epoch: number }
@@ -280,8 +280,18 @@ export class Notifications {
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
       const target = this.target(notice.chatId);
       const recipients = target?.platform === "ios"
-        ? this.recipients().filter(r => r.installationId === target.clientId) : [];
-      if (!recipients.length) { this.remove(notice.id); continue; }
+        ? this.recipients().filter(r => r.installationId === target.clientId)
+        : target?.platform === "desktop" && now - target.at > ACTIVITY_LEASE_MS
+          ? this.recipients()
+          : [];
+      if (!recipients.length) {
+        if (target?.platform === "desktop" && now - target.at <= ACTIVITY_LEASE_MS) {
+          this.put(notice, now + 15_000);
+        } else {
+          this.remove(notice.id);
+        }
+        continue;
+      }
       let retry = false;
       for (const recipient of recipients) {
         // Logout/rotation removes the old local receipt. Cross-account
