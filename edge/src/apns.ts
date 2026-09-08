@@ -12,12 +12,16 @@ const SAFE_APNS_REASONS = new Set([
   "BadExpirationDate", "BadMessageId", "BadPriority", "BadCollapseId",
   "BadPath", "PayloadEmpty", "PayloadTooLarge", "MethodNotAllowed"
 ]);
-function diagnostic(stage: string, status?: number, reason?: unknown): void {
+function diagnostic(stage: string, status?: number, reason?: unknown, error?: unknown): void {
   // Never interpolate error messages, URLs, tokens, payloads or identities.
   console.warn("apns_delivery", JSON.stringify({
     stage, ...(status === undefined ? {} : { status }),
     ...(reason === undefined ? {} : {
       reason: typeof reason === "string" && SAFE_APNS_REASONS.has(reason) ? reason : "Other"
+    }),
+    ...(error === undefined ? {} : {
+      error: error instanceof DOMException ? error.name :
+        error instanceof Error ? error.name : "Unknown"
     })
   }));
 }
@@ -76,5 +80,5 @@ export async function sendAPNs(
     if (["ExpiredProviderToken", "InvalidProviderToken"].includes(body?.reason ?? "")) cached = undefined;
     // Never log tokens, JWTs, private keys, response bodies or request URLs.
     return "retry";
-  } catch { diagnostic(`${stage}_failed`); return "retry"; }
+  } catch (error) { diagnostic(`${stage}_failed`, undefined, undefined, error); return "retry"; }
 }

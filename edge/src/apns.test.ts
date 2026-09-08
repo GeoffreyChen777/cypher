@@ -18,7 +18,7 @@ describe("APNs transport", () => {
     env.APNS_PRIVATE_KEY = "invalid-sensitive-private-key";
     expect(await sendAPNs(env, "0".repeat(64), "production", message())).toBe("retry");
     expect(fetcher).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith("apns_delivery", JSON.stringify({ stage: "provider_token_failed" }));
+    expect(log).toHaveBeenCalledWith("apns_delivery", JSON.stringify({ stage: "provider_token_failed", error: "TypeError" }));
     expect(JSON.stringify(log.mock.calls)).not.toContain(env.APNS_PRIVATE_KEY);
   });
   it("logs only allowlisted APNs reasons and never raw exceptions or bodies", async () => {
@@ -34,7 +34,7 @@ describe("APNs transport", () => {
       JSON.stringify({ stage: "rejected", status: 500, reason: "Other" }));
     vi.stubGlobal("fetch", async () => { throw new Error("sensitive-url"); });
     await sendAPNs(env, "0".repeat(64), "production", message());
-    expect(log).toHaveBeenLastCalledWith("apns_delivery", JSON.stringify({ stage: "transport_failed" }));
+    expect(log).toHaveBeenLastCalledWith("apns_delivery", JSON.stringify({ stage: "transport_failed", error: "Error" }));
     expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive");
   });
   it("is disabled unless explicitly configured", async () => {
