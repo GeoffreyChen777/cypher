@@ -57,7 +57,7 @@ export async function sendAPNs(
     const authorization = `bearer ${await providerToken(env)}`;
     stage = "transport";
     const response = await fetch(`https://${host}/3/device/${token}`, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+      method: "POST",
       headers: {
         authorization, "content-type": "application/json",
         "apns-topic": APNS_TOPIC, "apns-push-type": "alert", "apns-priority": "10",
