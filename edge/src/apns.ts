@@ -3,6 +3,24 @@ import type { Env } from "./env";
 import { noticeText, type NoticeKind } from "./notifications-model";
 
 export const APNS_TOPIC = "ai.mvp-lab.cypher.ios";
+const SAFE_APNS_REASONS = new Set([
+  "BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered",
+  "ExpiredProviderToken", "InvalidProviderToken", "MissingProviderToken",
+  "Forbidden", "TopicDisallowed", "BadTopic", "MissingTopic",
+  "BadEnvironmentKeyIdInToken", "TooManyProviderTokenUpdates",
+  "TooManyRequests", "InternalServerError", "ServiceUnavailable", "Shutdown",
+  "BadExpirationDate", "BadMessageId", "BadPriority", "BadCollapseId",
+  "BadPath", "PayloadEmpty", "PayloadTooLarge", "MethodNotAllowed"
+]);
+function diagnostic(stage: string, status?: number, reason?: unknown): void {
+  // Never interpolate error messages, URLs, tokens, payloads or identities.
+  console.info("apns_delivery", JSON.stringify({
+    stage, ...(status === undefined ? {} : { status }),
+    ...(reason === undefined ? {} : {
+      reason: typeof reason === "string" && SAFE_APNS_REASONS.has(reason) ? reason : "Other"
+    })
+  }));
+}
 export function notificationsAvailable(env: Env): boolean {
   return env.NOTIFICATIONS_ENABLED === "true" && !!env.PUSH_DEVICES &&
     /^[A-Z0-9]{10}$/.test(env.APNS_TEAM_ID ?? "") &&
@@ -25,15 +43,19 @@ export interface PushMessage {
 export async function sendAPNs(
   env: Env, token: string, environment: "development" | "production", message: PushMessage
 ): Promise<"sent" | "invalid" | "retry"> {
-  if (!notificationsAvailable(env)) return "retry";
+  if (!notificationsAvailable(env)) { diagnostic("not_configured"); return "retry"; }
+  let stage = "prepare";
   try {
     const host = environment === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${message.scope}/${message.chatId}`));
     const collapse = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, "0")).join("").slice(0, 48);
+    stage = "provider_token";
+    const authorization = `bearer ${await providerToken(env)}`;
+    stage = "transport";
     const response = await fetch(`https://${host}/3/device/${token}`, {
       method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
       headers: {
-        authorization: `bearer ${await providerToken(env)}`, "content-type": "application/json",
+        authorization, "content-type": "application/json",
         "apns-topic": APNS_TOPIC, "apns-push-type": "alert", "apns-priority": "10",
         "apns-id": message.id, "apns-collapse-id": collapse,
         "apns-expiration": String(Math.floor(Math.min(message.expires, Date.now() + 300_000) / 1000))
@@ -44,13 +66,15 @@ export async function sendAPNs(
           projectId: message.projectId, kind: message.kind, eventId: message.id }
       })
     });
-    if (response.status === 200) return "sent";
+    if (response.status === 200) { diagnostic("accepted", 200); return "sent"; }
+    stage = "response";
     const body = await response.json().catch(() => ({})) as { reason?: string };
-    if (response.status === 410 || ["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"].includes(body.reason ?? "")) {
+    diagnostic("rejected", response.status, body?.reason ?? "Other");
+    if (response.status === 410 || ["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"].includes(body?.reason ?? "")) {
       return "invalid";
     }
-    if (["ExpiredProviderToken", "InvalidProviderToken"].includes(body.reason ?? "")) cached = undefined;
+    if (["ExpiredProviderToken", "InvalidProviderToken"].includes(body?.reason ?? "")) cached = undefined;
     // Never log tokens, JWTs, private keys, response bodies or request URLs.
     return "retry";
-  } catch { return "retry"; }
+  } catch { diagnostic(`${stage}_failed`); return "retry"; }
 }

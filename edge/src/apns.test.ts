@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { APNS_TOPIC, notificationsAvailable, sendAPNs, type PushMessage } from "./apns";
 import type { Env } from "./env";
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 async function configured(): Promise<Env> {
   const key = await generateKeyPair("ES256", { extractable: true });
   return { NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001",
@@ -11,6 +11,32 @@ async function configured(): Promise<Env> {
 const message = (): PushMessage => ({ id: crypto.randomUUID(), scope: "a".repeat(64),
   chatId: "chat", projectId: "project", kind: "completed", expires: Date.now() + 60_000 });
 describe("APNs transport", () => {
+  it("diagnoses provider-key failure without disclosing key material", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const env = await configured();
+    env.APNS_PRIVATE_KEY = "invalid-sensitive-private-key";
+    expect(await sendAPNs(env, "0".repeat(64), "production", message())).toBe("retry");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("apns_delivery", JSON.stringify({ stage: "provider_token_failed" }));
+    expect(JSON.stringify(log.mock.calls)).not.toContain(env.APNS_PRIVATE_KEY);
+  });
+  it("logs only allowlisted APNs reasons and never raw exceptions or bodies", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const env = await configured();
+    vi.stubGlobal("fetch", async () => Response.json({ reason: "InvalidProviderToken", token: "sensitive" }, { status: 403 }));
+    await sendAPNs(env, "0".repeat(64), "production", message());
+    expect(log).toHaveBeenLastCalledWith("apns_delivery",
+      JSON.stringify({ stage: "rejected", status: 403, reason: "InvalidProviderToken" }));
+    vi.stubGlobal("fetch", async () => Response.json({ reason: "sensitive-response" }, { status: 500 }));
+    await sendAPNs(env, "0".repeat(64), "production", message());
+    expect(log).toHaveBeenLastCalledWith("apns_delivery",
+      JSON.stringify({ stage: "rejected", status: 500, reason: "Other" }));
+    vi.stubGlobal("fetch", async () => { throw new Error("sensitive-url"); });
+    await sendAPNs(env, "0".repeat(64), "production", message());
+    expect(log).toHaveBeenLastCalledWith("apns_delivery", JSON.stringify({ stage: "transport_failed" }));
+    expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive");
+  });
   it("is disabled unless explicitly configured", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     expect(notificationsAvailable({} as Env)).toBe(false);
