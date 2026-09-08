@@ -12,7 +12,7 @@ const message = (): PushMessage => ({ id: crypto.randomUUID(), scope: "a".repeat
   chatId: "chat", projectId: "project", kind: "completed", expires: Date.now() + 60_000 });
 describe("APNs transport", () => {
   it("diagnoses provider-key failure without disclosing key material", async () => {
-    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     const env = await configured();
     env.APNS_PRIVATE_KEY = "invalid-sensitive-private-key";
@@ -22,7 +22,7 @@ describe("APNs transport", () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain(env.APNS_PRIVATE_KEY);
   });
   it("logs only allowlisted APNs reasons and never raw exceptions or bodies", async () => {
-    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
     const env = await configured();
     vi.stubGlobal("fetch", async () => Response.json({ reason: "InvalidProviderToken", token: "sensitive" }, { status: 403 }));
     await sendAPNs(env, "0".repeat(64), "production", message());
