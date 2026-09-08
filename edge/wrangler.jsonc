@@ -80,7 +80,7 @@
     "AUTH_MODE": "workos",
     // Enable only after configuring APNS_PRIVATE_KEY (Worker secret),
     // APNS_TEAM_ID and APNS_KEY_ID and completing real-device validation.
-    "NOTIFICATIONS_ENABLED": "false"
+    "NOTIFICATIONS_ENABLED": "true"
   },
   "observability": {
     "enabled": true,
