@@ -181,6 +181,10 @@ if [ -f "$HOME/.config/systemd/user/cypher.service" ] &&
   systemctl --user restart cypher.service
   echo "✓ Cypher service switched to app/current"
   service_migrated=yes
+elif [ -f "$HOME/.config/systemd/user/cypher.service" ] &&
+     grep -Fq 'ExecStart=:\"%h/.cypher/app/current/cypher\" headless' \
+       "$HOME/.config/systemd/user/cypher.service"; then
+  service_migrated=yes
 fi
 # curl | sh leaves stdin carrying the script, not user input. Reopen the
 # controlling terminal explicitly, without ever reading answers from the pipe.
