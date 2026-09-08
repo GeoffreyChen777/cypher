@@ -1739,6 +1739,33 @@ impl AppState {
         .detach();
     }
 
+    pub fn report_notification_activity(
+        &self,
+        mut activity: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.engine.clone() else {
+            return;
+        };
+        let Some(AuthState::SignedIn {
+            user,
+            org_id: Some(org),
+        }) = &self.auth
+        else {
+            return;
+        };
+        activity["expectedUserId"] = serde_json::json!(user.id);
+        activity["expectedOrgId"] = serde_json::json!(org);
+        cx.spawn(async move |_, _| {
+            // Old engines/disabled notification services must not affect the UI.
+            let _ = handle
+                .client()
+                .call(methods::NOTIFICATION_ACTIVITY, activity)
+                .await;
+        })
+        .detach();
+    }
+
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;

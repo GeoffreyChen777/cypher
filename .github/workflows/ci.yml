@@ -91,4 +91,5 @@ jobs:
           cargo test --locked -p cypher-ui --lib runtime_
           cargo test --locked -p cypher-ui --lib mcp_
           cargo test --locked -p cypher-ui --lib state::tests
+          cargo test --locked -p cypher-ui --lib notification_activity::tests
           cargo test --locked -p cypher-ui --lib unix_engine_directory_does_not_redirect_client_preferences

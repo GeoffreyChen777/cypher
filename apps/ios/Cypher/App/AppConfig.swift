@@ -20,6 +20,7 @@ final class AppConfig: @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: AuthTokens?
     private var devBearer: String?
+    private var invalidated = false
     private let refreshGate = RefreshGate()
 
     /// Injectable for tests: how a fresh AuthClient is built. The production
@@ -51,8 +52,7 @@ final class AppConfig: @unchecked Sendable {
     func currentToken() async -> String? {
         switch mode {
         case .dev:
-            lock.lock(); defer { lock.unlock() }
-            return devBearer
+            return readDevBearer()
         case .workos:
             // Fast path: a still-fresh token needs no refresh.
             if let current = readTokens(), !Self.isExpired(jwt: current.accessToken) {
@@ -61,7 +61,8 @@ final class AppConfig: @unchecked Sendable {
             let refreshed = await refreshGate.refresh { [self] in
                 await performRefresh()
             }
-            return refreshed?.accessToken
+            guard refreshed != nil else { return nil }
+            return readTokens()?.accessToken
         }
     }
 
@@ -81,8 +82,7 @@ final class AppConfig: @unchecked Sendable {
         do {
             let refreshed = try await client.refresh(refreshToken: current.refreshToken,
                                                      organizationId: orgId)
-            persist(refreshed)
-            return refreshed
+            return persist(refreshed) ? refreshed : nil
         } catch let error as AuthError {
             if error.isPermanent {
                 // The session is dead (revoked/deleted) and can never
@@ -104,23 +104,35 @@ final class AppConfig: @unchecked Sendable {
 
     private func readTokens() -> AuthTokens? {
         lock.lock(); defer { lock.unlock() }
-        return tokens
+        return invalidated ? nil : tokens
     }
-
-    private func updateTokens(_ new: AuthTokens) {
+    private func readDevBearer() -> String? {
         lock.lock(); defer { lock.unlock() }
-        tokens = new
+        return invalidated ? nil : devBearer
     }
 
-    private func persist(_ new: AuthTokens) {
-        updateTokens(new)
+    /// In-flight notification/sync refreshes from an old account must not
+    /// repopulate Keychain after logout or overwrite a newly signed-in account.
+    func invalidate() {
+        lock.lock(); defer { lock.unlock() }
+        invalidated = true
+        tokens = nil
+        devBearer = nil
+    }
+
+    private func persist(_ new: AuthTokens) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !invalidated else { return false }
+        tokens = new
         Keychain.save(new.accessToken, key: "accessToken")
         Keychain.save(new.refreshToken, key: "refreshToken")
+        return true
     }
 
     /// Permanent rejection: wipe in-memory and stored credentials.
     private func clearTokens() {
         lock.lock(); defer { lock.unlock() }
+        guard !invalidated else { return }
         tokens = nil
         Keychain.delete(key: "accessToken")
         Keychain.delete(key: "refreshToken")

@@ -11,3 +11,8 @@ node_modules
 .wrangler
 build/
 edge/dist/
+
+# Xcode per-user workspace state and local distribution products.
+**/xcuserdata/
+*.xcarchive/
+*.ipa

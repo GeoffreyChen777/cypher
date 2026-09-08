@@ -49,6 +49,7 @@ struct SpaceView: View {
         .background(Theme.surface.ignoresSafeArea())
         .navigationTitle(space?.displayName ?? "Project")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
@@ -69,6 +70,7 @@ struct SpaceView: View {
                     }
                 }
             }
+            .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     path.append(.newSession(spaceId: spaceId))

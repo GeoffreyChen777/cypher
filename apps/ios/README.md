@@ -8,7 +8,7 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
 
 ### Mobile scope
 
-- **Project-first:** Home lists projects with their owning device and folder;
+- **Project-first:** Home lists projects with their owning device;
   open a project to create or resume its sessions, or access its archive.
   `Space`/`spaceId` remain the shared wire-schema names — no schema migration.
 - **Pi-only:** new sessions use Pi. Existing non-Pi sessions remain readable
@@ -63,6 +63,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   replacing the workspace. Queue/upload failure retains them; successful
   queuing consumes only the versions included in that send. Bounds: 32
   comments, 16k characters per quote, 8k per comment, 64 KiB annotation JSON.
+- **Smart notifications:** Home → Notifications configures important events,
+  desktop-activity suppression, per-Project muting and foreground in-app banners.
+  Registration, logout revocation and notification taps are account-scoped.
+  Production delivery is still disabled pending APNs credentials, portal
+  capability configuration and real-device acceptance. See
+  [`docs/notifications.md`](../../docs/notifications.md) for rollout boundaries.
 
 ### Validation boundary
 
@@ -78,6 +84,9 @@ provider setup, offline recovery, existing sessions and archived sessions.
 
 ## Build & run
 
+For TestFlight/App Store preparation, signing and publication boundaries, see
+[`docs/ios-release.md`](../../docs/ios-release.md).
+
 Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs).
 
 ```sh
@@ -91,6 +100,12 @@ automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
 (cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
 desktop's pulldown-cmark config).
+
+Simulator tests that exercise the real Keychain require local ad-hoc signing:
+use `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-` with `xcodebuild ... test`.
+An unsigned test host (`CODE_SIGNING_ALLOWED=NO`) cannot access Keychain and
+returns `-34018`; no physical device or portal provisioning update is needed
+for these simulator tests.
 
 ### App icon
 
@@ -168,7 +183,7 @@ Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
 
 | Desktop | iOS |
 | --- | --- |
-| Sidebar: Projects + Sessions | Project-first Home, owning device/path, then sessions |
+| Sidebar: Projects + Sessions | Project-first Home, owning device, then sessions |
 | Horizontal session tabs per project | Project detail: vertical session list (creation order) |
 | Tab close = archive | Swipe-to-archive |
 | Archived shelf under the sidebar list (open by default, Show-more paging, hover-swap Unarchive) | Same shelf under Home/space lists; unarchive is swipe-to-unarchive |

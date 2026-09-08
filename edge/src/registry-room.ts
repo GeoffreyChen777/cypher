@@ -21,6 +21,7 @@
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { Notifications } from "./notifications";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -52,6 +53,8 @@ export class RegistryRoom implements DurableObject {
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
+  private readonly notifications: Notifications;
+  private alarmScheduling: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -63,6 +66,7 @@ export class RegistryRoom implements DurableObject {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
+    this.notifications = new Notifications(ctx, env, (kind, id) => this.loadRow(kind, id), () => this.scheduleAlarm());
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
@@ -154,6 +158,9 @@ export class RegistryRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+    if (url.pathname.startsWith("/notifications/")) {
+      return this.notifications.fetch(request, url.pathname.slice("/notifications/".length));
+    }
 
     if (url.pathname === "/ws") {
       const device = url.searchParams.get("device") ?? "";
@@ -234,8 +241,10 @@ export class RegistryRoom implements DurableObject {
       // detects `state.seq < cursor` on its next hello and re-seeds the table
       // from its local rows with their ORIGINAL clocks (registry-core
       // rowToSeedOp) — the ws4 repair recipe, built in.
+      this.notifications.clearPending();
       this.ctx.storage.sql.exec("DELETE FROM rows");
       this.ctx.storage.sql.exec("DELETE FROM meta");
+      this.scheduleAlarm();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -366,10 +375,12 @@ export class RegistryRoom implements DurableObject {
     // event commit together, so a mid-batch crash never persists half a batch.
     const nextSeq = this.seq() + 1;
     const touched = new Map<string, Row>();
+    const originals = new Map<string, Row | undefined>();
     let applied = 0;
     for (const op of ops) {
       const key = `${op.kind} ${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
+      if (!originals.has(key)) originals.set(key, before);
       const { row, changed } = applyOp(before, op);
       if (!changed || row === undefined) continue;
       applied += 1;
@@ -378,6 +389,7 @@ export class RegistryRoom implements DurableObject {
     }
     if (applied > 0) {
       for (const row of touched.values()) this.saveRow(row);
+      this.notifications.observe([...touched].map(([key, after]) => ({ before: originals.get(key), after })), device);
       this.setMeta("seq", String(nextSeq));
       this.markBackupDirty();
     }
@@ -426,15 +438,40 @@ export class RegistryRoom implements DurableObject {
   }
 
   private markBackupDirty(): void {
+    const alreadyDirty = this.getMeta("backupDirty") === "1";
     this.setMeta("backupDirty", "1");
-    void this.ctx.storage.getAlarm().then((existing) => {
-      if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
-    });
+    if (!Number(this.getMeta("backupDue") ?? "0")) {
+      this.setMeta("backupDue", String(Date.now() + (alreadyDirty ? 0 : DAY_MS)));
+    }
+    this.scheduleAlarm();
+  }
+
+  private scheduleAlarm(): void {
+    const schedule = async () => {
+      // Pre-notification rooms have backupDirty but no backupDue. Persist a
+      // deadline once; notification rescheduling must not move it forever.
+      if (this.getMeta("backupDirty") === "1" && !Number(this.getMeta("backupDue") ?? "0")) {
+        this.setMeta("backupDue", String(Date.now()));
+      }
+      const notificationDue = this.notifications.nextDue() ?? Infinity;
+      const backupDue = this.getMeta("backupDirty") === "1"
+        ? Number(this.getMeta("backupDue") ?? "0") : Infinity;
+      const due = Math.min(notificationDue, backupDue);
+      if (Number.isFinite(due)) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, due));
+      else await this.ctx.storage.deleteAlarm();
+    };
+    this.alarmScheduling = this.alarmScheduling.then(schedule, schedule);
+    this.ctx.waitUntil(this.alarmScheduling);
   }
 
   /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
   async alarm(): Promise<void> {
-    if (this.getMeta("backupDirty") !== "1") return; // idle: stop the chain
+    await this.notifications.flush();
+    if (this.getMeta("backupDirty") !== "1" || Number(this.getMeta("backupDue") ?? "0") > Date.now()) {
+      this.scheduleAlarm();
+      await this.alarmScheduling;
+      return;
+    }
 
     // 1. Tombstone GC. Raising gcFloor to the purged rows' max seq forces a
     //    full resync for any cursor that might have missed a purged delete.
@@ -464,7 +501,12 @@ export class RegistryRoom implements DurableObject {
       );
       this.setMeta("backupSeq", String(seq));
     }
-    this.setMeta("backupDirty", "0");
+    if (this.seq() === seq) {
+      this.setMeta("backupDirty", "0");
+      this.setMeta("backupDue", "0");
+    } else this.setMeta("backupDue", String(Date.now() + DAY_MS));
+    this.scheduleAlarm();
+    await this.alarmScheduling;
   }
 }
 

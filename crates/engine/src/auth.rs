@@ -1113,6 +1113,52 @@ impl Auth {
         }
     }
 
+    /// Desktop viewport activity, never engine liveness. Bind the request to
+    /// the identity the UI observed; a login/organization switch fails closed.
+    pub async fn report_notification_activity(
+        &self,
+        expected_user: &str,
+        expected_org: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, EngineError> {
+        let token = self
+            .access_token()
+            .await
+            .ok_or_else(|| EngineError::Other("not signed in".into()))?;
+        let state = self.state();
+        if state.user().map(|u| u.id.as_str()) != Some(expected_user)
+            || state.org_id() != Some(expected_org)
+            || !expected_org
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(EngineError::Other("notification identity changed".into()));
+        }
+        let url = format!(
+            "{}/registry/{expected_org}/notifications/activity",
+            self.inner.config.edge_url.trim_end_matches('/')
+        );
+        let response = self
+            .inner
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| EngineError::Other("notification activity unavailable".into()))?;
+        if !response.status().is_success() {
+            return Err(EngineError::Other(
+                "notification activity unavailable".into(),
+            ));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| EngineError::Other("invalid notification activity response".into()))
+    }
+
     async fn authed_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,

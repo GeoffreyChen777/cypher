@@ -191,7 +191,8 @@ struct AuthClient {
 enum Keychain {
     private static let service = "ai.mvp-lab.cypher.ios"
 
-    static func save(_ value: String, key: String) {
+    @discardableResult
+    static func save(_ value: String, key: String, thisDeviceOnly: Bool = false) -> OSStatus {
         let data = Data(value.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -201,8 +202,9 @@ enum Keychain {
         SecItemDelete(query as CFDictionary)
         var add = query
         add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        add[kSecAttrAccessible as String] = thisDeviceOnly
+            ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(add as CFDictionary, nil)
     }
 
     static func load(key: String) -> String? {

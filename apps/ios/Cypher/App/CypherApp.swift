@@ -6,6 +6,7 @@ import SwiftUI
 
 @main
 struct CypherApp: App {
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -19,7 +20,12 @@ struct CypherApp: App {
                 // for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
+                .onAppear { pushDelegate.controller = model.notifications }
+                .overlay(alignment: .top) {
+                    InAppNotificationBanner(controller: model.notifications)
+                }
                 .onChange(of: scenePhase) { _, phase in
+                    model.notifications.setForeground(phase == .active)
                     if phase == .background {
                         model.flushDocs()
                     } else if phase == .active {

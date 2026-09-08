@@ -1366,6 +1366,7 @@ impl AuthRpc {
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
                 | methods::SELECT_ORG
+                | methods::NOTIFICATION_ACTIVITY
         )
     }
 }
@@ -1374,6 +1375,40 @@ impl AuthRpc {
 impl RpcService for AuthRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         match method {
+            methods::NOTIFICATION_ACTIVITY => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    expected_user_id: String,
+                    expected_org_id: String,
+                    client_id: String,
+                    sequence: u64,
+                    foreground: bool,
+                    interaction_age_ms: u64,
+                    chat_id: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let valid_id = |s: &str| {
+                    !s.is_empty()
+                        && s.len() <= 128
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                };
+                if !valid_id(&p.client_id)
+                    || p.chat_id.as_deref().is_some_and(|id| !valid_id(id))
+                    || p.interaction_age_ms > 86_400_000
+                    || p.sequence == 0
+                    || p.sequence > 9_007_199_254_740_991
+                {
+                    return Err(RpcError::BadParams("invalid activity".into()));
+                }
+                let response = self.auth.report_notification_activity(&p.expected_user_id, &p.expected_org_id,
+                    serde_json::json!({
+                        "clientId": p.client_id, "sequence": p.sequence, "platform": "desktop", "foreground": p.foreground,
+                        "interactionAgeMs": p.interaction_age_ms, "chatId": p.chat_id,
+                    })).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&response)
+            }
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
                 let url = self

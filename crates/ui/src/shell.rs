@@ -1052,6 +1052,7 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
+    notification_activity: crate::notification_activity::DesktopActivity,
     /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
     /// [`Shell::new`].
     debug_dialog: Option<String>,
@@ -1319,7 +1320,11 @@ impl Shell {
                             .as_deref()
                             .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
                     };
-                    if live {
+                    if live
+                        || shell
+                            .notification_activity
+                            .heartbeat_due(std::time::Instant::now())
+                    {
                         cx.notify();
                     }
                 });
@@ -1456,6 +1461,7 @@ impl Shell {
             resort_epoch: 0,
             sidebar_collapsed: std::collections::HashSet::new(),
             was_window_active: false,
+            notification_activity: Default::default(),
             debug_dialog,
             debug_gate,
             sidebar_tween: None,
@@ -7443,6 +7449,29 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let foreground = window.is_window_active();
+        let selected = matches!(self.route, Route::Chat)
+            .then(|| self.state.read(cx).selected_chat.clone())
+            .flatten();
+        if let Some(activity) =
+            self.notification_activity
+                .sample(foreground, selected, std::time::Instant::now())
+        {
+            self.state.update(cx, |state, cx| {
+                state.report_notification_activity(activity, cx)
+            });
+        }
+        let weak = cx.entity().downgrade();
+        let scroll_activity = crate::notification_activity::scroll_observer(move |cx| {
+            let _ = weak.update(cx, |shell, cx| {
+                if shell
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            });
+        });
         // A sidebar chat selection can leave settings without close_settings.
         // Do not retain a hidden credential field in the cached page entity.
         if self.route != Route::Settings(SettingsSection::Providers)
@@ -7522,6 +7551,23 @@ impl Render for Shell {
             .text_color(text)
             .font_family(font)
             .text_size(px(14.0))
+            .child(scroll_activity)
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            }))
+            .capture_key_down(cx.listener(|this, _, _, cx| {
+                if this
+                    .notification_activity
+                    .interact(std::time::Instant::now())
+                {
+                    cx.notify();
+                }
+            }))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))

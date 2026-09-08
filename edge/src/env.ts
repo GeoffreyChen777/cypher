@@ -21,6 +21,12 @@ export interface Env {
    * routes (code exchange, refresh, orgs). Unset ⇒ those routes answer 501,
    * matching the old apps/server dev-mode behavior. */
   WORKOS_API_KEY?: string;
+  PUSH_DEVICES?: DurableObjectNamespace;
+  NOTIFICATIONS_ENABLED?: string;
+  APNS_TEAM_ID?: string;
+  APNS_KEY_ID?: string;
+  /** APNs provider key, NOT the App Store Connect upload key. Worker secret. */
+  APNS_PRIVATE_KEY?: string;
 }
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying

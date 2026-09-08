@@ -25,6 +25,7 @@ struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [Route] = []
     @State private var showNewSpace = false
+    @State private var showNotifications = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeProjectFilter") private var spaceFilter: String = ""
 
@@ -51,6 +52,7 @@ struct HomeView: View {
             .background(Theme.surface.ignoresSafeArea())
             .navigationTitle("Cypher")  // feeds the back menu; not displayed
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar(removing: .title)
             .navigationDestination(for: Route.self) { route in
                 switch route {
@@ -93,6 +95,7 @@ struct HomeView: View {
                         if model.demo != nil {
                             Text("Demo mode")
                         }
+                        Button("Notifications") { showNotifications = true }
                         Button("Sign out", role: .destructive) { model.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
@@ -104,10 +107,44 @@ struct HomeView: View {
                     path.append(.space(spaceId))
                 }
             }
+            .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
+            .onChange(of: path) { _, route in
+                if case .chat(let id) = route.last { model.notifications.viewing(id) }
+                else { model.notifications.viewing(nil) }
+            }
+            .task(id: "\(model.notifications.pendingNavigation?.id ?? "")/\(model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined())") {
+                guard let pending = model.notifications.pendingNavigation else { return }
+                guard pending.scope == model.notifications.scope else {
+                    model.notifications.pendingNavigation = nil
+                    return
+                }
+                if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
+                    var route: [Route] = [.space(pending.projectId)]
+                    if let relation = chat.child, let parent = model.chat(id: relation.parentChatId),
+                       parent.deviceId == chat.deviceId { route.append(.chat(parent.id)) }
+                    route.append(.chat(chat.id))
+                    path = route
+                    model.notifications.viewing(chat.id)
+                    model.notifications.pendingNavigation = nil
+                } else {
+                    try? await Task.sleep(for: .seconds(12))
+                    guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
+                    model.notifications.pendingNavigation = nil
+                    model.notifications.navigationError = "This session isn't available in the current workspace."
+                }
+            }
+            .alert("Notification", isPresented: Binding(
+                get: { model.notifications.navigationError != nil },
+                set: { if !$0 { model.notifications.navigationError = nil } }
+            )) {
+                Button("OK") { model.notifications.navigationError = nil }
+            } message: { Text(model.notifications.navigationError ?? "") }
             .task(id: model.overviewChats.map(\.id).joined()) {
                 model.preloadSessions()
             }
             .onAppear {
+                if case .chat(let id) = path.last { model.notifications.viewing(id) }
+                else { model.notifications.viewing(nil) }
                 if let route = model.launchRoute {
                     model.launchRoute = nil
                     // Push the whole stack atomically — appending from a child's

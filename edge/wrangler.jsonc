@@ -34,7 +34,8 @@
       { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
-      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "PUSH_DEVICES", "class_name": "PushDevice" }
     ]
   },
   "migrations": [
@@ -53,6 +54,10 @@
       // replace SessionRoom's loro-aware s2 rooms.
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["PushDevice"]
     }
   ],
   "r2_buckets": [
@@ -72,9 +77,15 @@
     // WORKOS_API_KEY is a wrangler secret
     // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
     "WORKOS_CLIENT_ID": "client_01M0JTKFKB6QZWHZDGYW7AN8QH",
-    "AUTH_MODE": "workos"
+    "AUTH_MODE": "workos",
+    // Enable only after configuring APNS_PRIVATE_KEY (Worker secret),
+    // APNS_TEAM_ID and APNS_KEY_ID and completing real-device validation.
+    "NOTIFICATIONS_ENABLED": "false"
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    // APNs device addresses are embedded in outbound URLs; do not persist
+    // outbound request tracing. Incoming routes contain no token/lease.
+    "traces": { "enabled": false }
   }
 }

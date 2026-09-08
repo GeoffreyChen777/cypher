@@ -47,9 +47,11 @@ import { SessionRoom } from "./session-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
+import { PushDevice } from "./push-device";
+import { object, readNotificationJSON } from "./notifications-model";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PushDevice };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -162,6 +164,26 @@ export default {
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
     if (authRouted) return authRouted;
+
+    // A revocation-only capability survives account logout/expired auth.
+    // The opaque binding id + random lease can only disable that registration;
+    // it cannot read data, register a token or send a notification.
+    if (url.pathname === "/notifications/revoke" && request.method === "POST") {
+      if (!env.PUSH_DEVICES) return json({ error: "unavailable" }, 503);
+      try {
+        const body = object(await readNotificationJSON(request));
+        if (!/^[a-f0-9]{64}$/.test(String(body.bindingId)) ||
+            !/^[a-f0-9]{64}$/.test(String(body.scope)) ||
+            !/^[a-f0-9-]{36}$/.test(String(body.lease)) ||
+            typeof body.epoch !== "number" || !Number.isSafeInteger(body.epoch) || body.epoch < 1) {
+          return json({ error: "invalid" }, 400);
+        }
+        return env.PUSH_DEVICES.get(env.PUSH_DEVICES.idFromString(String(body.bindingId)))
+          .fetch(new Request("https://push/unregister", { method: "POST", body: JSON.stringify({
+            scope: body.scope, lease: body.lease, epoch: body.epoch
+          }) }));
+      } catch { return json({ error: "invalid" }, 400); }
+    }
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
@@ -307,6 +329,10 @@ export default {
       const orgId = parts[1];
       if (auth.orgId !== orgId) return json({ error: "forbidden" }, 403);
       const room = `reg1/${orgId}/${auth.userId}`;
+      if (parts.length === 4 && parts[2] === "notifications" &&
+          ["settings", "activity", "register", "unregister"].includes(parts[3] ?? "")) {
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, `/notifications/${parts[3]}`, "");
+      }
       if (parts[2] === "ws") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);

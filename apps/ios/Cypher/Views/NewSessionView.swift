@@ -132,9 +132,9 @@ struct NewSessionView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
         .navigationTitle("New session")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(removing: .title)  // the leading header owns the bar
+        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .principal) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("New session")
                         .font(Theme.sans(13, weight: .medium))
@@ -147,8 +147,7 @@ struct NewSessionView: View {
                             .truncationMode(.middle)
                     }
                 }
-                // 170: enough slack that the bar never evicts the item into
-                // the "…" overflow (SessionView.headerChromeInset).
+                // Bound the title while leaving room for native Back.
                 .frame(width: max(140, viewWidth - 170), alignment: .leading)
             }
             // Bare text on the bar, not a glass capsule.

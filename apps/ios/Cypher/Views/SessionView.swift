@@ -9,11 +9,8 @@ struct SessionView: View {
     let chatId: String
     @Binding var path: [Route]
 
-    /// Width the nav bar's own controls need around a LEADING title — the
-    /// back button ahead of it, bar margins, and slack. Generous on purpose:
-    /// a fixed-width item that does NOT fit gets evicted into a trailing "…"
-    /// overflow menu (where a custom text stack renders as nothing) — seen on
-    /// iPhone Air at 110.
+    /// Reserve room around the native title slot for Back and child-session
+    /// actions. A bounded title avoids an unbounded custom title-view proposal.
     private static let headerChromeInset: CGFloat = 170
 
     /// The view's own width, the only reliable basis for capping the principal
@@ -53,13 +50,15 @@ struct SessionView: View {
         }
         .navigationTitle(chat?.displayTitle ?? "Session")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(removing: .title)  // the leading header owns the bar
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             if let chat {
                 // Static, left-aligned session header — model/effort changes
                 // moved into the composer's picker chips.
-                ToolbarItem(placement: .topBarLeading) {
+                // Static text belongs in the native title slot. Putting a
+                // wide title in topBarLeading makes it a bar-button item that
+                // can morph with Back's Liquid Glass background during a pop.
+                ToolbarItem(placement: .principal) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(chat.displayTitle)
                             .font(Theme.sans(13, weight: .medium))
@@ -74,11 +73,8 @@ struct SessionView: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    // A FIXED width, not a max: iOS 26 proposes leading items
-                    // almost nothing next to the back button, so a flexible
-                    // frame collapses to its minimum ("S…"). Claiming the
-                    // remainder of the bar outright lays the texts out with
-                    // real room and truncates them properly.
+                    // Keep the title bounded without creating a leading
+                    // bar-button container or changing native Back behavior.
                     .frame(width: max(140, viewWidth - Self.headerChromeInset),
                            alignment: .leading)
                 }

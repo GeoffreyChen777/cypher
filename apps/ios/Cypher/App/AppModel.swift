@@ -22,6 +22,7 @@ final class AppModel {
     var phase: Phase = .signedOut
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
+    let notifications = NotificationController()
     private var sessionStores: [String: SessionStore] = [:]
     private var config: AppConfig?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -262,6 +263,8 @@ final class AppModel {
     }
 
     func signOut() {
+        config?.invalidate()
+        notifications.disconnect()
         workspace?.stop()
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
@@ -282,10 +285,12 @@ final class AppModel {
 
     private func connect(url: URL, mode: AppConfig.Mode, userId: String, orgId: String,
                          tokens: AuthTokens?, devBearer: String?) {
+        self.config?.invalidate()
         let config = AppConfig(edgeURL: url, mode: mode, userId: userId, orgId: orgId,
                                deviceId: deviceId, deviceName: deviceName,
                                tokens: tokens, devBearer: devBearer)
         self.config = config
+        notifications.bind(config)
         let store = WorkspaceStore(config: config)
         workspace = store
         store.start()
