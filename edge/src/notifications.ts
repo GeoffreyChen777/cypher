@@ -72,8 +72,24 @@ export class Notifications {
             typeof chat.fields.spaceId !== "string" || !this.row("spaces", chat.fields.spaceId)) {
           return json({ ok: true, ignored: true });
         }
+        const subagents = (Array.isArray(body.subagents) ? body.subagents : []).slice(0, 32).map(value => {
+          const run = object(value);
+          if (!["async", "sync", "message"].includes(String(run.mode)) ||
+              !["running", "done", "error"].includes(String(run.status)) ||
+              typeof run.updatedAt !== "number") throw new Error();
+          return { mode: String(run.mode), status: String(run.status), updatedAt: run.updatedAt };
+        });
+        const eventFields = { status, subagents } as Row["fields"];
+        const last = this.get<Row["fields"]>(`eventState:${chatId}`);
+        if (last && typeof last.updatedAt === "number" && last.updatedAt >= body.updatedAt) {
+          return json({ ok: true, stale: true });
+        }
+        this.set(`eventState:${chatId}`, { ...eventFields, updatedAt: body.updatedAt });
         const previous = this.get<string>(`eventStatus:${chatId}`);
-        if (previous === status) return json({ ok: true, duplicate: true });
+        const children = asyncChildren(eventFields);
+        const childrenSettled = status === "idle" && previous === "idle" &&
+          asyncChildren(last).live && !children.live;
+        if (previous === status && !childrenSettled) return json({ ok: true, duplicate: true });
         this.set(`eventStatus:${chatId}`, status);
         if (status === "working") {
           this.set(`run:${chatId}`, typeof body.startedAt === "number" ? String(body.startedAt) : crypto.randomUUID());
@@ -82,7 +98,10 @@ export class Notifications {
         let kind: NoticeKind | undefined;
         if (status === "awaitingInput") kind = "input";
         else if (status === "errored") kind = "failed";
-        else if (status === "idle" && (previous === "working" || previous === "awaitingInput")) kind = "completed";
+        else if (status === "idle" && !children.live &&
+          (previous === "working" || previous === "awaitingInput" || childrenSettled)) {
+          kind = children.failed ? "failed" : "completed";
+        }
         if (!kind) return json({ ok: true });
         const run = this.get<string>(`run:${chatId}`) ?? crypto.randomUUID();
         const startedAt = typeof body.startedAt === "number" ? body.startedAt : Number(run);
@@ -95,9 +114,12 @@ export class Notifications {
           id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
           child: !!chat.fields.child, run, at: Date.now(),
           expires: Date.now() + (kind === "input" ? 8 * 3_600_000 : 600_000),
-          recipients, attempt: 0, sessionStatus: status
+          recipients, attempt: 0, sessionStatus: status, source: "event"
         };
+        if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) return json({ ok: true, duplicate: true });
+        this.set(`enqueued:${chatId}`, `${run}/${kind}`);
         for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
+        if (this.events().length >= 256) this.remove(this.events()[0].notice.id);
         this.put(notice, Date.now() + NOTICE_DELAY_MS);
         this.schedule();
         return json({ ok: true, queued: true });
@@ -145,15 +167,13 @@ export class Notifications {
     return json({ error: "not_found" }, 404);
   }
 
-  observe(changes: { before: Row | undefined; after: Row }[], _sourceDevice: string): void {
+  observe(changes: { before: Row | undefined; after: Row }[], sourceDevice: string): void {
     if (!notificationsAvailable(this.env)) return;
     const now = Date.now();
     for (const { before, after } of changes) {
-      // A registry mutation can be relayed by iOS or another viewer. The
-      // execution owner is the session row's deviceId, not the device that
-      // happened to replicate the row. Requiring sourceDevice here drops
-      // remote runs started from iOS before their host reaches terminal state.
-      if (after.kind !== "sessions" || after.deleted || typeof after.fields.deviceId !== "string") continue;
+      // The execution engine does publish its session row to the registry,
+      // including iOS-started runs. Only that host's mutations are eligible.
+      if (after.kind !== "sessions" || after.deleted || after.fields.deviceId !== sourceDevice) continue;
       const chatId = after.fields.chatId;
       if (typeof chatId !== "string") continue;
       const status = after.fields.status;
@@ -186,12 +206,15 @@ export class Notifications {
         if (kind === "completed" && Number.isFinite(began) && now - began < SHORT_RUN_MS) continue;
       } else continue;
       const chat = this.row("chats", chatId);
-      if (!chat || chat.deleted || chat.fields.archived || typeof chat.fields.spaceId !== "string") continue;
+      if (!chat || chat.deleted || chat.fields.archived || typeof chat.fields.spaceId !== "string" ||
+          chat.fields.deviceId !== after.fields.deviceId) continue;
       const project = this.row("spaces", chat.fields.spaceId);
       if (!project || project.deleted) continue;
       if (!run) { run = crypto.randomUUID(); this.set(key, run); }
       const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
       if (!recipients.length) continue;
+      if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) continue;
+      this.set(`enqueued:${chatId}`, `${run}/${kind}`);
       const notice: Notice = {
         id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
         child: !!chat.fields.child, run, at: now, expires: now + (kind === "input" ? 8 * 3_600_000 : 600_000),
@@ -236,7 +259,12 @@ export class Notifications {
     for (const { notice, due } of this.events().slice(0, 2)) {
       if (due > now) break;
       const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
-      const session = this.row("sessions", notice.chatId);
+      const session = notice.source === "event"
+        ? (() => {
+          const state = this.get<{ status: string; updatedAt: number }>(`eventState:${notice.chatId}`);
+          return state ? { fields: state, deleted: false } : undefined;
+        })()
+        : this.row("sessions", notice.chatId);
       const expected = notice.sessionStatus ?? { completed: "idle", failed: "errored", input: "awaitingInput" }[notice.kind];
       if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
           !session || session.deleted || session.fields.status !== expected ||

@@ -1193,7 +1193,11 @@ impl Auth {
                 "status": session.status,
                 "startedAt": session.started_at.map(|x| x.timestamp_millis()),
                 "updatedAt": session.updated_at.timestamp_millis(),
-                "subagents": session.subagents,
+                "subagents": session.subagents.iter().take(32).map(|run| serde_json::json!({
+                    "mode": run.mode,
+                    "status": run.status,
+                    "updatedAt": run.updated_at,
+                })).collect::<Vec<_>>(),
             }))
             .send()
             .await

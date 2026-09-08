@@ -48,6 +48,7 @@ import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import { PushDevice } from "./push-device";
+export { APNsSender } from "./apns-sender";
 import { object, readNotificationJSON } from "./notifications-model";
 import installSh from "./install.sh";
 

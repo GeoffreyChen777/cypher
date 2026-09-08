@@ -2,7 +2,7 @@
  * or account switching. Registration/send are internal; public revocation
  * requires the exact opaque lease capability. */
 import type { Env } from "./env";
-import { sendAPNs, type PushMessage } from "./apns";
+import { type PushMessage } from "./apns";
 import { notificationJSON as json, object, identifier, readNotificationJSON } from "./notifications-model";
 
 interface Registration {
@@ -76,7 +76,10 @@ export class PushDevice implements DurableObject {
     if (previous?.state === "sending" && Date.now() - previous.at < 20_000) return json({ retry: true });
     if (message.expires <= Date.now()) return json({ permanent: true });
     await this.ctx.storage.put(key, { state: "sending", at: Date.now() });
-    const outcome = await sendAPNs(this.env, current.token, current.environment, message);
+    // The actual Apple connection runs in a normal Worker entrypoint through
+    // a same-script service binding, not in Durable Object execution context.
+    const outcome = await this.env.APNS_SENDER?.send(current.token, current.environment, message)
+      .catch(() => "retry" as const) ?? "retry";
     await this.ctx.storage.put(key, { state: outcome, at: Date.now() });
     if (outcome === "invalid") {
       // A re-registration may have happened while APNs was responding.

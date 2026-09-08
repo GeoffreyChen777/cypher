@@ -38,6 +38,9 @@
       { "name": "PUSH_DEVICES", "class_name": "PushDevice" }
     ]
   },
+  "services": [
+    { "binding": "APNS_SENDER", "service": "cypher-edge", "entrypoint": "APNsSender" }
+  ],
   "migrations": [
     {
       "tag": "v1",

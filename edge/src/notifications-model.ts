@@ -38,6 +38,7 @@ export interface Notice {
   recipients: { id: string; lease: string }[];
   attempt: number;
   sessionStatus?: string;
+  source?: "event";
 }
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid object");
