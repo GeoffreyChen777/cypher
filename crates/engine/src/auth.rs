@@ -1159,6 +1159,52 @@ impl Auth {
             .map_err(|_| EngineError::Other("invalid notification activity response".into()))
     }
 
+    /// Publish an execution-owner session transition. The Edge registry uses
+    /// this structured event for notifications because chat2 transcript rows
+    /// are intentionally opaque and the registry mirror is asynchronous.
+    pub async fn report_notification_event(
+        &self,
+        expected_user: &str,
+        expected_org: &str,
+        session: &cypher_proto::Session,
+    ) -> Result<serde_json::Value, EngineError> {
+        let token = self
+            .access_token()
+            .await
+            .ok_or_else(|| EngineError::Other("not signed in".into()))?;
+        let state = self.state();
+        if state.user().map(|u| u.id.as_str()) != Some(expected_user)
+            || state.org_id() != Some(expected_org)
+        {
+            return Err(EngineError::Other("notification identity changed".into()));
+        }
+        let url = format!(
+            "{}/registry/{expected_org}/notifications/event",
+            self.inner.config.edge_url.trim_end_matches('/')
+        );
+        self.inner
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&serde_json::json!({
+                "chatId": session.chat_id,
+                "deviceId": session.device_id,
+                "status": session.status,
+                "startedAt": session.started_at.map(|x| x.timestamp_millis()),
+                "updatedAt": session.updated_at.timestamp_millis(),
+                "subagents": session.subagents,
+            }))
+            .send()
+            .await
+            .map_err(|_| EngineError::Other("notification event unavailable".into()))?
+            .error_for_status()
+            .map_err(|_| EngineError::Other("notification event rejected".into()))?
+            .json()
+            .await
+            .map_err(|_| EngineError::Other("invalid notification event response".into()))
+    }
+
     async fn authed_json<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,

@@ -156,8 +156,15 @@ describe("notification outbox on real Durable Object SQLite", () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-baseline"));
     await runInDurableObject(stub, async (_, state) => {
       const now = Date.now();
+      const rows = new Map<string, Row>([
+        ["chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" })],
+        ["spaces/project", row("spaces", "project", {})]
+      ]);
       const service = new Notifications(state, { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: {},
-        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as Env, () => undefined, () => {});
+        APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as Env,
+        (kind, id) => rows.get(`${kind}/${id}`), () => {});
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
+        JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
       const a = row("sessions", "chat", { deviceId: "host", chatId: "chat", status: "working", startedAt: now - 1000, updatedAt: now });
       const b = row("sessions", "chat", { ...a.fields, status: "idle" });
       service.observe([{ before: undefined, after: b }], "host");
@@ -168,6 +175,15 @@ describe("notification outbox on real Durable Object SQLite", () => {
         method: "PUT", body: JSON.stringify({ ...defaultNotificationSettings(), mutedProjects: ["../bad"] })
       }), "settings");
       expect(bad.status).toBe(400);
+      const event = await service.fetch(new Request("https://test", { method: "POST", body: JSON.stringify({
+        chatId: "chat", deviceId: "host", status: "working", updatedAt: now
+      }) }), "event");
+      expect(event.status).toBe(200);
+      const done = await service.fetch(new Request("https://test", { method: "POST", body: JSON.stringify({
+        chatId: "chat", deviceId: "host", status: "idle", startedAt: now - 60_000, updatedAt: now + 1
+      }) }), "event");
+      expect(done.status).toBe(200);
+      expect(service.nextDue()).toBeDefined();
     });
   });
 });

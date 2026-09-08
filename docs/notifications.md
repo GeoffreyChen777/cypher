@@ -64,6 +64,10 @@ before enabling the service.
   row's execution-owner `deviceId`, not the device that replicated the row;
   this preserves notifications for iOS-started remote runs. Baseline snapshots,
   unchanged replay and stale transitions are still ignored.
+- The execution host also posts a signed-in, structured session event at each
+  status transition. This is the authoritative bridge when chat2 transcript
+  replication is ahead of the asynchronous sidebar mirror; the event is checked
+  against the current chat's owning device and account RegistryRoom.
 - Notification alarms share scheduling with daily registry backup/GC. A
   notification alarm must not continually postpone the backup deadline.
 - Events are rechecked against current run/status, project/chat existence and

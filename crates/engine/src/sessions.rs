@@ -1168,6 +1168,7 @@ impl Inner {
         self.sessions_tx.send_replace(list);
         if let Some(ws) = self.workspace() {
             ws.record_session(session);
+            ws.notify_session_event(session);
         }
     }
 

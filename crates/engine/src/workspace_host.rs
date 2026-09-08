@@ -292,12 +292,14 @@ struct WorkspaceHostInner {
     /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
     peer_alive: Mutex<Option<PeerAliveHook>>,
+    notification_event: Mutex<Option<NotificationEventHook>>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
 pub type PeerAliveHook = Arc<dyn Fn(&str) + Send + Sync>;
+pub type NotificationEventHook = Arc<dyn Fn(&Session) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -396,6 +398,7 @@ impl WorkspaceHost {
                 evicted_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
+                notification_event: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
             }),
         };
@@ -595,8 +598,26 @@ impl WorkspaceHost {
         *lock(&self.inner.peer_alive) = Some(hook);
     }
 
+    pub fn set_notification_event_hook(&self, hook: NotificationEventHook) {
+        *lock(&self.inner.notification_event) = Some(hook);
+    }
+
+    pub fn notify_session_event(&self, session: &Session) {
+        if let Some(hook) = lock(&self.inner.notification_event).clone() {
+            hook(session);
+        }
+    }
+
     pub fn device_id(&self) -> &str {
         &self.inner.config.device_id
+    }
+
+    pub fn org_id(&self) -> &str {
+        &self.inner.config.org_id
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.inner.config.user_id
     }
 
     pub fn connected(&self) -> bool {

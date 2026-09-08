@@ -61,6 +61,47 @@ export class Notifications {
         this.set("activity", [...remaining.slice(-63), activity]);
         return json({ ok: true, available: true });
       }
+      if (path === "event" && request.method === "POST") {
+        const chatId = identifier(body.chatId), deviceId = identifier(body.deviceId);
+        const status = String(body.status);
+        if (!["idle", "working", "awaitingInput", "errored"].includes(status) ||
+            typeof body.updatedAt !== "number" || !Number.isSafeInteger(body.updatedAt) ||
+            Math.abs(Date.now() - body.updatedAt) > 300_000) throw new Error();
+        const chat = this.row("chats", chatId);
+        if (!chat || chat.deleted || chat.fields.archived || chat.fields.deviceId !== deviceId ||
+            typeof chat.fields.spaceId !== "string" || !this.row("spaces", chat.fields.spaceId)) {
+          return json({ ok: true, ignored: true });
+        }
+        const previous = this.get<string>(`eventStatus:${chatId}`);
+        if (previous === status) return json({ ok: true, duplicate: true });
+        this.set(`eventStatus:${chatId}`, status);
+        if (status === "working") {
+          this.set(`run:${chatId}`, typeof body.startedAt === "number" ? String(body.startedAt) : crypto.randomUUID());
+          return json({ ok: true });
+        }
+        let kind: NoticeKind | undefined;
+        if (status === "awaitingInput") kind = "input";
+        else if (status === "errored") kind = "failed";
+        else if (status === "idle" && (previous === "working" || previous === "awaitingInput")) kind = "completed";
+        if (!kind) return json({ ok: true });
+        const run = this.get<string>(`run:${chatId}`) ?? crypto.randomUUID();
+        const startedAt = typeof body.startedAt === "number" ? body.startedAt : Number(run);
+        if (kind === "completed" && Number.isFinite(startedAt) && Date.now() - startedAt < SHORT_RUN_MS) {
+          return json({ ok: true, short: true });
+        }
+        const recipients = this.recipients().map(({ id, lease }) => ({ id, lease }));
+        if (!recipients.length) return json({ ok: true, noRecipients: true });
+        const notice: Notice = {
+          id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
+          child: !!chat.fields.child, run, at: Date.now(),
+          expires: Date.now() + (kind === "input" ? 8 * 3_600_000 : 600_000),
+          recipients, attempt: 0, sessionStatus: status
+        };
+        for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
+        this.put(notice, Date.now() + NOTICE_DELAY_MS);
+        this.schedule();
+        return json({ ok: true, queued: true });
+      }
       if (path === "register" && request.method === "POST") {
         if (!notificationsAvailable(this.env)) return json({ error: "push_unavailable" }, 503);
         const installationId = identifier(body.installationId);

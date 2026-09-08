@@ -330,7 +330,7 @@ export default {
       if (auth.orgId !== orgId) return json({ error: "forbidden" }, 403);
       const room = `reg1/${orgId}/${auth.userId}`;
       if (parts.length === 4 && parts[2] === "notifications" &&
-          ["settings", "activity", "register", "unregister"].includes(parts[3] ?? "")) {
+          ["settings", "activity", "event", "register", "unregister"].includes(parts[3] ?? "")) {
         return forward(env.REGISTRY_ROOMS, room, request, auth.userId, `/notifications/${parts[3]}`, "");
       }
       if (parts[2] === "ws") {

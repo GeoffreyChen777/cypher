@@ -339,6 +339,21 @@ impl EngineCore {
 
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
+        let workspace = self.workspace.clone();
+        let event_auth = auth.clone();
+        let expected_user = workspace.user_id().to_string();
+        let expected_org = workspace.org_id().to_string();
+        workspace.set_notification_event_hook(std::sync::Arc::new(move |session| {
+            let auth = event_auth.clone();
+            let user = expected_user.clone();
+            let org = expected_org.clone();
+            let session = session.clone();
+            tokio::spawn(async move {
+                if let Err(err) = auth.report_notification_event(&user, &org, &session).await {
+                    tracing::debug!(error = %err, "notification event unavailable");
+                }
+            });
+        }));
         *self
             .auth
             .lock()
