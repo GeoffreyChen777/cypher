@@ -171,8 +171,10 @@ fi
 echo "✓ Cypher $ver installed"
 if [ -f "$HOME/.config/systemd/user/cypher.service" ] &&
    grep -Fq 'CYPHER_DATA_DIR=' "$HOME/.config/systemd/user/cypher.service" &&
-   grep -Fq 'ExecStart=:\"%h/.cypher/app/' "$HOME/.config/systemd/user/cypher.service"; then
-  sed -i "s#^ExecStart=:\"%h/.cypher/app/[^/]*/cypher\" headless\$#ExecStart=:\"%h/.cypher/app/current/cypher\" headless#" \
+   grep -Eq 'ExecStart=:\"([^\" ]*/)?\.cypher/app/[^/]*/cypher\" headless$' \
+     "$HOME/.config/systemd/user/cypher.service"; then
+  sed -i -E \
+    's#^ExecStart=:\"([^\" ]*/)?\.cypher/app/[^/]*/cypher\" headless$#ExecStart=:\"%h/.cypher/app/current/cypher\" headless#' \
     "$HOME/.config/systemd/user/cypher.service"
   systemctl --user daemon-reload
   systemctl --user restart cypher.service
