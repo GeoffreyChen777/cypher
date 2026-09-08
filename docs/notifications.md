@@ -60,8 +60,10 @@ before enabling the service.
   routes select `reg1/<org>/<user>` from verified authentication, not a supplied
   user header. JSON bodies have a streaming 16 KiB limit.
 - `Notifications` stores preferences, activity, recipients and a bounded durable
-  outbox in RegistryRoom SQLite. It consumes host session transitions, not
-  baseline snapshots or arbitrary viewer replication.
+  outbox in RegistryRoom SQLite. It consumes session transitions based on the
+  row's execution-owner `deviceId`, not the device that replicated the row;
+  this preserves notifications for iOS-started remote runs. Baseline snapshots,
+  unchanged replay and stale transitions are still ignored.
 - Notification alarms share scheduling with daily registry backup/GC. A
   notification alarm must not continually postpone the backup deadline.
 - Events are rechecked against current run/status, project/chat existence and

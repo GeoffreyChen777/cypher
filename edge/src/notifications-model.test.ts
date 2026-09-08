@@ -67,4 +67,5 @@ describe("smart mobile notification policy", () => {
     expect(parseActivity({ clientId: "ui", platform: "desktop", foreground: false,
       sequence: 1, interactionAgeMs: 0, chatId: null }, again, now + 20_000)).toEqual(again);
   });
+
 });

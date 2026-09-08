@@ -104,11 +104,15 @@ export class Notifications {
     return json({ error: "not_found" }, 404);
   }
 
-  observe(changes: { before: Row | undefined; after: Row }[], device: string): void {
+  observe(changes: { before: Row | undefined; after: Row }[], _sourceDevice: string): void {
     if (!notificationsAvailable(this.env)) return;
     const now = Date.now();
     for (const { before, after } of changes) {
-      if (after.kind !== "sessions" || after.deleted || after.fields.deviceId !== device) continue;
+      // A registry mutation can be relayed by iOS or another viewer. The
+      // execution owner is the session row's deviceId, not the device that
+      // happened to replicate the row. Requiring sourceDevice here drops
+      // remote runs started from iOS before their host reaches terminal state.
+      if (after.kind !== "sessions" || after.deleted || typeof after.fields.deviceId !== "string") continue;
       const chatId = after.fields.chatId;
       if (typeof chatId !== "string") continue;
       const status = after.fields.status;
