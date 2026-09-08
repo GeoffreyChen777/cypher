@@ -280,6 +280,7 @@ struct PendingPush {
 struct Shared {
     cursor: u64,
     pending: VecDeque<PendingPush>,
+    in_flight: Option<String>,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
     /// Set by a transient (`quota`) rejection: re-push at this instant
@@ -860,6 +861,7 @@ impl Actor {
         use std::sync::atomic::Ordering::Relaxed;
 
         // ── hello / state ───────────────────────────────────────────────────
+        lock(&self.shared).in_flight = None;
         let hello_cursor = lock(&self.shared).cursor;
         let hello = wire::encode(
             frame_type::HELLO,
@@ -1191,16 +1193,26 @@ impl Actor {
     /// Send only the queue's head batch — the quota-probe path.
     async fn push_head(&self, pipe: &mut BinPipe) -> bool {
         let frame = {
-            let shared = lock(&self.shared);
-            shared.pending.front().map(|push| {
-                wire::encode(
-                    frame_type::PUSH,
-                    &wire::PushHeader {
-                        batch_id: &push.batch_id,
-                    },
-                    &push.bytes,
+            let mut shared = lock(&self.shared);
+            if shared.in_flight.is_some() {
+                return true;
+            }
+            let frame = shared.pending.front().map(|push| {
+                (
+                    push.batch_id.clone(),
+                    wire::encode(
+                        frame_type::PUSH,
+                        &wire::PushHeader {
+                            batch_id: &push.batch_id,
+                        },
+                        &push.bytes,
+                    ),
                 )
-            })
+            });
+            if let Some((id, _)) = &frame {
+                shared.in_flight = Some(id.clone());
+            }
+            frame.map(|(_, frame)| frame)
         };
         match frame {
             Some(frame) => pipe.tx.send(frame).await.is_ok(),
@@ -1209,26 +1221,15 @@ impl Actor {
     }
 
     async fn push_pending(&self, pipe: &mut BinPipe) -> bool {
-        // Clone rather than drain: batches stay queued until their ack.
-        let frames: Vec<Vec<u8>> = lock(&self.shared)
-            .pending
-            .iter()
-            .map(|push| {
-                wire::encode(
-                    frame_type::PUSH,
-                    &wire::PushHeader {
-                        batch_id: &push.batch_id,
-                    },
-                    &push.bytes,
-                )
-            })
-            .collect();
-        for frame in frames {
-            if pipe.tx.send(frame).await.is_err() {
-                return false;
-            }
+        // Never burst the whole replay queue on reconnect. Send one head and
+        // let its ACK advance the queue; this keeps a network recovery below
+        // the server quota and prevents a quota error from becoming a replay
+        // storm across reconnects.
+        let has_pending = !lock(&self.shared).pending.is_empty();
+        if has_pending {
+            lock(&self.shared).quota_blocked = true;
         }
-        true
+        self.push_head(pipe).await
     }
 
     /// Apply one inbound protocol frame. False = protocol breakdown, redial.
@@ -1267,6 +1268,9 @@ impl Actor {
                     return false;
                 };
                 let mut shared = lock(&self.shared);
+                if shared.in_flight.as_deref() == Some(&ack.batch_id) {
+                    shared.in_flight = None;
+                }
                 shared.pending.retain(|p| p.batch_id != ack.batch_id);
                 // An ACK proves the server accepted our row at ack.seq; it
                 // does not prove that interleaved remote rows reached us.
@@ -1315,6 +1319,7 @@ impl Actor {
                 let code = frame.header["code"].as_str().unwrap_or("?").to_string();
                 let message = frame.header["message"].as_str().unwrap_or("").to_string();
                 let batch_id = frame.header["batchId"].as_str().unwrap_or("");
+                lock(&self.shared).in_flight = None;
                 match code.as_str() {
                     // Permanent verdicts on a specific batch: retire it, or
                     // it replays on every nudge/reconnect forever — the
@@ -1340,6 +1345,7 @@ impl Actor {
                     // the batch queued and head-probe on a short clock.
                     "quota" => {
                         let mut shared = lock(&self.shared);
+                        shared.in_flight = None;
                         shared.quota_blocked = true;
                         shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
                     }

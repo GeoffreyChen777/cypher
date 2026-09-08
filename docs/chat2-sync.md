@@ -107,6 +107,9 @@ loro-protocol, no base64 — 33% base64 overhead matters at 1.2 Mbps):
 - Validation kept (all wasm-free): auth/owner, frame shape, row size cap, per-device
   rate/byte quotas. Semantic garbage is contained per-user (owner-only rooms), skipped
   by client imports (malformed-entry philosophy), and erased by the next checkpoint.
+- Reconnect replay is head-serialized: one pending batch is sent at a time and the
+  next is armed by its ACK. A duplicate `batchId` is acknowledged before quota
+  accounting, so lost ACKs do not consume the write budget.
 - Ops: `GET /stats` (headSeq, seqFloor, rowBytes, checkpoint age), nightly
   seq-monotonic R2 backup (registry pattern), tombstone-free — rows are the log.
 

@@ -25,6 +25,7 @@ import {
   FRONTIER_BLOB,
   getMeta,
   headSeq,
+  existingBatchSeq,
   logStats,
   MAX_ROW_BYTES,
   rowsAfter,
@@ -241,6 +242,8 @@ export class ChatRoom implements DurableObject {
         return json({ error: "too_large" }, 413);
       }
       const payload = new Uint8Array(await request.arrayBuffer());
+      const duplicateSeq = existingBatchSeq(sql, batchId);
+      if (duplicateSeq !== undefined) return json({ batchId, seq: duplicateSeq, dup: true });
       if (!this.admitQuota(device, payload.byteLength)) {
         this.recordPush(device, false);
         return json({ error: "quota" }, 429);
@@ -427,6 +430,11 @@ export class ChatRoom implements DurableObject {
     if (!state.ready || batchId === "" || batchId.length > 128) {
       this.recordPush(state.device, false);
       send(ws, FRAME.error, { code: "bad_push", message: "hello first / malformed push", batchId });
+      return;
+    }
+    const existingSeq = existingBatchSeq(this.ctx.storage.sql, batchId);
+    if (existingSeq !== undefined) {
+      send(ws, FRAME.ack, { batchId, seq: existingSeq, dup: true });
       return;
     }
     if (!this.admitQuota(state.device, payload.byteLength)) {

@@ -58,6 +58,9 @@ export type AppendOutcome =
   | { ok: true; seq: number; dup: boolean }
   | { ok: false; error: "too_large" | "empty" };
 
+export const existingBatchSeq = (sql: SqlStorage, batchId: string): number | undefined =>
+  ([...sql.exec("SELECT seq FROM rows WHERE batch_id = ?", batchId)][0]?.seq as number | undefined);
+
 /** Append one update row. `batch_id` UNIQUE dedupes reconnect re-pushes
  * server-side: a replay acks the ORIGINAL seq and appends nothing (Loro
  * re-import is a no-op client-side, so duplicates are safe end-to-end — this
@@ -71,10 +74,8 @@ export const appendRow = (
 ): AppendOutcome => {
   if (bytes.byteLength === 0) return { ok: false, error: "empty" };
   if (bytes.byteLength > MAX_ROW_BYTES) return { ok: false, error: "too_large" };
-  const existing = [...sql.exec("SELECT seq FROM rows WHERE batch_id = ?", batchId)];
-  if (existing.length > 0) {
-    return { ok: true, seq: existing[0]!.seq as number, dup: true };
-  }
+  const existing = existingBatchSeq(sql, batchId);
+  if (existing !== undefined) return { ok: true, seq: existing, dup: true };
   const seq = headSeq(sql) + 1;
   sql.exec(
     "INSERT INTO rows (seq, device, batch_id, bytes, received_at) VALUES (?, ?, ?, ?, ?)",
