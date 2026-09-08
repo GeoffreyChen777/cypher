@@ -22,10 +22,7 @@ export interface Env {
    * matching the old apps/server dev-mode behavior. */
   WORKOS_API_KEY?: string;
   PUSH_DEVICES?: DurableObjectNamespace;
-  APNS_SENDER?: {
-    send(token: string, environment: "development" | "production",
-      message: import("./apns").PushMessage): Promise<"sent" | "invalid" | "retry">;
-  };
+  APNS_SENDER?: Fetcher;
   NOTIFICATIONS_ENABLED?: string;
   APNS_TEAM_ID?: string;
   APNS_KEY_ID?: string;

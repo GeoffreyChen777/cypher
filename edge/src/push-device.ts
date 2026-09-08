@@ -78,8 +78,14 @@ export class PushDevice implements DurableObject {
     await this.ctx.storage.put(key, { state: "sending", at: Date.now() });
     // The actual Apple connection runs in a normal Worker entrypoint through
     // a same-script service binding, not in Durable Object execution context.
-    const outcome = await this.env.APNS_SENDER?.send(current.token, current.environment, message)
-      .catch(() => "retry" as const) ?? "retry";
+    const response = await this.env.APNS_SENDER?.fetch(new Request("https://apns.internal/send", {
+      method: "POST", body: JSON.stringify({
+        token: current.token, environment: current.environment, message
+      })
+    })).catch(() => undefined);
+    const result = response && await response.json().catch(() => ({ result: "retry" })) as { result?: string } | undefined;
+    const outcome = result?.result === "sent" || result?.result === "invalid"
+      ? result.result : "retry";
     await this.ctx.storage.put(key, { state: outcome, at: Date.now() });
     if (outcome === "invalid") {
       // A re-registration may have happened while APNs was responding.
