@@ -78,6 +78,8 @@
     // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
     "WORKOS_CLIENT_ID": "client_01M0JTKFKB6QZWHZDGYW7AN8QH",
     "AUTH_MODE": "workos",
+    "APNS_KEY_ID": "8WP4N48QXB",
+    "APNS_TEAM_ID": "999875MHT4",
     // Enable only after configuring APNS_PRIVATE_KEY (Worker secret),
     // APNS_TEAM_ID and APNS_KEY_ID and completing real-device validation.
     "NOTIFICATIONS_ENABLED": "true"
