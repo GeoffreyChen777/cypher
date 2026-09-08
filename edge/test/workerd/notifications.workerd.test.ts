@@ -29,6 +29,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
       const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
       state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
         JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
+        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working",
         startedAt: start - 60_000, updatedAt: start, subagents: [{ mode: "async", status: "running", updatedAt: start }] });
       const launched = row("sessions", "chat", { ...running.fields, status: "idle" });
@@ -73,7 +75,7 @@ describe("notification outbox on real Durable Object SQLite", () => {
       } finally { clock.mockRestore(); await state.storage.deleteAlarm(); }
     });
   });
-  it("persists the delay across reconstruction, drops desktop-suppressed completion without later backfill", async () => {
+  it("persists the delay across reconstruction without backfilling an already sent event", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-suppression"));
     await runInDurableObject(stub, async (_, state) => {
       const start = Date.now(), sends: unknown[] = [];
@@ -89,6 +91,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
       let service = make();
       state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES(?,?)", "recipients",
         JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
+        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working", startedAt: start - 60_000, updatedAt: start });
       service.observe([{ before: undefined, after: running }], "host");
       const done = row("sessions", "chat", { ...running.fields, status: "idle" });
@@ -104,15 +108,16 @@ describe("notification outbox on real Durable Object SQLite", () => {
       const clock = vi.spyOn(Date, "now").mockReturnValue(start + 11_000);
       try {
         await service.flush();
+        expect(sends).toHaveLength(1);
         expect(service.nextDue()).toBeUndefined();
         clock.mockReturnValue(start + 300_000);
         await service.flush();
-        expect(sends).toHaveLength(0);
+        expect(sends).toHaveLength(1);
       } finally { clock.mockRestore(); }
     });
   });
 
-  it("delivers an unresolved question once after desktop activity expires and cancels resolved questions", async () => {
+  it("delivers the selected session target once and cancels resolved questions", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("notifications-input"));
     await runInDurableObject(stub, async (_, state) => {
       const start = Date.now(), sends: unknown[] = [];
@@ -128,6 +133,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
       const service = new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
       state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES(?,?)", "recipients",
         JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
+        JSON.stringify({ clientId: "phone", platform: "ios", at: start }));
       const running = row("sessions", "chat", { chatId: "chat", deviceId: "host", status: "working", startedAt: start - 60_000, updatedAt: start });
       const input = row("sessions", "chat", { ...running.fields, status: "awaitingInput" });
       service.observe([{ before: undefined, after: running }], "host");
@@ -138,8 +145,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
       }) }), "activity");
       const clock = vi.spyOn(Date, "now").mockReturnValue(start + 11_000);
       try {
-        await service.flush(); expect(sends).toHaveLength(0);
-        expect(service.nextDue()).toBeDefined();
+        await service.flush(); expect(sends).toHaveLength(1);
+        expect(service.nextDue()).toBeUndefined();
         clock.mockReturnValue(start + 50_000);
         await service.flush(); expect(sends).toHaveLength(1);
         await service.flush(); expect(sends).toHaveLength(1);
@@ -165,6 +172,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
         (kind, id) => rows.get(`${kind}/${id}`), () => {});
       state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)",
         JSON.stringify([{ id: "b".repeat(64), lease: crypto.randomUUID(), installationId: "phone", epoch: 1 }]));
+      state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('target:chat',?)",
+        JSON.stringify({ clientId: "phone", platform: "ios", at: now }));
       const a = row("sessions", "chat", { deviceId: "host", chatId: "chat", status: "working", startedAt: now - 1000, updatedAt: now });
       const b = row("sessions", "chat", { ...a.fields, status: "idle" });
       service.observe([{ before: undefined, after: b }], "host");

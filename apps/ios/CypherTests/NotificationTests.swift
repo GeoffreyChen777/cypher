@@ -22,17 +22,13 @@ final class NotificationTests: XCTestCase {
     func testDefaultPolicyIsSmartAndDoesNotEnableIndependentSubagentResults() throws {
         var prefs = NotificationPreferences()
         let payload = try XCTUnwrap(PushPayload.parse(info))
-        XCTAssertEqual(prefs.mode, .smart)
+        XCTAssertEqual(prefs.mode, .always)
         XCTAssertFalse(prefs.subagents)
         XCTAssertTrue(prefs.permits(payload))
-        prefs.mode = .actionable
-        XCTAssertFalse(prefs.permits(payload))
-        prefs.mode = .always
         prefs.mutedProjects = ["project"]
         XCTAssertFalse(prefs.permits(payload))
         prefs.mutedProjects = []
-        prefs.mode = .off
-        XCTAssertFalse(prefs.permits(payload))
+        XCTAssertTrue(prefs.permits(payload))
     }
     func testLeaseEpochsAndOfflineRevocationsSurviveSerialization() throws {
         var state = PushRegistrationState()

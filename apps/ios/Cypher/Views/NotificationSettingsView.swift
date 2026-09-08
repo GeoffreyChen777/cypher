@@ -33,15 +33,12 @@ struct NotificationSettingsView: View {
                     if model.demo != nil { Text("Notifications are not sent in Demo mode.") }
                 }
                 Section {
-                    Picker("Policy", selection: setting(\.mode)) {
-                        ForEach(NotificationMode.allCases) { mode in Text(mode.label).tag(mode) }
-                    }
                     Toggle("Waiting for input", isOn: setting(\.input))
                     Toggle("Task failed", isOn: setting(\.failed))
                     Toggle("Task completed", isOn: setting(\.completed))
                     Toggle("Subagent results", isOn: setting(\.subagents))
                 } footer: {
-                    Text("Smart keeps your phone quiet while you're actively using Cypher on a computer. Completed tasks under 30 seconds are skipped. Alerts wait 10 seconds so opening the chat can cancel them. Subagent input requests can still notify you.")
+                    Text("Only the last device used for this session receives its notification. Alerts wait 10 seconds so a new session action can supersede them. Subagent results remain off by default.")
                 }
                 .disabled(!controller.available || controller.busy)
                 Section("Muted projects") {

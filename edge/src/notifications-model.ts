@@ -14,7 +14,7 @@ export interface NotificationSettings {
   mutedProjects: string[];
 }
 export const defaultNotificationSettings = (): NotificationSettings => ({
-  mode: "smart", completed: true, failed: true, input: true, subagents: false, mutedProjects: []
+  mode: "always", completed: true, failed: true, input: true, subagents: false, mutedProjects: []
 });
 export interface Activity {
   clientId: string;
@@ -50,13 +50,12 @@ export function identifier(value: unknown): string {
 }
 export function parseSettings(value: unknown): NotificationSettings {
   const v = object(value);
-  if (!["smart", "actionable", "always", "off"].includes(String(v.mode))) throw new Error("invalid mode");
   for (const key of ["completed", "failed", "input", "subagents"]) {
     if (typeof v[key] !== "boolean") throw new Error("invalid setting");
   }
   if (!Array.isArray(v.mutedProjects) || v.mutedProjects.length > 128) throw new Error("invalid project list");
   return {
-    mode: v.mode as NotificationSettings["mode"], completed: v.completed as boolean,
+    mode: "always", completed: v.completed as boolean,
     failed: v.failed as boolean, input: v.input as boolean, subagents: v.subagents as boolean,
     mutedProjects: [...new Set(v.mutedProjects.map(identifier))]
   };
@@ -81,20 +80,11 @@ export function active(activity: Activity, now: number): boolean {
     now - activity.interactionAt <= INTERACTION_MS;
 }
 export function notificationDecision(
-  notice: Notice, settings: NotificationSettings, activities: Activity[], now: number
+  notice: Notice, settings: NotificationSettings, _activities: Activity[], now: number
 ): "send" | "drop" | "defer" {
-  if (now >= notice.expires || settings.mode === "off" || !settings[notice.kind] ||
+  if (now >= notice.expires || !settings[notice.kind] ||
       settings.mutedProjects.includes(notice.projectId) ||
-      (settings.mode === "actionable" && notice.kind === "completed") ||
       (notice.child && notice.kind !== "input" && !settings.subagents)) return "drop";
-  const live = activities.filter(a => active(a, now));
-  // Opening the relevant chat during the delay consumes the event. An iPhone
-  // already displaying it should never receive a redundant alert either.
-  if (live.some(a => a.chatId === notice.chatId &&
-      ((a.platform === "ios" && a.receivedAt >= notice.at) || a.openedAt >= notice.at))) return "drop";
-  if (settings.mode !== "always" && live.some(a => a.platform === "desktop")) {
-    return notice.kind === "input" ? "defer" : "drop";
-  }
   return "send";
 }
 export function noticeText(kind: NoticeKind): { title: string; body: string } {

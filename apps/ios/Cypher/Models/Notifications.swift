@@ -13,7 +13,7 @@ enum NotificationMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 struct NotificationPreferences: Codable, Equatable {
-    var mode: NotificationMode = .smart
+    var mode: NotificationMode = .always
     var completed = true
     var failed = true
     var input = true
@@ -21,9 +21,9 @@ struct NotificationPreferences: Codable, Equatable {
     var mutedProjects: [String] = []
 
     func permits(_ payload: PushPayload) -> Bool {
-        guard mode != .off, !mutedProjects.contains(payload.projectId) else { return false }
+        guard !mutedProjects.contains(payload.projectId) else { return false }
         switch payload.kind {
-        case "completed": return completed && mode != .actionable
+        case "completed": return completed
         case "failed": return failed
         case "input": return input
         default: return false

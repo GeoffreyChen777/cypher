@@ -124,10 +124,5 @@ final class NotificationControllerTests: XCTestCase {
         f.controller.banner = nil
         f.controller.receive(other, tapped: false)
         XCTAssertNil(f.controller.banner)
-        var off = f.controller.settings
-        off.mode = .off
-        await f.controller.updateSettings(off)
-        f.controller.receive(payload(), tapped: false)
-        XCTAssertNil(f.controller.banner)
     }
 }

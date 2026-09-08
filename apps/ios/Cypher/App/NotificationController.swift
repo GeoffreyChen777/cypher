@@ -25,7 +25,7 @@ final class NotificationController {
     private var seenEvents = Set<String>()
     private var deferredTap: PushPayload?
     private var settingsRevision = 0
-    private var activityClientId = UUID().uuidString.lowercased()
+    private var activityClientId = ""
     private var activitySequence = 0
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var revokeTask: Task<Void, Never>?
@@ -81,6 +81,7 @@ final class NotificationController {
             persist()
         }
         self.config = config
+        activityClientId = saved.installationId
         scope = saved.binding?.scope
         registered = false // permission + server lease are revalidated below
         available = false
@@ -168,7 +169,7 @@ final class NotificationController {
                 persist()
                 drainRevocations()
             }
-            if available && settings.mode != .off &&
+            if available &&
                 [.authorized, .provisional, .ephemeral].contains(status) {
                 registerWithOS()
                 await registerToken()
@@ -209,8 +210,7 @@ final class NotificationController {
             guard ticket == generation else { return }
             settings = next
             error = nil
-            if next.mode == .off { clearDelivered() }
-            else if permission == "Allowed" {
+            if permission == "Allowed" {
                 registerWithOS()
                 await registerToken()
             }
@@ -232,7 +232,7 @@ final class NotificationController {
     func registrationFailed() { error = "APNs registration failed. Check Push signing and the network." }
 
     private func registerToken() async {
-        guard available, settings.mode != .off, !registering, let config, let token = saved.token else { return }
+        guard available, !registering, let config, let token = saved.token else { return }
         guard let environment = Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String,
               ["development", "production"].contains(environment) else {
             error = "The build has no valid APNs environment."; return

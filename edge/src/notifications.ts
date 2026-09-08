@@ -8,6 +8,7 @@ import {
 } from "./notifications-model";
 
 interface Recipient { id: string; lease: string; installationId: string; epoch: number }
+interface SessionTarget { clientId: string; platform: "desktop" | "ios"; at: number }
 
 function asyncChildren(fields: Row["fields"] | undefined) {
   const runs = (Array.isArray(fields?.subagents) ? fields.subagents : []).slice(0, 32)
@@ -39,6 +40,7 @@ export class Notifications {
   }
   private recipients(): Recipient[] { return this.get<Recipient[]>("recipients") ?? []; }
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
+  private target(chatId: string): SessionTarget | undefined { return this.get<SessionTarget>(`target:${chatId}`); }
   private scope(): string { return this.ctx.id.toString(); }
 
   async fetch(request: Request, path: string): Promise<Response> {
@@ -59,6 +61,9 @@ export class Notifications {
         const activity = parseActivity(body, current.find(a => a.clientId === id), now);
         const remaining = current.filter(a => a.clientId !== id && now - a.receivedAt < 600_000);
         this.set("activity", [...remaining.slice(-63), activity]);
+        if (activity.chatId && activity.foreground) {
+          this.set(`target:${activity.chatId}`, { clientId: activity.clientId, platform: activity.platform, at: now });
+        }
         return json({ ok: true, available: true });
       }
       if (path === "event" && request.method === "POST") {
@@ -273,8 +278,12 @@ export class Notifications {
       const decision = notificationDecision(notice, this.settings(), activities, now);
       if (decision === "drop") { this.remove(notice.id); continue; }
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
+      const target = this.target(notice.chatId);
+      const recipients = target?.platform === "ios"
+        ? this.recipients().filter(r => r.installationId === target.clientId) : [];
+      if (!recipients.length) { this.remove(notice.id); continue; }
       let retry = false;
-      for (const recipient of notice.recipients) {
+      for (const recipient of recipients) {
         // Logout/rotation removes the old local receipt. Cross-account
         // rebinding is additionally checked by the global token DO.
         if (!this.recipients().some(r => r.id === recipient.id && r.lease === recipient.lease)) continue;
