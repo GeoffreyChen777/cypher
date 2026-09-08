@@ -14,7 +14,7 @@ const SAFE_APNS_REASONS = new Set([
 ]);
 function diagnostic(stage: string, status?: number, reason?: unknown): void {
   // Never interpolate error messages, URLs, tokens, payloads or identities.
-  console.info("apns_delivery", JSON.stringify({
+  console.warn("apns_delivery", JSON.stringify({
     stage, ...(status === undefined ? {} : { status }),
     ...(reason === undefined ? {} : {
       reason: typeof reason === "string" && SAFE_APNS_REASONS.has(reason) ? reason : "Other"
