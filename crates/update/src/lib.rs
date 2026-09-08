@@ -25,6 +25,8 @@ use anyhow::{Context as _, bail};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
@@ -511,6 +513,59 @@ pub fn restart_service(data_dir: &Path) -> anyhow::Result<()> {
     } else {
         run("systemctl", &["--user", "restart", &unit])
     }
+}
+
+pub fn migrate_linux_service_to_current(data_dir: &Path) -> anyhow::Result<bool> {
+    if !cfg!(target_os = "linux") {
+        return Ok(false);
+    }
+    let unit = cypher_env::service_names(data_dir)?.0;
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            &unit,
+            "--property=FragmentPath",
+            "--value",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is unset")?;
+    let expected = home.join(".config/systemd/user/cypher.service");
+    if Path::new(&path) != expected || !expected.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(&expected)?;
+    let data = std::path::absolute(data_dir)?;
+    if !text
+        .lines()
+        .any(|line| line == format!("Environment=\"CYPHER_DATA_DIR={}\"", data.display()))
+    {
+        return Ok(false);
+    }
+    let Some(old) = text.lines().find(|line| {
+        line.starts_with("ExecStart=:\"%h/.cypher/app/") && line.ends_with("/cypher\" headless")
+    }) else {
+        return Ok(false);
+    };
+    let tmp = expected.with_extension("service.cypher-update");
+    std::fs::write(
+        &tmp,
+        text.replacen(
+            old,
+            "ExecStart=:\"%h/.cypher/app/current/cypher\" headless",
+            1,
+        ),
+    )?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, &expected)?;
+    run("systemctl", &["--user", "daemon-reload"])?;
+    Ok(true)
 }
 
 fn restart_service_from_engine(data_dir: &Path) -> anyhow::Result<()> {

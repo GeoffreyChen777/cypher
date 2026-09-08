@@ -31,6 +31,9 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             );
             cypher_update::stage_headless(edge_url, &manifest, &app_root).await?;
             cypher_update::apply_headless(&app_root, &manifest.version)?;
+            if cypher_update::migrate_linux_service_to_current(&cypher_env::data_dir())? {
+                println!("migrated Linux service to app/current.");
+            }
             println!(
                 "installed {} (current → {})",
                 app_root.join(&manifest.version).display(),

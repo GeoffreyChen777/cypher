@@ -169,6 +169,15 @@ FISH
 fi
 
 echo "✓ Cypher $ver installed"
+if [ -f "$HOME/.config/systemd/user/cypher.service" ] &&
+   grep -Fq 'CYPHER_DATA_DIR=' "$HOME/.config/systemd/user/cypher.service" &&
+   grep -Fq 'ExecStart=:\"%h/.cypher/app/' "$HOME/.config/systemd/user/cypher.service"; then
+  sed -i "s#^ExecStart=:\"%h/.cypher/app/[^/]*/cypher\" headless\$#ExecStart=:\"%h/.cypher/app/current/cypher\" headless#" \
+    "$HOME/.config/systemd/user/cypher.service"
+  systemctl --user daemon-reload
+  systemctl --user restart cypher.service
+  echo "✓ Cypher service switched to app/current"
+fi
 # curl | sh leaves stdin carrying the script, not user input. Reopen the
 # controlling terminal explicitly, without ever reading answers from the pipe.
 if [ "$setup" = yes ] && ( : </dev/tty ) >/dev/null 2>&1; then
