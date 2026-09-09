@@ -18,6 +18,20 @@ describe("single session notification target policy", () => {
     expect(notificationDecision(notice("input"), defaultNotificationSettings(), [activity()], now)).toBe("send");
     expect(active(activity({ interactionAt: now - 120_001 }), now)).toBe(false);
   });
+  it.each(["completed", "failed", "input"] as const)("reads %s only while a fresh iOS viewer is on that chat", kind => {
+    const prefs = defaultNotificationSettings();
+    const viewer = activity({ clientId: "phone", platform: "ios", chatId: "chat" });
+    expect(notificationDecision(notice(kind), prefs, [viewer], now)).toBe("drop");
+    for (const other of [
+      { ...viewer, chatId: null },
+      { ...viewer, chatId: "other" },
+      { ...viewer, foreground: false },
+      { ...viewer, receivedAt: now - 45_001 },
+      { ...viewer, platform: "desktop" as const },
+    ]) {
+      expect(notificationDecision(notice(kind), prefs, [other], now)).toBe("send");
+    }
+  });
   it("honors mode, event toggles and project muting", () => {
     const prefs = defaultNotificationSettings();
     expect(notificationDecision(notice(), prefs, [activity()], now)).toBe("send");

@@ -10,6 +10,8 @@ private final class NotificationFixture {
     var preferences = NotificationPreferences()
     var registrations: [[String: Any]] = []
     var revocations: [URLRequest] = []
+    var activities: [[String: Any]] = []
+    var readEventIds: [String] = []
     var leases: [String: String] = [:]
     init() {
         controller.readRegistration = { [weak self] in self?.storage }
@@ -37,6 +39,12 @@ private final class NotificationFixture {
                 body = ["scope": scope, "bindingId": String(repeating: "c", count: 64), "lease": lease]
             } else if url.path.hasSuffix("/revoke") {
                 revocations.append(request)
+            } else if url.path.hasSuffix("/activity"), let data = request.httpBody {
+                let activity = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+                activities.append(activity)
+                body = ["ok": true, "scope": scope,
+                        "readEventIds": activity["foreground"] as? Bool == true && activity["chatId"] as? String == "chat"
+                            ? readEventIds : []]
             }
             return (try JSONSerialization.data(withJSONObject: body),
                     HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
@@ -124,5 +132,88 @@ final class NotificationControllerTests: XCTestCase {
         f.controller.banner = nil
         f.controller.receive(other, tapped: false)
         XCTAssertNil(f.controller.banner)
+    }
+
+    func testReadReceiptStaysSilentAfterLeavingAndDoesNotHideAFutureEvent() async throws {
+        let f = NotificationFixture()
+        defer { f.controller.disconnect() }
+        f.bind()
+        try await wait { f.controller.scope != nil }
+        let read = payload()
+        f.readEventIds = [read.eventId]
+        // No transcript data is supplied: entering alone is the chosen policy.
+        f.controller.viewing("chat")
+        try await wait { f.activities.contains { $0["chatId"] as? String == "chat" } }
+        // Give the activity response a turn to apply its concrete event IDs.
+        await Task.yield()
+        f.controller.viewing(nil)
+        f.controller.receive(read, tapped: false)
+        XCTAssertNil(f.controller.banner)
+        let future = payload()
+        f.controller.receive(future, tapped: false)
+        XCTAssertEqual(f.controller.banner, future)
+    }
+
+    func testQuickNavigationCapturesDistinctActivityStatesWithIncreasingSequences() async throws {
+        let f = NotificationFixture()
+        defer { f.controller.disconnect() }
+        f.bind()
+        try await wait { f.controller.available }
+        let baseline = f.activities.count
+        f.controller.viewing("chat")
+        f.controller.viewing(nil)
+        try await wait { f.activities.count >= baseline + 2 }
+        let reports = f.activities.suffix(2)
+        XCTAssertEqual(reports.first?["chatId"] as? String, "chat")
+        XCTAssertTrue(reports.last?["chatId"] is NSNull)
+        XCTAssertLessThan(try XCTUnwrap(reports.first?["sequence"] as? Int),
+                          try XCTUnwrap(reports.last?["sequence"] as? Int))
+    }
+
+    func testReadReceiptFromOldAccountCannotSilenceTheNewAccount() async throws {
+        let f = NotificationFixture()
+        defer { f.controller.disconnect() }
+        f.bind()
+        try await wait { f.controller.scope != nil }
+        let oldPerform = f.controller.perform
+        let event = payload("b")
+        var release: CheckedContinuation<Void, Never>?
+        f.controller.perform = { request in
+            if request.url?.path.hasSuffix("/activity") == true,
+               let data = request.httpBody,
+               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               body["chatId"] as? String == "chat" {
+                await withCheckedContinuation { release = $0 }
+                return (try JSONSerialization.data(withJSONObject: [
+                    "scope": String(repeating: "b", count: 64), "readEventIds": [event.eventId]
+                ]), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+            return try await oldPerform(request)
+        }
+        f.controller.viewing("chat")
+        try await wait { release != nil }
+        f.bind("bob")
+        try await wait { f.controller.scope == String(repeating: "b", count: 64) }
+        XCTAssertNil(f.controller.currentChat)
+        release?.resume()
+        await Task.yield()
+        f.controller.receive(event, tapped: false)
+        XCTAssertEqual(f.controller.banner, event)
+    }
+
+    func testActivitySequenceSurvivesControllerRecreation() async throws {
+        let first = NotificationFixture()
+        first.bind()
+        try await wait { !first.activities.isEmpty }
+        let sequence = try XCTUnwrap(first.activities.last?["sequence"] as? Int)
+        let storage = first.storage
+        first.controller.disconnect()
+        let second = NotificationFixture()
+        defer { second.controller.disconnect() }
+        second.storage = storage
+        second.bind()
+        try await wait { !second.activities.isEmpty }
+        XCTAssertGreaterThan(try XCTUnwrap(second.activities.first?["sequence"] as? Int), sequence)
+        XCTAssertEqual(first.activities.first?["clientId"] as? String, second.activities.first?["clientId"] as? String)
     }
 }

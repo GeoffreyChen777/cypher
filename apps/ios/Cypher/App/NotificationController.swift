@@ -26,7 +26,6 @@ final class NotificationController {
     private var deferredTap: PushPayload?
     private var settingsRevision = 0
     private var activityClientId = ""
-    private var activitySequence = 0
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var revokeTask: Task<Void, Never>?
     // Injectable boundaries keep permission/network/keychain behavior testable
@@ -73,9 +72,9 @@ final class NotificationController {
         generation = UUID()
         busy = false
         activityClientId = UUID().uuidString.lowercased()
-        activitySequence = 0
         banner = nil
         pendingNavigation = nil
+        currentChat = nil
         if saved.binding?.account != account(config) {
             saved.retire()
             persist()
@@ -92,7 +91,7 @@ final class NotificationController {
         heartbeat = Task { [weak self] in
             await self?.refresh()
             while !Task.isCancelled {
-                await self?.reportActivity()
+                self?.reportActivity()
                 try? await Task.sleep(for: .seconds(15))
             }
         }
@@ -125,11 +124,11 @@ final class NotificationController {
             Task { await refresh() }
             drainRevocations()
         }
-        Task { await reportActivity() }
+        reportActivity()
     }
     func viewing(_ chatId: String?) {
         currentChat = chatId
-        Task { await reportActivity() }
+        reportActivity()
     }
     private func request(_ config: AppConfig, action: String, method: String = "GET", body: Data? = nil) async throws -> Data {
         guard self.config === config, !Task.isCancelled else { throw RelayError.notConnected }
@@ -159,6 +158,7 @@ final class NotificationController {
             scope = reply.scope
             completeDeferredTap()
             settings = reply.settings
+            reportActivity()
             error = available ? nil : "Push notifications aren't configured on this server yet."
             let status = await authorization()
             guard ticket == generation, revision == settingsRevision else { return }
@@ -303,16 +303,33 @@ final class NotificationController {
             }
         }
     }
-    private func reportActivity() async {
+    private func reportActivity() {
         guard let config, available else { return }
         let ticket = generation
-        activitySequence += 1
+        // Capture navigation/foreground state synchronously. Two quick
+        // navigation actions must not both report the later page when their
+        // asynchronous tasks eventually start.
+        let sequence = max(saved.activitySequence ?? 0, Int(nowMs())) + 1
+        saved.activitySequence = sequence
+        guard persist() else { return }
         let body: [String: Any] = [
-            "clientId": activityClientId, "sequence": activitySequence, "platform": "ios", "foreground": foreground,
+            "clientId": activityClientId, "sequence": sequence, "platform": "ios", "foreground": foreground,
             "interactionAgeMs": 0, "chatId": currentChat as Any? ?? NSNull()
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: body), ticket == generation else { return }
-        _ = try? await request(config, action: "activity", method: "POST", body: data)
+        Task {
+            // Old servers omit this additive response; ordinary activity
+            // reporting remains compatible during a rolling upgrade.
+            struct Reply: Decodable { var scope: String?; var readEventIds: [String]? }
+            guard let response = try? await request(config, action: "activity", method: "POST", body: data),
+                  ticket == generation, self.config === config,
+                  let reply = try? JSONDecoder().decode(Reply.self, from: response),
+                  let responseScope = reply.scope, responseScope == scope else { return }
+            let ids = Array((reply.readEventIds ?? []).filter { UUID(uuidString: $0) != nil }.prefix(256))
+            if seenEvents.count + ids.count > 512 { seenEvents = [] }
+            seenEvents.formUnion(ids)
+            if let banner, ids.contains(banner.eventId) { self.banner = nil }
+        }
     }
     func receive(_ payload: PushPayload, tapped: Bool) {
         if tapped && (config == nil || scope == nil) { deferredTap = payload; return }
@@ -320,7 +337,7 @@ final class NotificationController {
         if tapped { pendingNavigation = payload; return }
         guard foreground, settings.permits(payload),
               seenEvents.insert(payload.eventId).inserted else { return }
-        if seenEvents.count > 256 { seenEvents = [payload.eventId] }
+        if seenEvents.count > 512 { seenEvents = [payload.eventId] }
         guard currentChat != payload.chatId else { return }
         banner = payload
         Task {

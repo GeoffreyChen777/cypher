@@ -79,12 +79,20 @@ export function active(activity: Activity, now: number): boolean {
   return activity.foreground && now - activity.receivedAt <= ACTIVITY_LEASE_MS &&
     now - activity.interactionAt <= INTERACTION_MS;
 }
+export function iosViewingChat(chatId: string, activities: Activity[], now: number): boolean {
+  return activities.some(a => a.platform === "ios" && a.chatId === chatId && active(a, now));
+}
 export function notificationDecision(
-  notice: Notice, settings: NotificationSettings, _activities: Activity[], now: number
+  notice: Notice, settings: NotificationSettings, activities: Activity[], now: number
 ): "send" | "drop" | "defer" {
   if (now >= notice.expires || !settings[notice.kind] ||
       settings.mutedProjects.includes(notice.projectId) ||
       (notice.child && notice.kind !== "input" && !settings.subagents)) return "drop";
+  // Opening the session counts as reading it; loading/scroll position is not
+  // part of this policy. A fresh foreground viewer can also see events that
+  // arrive while it stays on the page. Historical or background views cannot
+  // suppress a later run.
+  if (iosViewingChat(notice.chatId, activities, now)) return "drop";
   return "send";
 }
 export function noticeText(kind: NoticeKind): { title: string; body: string } {

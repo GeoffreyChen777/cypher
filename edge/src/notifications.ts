@@ -3,7 +3,7 @@ import type { Row } from "./registry-core";
 import { notificationsAvailable } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
-  readNotificationJSON, notificationJSON as json, notificationDecision,
+  readNotificationJSON, notificationJSON as json, notificationDecision, iosViewingChat,
   NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
 } from "./notifications-model";
 
@@ -58,13 +58,28 @@ export class Notifications {
         if (!notificationsAvailable(this.env)) return json({ ok: true, available: false });
         const now = Date.now(), id = identifier(body.clientId);
         const current = this.get<Activity[]>("activity") ?? [];
-        const activity = parseActivity(body, current.find(a => a.clientId === id), now);
+        const previous = current.find(a => a.clientId === id);
+        const activity = parseActivity(body, previous, now);
+        // Duplicate/reordered reports must not replay a historical read,
+        // refresh its lease or route a new event to an old page.
+        if (activity === previous) return json({ ok: true, available: true, scope: this.scope(), readEventIds: [] });
         const remaining = current.filter(a => a.clientId !== id && now - a.receivedAt < 600_000);
         this.set("activity", [...remaining.slice(-63), activity]);
+        const readEventIds: string[] = [];
         if (activity.chatId && activity.foreground) {
           this.set(`target:${activity.chatId}`, { clientId: activity.clientId, platform: activity.platform, at: now });
+          if (activity.platform === "ios") {
+            // Atomically retire only events that already exist for this chat.
+            // Keep enqueued:<chat> intact so mirror replay cannot recreate them.
+            for (const { notice } of this.events()) {
+              if (notice.chatId !== activity.chatId) continue;
+              this.remove(notice.id);
+              readEventIds.push(notice.id);
+            }
+          }
         }
-        return json({ ok: true, available: true });
+        if (readEventIds.length) this.schedule();
+        return json({ ok: true, available: true, scope: this.scope(), readEventIds });
       }
       if (path === "event" && request.method === "POST") {
         const chatId = identifier(body.chatId), deviceId = identifier(body.deviceId);
@@ -124,6 +139,12 @@ export class Notifications {
         if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) return json({ ok: true, duplicate: true });
         this.set(`enqueued:${chatId}`, `${run}/${kind}`);
         for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
+        // An event arriving while the session is already visible is read too.
+        // Remember the dedupe marker even if the viewer leaves before flush.
+        if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], Date.now())) {
+          this.schedule();
+          return json({ ok: true, read: true });
+        }
         if (this.events().length >= 256) this.remove(this.events()[0].notice.id);
         this.put(notice, Date.now() + NOTICE_DELAY_MS);
         this.schedule();
@@ -230,6 +251,7 @@ export class Notifications {
       for (const pending of this.events()) {
         if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
       }
+      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now)) continue;
       if (this.events().length >= 256) {
         const oldest = this.events()[0]; if (oldest) this.remove(oldest.notice.id);
       }
@@ -258,7 +280,7 @@ export class Notifications {
 
   async flush(): Promise<void> {
     if (!notificationsAvailable(this.env)) { this.clearPending(); return; }
-    const now = Date.now(), activities = this.get<Activity[]>("activity") ?? [];
+    const now = Date.now();
     // At most 32 recipient calls per alarm, also within the free-tier
     // subrequest budget. Remaining due work gets another alarm.
     for (const { notice, due } of this.events().slice(0, 2)) {
@@ -275,7 +297,7 @@ export class Notifications {
           !session || session.deleted || session.fields.status !== expected ||
           this.get<string>(`run:${notice.chatId}`) !== notice.run) { this.remove(notice.id); continue; }
       if (expected === "idle" && asyncChildren(session.fields).live) { this.remove(notice.id); continue; }
-      const decision = notificationDecision(notice, this.settings(), activities, now);
+      const decision = notificationDecision(notice, this.settings(), this.get<Activity[]>("activity") ?? [], Date.now());
       if (decision === "drop") { this.remove(notice.id); continue; }
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
       const target = this.target(notice.chatId);
@@ -294,6 +316,14 @@ export class Notifications {
       }
       let retry = false;
       for (const recipient of recipients) {
+        // A read may arrive while the previous recipient/event is awaiting
+        // APNs. Never send a retired event to another device, or resurrect it
+        // for retry. A request already accepted by APNs cannot be recalled.
+        if (!this.events().some(e => e.notice.id === notice.id)) break;
+        if (notificationDecision(notice, this.settings(), this.get<Activity[]>("activity") ?? [], Date.now()) === "drop") {
+          this.remove(notice.id);
+          break;
+        }
         // Logout/rotation removes the old local receipt. Cross-account
         // rebinding is additionally checked by the global token DO.
         if (!this.recipients().some(r => r.id === recipient.id && r.lease === recipient.lease)) continue;

@@ -76,6 +76,10 @@ struct PushRevocation: Codable, Identifiable {
 struct PushRegistrationState: Codable {
     var installationId = UUID().uuidString.lowercased()
     var epoch = 0
+    /// Optional for compatibility with installations saved before read ACKs.
+    /// The server keys activity by installation, so sequence must survive
+    /// relaunch/account rebind instead of restarting at one.
+    var activitySequence: Int?
     var token: String?
     var binding: PushBinding?
     var revocations: [PushRevocation] = []

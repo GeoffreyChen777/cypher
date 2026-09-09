@@ -32,6 +32,20 @@ is no Smart/Always/Off policy.
   rather than backfilling the old launch acknowledgement.
 - An event waits about 10 seconds. Starting another run, resolving the question,
   archiving/deleting the chat or muting it can cancel the event.
+- Entering the corresponding session on a foreground iPhone also counts as
+  read, without waiting for transcript loading or a scroll-to-bottom. Once its
+  authenticated activity report reaches the server, existing queued events for
+  that chat are permanently removed; leaving the page does not requeue them.
+  A fresh foreground report for the same chat also suppresses delivery while
+  the user remains there. Opening Home/another chat, background reports, stale
+  leases and duplicate/out-of-order reports do not read an event.
+  Read cancellation returns concrete event IDs to iOS so a late foreground
+  delivery can stay silent after navigation. It does not create a chat-wide
+  "read forever" flag: events from later runs after leaving still notify.
+  Activity sequences survive app relaunch; cancellation and activity remain
+  isolated to the authenticated user/organization. Offline viewing cannot
+  cancel a server event until a fresh online report arrives, and an already
+  submitted APNs request cannot reliably be recalled.
 - The target is updated by a real session open/view/send/answer action. A
   project-list view or presence heartbeat does not change it.
 - When the last target is desktop, its target heartbeat expires after 45 seconds
