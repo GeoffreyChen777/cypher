@@ -91,6 +91,9 @@ enum TranscriptRowBuilder {
                             previous: TranscriptRow?,
                             isFirst: Bool) -> CGFloat {
         if isFirst { return TranscriptView.gapTurn + 10 }
+        // Separate exchanges without pulling a user's prompt away from its
+        // reply. Pending sends follow this same path as confirmed messages.
+        if case .user = row.kind { return TranscriptView.gapExchange }
         if row.turnStart { return TranscriptView.gapTurn }
         // Same part ⇒ these are sibling markdown blocks, not a new turn.
         if let key = row.partKey, key == previous?.partKey { return MD.blockGap }

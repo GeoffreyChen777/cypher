@@ -295,6 +295,20 @@ final class DemoDataset {
                     .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs"]), isError: false, resolved: true),
                     .text(id: "t0", text: "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`."),
                 ], createdAt: now - 950_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                // Short follow-ups keep multiple exchange boundaries visible
+                // together for checking bubble and inter-exchange spacing.
+                MessageEntry(id: "m3", role: .user, parts: [
+                    .text(id: "t0", text: "浅色模式下，失败提示也保持这个规则吗？"),
+                ], createdAt: now - 900_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "m4", role: .assistant, parts: [
+                    .text(id: "t0", text: "是的。标题保持中性色，只有失败标记使用 `danger`，浅色和深色模式一致。"),
+                ], createdAt: now - 850_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                MessageEntry(id: "m5", role: .user, parts: [
+                    .text(id: "t0", text: "再确认一下，每轮对话之间留白更大。"),
+                ], createdAt: now - 800_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "m6", role: .assistant, parts: [
+                    .text(id: "t0", text: "已调整：上一轮回复到下一条提问为 **36 pt**，同一轮提问到回复仍是 **14 pt**。"),
+                ], createdAt: now - 750_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
         case "chat-deploy":
             return [

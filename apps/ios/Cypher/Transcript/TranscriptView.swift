@@ -33,6 +33,7 @@ struct TranscriptView: View {
     }
 
     static let gapTurn: CGFloat = 14
+    static let gapExchange: CGFloat = 36
     static let gapBlock: CGFloat = 8
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -558,7 +559,10 @@ struct UserBubble: View {
                     [InlineRun(text: parsed.text, style: .plain)]), hugsContent: true)
                     .environment(\.commentDrafts, pending ? nil : commentDrafts)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                    // Optical centering for the native text line box: move
+                    // the text up 1pt while preserving the bubble's height.
+                    .padding(.top, 9)
+                    .padding(.bottom, 11)
                     .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
                     .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
             }
