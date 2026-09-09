@@ -58,6 +58,37 @@ is no Smart/Always/Off policy.
   session.” No project name, prompt, transcript, tool arguments or provider keys
   are included.
 
+### App icon badge
+
+- The badge is the number of **sessions with unread eligible important events**
+  in the current user/organization, not a count of push attempts or messages.
+  Repeated events in one session count as one. Short completions and disabled,
+  muted or excluded child events do not add an unread session.
+- Unread state is durable and separate from the delivery outbox: sending the
+  alert or exhausting its short retry window does not mark it read. Entering
+  that session clears it, even if its alert has already been sent. Home does
+  not clear all badges. Archiving/deleting a chat/project, or muting/disabling
+  the corresponding event category, removes its unread contribution.
+- The authenticated settings/activity responses include an absolute count and
+  monotonic revision. iOS refreshes on foreground, applies read receipts, ignores
+  older/foreign-account snapshots and clears the local badge on logout/account
+  replacement. This does not use the registry's general message-unseen dots.
+- Alerts carry `aps.badge`. A separate coalesced, retryable **badge-only** APNs
+  payload sends absolute counts (including zero) to all valid iOS registrations
+  in the account. It has no alert text or sound; important **alerts** still follow
+  the session's last-device target. Token-ownership checks also cover badge-only
+  sends. Reordered requests are normalized to the token's latest badge revision.
+- APNs can still delay or reorder requests already accepted by Apple, and
+  offline read actions cannot update the server until activity is reported.
+  A subsequent push/foreground refresh reconciles the icon; badge-only delivery
+  is not a guaranteed immediate cross-device read receipt.
+- New unread tracking starts with newly eligible events after this update;
+  existing chat history and previously sent notifications are not backfilled.
+  Badge support requires deploying the Worker and installing the updated iOS
+  client. iOS asks for `.badge` along with alert/sound permission. Existing users
+  can use **Notifications → Update notification permissions**, or enable
+  **Badges** in iOS Settings. Demo mode does not generate real push badges.
+
 Activity reports carry only the selected session and a monotonic client
 sequence. No keys, coordinates or content are collected. Online headless
 engines and ordinary registry presence are not routing signals.
@@ -82,7 +113,8 @@ engines and ordinary registry presence are not routing signals.
 - Events are rechecked against current run/status, project/chat existence and
   preferences immediately before sending. Normal events expire after 10 minutes;
   unresolved input expires after eight hours. Retry uses bounded exponential
-  backoff. One alarm processes at most two events and 16 recipients per event.
+  backoff. One alarm processes at most two events and 16 recipients per event,
+  plus at most 16 badge-only sends (48 recipient calls total).
 - `PushDevice` is global per APNs token/environment. Installation IDs, monotonic
   epochs and random leases prevent old registrations and delayed logout requests
   from overriding a newer owner. Retired installation watermarks do not expire.

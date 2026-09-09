@@ -21,10 +21,13 @@ struct NotificationSettingsView: View {
                             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                         }
                     } else {
-                        Button(controller.registered ? "Device registered" : "Enable notifications on this iPhone") {
+                        Button(controller.registered ? "Update notification permissions" : "Enable notifications on this iPhone") {
                             Task { await controller.enable() }
                         }
-                        .disabled(!controller.available || controller.busy || controller.registered)
+                        .disabled(!controller.available || controller.busy)
+                        Button("Open iOS Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                        }
                     }
                     if let error = controller.error {
                         Text(error).font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
@@ -60,6 +63,8 @@ struct NotificationSettingsView: View {
                 }
                 .disabled(!controller.available || controller.busy)
                 Section {
+                    Text("The app icon badge counts sessions with unread important events in this account. Opening a session clears its count; opening Home does not clear everything. Enable Badges in iOS Settings if the number is hidden.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Text("Notification preferences apply to this account's workspace. Lock-screen alerts do not include chat text, task details, or project names.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }

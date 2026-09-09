@@ -20,7 +20,9 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["spaces/project", row("spaces", "project", {})]
       ]);
       const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
-        sends.push(await r.json()); return Response.json({ sent: true });
+        const body = await r.json() as { message: { kind: string } };
+        if (body.message.kind !== "badge") sends.push(body);
+        return Response.json({ sent: true });
       } }) };
       const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
         APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test" } as unknown as Env;
@@ -53,7 +55,8 @@ describe("notification outbox on real Durable Object SQLite", () => {
       const config = { NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
         APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test", PUSH_DEVICES: {
           idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
-            sent.push(await r.json() as { message: { kind: string } });
+            const body = await r.json() as { message: { kind: string } };
+            if (body.message.kind !== "badge") sent.push(body);
             return Response.json({ sent: true });
           } })
         } } as unknown as Env;
@@ -114,7 +117,9 @@ describe("notification outbox on real Durable Object SQLite", () => {
       rows.set("chats/chat", row("chats", "chat", { deviceId: "host", spaceId: "project" }));
       rows.set("spaces/project", row("spaces", "project", { deviceId: "host" }));
       const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-        sends.push(await request.json()); return Response.json({ sent: true });
+        const body = await request.json() as { message: { kind: string } };
+        if (body.message.kind !== "badge") sends.push(body);
+        return Response.json({ sent: true });
       } }) };
       const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
         APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test-only" } as unknown as Env;
@@ -157,7 +162,9 @@ describe("notification outbox on real Durable Object SQLite", () => {
         ["spaces/project", row("spaces", "project", {})]
       ]);
       const ns = { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-        sends.push(await request.json()); return Response.json({ sent: true });
+        const body = await request.json() as { message: { kind: string } };
+        if (body.message.kind !== "badge") sends.push(body);
+        return Response.json({ sent: true });
       } }) };
       const config = { NOTIFICATIONS_ENABLED: "true", PUSH_DEVICES: ns,
         APNS_TEAM_ID: "TEAM123456", APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test-only" } as unknown as Env;

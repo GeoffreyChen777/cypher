@@ -1,6 +1,7 @@
 import type { Env } from "./env";
 import type { Row } from "./registry-core";
 import { notificationsAvailable } from "./apns";
+import type { BadgeSnapshot } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
   readNotificationJSON, notificationJSON as json, notificationDecision, iosViewingChat,
@@ -9,6 +10,8 @@ import {
 
 interface Recipient { id: string; lease: string; installationId: string; epoch: number }
 interface SessionTarget { clientId: string; platform: "desktop" | "ios"; at: number }
+interface BadgeJob extends BadgeSnapshot { id: string; due: number; expires: number; attempt: number }
+type UnreadEvent = Pick<Notice, "id" | "chatId" | "projectId" | "kind" | "child">;
 
 function asyncChildren(fields: Row["fields"] | undefined) {
   const runs = (Array.isArray(fields?.subagents) ? fields.subagents : []).slice(0, 32)
@@ -30,6 +33,9 @@ export class Notifications {
   ) {
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS notify_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS notify_events (id TEXT PRIMARY KEY, due INTEGER NOT NULL, value TEXT NOT NULL)");
+    // Delivered events leave the outbox but remain unread until the session
+    // is opened. One row per chat, never one row per notification or retry.
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS notify_unread (chat_id TEXT PRIMARY KEY, value TEXT NOT NULL)");
   }
   private get<T>(key: string): T | undefined {
     const row = [...this.ctx.storage.sql.exec("SELECT value FROM notify_kv WHERE key = ?", key)][0];
@@ -42,17 +48,64 @@ export class Notifications {
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
   private target(chatId: string): SessionTarget | undefined { return this.get<SessionTarget>(`target:${chatId}`); }
   private scope(): string { return this.ctx.id.toString(); }
+  private badge(): BadgeSnapshot {
+    return {
+      badgeCount: Number([...this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM notify_unread")][0].count),
+      badgeRevision: this.get<number>("badgeRevision") ?? 0
+    };
+  }
+  private queueBadge(due = Date.now()): void {
+    const snapshot = this.badge(), previous = this.get<BadgeJob>("badgeJob");
+    this.set("badgeJob", { ...snapshot, id: crypto.randomUUID(), due: Math.min(due, previous?.due ?? due),
+      expires: Date.now() + 600_000, attempt: 0 } satisfies BadgeJob);
+  }
+  private badgeChanged(due = Date.now()): void {
+    this.set("badgeRevision", (this.get<number>("badgeRevision") ?? 0) + 1);
+    this.queueBadge(due);
+  }
+  private markUnread(notice: Notice): void {
+    if (notificationDecision(notice, this.settings(), [], Date.now()) === "drop") return;
+    const unread: UnreadEvent = { id: notice.id, chatId: notice.chatId, projectId: notice.projectId,
+      kind: notice.kind, child: notice.child };
+    this.ctx.storage.sql.exec("INSERT INTO notify_unread(chat_id,value) VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET value=excluded.value",
+      notice.chatId, JSON.stringify(unread));
+    this.badgeChanged(Date.now() + NOTICE_DELAY_MS);
+  }
+  private clearUnread(chatId: string, eventId?: string): string | undefined {
+    const row = [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id=?", chatId)][0];
+    if (!row) return;
+    const notice = JSON.parse(row.value as string) as UnreadEvent;
+    if (eventId && notice.id !== eventId) return;
+    this.ctx.storage.sql.exec("DELETE FROM notify_unread WHERE chat_id=?", chatId);
+    this.badgeChanged();
+    return notice.id;
+  }
+  private pruneUnread(): void {
+    const prefs = this.settings();
+    for (const row of [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread")]) {
+      const notice = JSON.parse(row.value as string) as UnreadEvent;
+      const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
+      if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
+          !prefs[notice.kind] || prefs.mutedProjects.includes(notice.projectId) ||
+          (notice.child && notice.kind !== "input" && !prefs.subagents)) {
+        this.clearUnread(notice.chatId);
+      }
+    }
+  }
 
   async fetch(request: Request, path: string): Promise<Response> {
     if (path === "settings" && request.method === "GET") {
-      return json({ available: notificationsAvailable(this.env), scope: this.scope(), settings: this.settings() });
+      this.pruneUnread();
+      this.schedule();
+      return json({ available: notificationsAvailable(this.env), scope: this.scope(), settings: this.settings(), ...this.badge() });
     }
     try {
       const body = object(await readNotificationJSON(request));
       if (path === "settings" && request.method === "PUT") {
         this.set("settings", parseSettings(body));
+        this.pruneUnread();
         this.schedule();
-        return json({ settings: this.settings() });
+        return json({ settings: this.settings(), scope: this.scope(), ...this.badge() });
       }
       if (path === "activity" && request.method === "POST") {
         if (!notificationsAvailable(this.env)) return json({ ok: true, available: false });
@@ -62,7 +115,7 @@ export class Notifications {
         const activity = parseActivity(body, previous, now);
         // Duplicate/reordered reports must not replay a historical read,
         // refresh its lease or route a new event to an old page.
-        if (activity === previous) return json({ ok: true, available: true, scope: this.scope(), readEventIds: [] });
+        if (activity === previous) return json({ ok: true, available: true, scope: this.scope(), readEventIds: [], ...this.badge() });
         const remaining = current.filter(a => a.clientId !== id && now - a.receivedAt < 600_000);
         this.set("activity", [...remaining.slice(-63), activity]);
         const readEventIds: string[] = [];
@@ -76,10 +129,12 @@ export class Notifications {
               this.remove(notice.id);
               readEventIds.push(notice.id);
             }
+            const unreadId = this.clearUnread(activity.chatId);
+            if (unreadId && !readEventIds.includes(unreadId)) readEventIds.push(unreadId);
           }
         }
         if (readEventIds.length) this.schedule();
-        return json({ ok: true, available: true, scope: this.scope(), readEventIds });
+        return json({ ok: true, available: true, scope: this.scope(), readEventIds, ...this.badge() });
       }
       if (path === "event" && request.method === "POST") {
         const chatId = identifier(body.chatId), deviceId = identifier(body.deviceId);
@@ -142,11 +197,13 @@ export class Notifications {
         // An event arriving while the session is already visible is read too.
         // Remember the dedupe marker even if the viewer leaves before flush.
         if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], Date.now())) {
+          this.clearUnread(chatId);
           this.schedule();
           return json({ ok: true, read: true });
         }
         if (this.events().length >= 256) this.remove(this.events()[0].notice.id);
         this.put(notice, Date.now() + NOTICE_DELAY_MS);
+        this.markUnread(notice);
         this.schedule();
         return json({ ok: true, queued: true });
       }
@@ -173,6 +230,8 @@ export class Notifications {
         if (this.get<number>(key) !== epoch) return json({ error: "stale" }, 409);
         const recipient: Recipient = { id: id.toString(), lease: reply.lease, installationId, epoch };
         this.set("recipients", [...this.recipients().filter(r => r.installationId !== installationId), recipient]);
+        this.queueBadge();
+        this.schedule();
         return json({ scope: this.scope(), bindingId: recipient.id, lease: recipient.lease });
       }
       if (path === "unregister" && request.method === "POST") {
@@ -251,12 +310,14 @@ export class Notifications {
       for (const pending of this.events()) {
         if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
       }
-      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now)) continue;
+      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now)) { this.clearUnread(chatId); continue; }
       if (this.events().length >= 256) {
         const oldest = this.events()[0]; if (oldest) this.remove(oldest.notice.id);
       }
       this.put(notice, now + NOTICE_DELAY_MS);
+      this.markUnread(notice);
     }
+    this.pruneUnread();
     this.schedule();
   }
 
@@ -269,8 +330,14 @@ export class Notifications {
       notice.id, due, JSON.stringify(notice));
   }
   private remove(id: string): void { this.ctx.storage.sql.exec("DELETE FROM notify_events WHERE id=?", id); }
-  clearPending(): void { this.ctx.storage.sql.exec("DELETE FROM notify_events"); }
-  nextDue(): number | undefined { return this.events()[0]?.due; }
+  clearPending(): void {
+    this.ctx.storage.sql.exec("DELETE FROM notify_events");
+    this.set("badgeJob", null);
+  }
+  nextDue(): number | undefined {
+    const next = Math.min(this.events()[0]?.due ?? Infinity, this.get<BadgeJob>("badgeJob")?.due ?? Infinity);
+    return Number.isFinite(next) ? next : undefined;
+  }
   private async deviceCall(recipient: { id: string; lease: string }, path: string, extra: Record<string, unknown>): Promise<Response> {
     const ns = this.env.PUSH_DEVICES!;
     return ns.get(ns.idFromString(recipient.id)).fetch(new Request(`https://push${path}`, {
@@ -280,6 +347,7 @@ export class Notifications {
 
   async flush(): Promise<void> {
     if (!notificationsAvailable(this.env)) { this.clearPending(); return; }
+    this.pruneUnread();
     const now = Date.now();
     // At most 32 recipient calls per alarm, also within the free-tier
     // subrequest budget. Remaining due work gets another alarm.
@@ -295,10 +363,22 @@ export class Notifications {
       const expected = notice.sessionStatus ?? { completed: "idle", failed: "errored", input: "awaitingInput" }[notice.kind];
       if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
           !session || session.deleted || session.fields.status !== expected ||
-          this.get<string>(`run:${notice.chatId}`) !== notice.run) { this.remove(notice.id); continue; }
-      if (expected === "idle" && asyncChildren(session.fields).live) { this.remove(notice.id); continue; }
+          this.get<string>(`run:${notice.chatId}`) !== notice.run) {
+        this.remove(notice.id); this.clearUnread(notice.chatId, notice.id); continue;
+      }
+      if (expected === "idle" && asyncChildren(session.fields).live) {
+        this.remove(notice.id); this.clearUnread(notice.chatId, notice.id); continue;
+      }
       const decision = notificationDecision(notice, this.settings(), this.get<Activity[]>("activity") ?? [], Date.now());
-      if (decision === "drop") { this.remove(notice.id); continue; }
+      if (decision === "drop") {
+        this.remove(notice.id);
+        // Alert expiry is not "read". Delivered/unread badges survive the
+        // short APNs retry window; pruning handles disabled/muted/deleted rows.
+        if (iosViewingChat(notice.chatId, this.get<Activity[]>("activity") ?? [], Date.now())) {
+          this.clearUnread(notice.chatId, notice.id);
+        }
+        continue;
+      }
       if (decision === "defer") { this.put(notice, now + 15_000); continue; }
       const target = this.target(notice.chatId);
       const recipients = target?.platform === "ios"
@@ -322,6 +402,9 @@ export class Notifications {
         if (!this.events().some(e => e.notice.id === notice.id)) break;
         if (notificationDecision(notice, this.settings(), this.get<Activity[]>("activity") ?? [], Date.now()) === "drop") {
           this.remove(notice.id);
+          if (iosViewingChat(notice.chatId, this.get<Activity[]>("activity") ?? [], Date.now())) {
+            this.clearUnread(notice.chatId, notice.id);
+          }
           break;
         }
         // Logout/rotation removes the old local receipt. Cross-account
@@ -330,7 +413,7 @@ export class Notifications {
         try {
           const response = await this.deviceCall(recipient, "/send", { message: {
             id: notice.id, scope: this.scope(), chatId: notice.chatId, projectId: notice.projectId,
-            kind: notice.kind, expires: notice.expires
+            kind: notice.kind, expires: notice.expires, ...this.badge()
           } });
           const outcome = await response.json() as { sent?: boolean; permanent?: boolean };
           if (!outcome.sent && !outcome.permanent) retry = true;
@@ -343,6 +426,37 @@ export class Notifications {
         notice.attempt += 1;
         this.put(notice, now + Math.min(120_000, 5_000 * 2 ** notice.attempt));
       } else this.remove(notice.id);
+    }
+    await this.flushBadge();
+  }
+
+  private async flushBadge(): Promise<void> {
+    const job = this.get<BadgeJob>("badgeJob"), now = Date.now();
+    if (!job || job.due > now) return;
+    if (job.expires <= now) { this.set("badgeJob", null); return; }
+    let retry = false;
+    // Badge-only updates reach every registration in the account, including
+    // background phones that did not receive the session's targeted alert.
+    // Together with 32 alert calls above, this stays below 50 subrequests.
+    for (const recipient of this.recipients().slice(0, 16)) {
+      if (this.get<BadgeJob>("badgeJob")?.id !== job.id) return;
+      if (!this.recipients().some(r => r.id === recipient.id && r.lease === recipient.lease)) continue;
+      try {
+        const response = await this.deviceCall(recipient, "/send", { message: {
+          id: job.id, scope: this.scope(), kind: "badge", expires: job.expires,
+          badgeCount: job.badgeCount, badgeRevision: job.badgeRevision
+        } });
+        const outcome = await response.json() as { sent?: boolean; permanent?: boolean };
+        if (!outcome.sent && !outcome.permanent) retry = true;
+        if (outcome.permanent) this.set("recipients", this.recipients().filter(r => r.id !== recipient.id || r.lease !== recipient.lease));
+      } catch { retry = true; }
+    }
+    if (this.get<BadgeJob>("badgeJob")?.id !== job.id) return;
+    if (retry && job.attempt < 5) {
+      this.set("badgeJob", { ...job, attempt: job.attempt + 1,
+        due: now + Math.min(120_000, 5_000 * 2 ** (job.attempt + 1)) });
+    } else {
+      this.set("badgeJob", null);
     }
   }
 }

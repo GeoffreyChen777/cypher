@@ -41,8 +41,18 @@ async function providerToken(env: Env): Promise<string> {
   cached = { key: env.APNS_PRIVATE_KEY!, keyId: env.APNS_KEY_ID!, team: env.APNS_TEAM_ID!, jwt, until: now + 50 * 60_000 };
   return jwt;
 }
-export interface PushMessage {
+export interface BadgeSnapshot { badgeCount: number; badgeRevision: number }
+export interface AlertPushMessage extends Partial<BadgeSnapshot> {
   id: string; scope: string; chatId: string; projectId: string; kind: NoticeKind; expires: number;
+}
+export interface BadgePushMessage extends BadgeSnapshot {
+  id: string; scope: string; kind: "badge"; expires: number;
+}
+export type PushMessage = AlertPushMessage | BadgePushMessage;
+export function validBadge(snapshot: Partial<BadgeSnapshot>): boolean {
+  return Number.isSafeInteger(snapshot.badgeCount) && snapshot.badgeCount! >= 0 &&
+    snapshot.badgeCount! <= 2_147_483_647 &&
+    Number.isSafeInteger(snapshot.badgeRevision) && snapshot.badgeRevision! >= 0;
 }
 export async function sendAPNs(
   env: Env, token: string, environment: "development" | "production", message: PushMessage
@@ -51,7 +61,12 @@ export async function sendAPNs(
   let stage = "prepare";
   try {
     const host = environment === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${message.scope}/${message.chatId}`));
+    const badgeOnly = message.kind === "badge";
+    if ((badgeOnly || message.badgeCount !== undefined || message.badgeRevision !== undefined) && !validBadge(message)) {
+      return "retry";
+    }
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
+      badgeOnly ? `badge/${message.scope}` : `${message.scope}/${message.chatId}`));
     const collapse = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, "0")).join("").slice(0, 48);
     stage = "provider_token";
     const authorization = `bearer ${await providerToken(env)}`;
@@ -60,14 +75,20 @@ export async function sendAPNs(
       method: "POST",
       headers: {
         authorization, "content-type": "application/json",
-        "apns-topic": APNS_TOPIC, "apns-push-type": "alert", "apns-priority": "10",
+        "apns-topic": APNS_TOPIC, "apns-push-type": "alert", "apns-priority": badgeOnly ? "5" : "10",
         "apns-id": message.id, "apns-collapse-id": collapse,
         "apns-expiration": String(Math.floor(Math.min(message.expires, Date.now() + 300_000) / 1000))
       },
       body: JSON.stringify({
-        aps: { alert: noticeText(message.kind), sound: "default", "thread-id": collapse },
-        cypher: { version: 1, scope: message.scope, chatId: message.chatId,
-          projectId: message.projectId, kind: message.kind, eventId: message.id }
+        aps: {
+          ...(!badgeOnly ? { alert: noticeText(message.kind), sound: "default", "thread-id": collapse } : {}),
+          ...(message.badgeCount === undefined ? {} : { badge: message.badgeCount })
+        },
+        cypher: { version: 1, scope: message.scope, kind: message.kind, eventId: message.id,
+          ...(!badgeOnly ? { chatId: message.chatId, projectId: message.projectId } : {}),
+          ...(message.badgeCount === undefined ? {} :
+            { badgeCount: message.badgeCount, badgeRevision: message.badgeRevision })
+        }
       })
     });
     if (response.status === 200) { diagnostic("accepted", 200); return "sent"; }

@@ -66,11 +66,13 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   replacing the workspace. Queue/upload failure retains them; successful
   queuing consumes only the versions included in that send. Bounds: 32
   comments, 16k characters per quote, 8k per comment, 64 KiB annotation JSON.
-- **Smart notifications:** Home → Notifications configures important events,
-  desktop-activity suppression, per-Project muting and foreground in-app banners.
-  Registration, logout revocation and notification taps are account-scoped.
-  Production delivery is still disabled pending APNs credentials, portal
-  capability configuration and real-device acceptance. See
+- **Notifications:** Home → Notifications configures important events,
+  per-Project muting and notification permissions. Alerts follow the session's
+  last-used device. The app icon badge counts unread important-event sessions
+  in this account; opening a session clears its contribution, Home does not
+  clear everything, and logout clears the local icon. Registration, revocation,
+  read receipts, badge revisions and notification taps are account-scoped.
+  Real-device APNs delivery is a separate rollout/acceptance step. See
   [`docs/notifications.md`](../../docs/notifications.md) for rollout boundaries.
 
 ### Validation boundary

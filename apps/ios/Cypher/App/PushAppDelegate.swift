@@ -26,8 +26,13 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        guard let payload = PushPayload.parse(notification.request.content.userInfo) else { return [] }
-        await MainActor.run { self.controller?.receive(payload, tapped: false) }
+        let info = notification.request.content.userInfo
+        let badge = NotificationBadge.parse(info)
+        let payload = PushPayload.parse(info)
+        await MainActor.run {
+            if let badge { self.controller?.receiveBadge(badge) }
+            if let payload { self.controller?.receive(payload, tapped: false) }
+        }
         // Foreground notifications use our small in-app banner, never a
         // second system banner/sound (including when viewing the same chat).
         return []
@@ -38,6 +43,9 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
         await MainActor.run {
             if let controller = self.controller { controller.receive(payload, tapped: true) }
             else { self.pendingTap = payload }
+            // Tapping an old delivered alert is not an authoritative unread
+            // count. Refresh from the authenticated server after navigation.
+            if let controller { Task { await controller.refresh() } }
         }
     }
 }

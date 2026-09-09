@@ -11,6 +11,8 @@ final class NotificationController {
     private(set) var permission = "Not requested"
     private(set) var busy = false
     private(set) var registered = false
+    private(set) var badgeCount = 0
+    private var badgeRevision = -1
     var error: String?
     var banner: PushPayload?
     var pendingNavigation: PushPayload?
@@ -28,6 +30,7 @@ final class NotificationController {
     private var activityClientId = ""
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var revokeTask: Task<Void, Never>?
+    @ObservationIgnored private var badgeTask: Task<Void, Never>?
     // Injectable boundaries keep permission/network/keychain behavior testable
     // without registering a real token or modifying system settings.
     @ObservationIgnored var readRegistration: () -> String? = { Keychain.load(key: NotificationController.storageKey) }
@@ -42,10 +45,13 @@ final class NotificationController {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
     @ObservationIgnored var requestPermission: () async throws -> Bool = {
-        try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+        try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
     }
     @ObservationIgnored var registerWithOS: () -> Void = { UIApplication.shared.registerForRemoteNotifications() }
     @ObservationIgnored var clearDelivered: () -> Void = { UNUserNotificationCenter.current().removeAllDeliveredNotifications() }
+    @ObservationIgnored var setBadge: (Int) async -> Void = { count in
+        try? await UNUserNotificationCenter.current().setBadgeCount(count)
+    }
     private static let storageKey = "push-registration-v1"
 
     private func load() {
@@ -70,6 +76,7 @@ final class NotificationController {
     func bind(_ config: AppConfig) {
         load()
         generation = UUID()
+        resetBadge()
         busy = false
         activityClientId = UUID().uuidString.lowercased()
         banner = nil
@@ -101,6 +108,7 @@ final class NotificationController {
     func disconnect() {
         load()
         generation = UUID()
+        resetBadge()
         busy = false
         heartbeat?.cancel()
         heartbeat = nil
@@ -150,12 +158,18 @@ final class NotificationController {
         let ticket = generation
         settingsRevision += 1
         let revision = settingsRevision
-        struct Reply: Decodable { let available: Bool; let scope: String; let settings: NotificationPreferences }
+        struct Reply: Decodable {
+            let available: Bool; let scope: String; let settings: NotificationPreferences
+            var badgeCount: Int?; var badgeRevision: Int?
+        }
         do {
             let reply = try JSONDecoder().decode(Reply.self, from: await request(config, action: "settings"))
             guard ticket == generation, revision == settingsRevision else { return }
             available = reply.available
             scope = reply.scope
+            if let count = reply.badgeCount, let revision = reply.badgeRevision {
+                receiveBadge(NotificationBadge(scope: reply.scope, badgeCount: count, badgeRevision: revision))
+            }
             completeDeferredTap()
             settings = reply.settings
             reportActivity()
@@ -206,8 +220,9 @@ final class NotificationController {
         let ticket = generation
         defer { if ticket == generation { busy = false } }
         do {
-            _ = try await request(config, action: "settings", method: "PUT", body: JSONEncoder().encode(next))
+            let reply = try await request(config, action: "settings", method: "PUT", body: JSONEncoder().encode(next))
             guard ticket == generation else { return }
+            if let badge = try? JSONDecoder().decode(NotificationBadge.self, from: reply) { receiveBadge(badge) }
             settings = next
             error = nil
             if permission == "Allowed" {
@@ -320,15 +335,42 @@ final class NotificationController {
         Task {
             // Old servers omit this additive response; ordinary activity
             // reporting remains compatible during a rolling upgrade.
-            struct Reply: Decodable { var scope: String?; var readEventIds: [String]? }
+            struct Reply: Decodable {
+                var scope: String?; var readEventIds: [String]?
+                var badgeCount: Int?; var badgeRevision: Int?
+            }
             guard let response = try? await request(config, action: "activity", method: "POST", body: data),
                   ticket == generation, self.config === config,
                   let reply = try? JSONDecoder().decode(Reply.self, from: response),
                   let responseScope = reply.scope, responseScope == scope else { return }
+            if let count = reply.badgeCount, let revision = reply.badgeRevision {
+                receiveBadge(NotificationBadge(scope: responseScope, badgeCount: count, badgeRevision: revision))
+            }
             let ids = Array((reply.readEventIds ?? []).filter { UUID(uuidString: $0) != nil }.prefix(256))
             if seenEvents.count + ids.count > 512 { seenEvents = [] }
             seenEvents.formUnion(ids)
             if let banner, ids.contains(banner.eventId) { self.banner = nil }
+        }
+    }
+    func receiveBadge(_ badge: NotificationBadge) {
+        guard config != nil, badge.scope == scope, badge.valid, badge.badgeRevision > badgeRevision else { return }
+        badgeRevision = badge.badgeRevision
+        badgeCount = badge.badgeCount
+        applySystemBadge()
+    }
+    private func resetBadge() {
+        badgeRevision = -1
+        badgeCount = 0
+        applySystemBadge()
+    }
+    private func applySystemBadge() {
+        let ticket = generation, count = badgeCount, previous = badgeTask
+        // Serialize OS writes too: a delayed old-account setBadgeCount must
+        // finish before logout's zero or the next account's count is applied.
+        badgeTask = Task {
+            await previous?.value
+            guard ticket == generation, count == badgeCount else { return }
+            await setBadge(count)
         }
     }
     func receive(_ payload: PushPayload, tapped: Bool) {

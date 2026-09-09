@@ -72,4 +72,32 @@ describe("APNs transport", () => {
       expect(await sendAPNs(env, "0".repeat(64), "production", message())).toBe(expected);
     }
   });
+  it("sends absolute badges on alerts and badge-only zero without alert or sound", async () => {
+    const requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (_: string, options: RequestInit) => {
+      requests.push(options); return new Response(null, { status: 200 });
+    });
+    const env = await configured();
+    await sendAPNs(env, "0".repeat(64), "production", { ...message(), badgeCount: 3, badgeRevision: 7 });
+    await sendAPNs(env, "0".repeat(64), "production", {
+      id: crypto.randomUUID(), scope: "a".repeat(64), kind: "badge", expires: Date.now() + 60_000,
+      badgeCount: 0, badgeRevision: 8
+    });
+    const alert = JSON.parse(requests[0].body as string), badge = JSON.parse(requests[1].body as string);
+    expect(alert.aps.badge).toBe(3);
+    expect(badge.aps).toEqual({ badge: 0 });
+    expect(badge.cypher).toMatchObject({ kind: "badge", badgeCount: 0, badgeRevision: 8 });
+    expect(badge.cypher.chatId).toBeUndefined();
+    expect(new Headers(requests[1].headers).get("apns-push-type")).toBe("alert");
+    expect(new Headers(requests[1].headers).get("apns-priority")).toBe("5");
+  });
+  it("rejects malformed badge counts before contacting Apple", async () => {
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const env = await configured();
+    for (const badgeCount of [-1, 1.5, Number.MAX_SAFE_INTEGER]) {
+      expect(await sendAPNs(env, "0".repeat(64), "production",
+        { ...message(), badgeCount, badgeRevision: 1 })).toBe("retry");
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });

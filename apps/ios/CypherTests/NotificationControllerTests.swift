@@ -12,6 +12,9 @@ private final class NotificationFixture {
     var revocations: [URLRequest] = []
     var activities: [[String: Any]] = []
     var readEventIds: [String] = []
+    var badgeCount = 0
+    var badgeRevision = 0
+    var appliedBadges: [Int] = []
     var leases: [String: String] = [:]
     init() {
         controller.readRegistration = { [weak self] in self?.storage }
@@ -20,6 +23,7 @@ private final class NotificationFixture {
         controller.requestPermission = { [weak self] in self?.permission = .authorized; return true }
         controller.registerWithOS = { [weak self] in self?.controller.receivedToken(Data(repeating: 7, count: 32)) }
         controller.clearDelivered = {}
+        controller.setBadge = { [weak self] count in self?.appliedBadges.append(count) }
         controller.perform = { [weak self] request in
             guard let self, let url = request.url else { throw RelayError.notConnected }
             let scope = String(repeating: request.value(forHTTPHeaderField: "Authorization")?.contains("alice") == true ? "a" : "b", count: 64)
@@ -45,6 +49,11 @@ private final class NotificationFixture {
                 body = ["ok": true, "scope": scope,
                         "readEventIds": activity["foreground"] as? Bool == true && activity["chatId"] as? String == "chat"
                             ? readEventIds : []]
+            }
+            if url.path.hasSuffix("/settings") || url.path.hasSuffix("/activity") {
+                body["badgeCount"] = badgeCount
+                body["badgeRevision"] = badgeRevision
+                body["scope"] = scope
             }
             return (try JSONSerialization.data(withJSONObject: body),
                     HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
@@ -215,5 +224,53 @@ final class NotificationControllerTests: XCTestCase {
         try await wait { !second.activities.isEmpty }
         XCTAssertGreaterThan(try XCTUnwrap(second.activities.first?["sequence"] as? Int), sequence)
         XCTAssertEqual(first.activities.first?["clientId"] as? String, second.activities.first?["clientId"] as? String)
+    }
+
+    func testAuthoritativeBadgeDoesNotClearOnHomeAndUpdatesOnReadAndLogout() async throws {
+        let f = NotificationFixture()
+        f.badgeCount = 3; f.badgeRevision = 4
+        f.bind()
+        try await wait { f.appliedBadges.last == 3 }
+        f.controller.viewing(nil)
+        await Task.yield()
+        XCTAssertEqual(f.controller.badgeCount, 3)
+        f.badgeCount = 2; f.badgeRevision = 5
+        f.controller.viewing("chat")
+        try await wait { f.appliedBadges.last == 2 }
+        f.controller.disconnect()
+        try await wait { f.appliedBadges.last == 0 }
+    }
+
+    func testBadgeSnapshotsAreScopedAbsoluteAndMonotonic() async throws {
+        let f = NotificationFixture()
+        defer { f.controller.disconnect() }
+        f.bind()
+        try await wait { f.controller.scope != nil }
+        let scope = String(repeating: "a", count: 64)
+        f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 2, badgeRevision: 10))
+        f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 2, badgeRevision: 10))
+        try await wait { f.appliedBadges.last == 2 }
+        XCTAssertEqual(f.controller.badgeCount, 2, "Retries do not increment")
+        f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 0, badgeRevision: 11))
+        f.controller.receiveBadge(NotificationBadge(scope: scope, badgeCount: 3, badgeRevision: 9))
+        f.controller.receiveBadge(NotificationBadge(scope: String(repeating: "b", count: 64), badgeCount: 8, badgeRevision: 50))
+        try await wait { f.appliedBadges.last == 0 }
+        XCTAssertEqual(f.controller.badgeCount, 0)
+    }
+
+    func testLateSystemBadgeWriteCannotWinAfterLogout() async throws {
+        let f = NotificationFixture()
+        f.bind()
+        try await wait { f.controller.scope != nil }
+        var release: CheckedContinuation<Void, Never>?
+        f.controller.setBadge = { [weak f] count in
+            if count == 7 { await withCheckedContinuation { release = $0 } }
+            f?.appliedBadges.append(count)
+        }
+        f.controller.receiveBadge(NotificationBadge(scope: String(repeating: "a", count: 64), badgeCount: 7, badgeRevision: 10))
+        try await wait { release != nil }
+        f.controller.disconnect()
+        release?.resume()
+        try await wait { f.appliedBadges.last == 0 && f.appliedBadges.contains(7) }
     }
 }

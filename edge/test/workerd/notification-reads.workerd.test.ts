@@ -19,7 +19,9 @@ function fixture(state: DurableObjectState) {
     NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
     APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test",
     PUSH_DEVICES: { idFromString: (id: string) => id, get: () => ({ fetch: async (request: Request) => {
-      sends.push(await request.json() as typeof sends[number]);
+      const body = await request.json() as typeof sends[number] & { message: { kind: string } };
+      if (body.message.kind === "badge") return Response.json({ sent: true });
+      sends.push(body);
       await duringSend?.();
       return Response.json({ sent: false }); // failures normally schedule retry
     } }) }

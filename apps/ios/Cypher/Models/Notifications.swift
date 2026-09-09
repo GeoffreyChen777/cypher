@@ -1,5 +1,23 @@
 import Foundation
 
+struct NotificationBadge: Decodable, Equatable {
+    let scope: String
+    let badgeCount: Int
+    let badgeRevision: Int
+
+    var valid: Bool {
+        scope.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil &&
+            badgeCount >= 0 && badgeCount <= Int(Int32.max) &&
+            badgeRevision >= 0 && badgeRevision <= 9_007_199_254_740_991
+    }
+    static func parse(_ userInfo: [AnyHashable: Any]) -> NotificationBadge? {
+        guard let fields = userInfo["cypher"] as? [String: Any], fields["version"] as? Int == 1,
+              let data = try? JSONSerialization.data(withJSONObject: fields),
+              let badge = try? JSONDecoder().decode(Self.self, from: data), badge.valid else { return nil }
+        return badge
+    }
+}
+
 enum NotificationMode: String, Codable, CaseIterable, Identifiable {
     case smart, actionable, always, off
     var id: String { rawValue }

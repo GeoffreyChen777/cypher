@@ -2,7 +2,7 @@
  * or account switching. Registration/send are internal; public revocation
  * requires the exact opaque lease capability. */
 import type { Env } from "./env";
-import { type PushMessage } from "./apns";
+import { type PushMessage, validBadge, type BadgeSnapshot } from "./apns";
 import { notificationJSON as json, object, identifier, readNotificationJSON } from "./notifications-model";
 
 interface Registration {
@@ -67,14 +67,35 @@ export class PushDevice implements DurableObject {
       return json({ ok: true });
     }
     if (path !== "/send") return json({ error: "not found" }, 404);
-    const message = body.message as PushMessage | undefined;
+    let message = body.message as PushMessage | undefined;
     if (!message || message.scope !== current.scope || !/^[a-f0-9-]{36}$/.test(message.id) ||
-        !["completed", "failed", "input"].includes(message.kind)) return json({ error: "invalid" }, 400);
+        !["completed", "failed", "input", "badge"].includes(message.kind) ||
+        ((message.kind === "badge" || message.badgeCount !== undefined || message.badgeRevision !== undefined) &&
+          !validBadge(message))) return json({ error: "invalid" }, 400);
     const key = `delivery:${message.id}`;
     const previous = await this.ctx.storage.get<{ state: string; at: number }>(key);
     if (previous?.state === "sent") return json({ sent: true });
     if (previous?.state === "sending" && Date.now() - previous.at < 20_000) return json({ retry: true });
     if (message.expires <= Date.now()) return json({ permanent: true });
+    if (message.badgeCount !== undefined) {
+      const incoming = message;
+      // Normalize reordered requests against this token's latest account
+      // snapshot. A read (count=0) must not be overwritten by an older retry.
+      const snapshot = await this.ctx.storage.transaction(async tx => {
+        const registration = await tx.get<Registration>("registration");
+        if (!registration?.active || registration.lease !== current.lease || registration.scope !== current.scope) return null;
+        const latest = await tx.get<BadgeSnapshot & { scope: string; lease: string }>("badge");
+        if (latest?.scope === current.scope && latest.lease === current.lease &&
+            latest.badgeRevision >= incoming.badgeRevision!) {
+          return { badgeCount: latest.badgeCount, badgeRevision: latest.badgeRevision };
+        }
+        const next = { badgeCount: incoming.badgeCount!, badgeRevision: incoming.badgeRevision! };
+        await tx.put("badge", { ...next, scope: current.scope, lease: current.lease });
+        return next;
+      });
+      if (!snapshot) return json({ permanent: true });
+      message = { ...message, ...snapshot };
+    }
     await this.ctx.storage.put(key, { state: "sending", at: Date.now() });
     // The actual Apple connection runs in a normal Worker entrypoint through
     // a same-script service binding, not in Durable Object execution context.
