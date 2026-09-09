@@ -205,6 +205,16 @@ struct MessageEntry: Identifiable, Hashable {
     var deviceId: String
     var status: MessageStatus?
     var continuationOf: String?
+    /// Explicit sender intent from the durable command ledger, not a claim
+    /// that the agent has consumed the instruction (or a new wire field).
+    var isSteer = false
+}
+
+struct PendingSend {
+    var messageId: String
+    var text: String
+    var at: Int64
+    var isSteer = false
 }
 
 // MARK: - Folder browsing (add-space palette data)

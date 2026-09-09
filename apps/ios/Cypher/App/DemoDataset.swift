@@ -193,9 +193,9 @@ final class DemoDataset {
         if let existing = stores[chatId] { return existing }
         let store = SessionStore(chatId: chatId, config: Self.dummyConfig, offline: true)
         store.setEntries(Self.transcript(for: chatId))
-        store.demoResponder = { [weak self, weak store] prompt in
+        store.demoResponder = { [weak self, weak store] prompt, isSteer in
             guard let self, let store else { return }
-            self.simulateTurn(store: store, chatId: chatId, prompt: prompt)
+            self.simulateTurn(store: store, chatId: chatId, prompt: prompt, isSteer: isSteer)
         }
         stores[chatId] = store
         return store
@@ -309,6 +309,12 @@ final class DemoDataset {
                 MessageEntry(id: "m6", role: .assistant, parts: [
                     .text(id: "t0", text: "已调整：上一轮回复到下一条提问为 **36 pt**，同一轮提问到回复仍是 **14 pt**。"),
                 ], createdAt: now - 750_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                MessageEntry(id: "m7", role: .user, parts: [
+                    .text(id: "t0", text: "先不用跑测试，继续改 UI。"),
+                ], createdAt: now - 740_000, deviceId: "ios-demo", status: .complete, isSteer: true),
+                MessageEntry(id: "m8", role: .assistant, parts: [
+                    .text(id: "t0", text: "继续调整界面。这条追加指令用小标签和细边框区分，仍属于当前这一轮。"),
+                ], createdAt: now - 730_000, deviceId: "dev-mac", status: .complete),
             ]
         case "chat-deploy":
             return [
@@ -326,13 +332,13 @@ final class DemoDataset {
 
     // MARK: Streaming simulation
 
-    private func simulateTurn(store: SessionStore, chatId: String, prompt: String) {
+    private func simulateTurn(store: SessionStore, chatId: String, prompt: String, isSteer: Bool) {
         streamTask?.cancel()
         let now = nowMs()
         var entries = store.entries
         entries.append(MessageEntry(id: "u-\(now)", role: .user, parts: [
             .text(id: "t0", text: prompt),
-        ], createdAt: now, deviceId: "ios-demo", status: .complete, continuationOf: nil))
+        ], createdAt: now, deviceId: "ios-demo", status: .complete, continuationOf: nil, isSteer: isSteer))
         let liveId = "a-\(now)"
         entries.append(MessageEntry(id: liveId, role: .assistant, parts: [
             .text(id: "t0", text: ""),

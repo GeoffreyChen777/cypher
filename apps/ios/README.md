@@ -36,6 +36,14 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   tap the notice for setup details. Returning to foreground/retrying renews
   the grace period. This is a display threshold, not a new transport timeout:
   automatic reconnect and existing command/draft protections are unchanged.
+- **Steer bubbles:** explicit steer instructions remain right-aligned, with a
+  small arrow/Steer label, softer fill, thin border and 14pt same-turn spacing
+  (normal new exchanges retain 36pt). The synced, append-only command ledger's
+  `steer` + `messageId` identifies materialized messages after reopening/on other
+  iOS devices; optimistic echoes carry the same intent. The label is **not**
+  an agent receipt, including when a steer falls back to a new run. Old messages
+  without a matching command ID remain ordinary rather than being guessed.
+  Demo's `chat-tabs` includes an example; no engine/schema change is required.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
   Legacy orphaned sessions and their archives remain accessible.

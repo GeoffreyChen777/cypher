@@ -36,6 +36,7 @@ final class SessionCommandTests: XCTestCase {
         XCTAssertEqual(request?["modelOptions"]?.mapValue?["custom"]?.stringValue, "keep")
         XCTAssertEqual(store.pendingSends.count, 1)
         XCTAssertEqual(store.pendingSends.first?.text, "Continue this task")
+        XCTAssertEqual(store.pendingSends.first?.isSteer, false)
         XCTAssertTrue(store.entries.isEmpty, "The phone queues commands; it never fabricates host replies")
     }
 
@@ -49,5 +50,6 @@ final class SessionCommandTests: XCTestCase {
         XCTAssertEqual(Set(rows.compactMap { $0["id"]?.stringValue }).count, 3)
         XCTAssertEqual(rows.last?["payload"]?.mapValue?["requestId"]?.stringValue, "question-1")
         XCTAssertEqual(store.pendingSends.count, 1, "Only message-bearing commands have optimistic echoes")
+        XCTAssertEqual(store.pendingSends.first?.isSteer, true)
     }
 }

@@ -41,7 +41,7 @@ final class SessionStore {
     @ObservationIgnored let transcriptCache = TranscriptBuilderCache()
     private(set) var connected = false
     /// Client-minted ids of sends the host hasn't materialized yet.
-    private(set) var pendingSends: [(messageId: String, text: String, at: Int64)] = []
+    private(set) var pendingSends: [PendingSend] = []
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.
@@ -59,7 +59,7 @@ final class SessionStore {
     /// Demo mode: no room, entries driven externally.
     private let offline: Bool
     /// Demo hook: invoked instead of the command plane when offline.
-    @ObservationIgnored var demoResponder: ((String) -> Void)?
+    @ObservationIgnored var demoResponder: ((String, Bool) -> Void)?
 
     init(chatId: String, config: AppConfig, offline: Bool = false) {
         self.chatId = chatId
@@ -351,7 +351,24 @@ final class SessionStore {
     /// previous projection standing rather than blanking a live transcript.
     nonisolated static func decodeEntries(from doc: LoroDoc) -> [MessageEntry]? {
         guard let root = doc.getDeepValue().mapValue else { return nil }
-        let raw = (root["messages"]?.listValue ?? []).compactMap(entryFrom)
+        // Commands are append-only and sync with the transcript. Join explicit
+        // steer message IDs instead of guessing from timing/status, so the
+        // optimistic echo and a reopened/cross-device transcript agree.
+        // "applied" only means routed/queued, not consumed: don't expose it as
+        // a delivery receipt. Old messages without a matching ID stay normal.
+        let steerIDs = Set((root["commands"]?.listValue ?? []).compactMap { command -> String? in
+            guard let command = command.mapValue,
+                  command["kind"]?.stringValue == "steer",
+                  let payload = command["payload"]?.mapValue,
+                  payload["kind"]?.stringValue == "steer",
+                  let id = payload["messageId"]?.stringValue, !id.isEmpty else { return nil }
+            return id
+        })
+        let raw = (root["messages"]?.listValue ?? []).compactMap(entryFrom).map { entry in
+            var entry = entry
+            entry.isSteer = entry.role == .user && steerIDs.contains(entry.id)
+            return entry
+        }
         return joinContinuations(raw)
     }
 
@@ -462,7 +479,7 @@ final class SessionStore {
     func sendRun(prompt: String, chat: Chat, attachments: [String] = [], agentPrompt: String? = nil) -> Bool {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if offline {
-            demoResponder?(prompt)
+            demoResponder?(prompt, false)
             return true
         }
         let messageId = UUID().uuidString.lowercased()
@@ -481,7 +498,7 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "run", payload: payload) else { return false }
-        pendingSends.append((messageId, prompt, nowMs()))
+        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs()))
         revision &+= 1
         return true
     }
@@ -490,7 +507,7 @@ final class SessionStore {
     func sendSteer(prompt: String, agentPrompt: String? = nil) -> Bool {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
         if offline {
-            demoResponder?(prompt)
+            demoResponder?(prompt, true)
             return true
         }
         let messageId = UUID().uuidString.lowercased()
@@ -501,7 +518,7 @@ final class SessionStore {
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
         guard queueCommand(kind: "steer", payload: payload) else { return false }
-        pendingSends.append((messageId, prompt, nowMs()))
+        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs(), isSteer: true))
         revision &+= 1
         return true
     }

@@ -10,7 +10,7 @@
 import Foundation
 
 enum RowKind {
-    case user(text: String)
+    case user(text: String, isSteer: Bool = false)
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
@@ -53,7 +53,7 @@ enum TranscriptRowBuilder {
     /// "{entryId}#{partId}" so the streaming tail re-parses O(delta + tail);
     /// `completed` memoizes settled parts so they parse exactly once.
     static func rows(entries: [MessageEntry],
-                     pendingSends: [(messageId: String, text: String, at: Int64)],
+                     pendingSends: [PendingSend],
                      parsers: inout [String: IncrementalMarkdownParser],
                      completed: inout [String: CompletedParse]) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
@@ -67,9 +67,9 @@ enum TranscriptRowBuilder {
         let ids = Set(entries.map(\.id))
         for pending in pendingSends where !ids.contains(pending.messageId) {
             rows.append(TranscriptRow(id: pending.messageId,
-                                      version: fnv1a(pending.text) | 1,
+                                      version: userVersion(pending.text, isSteer: pending.isSteer) | 1,
                                       turnStart: true,
-                                      kind: .user(text: pending.text),
+                                      kind: .user(text: pending.text, isSteer: pending.isSteer),
                                       entryId: pending.messageId,
                                       timestamp: nil,
                                       partKey: nil))
@@ -93,7 +93,9 @@ enum TranscriptRowBuilder {
         if isFirst { return TranscriptView.gapTurn + 10 }
         // Separate exchanges without pulling a user's prompt away from its
         // reply. Pending sends follow this same path as confirmed messages.
-        if case .user = row.kind { return TranscriptView.gapExchange }
+        if case .user(_, let isSteer) = row.kind {
+            return isSteer ? TranscriptView.gapTurn : TranscriptView.gapExchange
+        }
         if row.turnStart { return TranscriptView.gapTurn }
         // Same part ⇒ these are sibling markdown blocks, not a new turn.
         if let key = row.partKey, key == previous?.partKey { return MD.blockGap }
@@ -115,8 +117,8 @@ enum TranscriptRowBuilder {
                 return nil
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
-            rows.append(TranscriptRow(id: entry.id, version: fnv1a(text),
-                                      turnStart: true, kind: .user(text: text),
+            rows.append(TranscriptRow(id: entry.id, version: userVersion(text, isSteer: entry.isSteer),
+                                      turnStart: true, kind: .user(text: text, isSteer: entry.isSteer),
                                       entryId: entry.id, timestamp: entry.createdAt,
                                       partKey: nil))
             return
@@ -191,6 +193,10 @@ enum TranscriptRowBuilder {
             }
         }
         flushTools(lastIx: lastPartIx)
+    }
+
+    private static func userVersion(_ text: String, isSteer: Bool) -> UInt64 {
+        fnv1a(text) ^ (isSteer ? UInt64(1) << 63 : 0)
     }
 
     private static func parse(text: String, key: String, streaming: Bool,

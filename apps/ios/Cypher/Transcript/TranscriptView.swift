@@ -382,8 +382,9 @@ struct TranscriptView: View {
     private func rowView(_ row: TranscriptRow) -> some View {
         Group {
             switch row.kind {
-            case .user(let text):
+            case .user(let text, let isSteer):
                 UserBubble(text: text, pending: row.timestamp == nil,
+                           isSteer: isSteer,
                            deviceId: store.hostDeviceId ?? "")
 
             case .markdown(let block, let streaming):
@@ -477,7 +478,7 @@ final class TranscriptBuilderCache {
     /// does — gate on the revision and hand back the same array.
     func rows(revision: UInt64,
               entries: [MessageEntry],
-              pendingSends: [(messageId: String, text: String, at: Int64)]) -> [TranscriptRow] {
+              pendingSends: [PendingSend]) -> [TranscriptRow] {
         if cachedRevision == revision { return cachedRows }
         cachedRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
                                                parsers: &parsers, completed: &completed)
@@ -542,6 +543,7 @@ struct UserBubble: View {
     @Environment(\.commentDrafts) private var commentDrafts
     let text: String
     var pending = false
+    var isSteer = false
     /// The chat's host device — where attachment files live (read-back key).
     var deviceId = ""
 
@@ -550,21 +552,36 @@ struct UserBubble: View {
         // transport); split them out and render thumbnails above the bubble,
         // exactly like the desktop's user rows.
         let parsed = parseUserMessageImages(text)
-        VStack(alignment: .trailing, spacing: 8) {
-            if !parsed.attachments.isEmpty, !deviceId.isEmpty {
-                UserAttachmentsStrip(deviceId: deviceId, attachments: parsed.attachments)
+        VStack(alignment: .trailing, spacing: 4) {
+            if isSteer {
+                Label("Steer", systemImage: "arrow.turn.down.right")
+                    .font(Theme.sans(11, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.trailing, 12)
+                    .accessibilityIdentifier("steer-label")
             }
-            if !parsed.text.isEmpty {
-                SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-                    [InlineRun(text: parsed.text, style: .plain)]), hugsContent: true)
-                    .environment(\.commentDrafts, pending ? nil : commentDrafts)
-                    .padding(.horizontal, 16)
-                    // Optical centering for the native text line box: move
-                    // the text up 1pt while preserving the bubble's height.
-                    .padding(.top, 9)
-                    .padding(.bottom, 11)
-                    .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
-                    .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 8) {
+                if !parsed.attachments.isEmpty, !deviceId.isEmpty {
+                    UserAttachmentsStrip(deviceId: deviceId, attachments: parsed.attachments)
+                }
+                if !parsed.text.isEmpty {
+                    SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
+                        [InlineRun(text: parsed.text, style: .plain)]), hugsContent: true)
+                        .environment(\.commentDrafts, pending ? nil : commentDrafts)
+                        .padding(.horizontal, 16)
+                        // Optical centering for the native text line box: move
+                        // the text up 1pt while preserving the bubble's height.
+                        .padding(.top, 9)
+                        .padding(.bottom, 11)
+                        .background(Theme.surfaceRaised.opacity(isSteer ? 0.55 : 1),
+                                    in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: Theme.bubbleRadius)
+                                .strokeBorder(isSteer ? Theme.border : .clear, lineWidth: 1)
+                                .allowsHitTesting(false)
+                        }
+                        .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
+                }
             }
         }
         .opacity(pending ? 0.65 : 1)

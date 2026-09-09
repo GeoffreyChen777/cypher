@@ -1,6 +1,15 @@
 import XCTest
 
 final class ComposerFocusUITests: XCTestCase {
+    func testDemoSteerHasAQuietLabel() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]
+        app.launch()
+        let label = app.descendants(matching: .any).matching(identifier: "steer-label").firstMatch
+        XCTAssertTrue(label.waitForExistence(timeout: 10))
+        XCTAssertTrue(label.isHittable, "The example steer should be visible at the transcript tail")
+    }
+
     func testRealTapExpandsEmptyComposerAndShortDraftCollapsesOnBlur() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]
