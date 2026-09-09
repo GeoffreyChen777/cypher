@@ -288,6 +288,8 @@ struct ComposerView: View {
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
+    let catalog: RemotePiCatalog
+    var connectionRetry = 0
 
     @State private var draftState = ComposerDraft()
     private var text: String { draftState.text }
@@ -298,7 +300,6 @@ struct ComposerView: View {
     @State private var uploadError: String?
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
-    @State private var catalog = RemotePiCatalog()
     @State private var catalogRevision = 0
 
     private var harness: String { chat.config?.harness ?? "" }
@@ -328,25 +329,12 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if !canControl {
-                Text(harness == "pi"
-                     ? "\(model.deviceName(chat.deviceId)) is unavailable. You can read synced messages; reconnect to continue."
-                     : "This session uses \(HarnessCatalog.label(for: harness)). iOS currently supports Pi only; this session is read-only.")
+            if harness != "pi" {
+                Text("Read-only session · iOS supports Pi")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.textMuted)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
-            }
-            if harness == "pi" {
-                PiCatalogNotice(catalog: catalog, deviceName: model.deviceName(chat.deviceId)) {
-                    catalogRevision += 1
-                }
-                if !catalog.loading, catalog.error == nil, currentModel == nil, !models.isEmpty {
-                    Text("Select an available model on this device to continue. The previous selection hasn't been changed.")
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.textMuted)
-                        .padding(.horizontal, 20)
-                }
             }
             if let uploadError {
                 Text(uploadError)
@@ -420,7 +408,7 @@ struct ComposerView: View {
                 levels: currentModel?.reasoningLevels ?? []
             )
         }
-        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)") {
+        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)") {
             guard harness == "pi" else { return }
             await catalog.load(deviceId: chat.deviceId, fetch: model.listPiModels)
         }

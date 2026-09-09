@@ -23,6 +23,8 @@ struct SessionView: View {
     @State private var scroll = ScrollState()
     @State private var controlError: String?
     @State private var commentDrafts = CommentDrafts()
+    @State private var catalog = RemotePiCatalog()
+    @State private var connectionRetry = 0
 
 
     private var chat: Chat? { model.chat(id: chatId) }
@@ -220,7 +222,8 @@ struct SessionView: View {
                             }
                             .disabled(!canControl(chat))
                         } else {
-                            ComposerView(store: store, chat: chat, runLive: status == .working)
+                            ComposerView(store: store, chat: chat, runLive: status == .working,
+                                         catalog: catalog, connectionRetry: connectionRetry)
                         }
                     }
                     .padding(.bottom, 8)
@@ -258,14 +261,22 @@ struct SessionView: View {
     /// shows "Run failed"; the strip always reserves its height so the
     /// composer never shifts.
     private func statusStrip(chat: Chat, store: SessionStore, status: SessionStatus?) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
+        let transportReady = model.demo != nil ||
+            (model.connected && model.deviceOnline(chat.deviceId) && store.connected)
+        let connection = SessionConnectionPhase.resolve(
+            transportReady: transportReady,
+            needsCatalog: chat.config?.harness == "pi" && store.openInputRequest == nil,
+            catalogMatches: catalog.deviceId == chat.deviceId,
+            catalogLoading: catalog.loading,
+            catalogError: catalog.error,
+            modelAvailable: catalog.models(for: chat.deviceId).contains { $0.id == chat.config?.model })
+        return TimelineView(.periodic(from: .now, by: 1)) { _ in
             HStack(spacing: 6) {
-                if model.demo == nil, !model.deviceOnline(chat.deviceId) {
-                    Text("Device offline · synced history")
-                        .font(Theme.sans(11)).foregroundStyle(Theme.warning)
-                } else if model.demo == nil, !store.connected {
-                    Text("Reconnecting session…")
-                        .font(Theme.sans(11)).foregroundStyle(Theme.textMuted)
+                if connection != .ready {
+                    SessionConnectionIndicator(phase: connection, retryRevision: connectionRetry) {
+                        connectionRetry += 1
+                        model.foregrounded()
+                    }
                 } else {
                 switch status {
                 case .working:

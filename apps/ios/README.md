@@ -30,6 +30,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   awaiting input), answer questions and attach photos. Offline devices remain
   browsable but new sends are disabled; drafts are retained on queue failure.
   A queued command is not proof that the remote run succeeded.
+- **Quiet reconnect:** the chat's reserved bottom status row shows only a
+  spinner while transport/model discovery reconnects. After 15 seconds without
+  readiness, or a definite catalog failure, it shows one short notice + Retry;
+  tap the notice for setup details. Returning to foreground/retrying renews
+  the grace period. This is a display threshold, not a new transport timeout:
+  automatic reconnect and existing command/draft protections are unchanged.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
   Legacy orphaned sessions and their archives remain accessible.
