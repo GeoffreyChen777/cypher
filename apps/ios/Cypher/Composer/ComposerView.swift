@@ -67,15 +67,10 @@ struct ComposerShell<Chips: View>: View {
     var autoFocus = false
     @ViewBuilder var chips: Chips
 
-    @FocusState private var focused: Bool
-    // In the iOS 26 safeAreaBar, a real tap can focus UIKit's editor without
-    // invalidating this shell's FocusState-dependent layout. Observe this
-    // editor's native lifecycle too; keyboard visibility is NOT a substitute
-    // (model-picker search fields and transcript selections must not expand us).
+    @State private var focus = ComposerFocus()
     @State private var editorID = "composer-editor-\(UUID().uuidString)"
-    @State private var nativeFocusedEditor: ObjectIdentifier?
 
-    private var editing: Bool { focused || nativeFocusedEditor != nil }
+    private var editing: Bool { focus.isFocused }
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || editing || !attachments.isEmpty || hasComments
@@ -91,7 +86,7 @@ struct ComposerShell<Chips: View>: View {
     // Switching between VStack/HStack via AnyLayout (rather than an if/else
     // that swaps container types) keeps `input`'s view identity stable across
     // the compact↔expanded flip — an if/else here would tear down and rebuild
-    // the TextField, dropping keyboard focus mid-type.
+    // the editor, dropping keyboard focus mid-type.
     private var shellLayout: AnyLayout {
         expanded
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
@@ -104,45 +99,22 @@ struct ComposerShell<Chips: View>: View {
             .padding(.horizontal, editing ? 10 : 16)
             .motionAnimation(Motion.resize, value: editing)
             .motionAnimation(Motion.collapse, value: expanded)
-            .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidBeginEditingNotification)) {
-                nativeEditingChanged($0, began: true)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidEndEditingNotification)) {
-                nativeEditingChanged($0, began: false)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidBeginEditingNotification)) {
-                nativeEditingChanged($0, began: true)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidEndEditingNotification)) {
-                nativeEditingChanged($0, began: false)
-            }
             .task(id: editorRevision) {
                 guard editorRevision > 0 else { return }
                 // Reattach keyboard focus to the new editor, not the retired
                 // UIKit instance. This task never writes the draft.
-                focused = false
+                focus.isFocused = false
                 await Task.yield()
                 guard !Task.isCancelled else { return }
-                focused = true
+                focus.isFocused = true
             }
             .onAppear {
                 guard autoFocus else { return }
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    focused = true
+                    focus.isFocused = true
                 }
             }
-    }
-
-    private func nativeEditingChanged(_ notification: Notification, began: Bool) {
-        guard let editor = notification.object as? UIView,
-              editor.accessibilityIdentifier == editorID else { return }
-        let identity = ObjectIdentifier(editor)
-        if began {
-            nativeFocusedEditor = identity
-        } else if nativeFocusedEditor == identity {
-            nativeFocusedEditor = nil
-        }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
@@ -197,19 +169,23 @@ struct ComposerShell<Chips: View>: View {
         // Masked to .subviews while focused so cursor-placement taps inside
         // the editor stay fully native.
         .contentShape(surfaceShape)
-        .gesture(TapGesture().onEnded { focused = true },
-                 including: focused ? .subviews : .all)
+        .gesture(TapGesture().onEnded { focus.isFocused = true },
+                 including: editing ? .subviews : .all)
     }
 
     private var input: some View {
-        TextField(placeholder, text: $draft, axis: .vertical)
-            .accessibilityIdentifier(editorID)
-            .font(Theme.sans(16))
-            .foregroundStyle(Theme.text)
-            .tint(Theme.text)
-            .lineLimit(1...7)
-            .focused($focused)
-            .disabled(busy)
+        ComposerTextInput(text: $draft, focus: focus, editorID: editorID, enabled: !busy,
+                          placeholder: placeholder)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .topLeading) {
+                if draft.isEmpty {
+                    Text(placeholder)
+                        .font(Theme.sans(16))
+                        .foregroundStyle(Theme.textFaint)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             // A live Steer does not transition the session's running state.
             // Explicitly retire the native editor's cached text on success.
             .id(editorRevision)

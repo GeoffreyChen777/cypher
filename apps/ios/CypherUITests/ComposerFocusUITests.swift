@@ -25,6 +25,10 @@ final class ComposerFocusUITests: XCTestCase {
         editor.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(controls.waitForExistence(timeout: 5))
+        editor.typeText("a")
+        XCTAssertTrue(controls.exists, "One character must show the toolbar, not only long drafts")
+        editor.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertTrue(controls.exists, "Deleting back to empty while focused must keep the toolbar")
         editor.typeText("hi")
         XCTAssertTrue(controls.exists, "Short input must not hide the toolbar")
         // Tap the transcript, not the composer or a sheet search field.

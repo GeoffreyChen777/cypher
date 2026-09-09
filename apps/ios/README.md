@@ -44,6 +44,14 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   an agent receipt, including when a steer falls back to a new run. Old messages
   without a matching command ID remain ordinary rather than being guessed.
   Demo's `chat-tabs` includes an example; no engine/schema change is required.
+- **Composer focus:** the editor owns a native UITextView/delegate rather than
+  relying on SwiftUI TextField's backing-view accessibility ID or FocusState.
+  Empty focus and the first typed character expand the model/thinking toolbar;
+  picker/search keyboards cannot expand it. Editor generations reject late
+  focus/text callbacks after a send; marked IME text is preserved during view
+  updates, and long drafts scroll within seven lines. Regression checks cover
+  the session's safeAreaBar and real taps in a Release simulator build; these
+  are not a substitute for confirming the fix on the affected physical phone.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
   Legacy orphaned sessions and their archives remain accessible.

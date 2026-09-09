@@ -60,11 +60,27 @@ final class ComposerDraftTests: XCTestCase {
         }
         try await settle("initial collapsed editor") { editor(host.view) != nil && height > 0 && height < 100 }
         let field = try XCTUnwrap(editor(host.view))
+        // Accessibility is for automation, never a prerequisite for observing
+        // focus. SwiftUI's private backing views need not inherit this ID.
+        field.accessibilityIdentifier = nil
         XCTAssertTrue(field.becomeFirstResponder())
         try await settle("empty focused composer must show toolbar") { height > 100 }
         XCTAssertTrue(field.isFirstResponder, "Expansion must preserve editor identity and focus")
+        host.rootView = FocusComposerFixture(draft: draft) { height = $0 }
+        try await Task.sleep(for: .milliseconds(100))
+        host.view.layoutIfNeeded()
+        XCTAssertTrue(editor(host.view) === field, "A parent/session refresh must preserve the editor")
+        XCTAssertTrue(field.isFirstResponder)
+        XCTAssertGreaterThan(height, 100)
         draft.binding.wrappedValue = "短消息"
         try await settle("short focused draft stays expanded") { height > 100 }
+        let native = try XCTUnwrap(field as? UITextView)
+        draft.binding.wrappedValue = Array(repeating: "line", count: 20).joined(separator: "\n")
+        let cap = ceil(try XCTUnwrap(native.font).lineHeight * 7)
+        try await settle("long drafts cap at seven lines and scroll") {
+            abs(native.bounds.height - cap) < 1 && native.contentSize.height > native.bounds.height
+        }
+        draft.binding.wrappedValue = "短消息"
         field.resignFirstResponder()
         try await settle("short blurred draft collapses") { height < 100 }
     }
@@ -119,14 +135,17 @@ private struct FocusComposerFixture: View {
     let draft: ComposerDraft
     let heightChanged: (CGFloat) -> Void
     var body: some View {
-        ComposerShell(
-            draft: draft.binding,
-            editorRevision: draft.revision,
-            sendEnabled: true,
-            showStop: false,
-            onSend: { draft.clearAfterSend() }
-        ) { Text("Pi · High") }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heightChanged($0) }
+        ScrollView { Text("Synced transcript").frame(maxWidth: .infinity, minHeight: 500) }
+        .safeAreaBar(edge: .bottom, spacing: 0) {
+            ComposerShell(
+                draft: draft.binding,
+                editorRevision: draft.revision,
+                sendEnabled: true,
+                showStop: false,
+                onSend: { draft.clearAfterSend() }
+            ) { Text("Pi · High") }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heightChanged($0) }
+        }
         .frame(width: 360)
         .frame(maxHeight: .infinity, alignment: .bottom)
     }
@@ -140,7 +159,6 @@ private struct LiveComposerFixture: View {
             editorRevision: draft.revision,
             sendEnabled: true,
             showStop: true,
-            alwaysExpanded: true,
             onSend: { draft.clearAfterSend() }
         ) { Text("Pi") }
     }
