@@ -68,9 +68,17 @@ struct ComposerShell<Chips: View>: View {
     @ViewBuilder var chips: Chips
 
     @FocusState private var focused: Bool
+    // In the iOS 26 safeAreaBar, a real tap can focus UIKit's editor without
+    // invalidating this shell's FocusState-dependent layout. Observe this
+    // editor's native lifecycle too; keyboard visibility is NOT a substitute
+    // (model-picker search fields and transcript selections must not expand us).
+    @State private var editorID = "composer-editor-\(UUID().uuidString)"
+    @State private var nativeFocusedEditor: ObjectIdentifier?
+
+    private var editing: Bool { focused || nativeFocusedEditor != nil }
 
     private var expanded: Bool {
-        alwaysExpanded || keepExpanded || focused || !attachments.isEmpty || hasComments
+        alwaysExpanded || keepExpanded || editing || !attachments.isEmpty || hasComments
             || draft.contains("\n") || draft.count > 26
     }
 
@@ -93,9 +101,21 @@ struct ComposerShell<Chips: View>: View {
     var body: some View {
         surface
             // Focus-widen: margins pull in slightly while typing (chat-session.tsx).
-            .padding(.horizontal, focused ? 10 : 16)
-            .motionAnimation(Motion.resize, value: focused)
+            .padding(.horizontal, editing ? 10 : 16)
+            .motionAnimation(Motion.resize, value: editing)
             .motionAnimation(Motion.collapse, value: expanded)
+            .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidBeginEditingNotification)) {
+                nativeEditingChanged($0, began: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidEndEditingNotification)) {
+                nativeEditingChanged($0, began: false)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidBeginEditingNotification)) {
+                nativeEditingChanged($0, began: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UITextView.textDidEndEditingNotification)) {
+                nativeEditingChanged($0, began: false)
+            }
             .task(id: editorRevision) {
                 guard editorRevision > 0 else { return }
                 // Reattach keyboard focus to the new editor, not the retired
@@ -112,6 +132,17 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
+    }
+
+    private func nativeEditingChanged(_ notification: Notification, began: Bool) {
+        guard let editor = notification.object as? UIView,
+              editor.accessibilityIdentifier == editorID else { return }
+        let identity = ObjectIdentifier(editor)
+        if began {
+            nativeFocusedEditor = identity
+        } else if nativeFocusedEditor == identity {
+            nativeFocusedEditor = nil
+        }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
@@ -141,6 +172,8 @@ struct ComposerShell<Chips: View>: View {
                             chips
                                 .disabled(busy)
                         }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("composer-model-controls")
                     }
                     .scrollClipDisabled(false)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -170,6 +203,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var input: some View {
         TextField(placeholder, text: $draft, axis: .vertical)
+            .accessibilityIdentifier(editorID)
             .font(Theme.sans(16))
             .foregroundStyle(Theme.text)
             .tint(Theme.text)

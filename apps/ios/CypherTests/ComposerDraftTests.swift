@@ -32,6 +32,43 @@ final class ComposerDraftTests: XCTestCase {
         XCTAssertEqual(draft.text, "keep on queue failure — retry")
     }
 
+    func testEmptyComposerExpandsOnNativeFocusAndCollapsesOnBlur() async throws {
+        let draft = ComposerDraft()
+        var height: CGFloat = 0
+        let host = UIHostingController(rootView: FocusComposerFixture(draft: draft) { height = $0 })
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKey()
+        }
+        func editor(_ view: UIView) -> UIView? {
+            if view is UITextField || view is UITextView { return view }
+            return view.subviews.lazy.compactMap { editor($0) }.first
+        }
+        func settle(_ message: String, _ condition: () -> Bool) async throws {
+            for _ in 0..<75 {
+                host.view.layoutIfNeeded()
+                if condition() { return }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTFail("\(message); height=\(height)")
+        }
+        try await settle("initial collapsed editor") { editor(host.view) != nil && height > 0 && height < 100 }
+        let field = try XCTUnwrap(editor(host.view))
+        XCTAssertTrue(field.becomeFirstResponder())
+        try await settle("empty focused composer must show toolbar") { height > 100 }
+        XCTAssertTrue(field.isFirstResponder, "Expansion must preserve editor identity and focus")
+        draft.binding.wrappedValue = "短消息"
+        try await settle("short focused draft stays expanded") { height > 100 }
+        field.resignFirstResponder()
+        try await settle("short blurred draft collapses") { height < 100 }
+    }
+
     func testLiveComposerClearsNativeTextWithoutRunStateTransition() async throws {
         let draft = ComposerDraft()
         draft.text = "测试 steer message"
@@ -75,6 +112,23 @@ final class ComposerDraftTests: XCTestCase {
         try await settle { editors(host.view).contains { $0.isFirstResponder } }
         draft.binding.wrappedValue = "next prompt"
         try await settle { editors(host.view).contains { text($0) == "next prompt" } }
+    }
+}
+
+private struct FocusComposerFixture: View {
+    let draft: ComposerDraft
+    let heightChanged: (CGFloat) -> Void
+    var body: some View {
+        ComposerShell(
+            draft: draft.binding,
+            editorRevision: draft.revision,
+            sendEnabled: true,
+            showStop: false,
+            onSend: { draft.clearAfterSend() }
+        ) { Text("Pi · High") }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heightChanged($0) }
+        .frame(width: 360)
+        .frame(maxHeight: .infinity, alignment: .bottom)
     }
 }
 

@@ -110,6 +110,20 @@ An unsigned test host (`CODE_SIGNING_ALLOWED=NO`) cannot access Keychain and
 returns `-34018`; no physical device or portal provisioning update is needed
 for these simulator tests.
 
+Composer focus also has a real-tap regression test. Native
+`becomeFirstResponder()` unit tests alone do not reproduce the iOS 26
+`safeAreaBar` focus/layout issue. Run the separate UI-test scheme against an
+isolated development simulator (it launches the app with offline demo data):
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+xcodebuild -project apps/ios/Cypher.xcodeproj -scheme CypherUI \
+  -destination 'platform=iOS Simulator,name=Cypher Pi iOS Dev' \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+Run this command from the repository root.
+
 ### App icon
 
 iOS uses a dedicated **full-bleed, opaque RGB** icon. Do not copy the padded,
