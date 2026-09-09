@@ -11,10 +11,37 @@
 import PhotosUI
 import SwiftUI
 
+/// Each accepted send ends an editing generation. Late callbacks from the
+/// retired native editor must not restore its old text or erase a new draft.
+@MainActor
+@Observable
+final class ComposerDraft {
+    var text = ""
+    private(set) var revision = 0
+
+    var binding: Binding<String> {
+        let generation = revision
+        return Binding(
+            get: { self.text },
+            set: { value in
+                guard self.revision == generation else { return }
+                self.text = value
+            }
+        )
+    }
+
+    func clearAfterSend() {
+        revision += 1
+        text = ""
+    }
+}
+
 /// Shared glass shell + input + action row. `chips` render in the expanded
 /// toolbar row between the attach and send circles.
 struct ComposerShell<Chips: View>: View {
     @Binding var draft: String
+    /// Changes only after an accepted send, never on individual keystrokes.
+    var editorRevision = 0
     var placeholder = "Message"
     var sendEnabled: Bool
     var showStop: Bool
@@ -69,6 +96,15 @@ struct ComposerShell<Chips: View>: View {
             .padding(.horizontal, focused ? 10 : 16)
             .motionAnimation(Motion.resize, value: focused)
             .motionAnimation(Motion.collapse, value: expanded)
+            .task(id: editorRevision) {
+                guard editorRevision > 0 else { return }
+                // Reattach keyboard focus to the new editor, not the retired
+                // UIKit instance. This task never writes the draft.
+                focused = false
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                focused = true
+            }
             .onAppear {
                 guard autoFocus else { return }
                 Task { @MainActor in
@@ -140,6 +176,9 @@ struct ComposerShell<Chips: View>: View {
             .lineLimit(1...7)
             .focused($focused)
             .disabled(busy)
+            // A live Steer does not transition the session's running state.
+            // Explicitly retire the native editor's cached text on success.
+            .id(editorRevision)
     }
 
     private var attachButton: some View {
@@ -216,7 +255,8 @@ struct ComposerView: View {
     let chat: Chat
     let runLive: Bool
 
-    @State private var text = ""
+    @State private var draftState = ComposerDraft()
+    private var text: String { draftState.text }
     @State private var attachments: [StagedAttachment] = []
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPicker = false
@@ -286,7 +326,8 @@ struct ComposerView: View {
                 PendingCommentsBar(drafts: commentDrafts)
             }
             ComposerShell(
-                draft: $text,
+                draft: draftState.binding,
+                editorRevision: draftState.revision,
                 sendEnabled: canSend,
                 showStop: runLive && canControl,
                 busy: uploading,
@@ -467,15 +508,7 @@ struct ComposerView: View {
     }
 
     private func clearDraft() {
-        text = ""
-        // The clear above is unconditional, so a prompt left sitting in the
-        // composer after a successful send is not this path failing to run —
-        // it is the text view writing the pre-send string back. A focused
-        // multiline TextField commits pending autocorrect/marked text through
-        // the binding AFTER a programmatic change, which restores the prompt.
-        // Re-clear once that has drained; a keystroke can't land inside the
-        // same main-actor turn, so this can never eat real input.
-        Task { @MainActor in text = "" }
+        draftState.clearAfterSend()
     }
 }
 
