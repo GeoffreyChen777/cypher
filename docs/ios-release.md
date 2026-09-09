@@ -17,9 +17,11 @@ distribution through a device-development signing setup.
   the expected team/bundle ID, an iOS Team Store provisioning profile with
   no device list, `beta-reports-active = true`, no debug entitlement, and the
   required-reason privacy manifest.
-- The next release is prepared as `0.1.4` / build `1`; the previous
-  `0.1.3 (1)` upload remains unchanged. Notification configuration and real-device
-  acceptance gate the new release; see [notifications.md](notifications.md).
+- The next release is prepared as `0.1.5` / build `1`. The previous
+  `0.1.4 (3)` upload reported success on 2026-09-08; that is upload acceptance,
+  not proof of Apple processing completion or real-device acceptance.
+  The new release includes unread-session icon badges, quiet reconnect status
+  and distinct steer bubbles; see [notifications.md](notifications.md).
 - `ExportOptions-TestFlight.plist` requests **local export**, not upload.
   Version/build auto-management is disabled.
 - With explicit approval, `0.1.3 (1)` was uploaded on 2026-09-07 using a
