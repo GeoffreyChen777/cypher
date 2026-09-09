@@ -167,12 +167,18 @@ final class NotificationControllerTests: XCTestCase {
         let f = NotificationFixture()
         defer { f.controller.disconnect() }
         f.bind()
-        try await wait { f.controller.available }
+        try await wait { f.controller.available && !f.activities.isEmpty }
         let baseline = f.activities.count
         f.controller.viewing("chat")
         f.controller.viewing(nil)
         try await wait { f.activities.count >= baseline + 2 }
-        let reports = f.activities.suffix(2)
+        // Each report captures its sequence synchronously, but asynchronous
+        // authentication/transport may deliver them in either order. Assert
+        // navigation order via the wire sequence, not task scheduling order.
+        let reports = f.activities.dropFirst(baseline).sorted {
+            ($0["sequence"] as? Int ?? 0) < ($1["sequence"] as? Int ?? 0)
+        }
+        XCTAssertEqual(reports.count, 2)
         XCTAssertEqual(reports.first?["chatId"] as? String, "chat")
         XCTAssertTrue(reports.last?["chatId"] is NSNull)
         XCTAssertLessThan(try XCTUnwrap(reports.first?["sequence"] as? Int),
