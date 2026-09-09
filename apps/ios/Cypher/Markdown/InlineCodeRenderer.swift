@@ -18,8 +18,11 @@ struct InlineCodeRenderer: TextRenderer {
             for run in line {
                 guard run[InlineCodeAttribute.self] != nil else { continue }
                 let bounds = run.typographicBounds.rect
+                // SwiftUI's typographic bounds sit a little high relative to
+                // the Geist glyphs. Nudge the wash down so its vertical
+                // center follows the ink rather than the line box.
                 let rect = CGRect(x: bounds.minX - 2,
-                                  y: bounds.minY + 2,
+                                  y: bounds.minY + 4.5,
                                   width: bounds.width + 4,
                                   height: bounds.height - 4)
                 context.fill(Path(roundedRect: rect, cornerRadius: 4.5), with: .color(wash))

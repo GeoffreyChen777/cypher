@@ -9,7 +9,7 @@ enum SheetStyle {
     static let cardRadius: CGFloat = 20
     static let cardFill = whiteAlpha(0.045)
     static let rowSeparator = whiteAlpha(0.06)
-    static let panel = grey(0x14)
+    static let panel = Theme.sheetPanel
 }
 
 /// Grouped card: rows separated by inset hairlines.

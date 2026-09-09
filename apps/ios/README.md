@@ -8,6 +8,9 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
 
 ### Mobile scope
 
+- **Appearance:** Home → account menu → Appearance offers System (default),
+  Light and Dark. The choice is saved on this phone only. Surfaces, sheets,
+  composer, Markdown and native selectable text adapt without changing layout.
 - **Project-first:** Home lists projects with their owning device;
   open a project to create or resume its sessions, or access its archive.
   `Space`/`spaceId` remain the shared wire-schema names — no schema migration.

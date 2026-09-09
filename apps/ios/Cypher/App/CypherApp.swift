@@ -14,9 +14,8 @@ struct CypherApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
                 // Monochrome controls: glass buttons, toolbar icons, and
-                // toggles render white like the desktop — accent stays paint
+                // toggles follow the text color — accent stays paint
                 // for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
@@ -24,6 +23,7 @@ struct CypherApp: App {
                 .overlay(alignment: .top) {
                     InAppNotificationBanner(controller: model.notifications)
                 }
+                .modifier(AppAppearanceModifier())
                 .onChange(of: scenePhase) { _, phase in
                     model.notifications.setForeground(phase == .active)
                     if phase == .background {

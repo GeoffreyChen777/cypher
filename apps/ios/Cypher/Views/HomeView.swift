@@ -95,6 +95,7 @@ struct HomeView: View {
                         if model.demo != nil {
                             Text("Demo mode")
                         }
+                        AppearancePicker()
                         Button("Notifications") { showNotifications = true }
                         Button("Sign out", role: .destructive) { model.signOut() }
                     } label: {

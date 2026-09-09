@@ -99,7 +99,13 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
                 self.enumerateEnclosingRects(forGlyphRange: glyphs,
                     withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                     in: container) { rect, _ in
-                    let rect = rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -2, dy: 2)
+                    // The native text view's glyph bounds place this wash
+                    // slightly above the visible ink. Unlike the SwiftUI
+                    // renderer, this path is used by the actual transcript
+                    // (including selectable Markdown), so keep the correction
+                    // here as well.
+                    let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5)
+                        .insetBy(dx: -2, dy: 2)
                     color.setFill()
                     UIBezierPath(roundedRect: rect, cornerRadius: MD.inlineCodeRadius).fill()
                 }
@@ -144,6 +150,12 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.linkTextAttributes = [.foregroundColor: UIColor(Theme.text),
                                    .underlineStyle: NSUnderlineStyle.single.rawValue]
         view.tintColor = UIColor(Theme.accent)
+        // Repaint custom inline-code backgrounds as well as glyphs on a live
+        // appearance change. Do not replace text or clear an active selection.
+        view.registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: TranscriptUITextView, _: UITraitCollection) in
+            view.layoutManager.invalidateDisplay(forCharacterRange: NSRange(location: 0, length: view.textStorage.length))
+            view.setNeedsDisplay()
+        }
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.delegate = context.coordinator
         view.selectionEnded = { [weak view, weak coordinator = context.coordinator] in

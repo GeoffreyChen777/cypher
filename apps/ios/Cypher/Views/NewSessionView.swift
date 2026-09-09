@@ -579,7 +579,6 @@ struct ModelPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
     }
 
     private var selectedModel: ModelInfo? {
@@ -678,7 +677,6 @@ struct TraitPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
     }
 
     /// One-line hints for the ladder (the special modes deserve explanation).
@@ -814,7 +812,6 @@ struct RefPickerSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
     }
 
     private func row(_ ref: RepoRef) -> some View {
@@ -889,7 +886,6 @@ struct CheckoutPickerSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
     }
 
     private func row(_ rowKind: CheckoutKind, title: String, subtitle: String) -> some View {

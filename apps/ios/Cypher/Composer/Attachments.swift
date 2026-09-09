@@ -357,10 +357,10 @@ struct AttachmentStripView: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(Theme.text)
+                            .foregroundStyle(.white)
                             .frame(width: 18, height: 18)
                             .background(.black.opacity(0.65), in: Circle())
-                            .overlay(Circle().strokeBorder(whiteAlpha(0.2), lineWidth: 1))
+                            .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .offset(x: 5, y: -5)
@@ -466,7 +466,7 @@ struct AttachmentLightbox: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     Text(preview.name)
                         .font(Theme.sans(11))
-                        .foregroundStyle(Theme.textMuted)
+                        .foregroundStyle(.white.opacity(0.75))
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
