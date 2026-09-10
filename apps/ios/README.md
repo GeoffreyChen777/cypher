@@ -52,6 +52,13 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   updates, and long drafts scroll within seven lines. Regression checks cover
   the session's safeAreaBar and real taps in a Release simulator build; these
   are not a substitute for confirming the fix on the affected physical phone.
+- **Transcript rubber-banding:** automatic pin corrections yield during
+  tracking (the first touch), dragging, deceleration and native/programmatic
+  animation, then wait for 150ms of quiet scroll-offset geometry. Repeated
+  touches invalidate older queued corrections; streamed content yields to the
+  same native gesture/bounce window but may retarget its own spring. Negative
+  bottom distance during a bounce is not treated as a broken/blank layout.
+  Idle reflows and keyboard-end corrections remain enabled after settling.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
   Legacy orphaned sessions and their archives remain accessible.
