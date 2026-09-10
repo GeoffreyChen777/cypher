@@ -59,6 +59,16 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   same native gesture/bounce window but may retarget its own spring. Negative
   bottom distance during a bounce is not treated as a broken/blank layout.
   Idle reflows and keyboard-end corrections remain enabled after settling.
+- **Files / Changes:** separate options in the chat's top-right menu open read-only remote directory
+  navigation, UTF-8 file previews and working-tree Git diffs with per-file
+  patches. Changes uses a continuous, collapsible list in a locally bundled
+  Pierre Diffs viewer with line numbers, syntax/word highlighting and
+  unified/side-by-side layouts. Unchanged code starts folded and loads from the
+  same snapshot only when expanded. The target is this chat's host/checkout, never the phone or another
+  device. Files requires the updated engine RPCs; old hosts show an upgrade
+  notice. No editing, staging, commits or terminal fallback. See
+  [workspace browser](../../docs/ios-workspace-browser.md) for limits and
+  validation boundaries.
 - **Device isolation:** changing the folder browser's device invalidates old
   requests/results. Creation is locked to the device that supplied the listing.
   Legacy orphaned sessions and their archives remain accessible.

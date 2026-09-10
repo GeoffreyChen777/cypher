@@ -38,6 +38,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 pub mod uploads;
+mod workspace_files;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};

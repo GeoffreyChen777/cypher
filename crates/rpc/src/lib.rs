@@ -131,6 +131,10 @@ pub mod methods {
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
+    /// Read-only browser; {chatId, cwd, path}. cwd must still be the chat's
+    /// assigned checkout, and path is relative with no symlink traversal.
+    pub const LIST_WORKSPACE_FILES: &str = "ListWorkspaceFiles";
+    pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).

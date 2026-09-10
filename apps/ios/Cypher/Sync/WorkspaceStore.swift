@@ -309,6 +309,15 @@ final class WorkspaceStore {
         return try await relay(for: deviceId).call(method: "ListFolders", params: params)
     }
 
+    /// Only the read-only browser's fixed RPC set, on the chat's host device.
+    func workspaceBrowserCall<T: Decodable>(deviceId: String, method: String,
+                                            params: [String: Any]) async throws -> T {
+        guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
+            throw RelayError.notConnected
+        }
+        return try await relay(for: deviceId).call(method: method, params: params, timeoutSeconds: 30)
+    }
+
     /// ListRefs on the target device — branches with current/worktree markers
     /// (default branch first, per the engine's ordering).
     func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {

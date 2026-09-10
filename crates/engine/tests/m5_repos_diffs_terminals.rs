@@ -1118,6 +1118,83 @@ async fn rpc_dispatch_for_m5_methods() {
         .await
         .expect("SearchFiles by chat");
     assert_eq!(chat_matches[0]["path"], "file.txt");
+    let directory = client
+        .call(
+            methods::LIST_WORKSPACE_FILES,
+            serde_json::json!({"chatId":"search-chat", "cwd":repo_path, "path":""}),
+        )
+        .await
+        .expect("ListWorkspaceFiles");
+    assert!(
+        directory["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "file.txt")
+    );
+    assert!(
+        !directory["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == ".git")
+    );
+    let content = client
+        .call(
+            methods::READ_WORKSPACE_FILE,
+            serde_json::json!({"chatId":"search-chat", "cwd":repo_path, "path":"file.txt"}),
+        )
+        .await
+        .expect("ReadWorkspaceFile");
+    assert_eq!(content["text"], "hello\n");
+    for path in ["../file.txt", "/etc/passwd", ".git/config", ""] {
+        assert!(
+            client
+                .call(
+                    methods::READ_WORKSPACE_FILE,
+                    serde_json::json!({"chatId":"search-chat", "cwd":repo_path, "path":path})
+                )
+                .await
+                .is_err(),
+            "reject path {path}"
+        );
+    }
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({"chatId":"search-chat", "cwd":"/", "path":"file.txt"})
+            )
+            .await
+            .is_err(),
+        "stale cwd cannot read a different checkout"
+    );
+    assert!(
+        client
+            .call(
+                methods::LIST_WORKSPACE_FILES,
+                serde_json::json!({"chatId":"missing-chat", "cwd":repo_path, "path":""})
+            )
+            .await
+            .is_err(),
+        "a known chat is required"
+    );
+    core.workspace
+        .create_space("foreign-space", "other-device", &repo_path, None, true)
+        .unwrap();
+    core.workspace
+        .create_chat("foreign-chat", Some("foreign-space"), None, None, None)
+        .unwrap();
+    assert!(
+        client
+            .call(
+                methods::LIST_WORKSPACE_FILES,
+                serde_json::json!({"chatId":"foreign-chat", "cwd":repo_path, "path":""})
+            )
+            .await
+            .is_err(),
+        "foreign-device roots cannot be read locally"
+    );
     assert!(
         client
             .call(
@@ -1143,6 +1220,9 @@ async fn rpc_dispatch_for_m5_methods() {
             Some(outside.to_string_lossy().into_owned()),
         )
         .expect("outside chat row");
+    assert!(client.call(methods::LIST_WORKSPACE_FILES,
+        serde_json::json!({"chatId":"outside-chat", "cwd":outside.to_string_lossy(), "path":""}))
+        .await.is_err(), "a tampered chat row must not authorize an arbitrary folder");
     assert!(
         client
             .call(
@@ -1197,6 +1277,40 @@ async fn rpc_dispatch_for_m5_methods() {
             .starts_with("cypher/")
     );
     assert!(worktree["checkoutId"].is_string());
+    let marker = PathBuf::from(&worktree_path).join("worktree-only.txt");
+    std::fs::write(&marker, "linked checkout").unwrap();
+    core.workspace
+        .create_chat(
+            "worktree-read-chat",
+            Some("space-term"),
+            None,
+            None,
+            Some(worktree_path.clone()),
+        )
+        .unwrap();
+    let linked = client
+        .call(
+            methods::READ_WORKSPACE_FILE,
+            serde_json::json!({
+                "chatId": "worktree-read-chat", "cwd": worktree_path, "path": "worktree-only.txt",
+            }),
+        )
+        .await
+        .expect("read from an authorized linked worktree");
+    assert_eq!(linked["text"], "linked checkout");
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({
+                    "chatId": "search-chat", "cwd": repo_path, "path": "worktree-only.txt",
+                })
+            )
+            .await
+            .is_err(),
+        "main checkout must not borrow a worktree's contents"
+    );
+    std::fs::remove_file(marker).unwrap();
     let deleted = client
         .call(
             methods::DELETE_WORKTREE,

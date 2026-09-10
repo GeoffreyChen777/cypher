@@ -173,6 +173,16 @@ struct FileSearchParams {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileParams {
+    chat_id: String,
+    /// Optimistic context check: never silently read a newly switched checkout.
+    cwd: String,
+    #[serde(default)]
+    path: String,
+}
+
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
         ToolCall::ReadFile { path }
@@ -1202,6 +1212,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
             | methods::SEARCH_FILES
+            | methods::LIST_WORKSPACE_FILES
+            | methods::READ_WORKSPACE_FILE
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
             // Checkout diffs are produced on the device holding the checkout.
@@ -2244,6 +2256,44 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
             }
+            methods::LIST_WORKSPACE_FILES | methods::READ_WORKSPACE_FILE => {
+                let p: WorkspaceFileParams = parse_params(params)?;
+                let directory = method == methods::LIST_WORKSPACE_FILES;
+                tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    let same_checkout = || -> Result<(), RpcError> {
+                        let chat = self
+                            .workspace
+                            .chat(&p.chat_id)
+                            .map_err(|e| RpcError::Failed(e.to_string()))?
+                            .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+                        if chat.device_id != self.doc_host.device_id()
+                            || chat.cwd.as_deref() != Some(p.cwd.as_str())
+                        {
+                            return Err(RpcError::Failed(
+                                "chat device or checkout changed; reopen Files".into(),
+                            ));
+                        }
+                        Ok(())
+                    };
+                    same_checkout()?;
+                    let root = self
+                        .file_search_root(&FileSearchParams {
+                            query: String::new(),
+                            chat_id: Some(p.chat_id.clone()),
+                            space_id: None,
+                            path: None,
+                        })
+                        .await?;
+                    same_checkout()?;
+                    let value = crate::workspace_files::read(root, p.path.clone(), directory)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    same_checkout()?;
+                    RpcReply::value(&value)
+                })
+                .await
+                .map_err(|_| RpcError::Failed("workspace file read timed out".into()))?
+            }
             methods::SEARCH_FILES => {
                 let p: FileSearchParams = parse_params(params)?;
                 if p.query.chars().count() > 256 {
@@ -2610,6 +2660,8 @@ mod tests {
         assert!(forwardable(methods::WATCH_DOC_COMMANDS));
         assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
         assert!(forwardable(methods::SEARCH_FILES));
+        assert!(forwardable(methods::LIST_WORKSPACE_FILES));
+        assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::FETCH_ALL));
     }
 
