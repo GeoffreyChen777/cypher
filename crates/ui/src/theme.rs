@@ -588,6 +588,18 @@ impl Theme {
         }
     }
 
+    /// Small composer accessories float directly over scrolling text. Give
+    /// their blur a visible but translucent tint: the blur softens underlying
+    /// glyphs without making the pill look solid. Opaque platforms keep a
+    /// solid backing.
+    pub fn composer_accessory_bg(&self) -> Hsla {
+        if self.is_glass() {
+            self.surface_overlay.opacity(0.45)
+        } else {
+            self.surface_overlay
+        }
+    }
+
     /// Section-card fill (settings cards and similar in-panel cards). The
     /// opaque `surface` tone read as a harsh solid slab floating on the
     /// frosted blur (user report), so glass thins it to a translucent tint;
@@ -1631,6 +1643,34 @@ mod tests {
             assert_eq!(Theme::light().glass().a, 1.0);
             assert_eq!(Theme::dark().glass().a, 1.0);
         }
+    }
+
+    #[test]
+    fn composer_accessories_have_a_legible_backing_in_both_appearances() {
+        let _guard = lock_appearance();
+        for (appearance, theme) in [
+            (Appearance::Dark, Theme::dark()),
+            (Appearance::Light, Theme::light()),
+        ] {
+            set_current_appearance(appearance);
+            let backing = theme.composer_accessory_bg();
+            let hovered = backing.blend(ink(0.06));
+            assert!(
+                backing.a >= 0.4,
+                "scrolling text needs a persistent backing"
+            );
+            assert!(
+                hovered.a >= backing.a,
+                "hover must never remove the backing"
+            );
+            if theme.is_glass() {
+                assert!(backing.a <= 0.5, "the accessory must not read as opaque");
+                assert!(hovered.a < 0.55, "hover must preserve the glass appearance");
+            } else {
+                assert_eq!(backing.a, 1.0, "no sharp text bleed without blur");
+            }
+        }
+        set_current_appearance(Appearance::Dark);
     }
 
     /// An input plate has to read as *lifted* in both appearances. Dark does that

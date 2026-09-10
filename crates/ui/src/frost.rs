@@ -22,6 +22,13 @@ use crate::theme::Theme;
 /// own lighter 16 (`chat-composer-glass` blurs 12–16 in the reference).
 pub const MENU_BLUR: f32 = 44.0;
 
+/// The 22px-high Comments/Subagents pills share one frost recipe. Wrapping
+/// the existing trigger preserves its hit target and anchored popup; never
+/// overflow-clip the trigger, since its inspector opens outside the capsule.
+pub fn composer_accessory(child: impl IntoElement) -> Frosted {
+    frosted(11.0, 16.0, child)
+}
+
 /// Frost `child` (a popover card): backdrop-blurred on glass, pass-through on
 /// opaque platforms. `corner_radius` must match the card's rounding.
 pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
