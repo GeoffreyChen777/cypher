@@ -555,7 +555,11 @@ struct ModelPickerSheet: View {
                 }
                 .padding(20)
                 .padding(.bottom, 12)
+                // The loading/empty content has a narrow intrinsic width;
+                // don't wait for full-width PickRows to size the sheet.
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(SheetStyle.panel)
             .navigationTitle("Select model")
             .navigationBarTitleDisplayMode(.inline)
