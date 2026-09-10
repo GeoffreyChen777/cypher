@@ -272,10 +272,9 @@ final class WorkspaceStore {
         chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
     }
 
-    /// Aggregate most-urgent member status for a space's leading dot.
+    /// Aggregate active sessions for the project's trailing status indicator.
     func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
-        let members = chats(in: spaceId).map { indicator(for: $0) }
-        return members.min(by: { $0.rawValue < $1.rawValue })
+        ChatIndicator.projectSummary(chats(in: spaceId).map { indicator(for: $0) })
     }
 
     // MARK: Device relay (folder browsing / direct host RPCs)

@@ -280,6 +280,17 @@ struct HomeView: View {
                                 .frame(width: 6, height: 6)
                                 .accessibilityLabel(model.deviceOnline(space.deviceId)
                                                     ? "Device online" : "Device offline")
+                            Spacer(minLength: 8)
+                            Text("\(model.chats(in: space.id).count)")
+                                .font(Theme.mono(12))
+                                .foregroundStyle(Theme.textFaint)
+                                .fixedSize()
+                                .accessibilityLabel("\(model.chats(in: space.id).count) sessions")
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textFaint)
+                                .frame(width: 12, height: 14)
+                                .accessibilityHidden(true)
                         }
                         HStack {
                             Text(space.displayName)
@@ -287,10 +298,7 @@ struct HomeView: View {
                                 .foregroundStyle(Theme.text)
                                 .lineLimit(1)
                             Spacer()
-                            Text("\(model.chats(in: space.id).count)")
-                                .font(Theme.mono(12)).foregroundStyle(Theme.textFaint)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11)).foregroundStyle(Theme.textFaint)
+                            ProjectStatusIndicator(indicator: model.spaceIndicator(space.id))
                         }
                     }
                     .padding(.vertical, 12)
@@ -365,6 +373,46 @@ struct HomeView: View {
 }
 
 // MARK: - Rows
+
+/// Shares the chevron's trailing rail; an empty slot preserves idle geometry.
+private struct ProjectStatusIndicator: View {
+    let indicator: ChatIndicator?
+
+    var body: some View {
+        Group {
+            switch indicator {
+            case .working:
+                MiniSpinner()
+            case .completed:
+                Image(systemName: "checkmark")
+                    .foregroundStyle(ChatIndicator.completed.dotColor)
+            case .awaitingInput:
+                Image(systemName: "questionmark.circle")
+                    .foregroundStyle(ChatIndicator.awaitingInput.dotColor)
+            case .errored:
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(ChatIndicator.errored.dotColor)
+            case .idle, nil:
+                Color.clear
+            }
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .frame(width: 12, height: 14)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHidden(indicator == nil || indicator == .idle)
+    }
+
+    private var accessibilityLabel: String {
+        switch indicator {
+        case .working: return "Sessions running"
+        case .completed: return "Unread completed sessions"
+        case .awaitingInput: return "Sessions awaiting input"
+        case .errored: return "Unread session errors"
+        case .idle, nil: return ""
+        }
+    }
+}
 
 /// Two-line session row: project-scoped rows show checkout context above
 /// the title. Cross-project history retains its project/device context.
