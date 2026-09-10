@@ -175,9 +175,9 @@ enum TranscriptRowBuilder {
 
             case .input(let partId, _, let questions, let resolved):
                 flushTools(lastIx: ix - 1)
-                let header = questions.first?.header ?? "Question"
+                let header = questions.first.map { QuestionPresentation($0).header } ?? "Question"
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
-                                          version: fnv1a(header) | (resolved ? 1 : 0),
+                                          version: (fnv1a(header) << 1) | (resolved ? 1 : 0),
                                           turnStart: first,
                                           kind: .inputChip(header: header, resolved: resolved),
                                           entryId: entry.id, timestamp: nil, partKey: nil))

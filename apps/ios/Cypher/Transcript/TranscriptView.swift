@@ -799,7 +799,7 @@ struct InputChipView: View {
             Text("Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text(resolved ? header : "Awaiting your answer…")
+            Text(resolved ? (header == "Your input" ? "Answered" : header) : "Awaiting your answer…")
                 .font(Theme.sans(12))
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
