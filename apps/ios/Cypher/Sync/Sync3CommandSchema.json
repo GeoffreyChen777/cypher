@@ -56,7 +56,7 @@
             "kind": {"enum": ["respondInput"]},
             "requestId": "entityId",
             "answers": {
-              "array": {"object": {"questionId": "entityId", "labels": {"array": "string", "max": 256}}},
+              "array": {"object": {"questionId": "nonemptyString", "labels": {"array": "string", "max": 256}}},
               "max": 256
             }
           }

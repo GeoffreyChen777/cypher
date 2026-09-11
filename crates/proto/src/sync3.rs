@@ -3,15 +3,24 @@
 
 use std::collections::BTreeMap;
 
+use crate::{MessagePart, MessageStatus, SessionMessageEntry};
 use crate::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 mod command;
+mod transcript;
 
 pub const VERSION: u8 = 3;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 pub const MAX_BATCH_OPS: usize = 64;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+pub const MAX_MESSAGE_PARTS: usize = 256;
+fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(d)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -42,6 +51,7 @@ pub enum Event {
     CommandResolved {
         command_id: String,
         status: SessionCommandStatus,
+        #[serde(deserialize_with = "required_option")]
         resolution: Option<String>,
     },
     CommandCancelled {
@@ -51,29 +61,36 @@ pub enum Event {
         run_id: String,
     },
     MessageCreated {
-        run_id: String,
+        #[serde(deserialize_with = "required_option")]
+        run_id: Option<String>,
         message_id: String,
         role: Role,
+        device_id: String,
+        created_at: u64,
+        #[serde(deserialize_with = "required_option")]
+        continuation_of: Option<String>,
+    },
+    PartPut {
+        message_id: String,
+        index: u32,
+        #[serde(deserialize_with = "transcript::deserialize_part")]
+        part: MessagePart,
     },
     TextAppended {
         message_id: String,
+        part_id: String,
         offset: u64,
         text: String,
     },
-    ToolStarted {
-        run_id: String,
-        tool_id: String,
-        name: String,
+    MessageFinished {
+        message_id: String,
+        #[serde(deserialize_with = "required_option")]
+        status: Option<MessageStatus>,
     },
-    ToolFinished {
-        tool_id: String,
-        failed: bool,
-        summary: String,
-    },
-    InputRequested {
-        run_id: String,
-        request_id: String,
-        prompt: String,
+    AttachmentSealed {
+        upload_id: String,
+        path: String,
+        file_name: String,
     },
     RunFinished {
         run_id: String,
@@ -293,31 +310,66 @@ impl Operation {
             Event::CommandCancelled { command_id } => id(command_id)?,
             Event::RunStarted { run_id } | Event::RunFinished { run_id, .. } => id(run_id)?,
             Event::MessageCreated {
-                run_id, message_id, ..
+                run_id,
+                message_id,
+                device_id,
+                created_at,
+                continuation_of,
+                ..
             } => {
-                id(run_id)?;
+                if let Some(run) = run_id {
+                    id(run)?;
+                }
                 entity_id(message_id)?;
+                id(device_id)?;
+                if *created_at > MAX_SAFE_INTEGER {
+                    return Err("invalid_timestamp");
+                }
+                if let Some(parent) = continuation_of {
+                    entity_id(parent)?;
+                    if parent == message_id {
+                        return Err("invalid_continuation");
+                    }
+                }
+            }
+            Event::PartPut {
+                message_id,
+                index,
+                part,
+            } => {
+                entity_id(message_id)?;
+                if *index as usize >= MAX_MESSAGE_PARTS {
+                    return Err("too_many_parts");
+                }
+                transcript::validate_part(part)?;
             }
             Event::TextAppended {
-                message_id, offset, ..
+                message_id,
+                part_id,
+                offset,
+                ..
             } => {
                 entity_id(message_id)?;
+                entity_id(part_id)?;
                 if *offset > MAX_SAFE_INTEGER {
                     return Err("invalid_offset");
                 }
             }
-            Event::ToolStarted {
-                run_id, tool_id, ..
-            } => {
-                id(run_id)?;
-                entity_id(tool_id)?;
+            Event::MessageFinished { message_id, status } => {
+                entity_id(message_id)?;
+                if *status == Some(MessageStatus::Streaming) {
+                    return Err("invalid_message_status");
+                }
             }
-            Event::ToolFinished { tool_id, .. } => entity_id(tool_id)?,
-            Event::InputRequested {
-                run_id, request_id, ..
+            Event::AttachmentSealed {
+                upload_id,
+                path,
+                file_name,
             } => {
-                id(run_id)?;
-                entity_id(request_id)?;
+                id(upload_id)?;
+                if path.is_empty() || file_name.is_empty() {
+                    return Err("invalid_attachment");
+                }
             }
         }
         if serde_json::to_vec(self).map_err(|_| "invalid_json")?.len() > MAX_FRAME_BYTES / 2 {
@@ -350,8 +402,7 @@ pub struct Projection {
     pub commands: BTreeMap<String, CommandState>,
     pub runs: BTreeMap<String, RunState>,
     pub messages: BTreeMap<String, MessageState>,
-    pub tools: BTreeMap<String, ToolState>,
-    pub inputs: BTreeMap<String, InputState>,
+    pub attachments: BTreeMap<String, AttachmentState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -369,26 +420,38 @@ pub struct RunState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MessageState {
-    pub run_id: String,
-    pub role: Role,
-    pub text: String,
+    pub run_id: Option<String>,
+    pub entry: SessionMessageEntry,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ToolState {
-    pub run_id: String,
-    pub name: String,
-    pub failed: Option<bool>,
-    pub summary: Option<String>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InputState {
-    pub run_id: String,
-    pub prompt: String,
+pub struct AttachmentState {
+    pub path: String,
+    pub file_name: String,
 }
 
 impl Projection {
+    fn writable_message(&self, id: &str) -> Result<&MessageState, &'static str> {
+        let message = self.messages.get(id).ok_or("unknown_message")?;
+        if let Some(run) = &message.run_id {
+            self.live(run)?;
+        }
+        if message.entry.status != Some(MessageStatus::Streaming) {
+            return Err("message_finished");
+        }
+        Ok(message)
+    }
+    fn put_message(&mut self, id: &str, message: MessageState) -> Result<(), &'static str> {
+        if serde_json::to_vec(&message)
+            .map_err(|_| "invalid_message")?
+            .len()
+            > MAX_MESSAGE_BYTES
+        {
+            return Err("message_too_large");
+        }
+        self.messages.insert(id.into(), message);
+        Ok(())
+    }
     fn live(&self, run: &str) -> Result<(), &'static str> {
         match self.runs.get(run) {
             Some(RunState { outcome: None }) => Ok(()),
@@ -487,8 +550,13 @@ impl Projection {
                 run_id,
                 message_id,
                 role,
+                device_id,
+                created_at,
+                continuation_of,
             } => {
-                self.live(run_id)?;
+                if let Some(run) = run_id {
+                    self.live(run)?;
+                }
                 if self.messages.contains_key(message_id) {
                     return Err("message_exists");
                 }
@@ -496,79 +564,89 @@ impl Projection {
                     message_id.clone(),
                     MessageState {
                         run_id: run_id.clone(),
-                        role: *role,
-                        text: String::new(),
+                        entry: SessionMessageEntry {
+                            id: message_id.clone(),
+                            role: *role,
+                            parts: vec![],
+                            device_id: device_id.clone(),
+                            created_at: *created_at as i64,
+                            status: Some(MessageStatus::Streaming),
+                            continuation_of: continuation_of.clone(),
+                        },
                     },
                 );
+            }
+            Event::PartPut {
+                message_id,
+                index,
+                part,
+            } => {
+                let mut message = self.writable_message(message_id)?.clone();
+                let index = *index as usize;
+                if index > message.entry.parts.len() {
+                    return Err("part_gap");
+                }
+                if let Some(old) = message.entry.parts.get(index) {
+                    transcript::validate_replacement(old, part)?;
+                    message.entry.parts[index] = part.clone();
+                } else {
+                    if message.entry.parts.iter().any(|p| p.id() == part.id()) {
+                        return Err("part_exists");
+                    }
+                    message.entry.parts.push(part.clone());
+                }
+                self.put_message(message_id, message)?;
             }
             Event::TextAppended {
                 message_id,
+                part_id,
                 offset,
                 text,
             } => {
-                let m = self.messages.get(message_id).ok_or("unknown_message")?;
-                self.live(&m.run_id)?;
-                if m.text.len() as u64 != *offset {
+                let mut m = self.writable_message(message_id)?.clone();
+                let part = m
+                    .entry
+                    .parts
+                    .iter_mut()
+                    .find(|p| p.id() == part_id)
+                    .ok_or("unknown_part")?;
+                let MessagePart::Text { text: current, .. } = part else {
+                    return Err("not_text");
+                };
+                if current.len() as u64 != *offset {
                     return Err("text_offset_mismatch");
                 }
-                self.messages
-                    .get_mut(message_id)
-                    .unwrap()
-                    .text
-                    .push_str(text);
+                current.push_str(text);
+                self.put_message(message_id, m)?;
             }
-            Event::ToolStarted {
-                run_id,
-                tool_id,
-                name,
-            } => {
-                self.live(run_id)?;
-                if self.tools.contains_key(tool_id) {
-                    return Err("tool_exists");
-                }
-                self.tools.insert(
-                    tool_id.clone(),
-                    ToolState {
-                        run_id: run_id.clone(),
-                        name: name.clone(),
-                        failed: None,
-                        summary: None,
-                    },
-                );
+            Event::MessageFinished { message_id, status } => {
+                self.writable_message(message_id)?;
+                self.messages.get_mut(message_id).unwrap().entry.status = *status;
             }
-            Event::ToolFinished {
-                tool_id,
-                failed,
-                summary,
+            Event::AttachmentSealed {
+                upload_id,
+                path,
+                file_name,
             } => {
-                let tool = self.tools.get(tool_id).ok_or("unknown_tool")?;
-                self.live(&tool.run_id)?;
-                if tool.failed.is_some() {
-                    return Err("tool_finished");
+                let value = AttachmentState {
+                    path: path.clone(),
+                    file_name: file_name.clone(),
+                };
+                if let Some(old) = self.attachments.get(upload_id)
+                    && old != &value
+                {
+                    return Err("attachment_conflict");
                 }
-                let tool = self.tools.get_mut(tool_id).unwrap();
-                tool.failed = Some(*failed);
-                tool.summary = Some(summary.clone());
-            }
-            Event::InputRequested {
-                run_id,
-                request_id,
-                prompt,
-            } => {
-                self.live(run_id)?;
-                if self.inputs.contains_key(request_id) {
-                    return Err("input_exists");
-                }
-                self.inputs.insert(
-                    request_id.clone(),
-                    InputState {
-                        run_id: run_id.clone(),
-                        prompt: prompt.clone(),
-                    },
-                );
+                self.attachments.insert(upload_id.clone(), value);
             }
             Event::RunFinished { run_id, outcome } => {
                 self.live(run_id)?;
+                if self.messages.values().any(|m| {
+                    m.run_id.as_ref() == Some(run_id)
+                        && m.entry.status == Some(MessageStatus::Streaming)
+                }) {
+                    return Err("unfinished_messages");
+                }
                 self.runs.get_mut(run_id).unwrap().outcome = Some(*outcome);
             }
         }
@@ -579,6 +657,58 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_deltas_can_exceed_one_frame_but_never_the_message_budget() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
+        let mut projection = Projection::default();
+        for value in fixture["operations"].as_array().unwrap().iter().take(5) {
+            projection
+                .apply(&serde_json::from_value(value.clone()).unwrap(), "host", 1)
+                .unwrap();
+        }
+        for i in 0..5 {
+            let before = projection.clone();
+            let op = Operation {
+                id: format!("budget-{i}"),
+                actor: "host".into(),
+                owner_epoch: 1,
+                event: Event::TextAppended {
+                    message_id: "message".into(),
+                    part_id: "text".into(),
+                    offset: 6 + i * 60 * 1024,
+                    text: "x".repeat(60 * 1024),
+                },
+            };
+            let result = projection.apply(&op, "host", 1);
+            if i < 4 {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err(), "message_too_large");
+                assert_eq!(projection, before);
+            }
+        }
+    }
+    #[test]
+    fn shared_render_part_shapes_are_lossless_and_private_inputs_are_rejected() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/part-validation.json"))
+                .unwrap();
+        for (group, valid) in [("valid", true), ("invalid", false)] {
+            for part in fixture[group].as_array().unwrap() {
+                let raw = serde_json::json!({"id":"part-op","actor":"host","ownerEpoch":1,
+                    "event":{"type":"partPut","messageId":"message","index":0,"part":part}});
+                let result = serde_json::from_value::<Operation>(raw.clone());
+                if valid {
+                    let op = result.unwrap();
+                    op.validate().unwrap();
+                    assert_eq!(serde_json::to_value(op).unwrap(), raw);
+                } else {
+                    assert!(result.map_or(true, |op| op.validate().is_err()), "{part}");
+                }
+            }
+        }
+    }
     #[test]
     fn shared_complete_command_validation() {
         let fixture: Value =
@@ -632,14 +762,20 @@ mod tests {
     fn shared_command_lifecycle_is_fenced_and_failures_are_atomic() {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
-        let queued: Operation = serde_json::from_value(fixture["operations"][0].clone()).unwrap();
+        let initial: Vec<Operation> =
+            serde_json::from_value(fixture["operations"].clone()).unwrap();
         let cases: Vec<Value> = serde_json::from_str(include_str!(
             "../../../fixtures/sync3/command-lifecycle.json"
         ))
         .unwrap();
         for case in cases {
             let mut projection = Projection::default();
-            projection.apply(&queued, "host", 1).unwrap();
+            for op in initial
+                .iter()
+                .take(case["initialPrefix"].as_u64().unwrap_or(1) as usize)
+            {
+                projection.apply(op, "host", 1).unwrap();
+            }
             for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
                 let op: Operation = serde_json::from_value(serde_json::json!({
                     "id":format!("step-{i}"),"actor":step["actor"],
@@ -677,7 +813,7 @@ mod tests {
         }
         system_projection.apply(&system, "host", 1).unwrap();
         assert_eq!(
-            system_projection.messages["system-message#c1"].role,
+            system_projection.messages["system-message#c1"].entry.role,
             Role::System
         );
         let mut p = Projection::default();
@@ -693,6 +829,7 @@ mod tests {
                     owner_epoch: 1,
                     event: Event::TextAppended {
                         message_id: "message".into(),
+                        part_id: "text".into(),
                         offset: 7,
                         text: "!".into()
                     },

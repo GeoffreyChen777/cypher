@@ -7,6 +7,7 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
     @MainActor static func main() async throws {
         struct Fixture: Decodable { let operations: [Sync3Operation]; let projection: Sync3Projection }
         let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
+        let head = Int64(fixture.operations.count)
         var projection = Sync3Projection()
         for op in fixture.operations { try projection.apply(op, owner: "host", ownerEpoch: 1) }
         precondition(projection == fixture.projection)
@@ -20,38 +21,38 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
         let pending = try journal!.pending()
         precondition(pending == [fixture.operations[0]])
         try journal!.acceptState(["type": .string("state"), "version": .int(3), "epoch": .int(1),
-                                 "owner": .string("host"), "ownerEpoch": .int(1), "head": .int(10)])
+                                 "owner": .string("host"), "ownerEpoch": .int(1), "head": .int(head)])
         let rows = fixture.operations.enumerated().map { Sync3Row(seq: Int64($0.offset + 1), operation: $0.element) }
         let encoded = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode(rows))
         try journal!.applyPage(["type": .string("page"), "version": .int(3), "epoch": .int(1),
-                               "through": .int(10), "next": .int(10), "rows": encoded, "done": .bool(true)])
+                               "through": .int(head), "next": .int(head), "rows": encoded, "done": .bool(true)])
         let actual = try journal!.projection, cursor = try journal!.cursor
-        precondition(actual == fixture.projection && cursor == 10)
+        precondition(actual == fixture.projection && cursor == head)
         print("PASS: Swift shared fixture, SQLite restart and transactional projection")
         if CommandLine.arguments.count >= 4, CommandLine.arguments[2] == "--shared-journal" {
             let shared = try Sync3Journal(url: URL(fileURLWithPath: CommandLine.arguments[3]),
                                           account: "account", room: "shared-room", actor: "phone")
             let before = try shared.projection, cursor = try shared.cursor
-            precondition(before == fixture.projection && cursor == 10)
+            precondition(before == fixture.projection && cursor == head)
             let numbersURL = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent().appendingPathComponent("numbers.json")
             let numbers = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: numbersURL))
             let canonical = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(numbers["canonical"]!))
             let pending = try shared.pending()
             precondition(pending == [canonical])
             try shared.acknowledge(["type": .string("ack"), "version": .int(3), "epoch": .int(1),
-                                    "receipts": .array([.object(["id": .string(canonical.id), "seq": .int(11)])])])
+                                    "receipts": .array([.object(["id": .string(canonical.id), "seq": .int(head + 1)])])])
             let afterAck = try shared.cursor
-            precondition(afterAck == 10)
-            let rows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: 11, operation: canonical)]))
+            precondition(afterAck == head)
+            let rows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: head + 1, operation: canonical)]))
             try shared.applyPage(["type": .string("page"), "version": .int(3), "epoch": .int(1),
-                                  "through": .int(11), "next": .int(11), "rows": rows, "done": .bool(true)])
+                                  "through": .int(head + 1), "next": .int(head + 1), "rows": rows, "done": .bool(true)])
             let resolved = try Sync3Operation(id: "resolved", actor: "host", ownerEpoch: 1, event: [
                 "type": .string("commandResolved"), "commandId": .string("command"),
                 "status": .string("applied"), "resolution": .null,
             ])
-            let resolvedRows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: 12, operation: resolved)]))
+            let resolvedRows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: head + 2, operation: resolved)]))
             try shared.applyPage(["type": .string("page"), "version": .int(3), "epoch": .int(1),
-                                  "through": .int(12), "next": .int(12), "rows": resolvedRows, "done": .bool(true)])
+                                  "through": .int(head + 2), "next": .int(head + 2), "rows": resolvedRows, "done": .bool(true)])
             print("PASS: Swift read Rust SQLite state/outbox and applied the canonical receipt")
             return
         }
@@ -67,7 +68,7 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
                 request.setValue("Bearer sync3-user@sync3-org", forHTTPHeaderField: "Authorization")
                 return request
             })
-            try await wait(client, cursor: 10)
+            try await wait(client, cursor: head)
             let projected = try liveJournal.projection
             precondition(projected == fixture.projection)
             var entry = fixture.operations[0].event["command"]!.objectValue!
@@ -76,7 +77,7 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
                                             event: ["type": .string("commandQueued"), "commandId": .string("swift-command"),
                                                     "command": .object(entry)])
             try client.enqueue(command)
-            try await wait(client, cursor: 11)
+            try await wait(client, cursor: head + 1)
             precondition(client.status.repairs == 0)
             await client.stop()
             print("PASS: Swift reads Rust events and commits a command over real workerd WS; HTTP repairs=0")

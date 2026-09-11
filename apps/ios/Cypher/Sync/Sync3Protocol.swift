@@ -95,27 +95,44 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         let fields: [String: [String]] = [
             "commandQueued": ["commandId", "command"], "commandAccepted": ["commandId", "runId"],
             "commandResolved": ["commandId", "status", "resolution"], "commandCancelled": ["commandId"],
-            "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role"],
-            "textAppended": ["messageId", "offset", "text"], "toolStarted": ["runId", "toolId", "name"],
-            "toolFinished": ["toolId", "failed", "summary"], "inputRequested": ["runId", "requestId", "prompt"],
+            "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
+            "partPut": ["messageId", "index", "part"], "textAppended": ["messageId", "partId", "offset", "text"],
+            "messageFinished": ["messageId", "status"], "attachmentSealed": ["uploadId", "path", "fileName"],
             "runFinished": ["runId", "outcome"],
         ]
         guard let keys = fields[type] else { try Sync3Wire.fail("invalid_event") }
         try Sync3Wire.shape(event, ["type"] + keys)
-        for key in ["commandId", "runId"] where event[key] != nil {
+        for key in ["commandId", "runId", "deviceId", "uploadId"] where event[key] != nil {
+            if key == "runId", type == "messageCreated", event[key] == .null { continue }
             _ = try Sync3Wire.identifier(event[key])
         }
-        for key in ["messageId", "toolId", "requestId"] where event[key] != nil {
+        for key in ["messageId", "partId"] where event[key] != nil {
             _ = try Sync3Wire.entityIdentifier(event[key])
         }
-        for key in ["text", "name", "summary", "prompt"] where event[key] != nil {
+        for key in ["text", "path", "fileName"] where event[key] != nil {
             _ = try Sync3Wire.string(event[key])
         }
         if type == "textAppended" { _ = try Sync3Wire.integer(event["offset"]) }
         if type == "messageCreated", ![JSONValue.string("user"), .string("assistant"), .string("system")].contains(event["role"]) {
             try Sync3Wire.fail("invalid_role")
         }
-        if type == "toolFinished", event["failed"]?.boolValue == nil { try Sync3Wire.fail("invalid_tool_result") }
+        if type == "messageCreated" {
+            _ = try Sync3Wire.integer(event["createdAt"])
+            if event["continuationOf"] != .null {
+                _ = try Sync3Wire.entityIdentifier(event["continuationOf"])
+                if event["continuationOf"] == event["messageId"] { try Sync3Wire.fail("invalid_continuation") }
+            }
+        }
+        if type == "partPut" {
+            guard try Sync3Wire.integer(event["index"]) < 256 else { try Sync3Wire.fail("too_many_parts") }
+            try Sync3CommandSchema.validatePart(event["part"]!)
+        }
+        if type == "messageFinished", ![JSONValue.null, .string("complete"), .string("aborted")].contains(event["status"]) {
+            try Sync3Wire.fail("invalid_message_status")
+        }
+        if type == "attachmentSealed", event["path"] == .string("") || event["fileName"] == .string("") {
+            try Sync3Wire.fail("invalid_attachment")
+        }
         if type == "runFinished", !["completed", "failed", "interrupted"].contains(event["outcome"]?.stringValue ?? "") {
             try Sync3Wire.fail("invalid_outcome")
         }
@@ -145,11 +162,10 @@ struct Sync3Projection: Codable, Equatable, Sendable {
     var commands: [String: [String: JSONValue]] = [:]
     var runs: [String: [String: JSONValue]] = [:]
     var messages: [String: [String: JSONValue]] = [:]
-    var tools: [String: [String: JSONValue]] = [:]
-    var inputs: [String: [String: JSONValue]] = [:]
+    var attachments: [String: [String: JSONValue]] = [:]
 
     var tables: [String: [String: [String: JSONValue]]] {
-        ["commands": commands, "runs": runs, "messages": messages, "tools": tools, "inputs": inputs]
+        ["commands": commands, "runs": runs, "messages": messages, "attachments": attachments]
     }
     /// Validate disk rows before the reducer touches them. A damaged cache
     /// becomes a recovery error, never a forced-unwrap process crash.
@@ -174,29 +190,50 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             }
             runs[id] = record
         case "messages":
-            try Sync3Wire.shape(record, ["runId", "role", "text"])
-            _ = try Sync3Wire.identifier(record["runId"]); _ = try Sync3Wire.string(record["text"])
-            guard ["user", "assistant", "system"].contains(record["role"]?.stringValue ?? "") else { try Sync3Wire.fail("invalid_role") }
-            messages[id] = record
-        case "tools":
-            try Sync3Wire.shape(record, ["runId", "name", "failed", "summary"])
-            _ = try Sync3Wire.identifier(record["runId"]); _ = try Sync3Wire.string(record["name"])
-            if record["failed"] == .null {
-                guard record["summary"] == .null else { try Sync3Wire.fail("invalid_projection") }
-            } else {
-                guard record["failed"]?.boolValue != nil else { try Sync3Wire.fail("invalid_tool_result") }
-                _ = try Sync3Wire.string(record["summary"])
+            try Sync3Wire.shape(record, ["runId", "entry"]); try nullableID(record["runId"])
+            guard let entry = record["entry"]?.objectValue, entry["id"] == .string(id),
+                  case .array(let parts) = entry["parts"], parts.count <= 256 else { try Sync3Wire.fail("invalid_message") }
+            let required: Set<String> = ["id", "role", "parts", "createdAt", "deviceId"]
+            guard required.isSubset(of: Set(entry.keys)),
+                  Set(entry.keys).isSubset(of: required.union(["status", "continuationOf"])) else { try Sync3Wire.fail("invalid_shape") }
+            _ = try Sync3Wire.identifier(entry["deviceId"]); _ = try Sync3Wire.integer(entry["createdAt"])
+            guard ["user", "assistant", "system"].contains(entry["role"]?.stringValue ?? "") else { try Sync3Wire.fail("invalid_role") }
+            if let status = entry["status"], ![JSONValue.string("streaming"), .string("complete"), .string("aborted")].contains(status) {
+                try Sync3Wire.fail("invalid_message_status")
             }
-            tools[id] = record
-        case "inputs":
-            try Sync3Wire.shape(record, ["runId", "prompt"])
-            _ = try Sync3Wire.identifier(record["runId"]); _ = try Sync3Wire.string(record["prompt"])
-            inputs[id] = record
+            if let parent = entry["continuationOf"] {
+                _ = try Sync3Wire.entityIdentifier(parent)
+                guard parent != entry["id"] else { try Sync3Wire.fail("invalid_continuation") }
+            }
+            var ids = Set<String>()
+            for part in parts {
+                try Sync3CommandSchema.validatePart(part, stored: true)
+                guard ids.insert(part.objectValue!["id"]!.stringValue!).inserted else { try Sync3Wire.fail("part_exists") }
+            }
+            try putMessage(id, record)
+        case "attachments":
+            try Sync3Wire.shape(record, ["path", "fileName"])
+            guard !(try Sync3Wire.string(record["path"])).isEmpty, !(try Sync3Wire.string(record["fileName"])).isEmpty else {
+                try Sync3Wire.fail("invalid_attachment")
+            }
+            attachments[id] = record
         default: try Sync3Wire.fail("invalid_entity_kind")
         }
     }
     private func live(_ run: String) throws {
         guard runs[run]?["outcome"] == .null else { try Sync3Wire.fail("run_not_live") }
+    }
+    private func writable(_ id: String) throws -> [String: JSONValue] {
+        guard let msg = messages[id] else { try Sync3Wire.fail("unknown_message") }
+        if let run = msg["runId"]?.stringValue { try live(run) }
+        guard msg["entry"]?.objectValue?["status"] == .string("streaming") else { try Sync3Wire.fail("message_finished") }
+        return msg
+    }
+    private mutating func putMessage(_ id: String, _ record: [String: JSONValue]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard try encoder.encode(record).count <= 256 * 1024 else { try Sync3Wire.fail("message_too_large") }
+        messages[id] = record
     }
     mutating func apply(_ op: Sync3Operation, owner: String, ownerEpoch: Int64) throws {
         try op.validate()
@@ -235,35 +272,60 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             }) else { try Sync3Wire.fail("run_not_accepted") }
             runs[run] = ["outcome": .null]
         case "messageCreated":
-            let id = e["messageId"]!.stringValue!, run = e["runId"]!.stringValue!
-            try live(run)
+            let id = e["messageId"]!.stringValue!
+            if let run = e["runId"]?.stringValue { try live(run) }
             guard messages[id] == nil else { try Sync3Wire.fail("message_exists") }
-            messages[id] = ["runId": .string(run), "role": e["role"]!, "text": .string("")]
+            var entry: [String: JSONValue] = ["id": .string(id), "role": e["role"]!, "parts": .array([]),
+                                             "createdAt": e["createdAt"]!, "deviceId": e["deviceId"]!, "status": .string("streaming")]
+            if e["continuationOf"] != .null { entry["continuationOf"] = e["continuationOf"] }
+            messages[id] = ["runId": e["runId"]!, "entry": .object(entry)]
+        case "partPut":
+            let id = e["messageId"]!.stringValue!
+            var msg = try writable(id), entry = msg["entry"]!.objectValue!
+            guard case .array(var parts) = entry["parts"] else { try Sync3Wire.fail("invalid_message") }
+            let index = Int(try Sync3Wire.integer(e["index"])), part = e["part"]!, p = part.objectValue!
+            guard index <= parts.count else { try Sync3Wire.fail("part_gap") }
+            if index < parts.count {
+                let old = parts[index].objectValue!
+                guard old["id"] == p["id"], old["kind"] == p["kind"] else { try Sync3Wire.fail("part_identity_mismatch") }
+                if p["kind"] == .string("text"), old["text"] != p["text"] { try Sync3Wire.fail("text_requires_delta") }
+                if p["kind"] == .string("input") {
+                    guard old["requestId"] == p["requestId"], old["questions"] == p["questions"] else { try Sync3Wire.fail("question_changed") }
+                }
+                if [JSONValue.string("tool"), .string("input")].contains(p["kind"]),
+                   old["resolved"] == .bool(true), p["resolved"] == .bool(false) { try Sync3Wire.fail("part_resolved") }
+                parts[index] = part
+            } else {
+                guard !parts.contains(where: { $0.objectValue?["id"] == p["id"] }) else { try Sync3Wire.fail("part_exists") }
+                parts.append(part)
+            }
+            entry["parts"] = .array(parts); msg["entry"] = .object(entry); try putMessage(id, msg)
         case "textAppended":
             let id = e["messageId"]!.stringValue!
-            guard var msg = messages[id], let text = msg["text"]?.stringValue else { try Sync3Wire.fail("unknown_message") }
-            try live(msg["runId"]!.stringValue!)
+            var msg = try writable(id), entry = msg["entry"]!.objectValue!
+            guard case .array(var parts) = entry["parts"],
+                  let index = parts.firstIndex(where: { $0.objectValue?["id"] == e["partId"] }) else { try Sync3Wire.fail("unknown_part") }
+            var part = parts[index].objectValue!
+            guard part["kind"] == .string("text"), let text = part["text"]?.stringValue else { try Sync3Wire.fail("not_text") }
             guard Int64(text.utf8.count) == (try Sync3Wire.integer(e["offset"])) else { try Sync3Wire.fail("text_offset_mismatch") }
-            msg["text"] = .string(text + e["text"]!.stringValue!); messages[id] = msg
-        case "toolStarted":
-            let id = e["toolId"]!.stringValue!
-            try live(e["runId"]!.stringValue!)
-            guard tools[id] == nil else { try Sync3Wire.fail("tool_exists") }
-            tools[id] = ["runId": e["runId"]!, "name": e["name"]!, "failed": .null, "summary": .null]
-        case "toolFinished":
-            let id = e["toolId"]!.stringValue!
-            guard var tool = tools[id] else { try Sync3Wire.fail("unknown_tool") }
-            try live(tool["runId"]!.stringValue!)
-            guard tool["failed"] == .null else { try Sync3Wire.fail("tool_finished") }
-            tool["failed"] = e["failed"]; tool["summary"] = e["summary"]; tools[id] = tool
-        case "inputRequested":
-            let id = e["requestId"]!.stringValue!
-            try live(e["runId"]!.stringValue!)
-            guard inputs[id] == nil else { try Sync3Wire.fail("input_exists") }
-            inputs[id] = ["runId": e["runId"]!, "prompt": e["prompt"]!]
+            part["text"] = .string(text + e["text"]!.stringValue!); parts[index] = .object(part)
+            entry["parts"] = .array(parts); msg["entry"] = .object(entry); try putMessage(id, msg)
+        case "messageFinished":
+            let id = e["messageId"]!.stringValue!
+            var msg = try writable(id), entry = msg["entry"]!.objectValue!
+            if e["status"] == .null { entry.removeValue(forKey: "status") } else { entry["status"] = e["status"] }
+            msg["entry"] = .object(entry); try putMessage(id, msg)
+        case "attachmentSealed":
+            let id = e["uploadId"]!.stringValue!, value = ["path": e["path"]!, "fileName": e["fileName"]!]
+            if let old = attachments[id], old != value { try Sync3Wire.fail("attachment_conflict") }
+            attachments[id] = value
         case "runFinished":
             let run = e["runId"]!.stringValue!
-            try live(run); runs[run] = ["outcome": e["outcome"]!]
+            try live(run)
+            guard !messages.values.contains(where: { $0["runId"] == e["runId"] && $0["entry"]?.objectValue?["status"] == .string("streaming") }) else {
+                try Sync3Wire.fail("unfinished_messages")
+            }
+            runs[run] = ["outcome": e["outcome"]!]
         default: try Sync3Wire.fail("invalid_event")
         }
     }

@@ -21,7 +21,7 @@ final class Sync3Journal {
             sqlite3_busy_timeout(db, 5_000)
             let format = try query("PRAGMA user_version").first?[0]
             let prototype = try query("SELECT name FROM sqlite_master WHERE type='table' AND name='sync3_projection'")
-            guard prototype.isEmpty, format == "0" || format == "4" else { try Sync3Wire.fail("unsupported_journal_format") }
+            guard prototype.isEmpty, format == "0" || format == "5" else { try Sync3Wire.fail("unsupported_journal_format") }
             for path in [url.path, url.path + "-wal", url.path + "-shm"] where FileManager.default.fileExists(atPath: path) {
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
             }
@@ -51,7 +51,7 @@ final class Sync3Journal {
                 try execute("INSERT OR IGNORE INTO sync3_meta(singleton,account,room,actor) VALUES(1,?,?,?)", [account, room, actor])
                 let identity = try query("SELECT account,room,actor FROM sync3_meta WHERE singleton=1")
                 guard identity.first == [account, room, actor] else { try Sync3Wire.fail("scope_mismatch") }
-                try execute("PRAGMA user_version=4")
+                try execute("PRAGMA user_version=5")
             }
         } catch {
             sqlite3_close(db); db = nil; throw error
@@ -206,21 +206,20 @@ final class Sync3Journal {
             if let row = try query("SELECT id FROM sync3_entities WHERE kind='commands' AND run_id=? AND json_extract(body,'$.command.status') IN ('pending','applied') LIMIT 1", [run]).first {
                 try load("commands", row[0]!)
             }
-        case "runFinished": try load("runs", e["runId"]!.stringValue!)
+        case "runFinished":
+            let run = e["runId"]!.stringValue!
+            try load("runs", run)
+            if let row = try query("SELECT id FROM sync3_entities WHERE kind='messages' AND run_id=? AND json_extract(body,'$.entry.status')='streaming' LIMIT 1", [run]).first {
+                try load("messages", row[0]!)
+            }
         case "messageCreated":
-            try load("messages", e["messageId"]!.stringValue!); try load("runs", e["runId"]!.stringValue!)
-        case "textAppended":
+            try load("messages", e["messageId"]!.stringValue!)
+            if let run = e["runId"]?.stringValue { try load("runs", run) }
+        case "textAppended", "partPut", "messageFinished":
             let id = e["messageId"]!.stringValue!
             try load("messages", id)
             if let run = projection.messages[id]?["runId"]?.stringValue { try load("runs", run) }
-        case "toolStarted":
-            try load("tools", e["toolId"]!.stringValue!); try load("runs", e["runId"]!.stringValue!)
-        case "toolFinished":
-            let id = e["toolId"]!.stringValue!
-            try load("tools", id)
-            if let run = projection.tools[id]?["runId"]?.stringValue { try load("runs", run) }
-        case "inputRequested":
-            try load("inputs", e["requestId"]!.stringValue!); try load("runs", e["runId"]!.stringValue!)
+        case "attachmentSealed": try load("attachments", e["uploadId"]!.stringValue!)
         default: try Sync3Wire.fail("invalid_event")
         }
         let before = projection.tables

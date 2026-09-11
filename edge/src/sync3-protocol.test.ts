@@ -5,13 +5,14 @@ import numbers from "../../fixtures/sync3/numbers.json";
 import commands from "../../fixtures/sync3/command-validation.json";
 import lifecycle from "../../fixtures/sync3/command-lifecycle.json";
 import systemMessage from "../../fixtures/sync3/system-message.json";
+import partShapes from "../../fixtures/sync3/part-validation.json";
 import {
   applyOperation, canonical, parseRequest, validateOperation,
   type EntityKind, type Projection, type ProjectionStore,
 } from "./sync3-protocol";
 
 function memory(): { projection: Projection; store: ProjectionStore } {
-  const projection: Projection = { commands: {}, runs: {}, messages: {}, tools: {}, inputs: {} };
+  const projection: Projection = { commands: {}, runs: {}, messages: {}, attachments: {} };
   const store: ProjectionStore = {
     get<K extends EntityKind>(kind: K, id: string): Projection[K][string] | undefined {
       return Object.hasOwn(projection[kind], id) ? projection[kind][id] as Projection[K][string] : undefined;
@@ -20,11 +21,21 @@ function memory(): { projection: Projection; store: ProjectionStore } {
       Object.defineProperty(projection[kind], id, { value, configurable: true, writable: true, enumerable: true });
     },
     hasAcceptedRun: run => Object.values(projection.commands).some(c => c.runId === run && ["pending", "applied"].includes(c.command.status)),
+    hasOpenMessage: run => Object.values(projection.messages).some(m => m.runId === run && m.entry.status === "streaming"),
   };
   return { projection, store };
 }
 
 describe("sync3 shared contract", () => {
+  it("preserves complete parts and rejects private inputs and unknown nested properties", () => {
+    for (const [group, valid] of [[partShapes.valid, true], [partShapes.invalid, false]] as const) {
+      for (const part of group) {
+        const op = { id: "part-op", actor: "host", ownerEpoch: 1, event: { type: "partPut", messageId: "message", index: 0, part } };
+        if (valid) expect(validateOperation(op)).toEqual(op);
+        else expect(() => validateOperation(op)).toThrow();
+      }
+    }
+  });
   it("validates all complete command payloads without discarding unknown properties", () => {
     for (const payload of commands.payloads) {
       const op = structuredClone(golden.operations[0]);
@@ -46,7 +57,9 @@ describe("sync3 shared contract", () => {
   });
   it.each(lifecycle)("enforces command lifecycle: $name", scenario => {
     const { projection, store } = memory();
-    applyOperation(store, validateOperation(golden.operations[0]), "host", 1);
+    for (const value of golden.operations.slice(0, "initialPrefix" in scenario ? scenario.initialPrefix : 1)) {
+      applyOperation(store, validateOperation(value), "host", 1);
+    }
     scenario.steps.forEach((step, index) => {
       const op = validateOperation({ id: `step-${index}`, actor: step.actor, ownerEpoch: "ownerEpoch" in step ? step.ownerEpoch : 1, event: step.event });
       const before = structuredClone(projection);
@@ -73,7 +86,7 @@ describe("sync3 shared contract", () => {
     const { projection, store } = memory();
     for (const value of golden.operations.slice(0, 3)) applyOperation(store, validateOperation(value), "host", 1);
     applyOperation(store, validateOperation(systemMessage), "host", 1);
-    expect(projection.messages["system-message#c1"].role).toBe("system");
+    expect(projection.messages["system-message#c1"].entry.role).toBe("system");
   });
   it("fences wrong actors and stale owners before mutation", () => {
     const { projection, store } = memory();
@@ -86,7 +99,7 @@ describe("sync3 shared contract", () => {
     expect(() => parseRequest('{"version":2,"type":"probe"}')).toThrow("upgrade_required");
     expect(() => parseRequest('{"version":3,"type":"probe","extra":1}')).toThrow("invalid_shape");
     expect(() => parseRequest('{"version":3,"type":"hello","actor":"a","epoch":1,"after":9007199254740992}')).toThrow("invalid_cursor");
-    expect(() => validateOperation({ ...golden.operations[4], event: { type: "textAppended", messageId: "message", offset: 0, text: "\ud800" } })).toThrow("invalid_unicode");
+    expect(() => validateOperation({ ...golden.operations[4], event: { type: "textAppended", messageId: "message", partId: "text", offset: 0, text: "\ud800" } })).toThrow("invalid_unicode");
     expect(() => parseRequest('{"version":3,"type":"push","operations":[]}')).toThrow("invalid_batch");
   });
   it("identity is stable under key order and proto-like IDs are ordinary data", () => {

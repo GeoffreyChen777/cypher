@@ -36,6 +36,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="cypher-sync3-smoke-") as tmp:
         swift = Path(tmp) / "swift-smoke"
         shutil.copyfile(ROOT / "apps/ios/Cypher/Sync/Sync3CommandSchema.json", Path(tmp) / "Sync3CommandSchema.json")
+        shutil.copyfile(ROOT / "apps/ios/Cypher/Sync/Sync3PartSchema.json", Path(tmp) / "Sync3PartSchema.json")
         run(["xcrun", "swiftc", "-parse-as-library",
              "apps/ios/Cypher/Sync/RegistryCore.swift",
              "apps/ios/Cypher/Sync/Sync3Protocol.swift",

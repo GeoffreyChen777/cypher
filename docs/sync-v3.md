@@ -57,9 +57,11 @@ events are host-authored; command enqueue is multi-device. An account member
 is trusted within its account; an actor label is not a cryptographic device
 identity. User/organization authorization remains mandatory at the Worker.
 
-Initial event vocabulary: command queued/accepted/resolved/cancelled, run started, message created,
-text appended (byte offset checked), tool started/finished, input requested,
-run finished. Semantic run events carry stable run/message/part identifiers.
+Current event vocabulary: command queued/accepted/resolved/cancelled, run started,
+message created, indexed part put, text appended (part-scoped byte offset
+checked), message finished, attachment sealed, run finished. The initial toy
+tool/input events have been removed, not retained as compatibility aliases.
+Semantic run events carry stable run/message/part identifiers.
 No executable closures or arbitrary client-provided SQL are transported.
 
 `commandQueued.command` now carries the full `SessionCommandEntry`, not the
@@ -75,7 +77,7 @@ imported by Edge). Validation happens before decoding can discard unknown
 properties or default omitted fields. This preserves model settings, worktrees,
 comment prompts, attachment descriptors, input labels and retry identity.
 Legacy Loro frontiers are not accepted on this wire. The local normalized
-SQLite format is now **4**; earlier prototype formats are rejected without
+SQLite format is now **5**; earlier prototype formats are rejected without
 resetting or migrating their contents. The network version remains **3**.
 
 The complete native transcript entry/part models, event fold, render privacy
@@ -84,7 +86,21 @@ path in `engine::sessions` uses that shared fold/privacy implementation; only
 its persistence writer is still the legacy document writer. `cargo tree -p
 cypher-proto --edges normal` contains no Loro dependency. System message roles
 and native `#c` continuation identifiers are accepted by all three v3 readers.
-This extraction does **not** yet add full part/entry operations to the wire.
+The wire now preserves full rendered parts, device/time/continuation metadata,
+message status, tool output/diff references and input questions. Its closed
+part descriptor is shared from `Sync3PartSchema.json`. Private tool inputs
+cannot enter the log; question IDs are opaque strings, not filesystem IDs.
+Part IDs are message-scoped, text replacement requires byte-offset deltas,
+question identity is immutable and resolved parts cannot become unresolved.
+Runs cannot finish with open messages; finished messages reject late writes.
+
+Each projected message is bounded to 256 KiB / 256 parts. Individually bounded
+text deltas may accumulate beyond the 64-KiB single-string wire budget: native
+reload validates this stored aggregate separately, without relaxing admission.
+Overflow must trigger producer rollover, not truncation or a larger frame.
+The bounded producer, authoritative transcript ordering, actual attachment
+transfer and normal-client rendering still need integration. An
+`attachmentSealed` record alone does not establish file upload or availability.
 
 ## Deployment and migration boundaries
 
@@ -110,6 +126,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
 - [x] Host ownership fence and reducer validation.
 - [x] Complete command payloads, issuer/identity checks, cancellation races and
   immutable resolution, with shared three-language validation/lifecycle cases.
+- [x] Full rendered-part wire shapes, continuation/status metadata, scoped part
+  identity, UTF-8 deltas and atomic per-message byte-budget rejection.
 - [x] Rust durable outbox and transactional cursor/reducer.
 - [x] Rust transport: lost ACK repair, healthy-live zero HTTP, pongs cannot
   hide business timeout, semantic epoch conflict parks without a retry storm.
@@ -149,19 +167,19 @@ python3 scripts/ci/sync3-smoke.py
 ```
 
 The smoke owns a loopback-only workerd process group and temporary databases.
-Rust writes ten events; Swift reads the identical projection and writes an
-eleventh command; a fresh Rust client reads that Swift command. Healthy WS
+Rust writes twelve events; Swift reads the identical projection and writes a
+thirteenth command; a fresh Rust client reads that Swift command. Healthy WS
 traffic invokes no HTTP repair. This is not an actual harness execution test.
 
 Results:
 
-- Rust proto/sync: **110 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **112 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
   No normal-client protocol was switched by these extractions.
-- Edge: **110 unit + 50 workerd passed**; typecheck and bundle build passed.
-- iOS `Cypher` scheme: **182 passed**, including thirteen v3 tests, on an isolated
+- Edge: **112 unit + 53 workerd passed**; typecheck and bundle build passed.
+- iOS `Cypher` scheme: **184 passed**, including fifteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine tests: **143 passed**; UI tests: **672 passed**.
   The prior icon failure was fixed by preferring package-name matches over
@@ -174,6 +192,12 @@ Results:
 - With 1,000 unrelated historical commands present, one text append makes
   exactly three local row changes: its message, its event and the cursor.
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
+  Full-part vectors also prove lossless known tool variants, nested shape
+  rejection and removal of private raw tool inputs. Shared lifecycle cases
+  cover scoped repeated part IDs, immutable questions, resolved-state
+  monotonicity, late writes, unfinished runs and attachment conflicts.
+  Budget tests preserve earlier committed text when the next delta exceeds
+  the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
 - GitHub CI passed all five jobs for `d9e754f`, including Linux backend,

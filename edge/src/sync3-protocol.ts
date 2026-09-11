@@ -1,10 +1,12 @@
 /** Experimental typed v3 protocol; no Loro/WASM and no implicit chat2 conversion. */
 import { validCommand, isEntityId, type Command, type CommandStatus } from "./sync3-command";
+import { validPart, type Part, type Entry } from "./sync3-transcript";
 export type { Command } from "./sync3-command";
 export const VERSION = 3;
 export const MAX_FRAME_BYTES = 256 * 1024;
 export const MAX_BATCH_OPS = 64;
 export const MAX_OPERATION_BYTES = MAX_FRAME_BYTES / 2;
+export const MAX_MESSAGE_BYTES = 256 * 1024;
 const utf8 = new TextEncoder();
 
 export type Event =
@@ -13,11 +15,11 @@ export type Event =
   | { type: "commandResolved"; commandId: string; status: CommandStatus; resolution: string | null }
   | { type: "commandCancelled"; commandId: string }
   | { type: "runStarted"; runId: string }
-  | { type: "messageCreated"; runId: string; messageId: string; role: "user" | "assistant" | "system" }
-  | { type: "textAppended"; messageId: string; offset: number; text: string }
-  | { type: "toolStarted"; runId: string; toolId: string; name: string }
-  | { type: "toolFinished"; toolId: string; failed: boolean; summary: string }
-  | { type: "inputRequested"; runId: string; requestId: string; prompt: string }
+  | { type: "messageCreated"; runId: string | null; messageId: string; role: Entry["role"]; deviceId: string; createdAt: number; continuationOf: string | null }
+  | { type: "partPut"; messageId: string; index: number; part: Part }
+  | { type: "textAppended"; messageId: string; partId: string; offset: number; text: string }
+  | { type: "messageFinished"; messageId: string; status: "complete" | "aborted" | null }
+  | { type: "attachmentSealed"; uploadId: string; path: string; fileName: string }
   | { type: "runFinished"; runId: string; outcome: "completed" | "failed" | "interrupted" };
 export interface Operation { id: string; actor: string; ownerEpoch: number; event: Event }
 export interface Row { seq: number; operation: Operation }
@@ -82,21 +84,30 @@ export function validateOperation(value: unknown): Operation {
   const fields: Record<string, string[]> = {
     commandQueued: ["commandId", "command"], commandAccepted: ["commandId", "runId"],
     commandResolved: ["commandId", "status", "resolution"], commandCancelled: ["commandId"],
-    runStarted: ["runId"], messageCreated: ["runId", "messageId", "role"],
-    textAppended: ["messageId", "offset", "text"], toolStarted: ["runId", "toolId", "name"],
-    toolFinished: ["toolId", "failed", "summary"], inputRequested: ["runId", "requestId", "prompt"],
+    runStarted: ["runId"], messageCreated: ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
+    partPut: ["messageId", "index", "part"], textAppended: ["messageId", "partId", "offset", "text"],
+    messageFinished: ["messageId", "status"], attachmentSealed: ["uploadId", "path", "fileName"],
     runFinished: ["runId", "outcome"],
   };
   if (typeof ev.type !== "string" || !Object.hasOwn(fields, ev.type)) reject("invalid_event");
   shape(ev, ["type", ...fields[ev.type]]);
-  for (const k of ["commandId", "runId"]) {
-    if (Object.hasOwn(ev, k)) identifier(ev[k]);
+  for (const k of ["commandId", "runId", "deviceId", "uploadId"]) {
+    if (Object.hasOwn(ev, k) && !(k === "runId" && ev.type === "messageCreated" && ev[k] === null)) identifier(ev[k]);
   }
-  for (const k of ["messageId", "toolId", "requestId"]) if (Object.hasOwn(ev, k) && !isEntityId(ev[k])) reject("invalid_id");
-  for (const k of ["text", "name", "summary", "prompt"]) if (Object.hasOwn(ev, k)) text(ev[k]);
+  for (const k of ["messageId", "partId"]) if (Object.hasOwn(ev, k) && !isEntityId(ev[k])) reject("invalid_id");
+  for (const k of ["text", "path", "fileName"]) if (Object.hasOwn(ev, k)) text(ev[k]);
   if (ev.type === "textAppended" && !safeInteger(ev.offset)) reject("invalid_offset");
   if (ev.type === "messageCreated" && (typeof ev.role !== "string" || !["user", "assistant", "system"].includes(ev.role))) reject("invalid_role");
-  if (ev.type === "toolFinished" && typeof ev.failed !== "boolean") reject("invalid_tool_result");
+  if (ev.type === "messageCreated") {
+    if (!safeInteger(ev.createdAt)) reject("invalid_timestamp");
+    if (ev.continuationOf !== null && (!isEntityId(ev.continuationOf) || ev.continuationOf === ev.messageId)) reject("invalid_continuation");
+  }
+  if (ev.type === "partPut") {
+    if (!safeInteger(ev.index) || ev.index >= 256) reject("too_many_parts");
+    if (!validPart(ev.part)) reject("invalid_part");
+  }
+  if (ev.type === "messageFinished" && ev.status !== null && ev.status !== "complete" && ev.status !== "aborted") reject("invalid_message_status");
+  if (ev.type === "attachmentSealed" && (!ev.path || !ev.fileName)) reject("invalid_attachment");
   if (ev.type === "runFinished" && (typeof ev.outcome !== "string" || !["completed", "failed", "interrupted"].includes(ev.outcome))) reject("invalid_outcome");
   if (ev.type === "commandQueued") {
     const cmd = ev.command;
@@ -149,15 +160,15 @@ export function canonical(value: unknown): string {
 export interface Projection {
   commands: Record<string, { command: Command; actor: string; runId: string | null }>;
   runs: Record<string, { outcome: "completed" | "failed" | "interrupted" | null }>;
-  messages: Record<string, { runId: string; role: "user" | "assistant" | "system"; text: string }>;
-  tools: Record<string, { runId: string; name: string; failed: boolean | null; summary: string | null }>;
-  inputs: Record<string, { runId: string; prompt: string }>;
+  messages: Record<string, { runId: string | null; entry: Entry }>;
+  attachments: Record<string, { path: string; fileName: string }>;
 }
 export type EntityKind = keyof Projection;
 export interface ProjectionStore {
   get<K extends EntityKind>(kind: K, id: string): Projection[K][string] | undefined;
   set<K extends EntityKind>(kind: K, id: string, value: Projection[K][string]): void;
   hasAcceptedRun(runId: string): boolean;
+  hasOpenMessage(runId: string): boolean;
 }
 export function applyOperation(store: ProjectionStore, op: Operation, owner: string, ownerEpoch: number): void {
   validateOperation(op);
@@ -166,6 +177,17 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
   if (ev.type !== "commandQueued" && ev.type !== "commandCancelled" && op.actor !== owner) reject("not_owner");
   const live = (run: string) => {
     if (store.get("runs", run)?.outcome !== null) reject("run_not_live");
+  };
+  const writable = (id: string) => {
+    const msg = store.get("messages", id);
+    if (!msg) reject("unknown_message");
+    if (msg.runId !== null) live(msg.runId);
+    if (msg.entry.status !== "streaming") reject("message_finished");
+    return structuredClone(msg);
+  };
+  const putMessage = (id: string, msg: Projection["messages"][string]) => {
+    if (byteLength(JSON.stringify(msg)) > MAX_MESSAGE_BYTES) reject("message_too_large");
+    store.set("messages", id, msg);
   };
   switch (ev.type) {
     case "commandQueued":
@@ -197,32 +219,51 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
       if (!store.hasAcceptedRun(ev.runId)) reject("run_not_accepted");
       store.set("runs", ev.runId, { outcome: null }); break;
     case "messageCreated":
-      live(ev.runId);
+      if (ev.runId !== null) live(ev.runId);
       if (store.get("messages", ev.messageId)) reject("message_exists");
-      store.set("messages", ev.messageId, { runId: ev.runId, role: ev.role, text: "" }); break;
+      store.set("messages", ev.messageId, { runId: ev.runId, entry: {
+        id: ev.messageId, role: ev.role, deviceId: ev.deviceId, createdAt: ev.createdAt,
+        parts: [], status: "streaming", ...(ev.continuationOf === null ? {} : { continuationOf: ev.continuationOf }),
+      } }); break;
+    case "partPut": {
+      const msg = writable(ev.messageId), parts = msg.entry.parts;
+      if (ev.index > parts.length) reject("part_gap");
+      const old = parts[ev.index], part = ev.part;
+      if (old) {
+        if (old.id !== part.id || old.kind !== part.kind) reject("part_identity_mismatch");
+        if (old.kind === "text" && part.kind === "text" && old.text !== part.text) reject("text_requires_delta");
+        if (old.kind === "tool" && part.kind === "tool" && old.resolved && !part.resolved) reject("part_resolved");
+        if (old.kind === "input" && part.kind === "input") {
+          if (old.requestId !== part.requestId || canonical(old.questions) !== canonical(part.questions)) reject("question_changed");
+          if (old.resolved && !part.resolved) reject("part_resolved");
+        }
+        parts[ev.index] = structuredClone(part);
+      } else {
+        if (parts.some(p => p.id === part.id)) reject("part_exists");
+        parts.push(structuredClone(part));
+      }
+      putMessage(ev.messageId, msg); break;
+    }
     case "textAppended": {
-      const msg = store.get("messages", ev.messageId);
-      if (!msg) reject("unknown_message");
-      live(msg.runId);
-      if (byteLength(msg.text) !== ev.offset) reject("text_offset_mismatch");
-      store.set("messages", ev.messageId, { ...msg, text: msg.text + ev.text }); break;
+      const msg = writable(ev.messageId), part = msg.entry.parts.find(p => p.id === ev.partId);
+      if (!part) reject("unknown_part");
+      if (part.kind !== "text") reject("not_text");
+      if (byteLength(part.text) !== ev.offset) reject("text_offset_mismatch");
+      part.text += ev.text; putMessage(ev.messageId, msg); break;
     }
-    case "toolStarted":
-      live(ev.runId);
-      if (store.get("tools", ev.toolId)) reject("tool_exists");
-      store.set("tools", ev.toolId, { runId: ev.runId, name: ev.name, failed: null, summary: null }); break;
-    case "toolFinished": {
-      const tool = store.get("tools", ev.toolId);
-      if (!tool) reject("unknown_tool");
-      live(tool.runId);
-      if (tool.failed !== null) reject("tool_finished");
-      store.set("tools", ev.toolId, { ...tool, failed: ev.failed, summary: ev.summary }); break;
+    case "messageFinished": {
+      const msg = writable(ev.messageId);
+      if (ev.status === null) delete msg.entry.status; else msg.entry.status = ev.status;
+      putMessage(ev.messageId, msg); break;
     }
-    case "inputRequested":
-      live(ev.runId);
-      if (store.get("inputs", ev.requestId)) reject("input_exists");
-      store.set("inputs", ev.requestId, { runId: ev.runId, prompt: ev.prompt }); break;
+    case "attachmentSealed": {
+      const value = { path: ev.path, fileName: ev.fileName }, old = store.get("attachments", ev.uploadId);
+      if (old && canonical(old) !== canonical(value)) reject("attachment_conflict");
+      store.set("attachments", ev.uploadId, value); break;
+    }
     case "runFinished":
-      live(ev.runId); store.set("runs", ev.runId, { outcome: ev.outcome }); break;
+      live(ev.runId);
+      if (store.hasOpenMessage(ev.runId)) reject("unfinished_messages");
+      store.set("runs", ev.runId, { outcome: ev.outcome }); break;
   }
 }

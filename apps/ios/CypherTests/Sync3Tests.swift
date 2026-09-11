@@ -8,6 +8,44 @@ final class Sync3Tests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         return try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: root.appendingPathComponent("fixtures/sync3/\(name).json")))
     }
+    func testCompletePartShapesPreserveRenderDataAndRejectPrivateInputs() throws {
+        let fixture = try sharedJSON("part-validation").objectValue!
+        for (name, valid) in [("valid", true), ("invalid", false)] {
+            guard case .array(let parts) = fixture[name] else { return XCTFail("missing part cases") }
+            for part in parts {
+                let raw: [String: JSONValue] = ["id": .string("part-op"), "actor": .string("host"), "ownerEpoch": .int(1),
+                    "event": .object(["type": .string("partPut"), "messageId": .string("message"), "index": .int(0), "part": part])]
+                let data = try Sync3Wire.encode(raw)
+                if valid {
+                    let op = try JSONDecoder().decode(Sync3Operation.self, from: data)
+                    XCTAssertEqual(try JSONDecoder().decode([String: JSONValue].self, from: Sync3Wire.encode(op)), raw)
+                } else { XCTAssertThrowsError(try JSONDecoder().decode(Sync3Operation.self, from: data)) }
+            }
+        }
+    }
+    func testAccumulatedTextCanExceedOneFrameAndBudgetFailureIsAtomic() throws {
+        let url = try directory().appendingPathComponent("journal.sqlite")
+        var journal: Sync3Journal? = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+        let initial = Array(try fixture().operations.prefix(5))
+        try journal!.acceptState(state(head: 5)); try journal!.applyPage(page(initial))
+        for i in 0..<5 {
+            let op = try Sync3Operation(id: "budget-\(i)", actor: "host", ownerEpoch: 1, event: [
+                "type": .string("textAppended"), "messageId": .string("message"), "partId": .string("text"),
+                "offset": .int(Int64(6 + i * 60 * 1024)), "text": .string(String(repeating: "x", count: 60 * 1024))])
+            let seq = Int64(6 + i), before = try journal!.projection
+            let rows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: seq, operation: op)]))
+            let next: [String: JSONValue] = ["version": .int(3), "type": .string("page"), "epoch": .int(1),
+                "through": .int(seq), "next": .int(seq), "rows": rows, "done": .bool(true)]
+            if i < 4 { try journal!.applyPage(next) }
+            else {
+                XCTAssertThrowsError(try journal!.applyPage(next)) { error in XCTAssertEqual(error as? Sync3Error, .protocolError("message_too_large")) }
+                XCTAssertEqual(try journal!.projection, before)
+            }
+            journal = nil
+            journal = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+        }
+        XCTAssertEqual(try journal!.cursor, 9)
+    }
     func testCompleteCommandValidation() throws {
         let queued = try fixture().operations[0]
         let vectors = try sharedJSON("command-validation").objectValue!
@@ -44,15 +82,16 @@ final class Sync3Tests: XCTestCase {
         XCTAssertThrowsError(try Sync3Operation(id: queued.id, actor: queued.actor, ownerEpoch: 1, event: e))
     }
     func testSharedCommandLifecyclePersistsAndRejectsWithoutCursorAdvance() throws {
-        let queued = try fixture().operations[0]
+        let base = try fixture().operations
         guard case .array(let scenarios) = try sharedJSON("command-lifecycle") else { return XCTFail("missing scenarios") }
         for scenario in scenarios {
             let c = scenario.objectValue!, url = try directory().appendingPathComponent("journal.sqlite")
             var journal: Sync3Journal? = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
-            try journal!.acceptState(state(head: 1))
-            var committed = [queued]
+            let prefix = Int((try? Sync3Wire.integer(c["initialPrefix"])) ?? 1)
+            try journal!.acceptState(state(head: Int64(prefix)))
+            var committed = Array(base.prefix(prefix))
             var pure = Sync3Projection()
-            try pure.apply(queued, owner: "host", ownerEpoch: 1)
+            for op in committed { try pure.apply(op, owner: "host", ownerEpoch: 1) }
             try journal!.applyPage(page(committed))
             guard case .array(let steps) = c["steps"] else { return XCTFail("missing steps") }
             for (index, value) in steps.enumerated() {
@@ -122,10 +161,10 @@ final class Sync3Tests: XCTestCase {
         var event = f.operations[5].event; event["offset"] = .int(2)
         let op = try Sync3Operation(id: "wrong", actor: "host", ownerEpoch: 1, event: event)
         XCTAssertThrowsError(try wrong.apply(op, owner: "host", ownerEpoch: 1))
-        XCTAssertEqual(wrong.messages["message"]?["text"], .string("你好"))
+        XCTAssertEqual(wrong.messages["message"]?["entry"]?.objectValue?["parts"], .array([.object(["kind": .string("text"), "id": .string("text"), "text": .string("你好")])]))
         let system = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(sharedJSON("system-message")))
         try wrong.apply(system, owner: "host", ownerEpoch: 1)
-        XCTAssertEqual(wrong.messages["system-message#c1"]?["role"], .string("system"))
+        XCTAssertEqual(wrong.messages["system-message#c1"]?["entry"]?.objectValue?["role"], .string("system"))
     }
     func testDurableOutboxRestartAndAckDoesNotSkipCursor() throws {
         let f = try fixture(), url = try directory().appendingPathComponent("journal.sqlite")
@@ -133,7 +172,7 @@ final class Sync3Tests: XCTestCase {
         try j!.enqueue(f.operations[0]); j = nil
         j = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
         XCTAssertEqual(try j!.pending(), [f.operations[0]])
-        try j!.acceptState(state(head: 10))
+        try j!.acceptState(state(head: Int64(f.operations.count)))
         try j!.acknowledge(["type": .string("ack"), "version": .int(3), "epoch": .int(1),
                            "receipts": .array([.object(["id": .string("op-1"), "seq": .int(1)])])])
         XCTAssertEqual(try j!.cursor, 0)
@@ -142,23 +181,23 @@ final class Sync3Tests: XCTestCase {
         j = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
         try j!.applyPage(page(f.operations))
         XCTAssertEqual(try j!.projection, f.projection)
-        XCTAssertEqual(try j!.cursor, 10)
+        XCTAssertEqual(try j!.cursor, Int64(f.operations.count))
         try j!.applyPage(page(f.operations))
-        XCTAssertEqual(try j!.cursor, 10)
+        XCTAssertEqual(try j!.cursor, Int64(f.operations.count))
     }
     func testScopeEpochAndRollbackProtection() throws {
         let f = try fixture(), url = try directory().appendingPathComponent("journal.sqlite")
         let j = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
-        try j.acceptState(state(head: 10)); try j.enqueue(f.operations[0])
+        try j.acceptState(state(head: Int64(f.operations.count))); try j.enqueue(f.operations[0])
         let bad = try Sync3Operation(id: "bad", actor: "host", ownerEpoch: 1,
                                     event: ["type": .string("runStarted"), "runId": .string("absent")])
         XCTAssertThrowsError(try j.applyPage(page([f.operations[0], bad])))
         XCTAssertEqual(try j.cursor, 0); XCTAssertEqual(try j.projection, Sync3Projection())
         XCTAssertEqual(try j.pending(), [f.operations[0]])
         XCTAssertThrowsError(try Sync3Journal(url: url, account: "different", room: "room", actor: "phone"))
-        var changed = state(head: 10); changed["epoch"] = .int(2)
+        var changed = state(head: Int64(f.operations.count)); changed["epoch"] = .int(2)
         XCTAssertThrowsError(try j.acceptState(changed))
-        changed = state(head: 10); changed["owner"] = .string("different-owner")
+        changed = state(head: Int64(f.operations.count)); changed["owner"] = .string("different-owner")
         XCTAssertThrowsError(try j.acceptState(changed))
         try j.applyPage(page(f.operations))
         XCTAssertThrowsError(try j.acceptState(state(head: 9)))

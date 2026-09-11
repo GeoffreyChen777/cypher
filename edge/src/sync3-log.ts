@@ -56,6 +56,9 @@ export class Sync3Log implements ProjectionStore {
   hasAcceptedRun(runId: string): boolean {
     return this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='commands' AND run_id=? AND json_extract(body,'$.command.status') IN ('pending','applied') LIMIT 1", runId).toArray().length > 0;
   }
+  hasOpenMessage(runId: string): boolean {
+    return this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='messages' AND run_id=? AND json_extract(body,'$.entry.status')='streaming' LIMIT 1", runId).toArray().length > 0;
+  }
   append(operations: Operation[], actor?: string): Extract<Reply, { type: "ack" }> {
     if (!operations.length || operations.length > MAX_BATCH_OPS) reject("invalid_batch");
     if (byteLength(JSON.stringify({ type: "push", version: 3, operations })) > MAX_FRAME_BYTES) reject("frame_too_large");
@@ -118,7 +121,8 @@ export class Sync3Log implements ProjectionStore {
         AND json_extract(c.body,'$.command.status') IN ('pending','applied')
         AND (r.id IS NULL OR json_extract(r.body,'$.outcome') IS NULL) LIMIT 1`).toArray();
       const live = this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='runs' AND json_extract(body,'$.outcome') IS NULL LIMIT 1").toArray();
-      if (uncertain.length || live.length) reject("execution_unresolved");
+      const open = this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='messages' AND json_extract(body,'$.entry.status')='streaming' LIMIT 1").toArray();
+      if (uncertain.length || live.length || open.length) reject("execution_unresolved");
       this.storage.sql.exec("UPDATE v3_meta SET owner=?,owner_epoch=? WHERE singleton=1", owner, expectedEpoch + 1);
     });
   }

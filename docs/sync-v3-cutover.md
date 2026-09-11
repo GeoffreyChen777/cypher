@@ -35,8 +35,11 @@ review submissions.
    process can serve multiple turns, so its process ID cannot blindly become
    a single already-finished v3 run ID.
    The native entry/part models, folding, privacy projection and continuation
-   helpers are also storage-independent now. The next writer must preserve
-   full tools/questions/status/continuation metadata, not flatten them to text.
+   helpers are also storage-independent now. Full part/delta operations and
+   tools/questions/status/continuation metadata now exist on the wire. The
+   actual bounded writer and normal-client rendering are not implemented yet.
+   Derive transcript ordering from authoritative committed positions, not
+   timestamps or entity rows' last-update positions.
    Part IDs are message-scoped (including repeated live-plan IDs), not globally
    unique tool IDs. The existing 256-KiB segment budget is larger than a v3
    operation's 128-KiB limit: use part/delta operations and bounded rollover,

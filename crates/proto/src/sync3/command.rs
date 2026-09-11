@@ -14,7 +14,7 @@ static SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     .expect("checked-in command shape descriptor")
 });
 
-fn matches(value: &Value, schema: &Value) -> bool {
+pub(super) fn matches(value: &Value, schema: &Value) -> bool {
     if let Some(kind) = schema.as_str() {
         return match kind {
             "id" => value.as_str().is_some_and(valid_id),

@@ -42,7 +42,7 @@ impl Journal {
         let prototype: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync3_projection')",
             [], |r| r.get(0))?;
-        if prototype || ![0, 4].contains(&format) {
+        if prototype || ![0, 5].contains(&format) {
             // Never silently reopen a different storage format as empty.
             return Err(invalid("unsupported_journal_format"));
         }
@@ -93,7 +93,7 @@ impl Journal {
         if identity != (account.into(), room.into(), actor.into()) {
             return Err(invalid("scope_mismatch"));
         }
-        tx.pragma_update(None, "user_version", 4)?;
+        tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
         Ok(Self {
             db,
@@ -499,11 +499,19 @@ mod tests {
             let path = dir.path().join("journal.sqlite");
             let mut j = Journal::open(&path, "account", "room", "phone").unwrap();
             j.accept_state(&state(100)).unwrap();
-            let mut rows = vec![Row {
-                seq: 1,
-                operation: serde_json::from_value(fixture["operations"][0].clone()).unwrap(),
-            }];
-            j.apply_page(&page(rows.clone(), 1)).unwrap();
+            let mut rows: Vec<Row> = fixture["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(case["initialPrefix"].as_u64().unwrap_or(1) as usize)
+                .enumerate()
+                .map(|(i, v)| Row {
+                    seq: i as u64 + 1,
+                    operation: serde_json::from_value(v.clone()).unwrap(),
+                })
+                .collect();
+            j.apply_page(&page(rows.clone(), rows.len() as u64))
+                .unwrap();
             for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
                 // Admission ownership is checked by the authoritative server.
                 // A committed historical page may predate the current owner.
@@ -681,6 +689,7 @@ mod tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
         let ops: Vec<Operation> = serde_json::from_value(fixture["operations"].clone()).unwrap();
+        let head = ops.len() as u64;
         let mut j = Journal::open(Path::new(":memory:"), "account", "room", "phone").unwrap();
         j.accept_state(&state(ops.len() as u64)).unwrap();
         let page = page(
@@ -691,7 +700,7 @@ mod tests {
                     operation,
                 })
                 .collect(),
-            10,
+            head,
         );
         j.apply_page(&page).unwrap();
         j.apply_page(&page).unwrap();
@@ -768,7 +777,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(changed, 1);
-        assert_eq!(j.projection().unwrap().messages["message"].text, "你好!");
+        assert_eq!(
+            serde_json::to_value(j.projection().unwrap()).unwrap()["messages"]["message"]["entry"]
+                ["parts"][0]["text"],
+            "你好!"
+        );
     }
     #[test]
     fn javascript_number_normalization_does_not_poison_own_receipt() {

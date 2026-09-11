@@ -74,6 +74,9 @@ async fn main() {
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     assert!(cypher_proto::sync3::valid_id(&room));
     let path = format!("{base}/sync3/sync3-org/chats/{room}/");
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
+    let head = fixture["operations"].as_array().unwrap().len() as u64;
     if matches!(
         std::env::args().nth(3).as_deref(),
         Some("--write-journal" | "--verify-journal")
@@ -85,8 +88,6 @@ async fn main() {
             !writing,
             "never overwrite/reseed a test database"
         );
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
         let numbers: serde_json::Value =
             serde_json::from_str(include_str!("../../../fixtures/sync3/numbers.json")).unwrap();
         let mut journal = Journal::open(&file, "account", "shared-room", "phone").unwrap();
@@ -97,7 +98,7 @@ async fn main() {
                     epoch: 1,
                     owner: "host".into(),
                     owner_epoch: 1,
-                    head: 10,
+                    head,
                 })
                 .unwrap();
             let operations: Vec<Operation> =
@@ -114,8 +115,8 @@ async fn main() {
                 .apply_page(&Reply::Page {
                     version: 3,
                     epoch: 1,
-                    through: 10,
-                    next: 10,
+                    through: head,
+                    next: head,
                     done: true,
                     rows,
                 })
@@ -125,7 +126,7 @@ async fn main() {
                 .unwrap();
             println!("PASS: Rust wrote a private normalized SQLite journal for Swift");
         } else {
-            assert_eq!(journal.cursor().unwrap(), 12);
+            assert_eq!(journal.cursor().unwrap(), head + 2);
             assert_eq!(
                 journal.projection().unwrap().commands["command"]
                     .command
@@ -167,9 +168,13 @@ async fn main() {
             None,
             Tuning::default(),
         );
-        wait_cursor(&reader, 11).await;
+        wait_cursor(&reader, head + 1).await;
         let projection = reader.journal().lock().unwrap().projection().unwrap();
-        assert_eq!(projection.messages["message"].text, "你好!");
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["messages"]["message"]["entry"]["parts"][0]
+                ["text"],
+            "你好!"
+        );
         assert_eq!(projection.commands["swift-command"].actor, "swift-reader");
         reader.shutdown().await;
         println!("PASS: Rust reads the command committed by Swift through real workerd");
@@ -187,8 +192,6 @@ async fn main() {
         "initialization failed: {}",
         response.status()
     );
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
     let ops: Vec<Operation> = serde_json::from_value(fixture["operations"].clone()).unwrap();
     let expected: Projection = serde_json::from_value(fixture["projection"].clone()).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -221,8 +224,8 @@ async fn main() {
     for op in ops.iter().skip(1) {
         host.enqueue(op).unwrap();
     }
-    wait_cursor(&phone, 10).await;
-    wait_cursor(&host, 10).await;
+    wait_cursor(&phone, head).await;
+    wait_cursor(&host, head).await;
     assert_eq!(
         phone.journal().lock().unwrap().projection().unwrap(),
         expected
@@ -238,7 +241,7 @@ async fn main() {
         Some(repair),
         Tuning::default(),
     );
-    wait_cursor(&restarted, 10).await;
+    wait_cursor(&restarted, head).await;
     assert!(
         restarted
             .journal()
@@ -260,6 +263,6 @@ async fn main() {
     restarted.shutdown().await;
     host.shutdown().await;
     println!(
-        "PASS: workerd ↔ Rust host/phone; 10 typed events; UTF-8; restart; healthy HTTP repairs=0"
+        "PASS: workerd ↔ Rust host/phone; {head} typed events; UTF-8; restart; healthy HTTP repairs=0"
     );
 }

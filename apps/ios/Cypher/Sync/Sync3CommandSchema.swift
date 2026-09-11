@@ -2,6 +2,31 @@ import Foundation
 
 /// Closed shape descriptor shared with Rust/Edge, not a general JSON Schema interpreter.
 enum Sync3CommandSchema {
+    private static let partSchema: JSONValue? = {
+        guard let url = Bundle.main.url(forResource: "Sync3PartSchema", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(JSONValue.self, from: data)
+    }()
+    static func validatePart(_ value: JSONValue, stored: Bool = false) throws {
+        // A text part grows through individually bounded deltas. Its persisted
+        // aggregate may exceed the single-operation string budget, but never
+        // the message budget. Still validate every other field without letting
+        // this exception weaken wire admission or non-text part validation.
+        if stored, var part = value.objectValue, part["kind"] == .string("text") {
+            guard let text = part["text"]?.stringValue, text.utf8.count <= 256 * 1024 else { try Sync3Wire.fail("message_too_large") }
+            part["text"] = .string("")
+            return try validatePart(.object(part))
+        }
+        try Sync3Wire.validateJSON(value, depth: 3)
+        guard let partSchema else { try Sync3Wire.fail("missing_part_schema") }
+        guard matches(value, partSchema) else { try Sync3Wire.fail("invalid_part") }
+        let p = value.objectValue!
+        if let call = p["call"]?.objectValue, call["kind"] == .string("unknown"), call["name"] == .string("subagent") {
+            guard let task = call["input"]?.objectValue?["task"]?.stringValue, task.unicodeScalars.count <= 500 else {
+                try Sync3Wire.fail("private_tool_input")
+            }
+        }
+    }
     private static let schema: JSONValue? = {
         guard let url = Bundle.main.url(forResource: "Sync3CommandSchema", withExtension: "json"),
               let data = try? Data(contentsOf: url) else { return nil }

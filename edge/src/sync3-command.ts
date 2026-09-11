@@ -24,7 +24,7 @@ export function isEntityId(value: unknown): value is string {
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function matches(value: unknown, rule: unknown): boolean {
+export function matches(value: unknown, rule: unknown): boolean {
   if (typeof rule === "string") {
     switch (rule) {
       case "id": return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);

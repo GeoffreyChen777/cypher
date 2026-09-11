@@ -5,7 +5,7 @@ use cypher_proto::sync3::{Event, Operation, Projection};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-const KINDS: [&str; 5] = ["commands", "runs", "messages", "tools", "inputs"];
+const KINDS: [&str; 4] = ["commands", "runs", "messages", "attachments"];
 
 fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> Result<(), Error> {
     let body: Option<String> = db
@@ -34,14 +34,9 @@ fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> R
                 .messages
                 .insert(id.into(), serde_json::from_str(&body)?);
         }
-        "tools" => {
+        "attachments" => {
             projection
-                .tools
-                .insert(id.into(), serde_json::from_str(&body)?);
-        }
-        "inputs" => {
-            projection
-                .inputs
+                .attachments
                 .insert(id.into(), serde_json::from_str(&body)?);
         }
         _ => return Err(invalid("invalid_entity_kind")),
@@ -50,8 +45,7 @@ fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> R
 }
 
 pub(super) fn read(db: &Connection) -> Result<Projection, Error> {
-    let mut value =
-        serde_json::json!({"commands":{},"runs":{},"messages":{},"tools":{},"inputs":{}});
+    let mut value = serde_json::json!({"commands":{},"runs":{},"messages":{},"attachments":{}});
     let mut query = db.prepare("SELECT kind,id,body FROM sync3_entities ORDER BY kind,id")?;
     for row in query.query_map([], |r| {
         Ok((
@@ -94,38 +88,35 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
                 load(db, &mut projection, "commands", &command)?;
             }
         }
-        Event::RunFinished { run_id, .. } => load(db, &mut projection, "runs", run_id)?,
+        Event::RunFinished { run_id, .. } => {
+            load(db, &mut projection, "runs", run_id)?;
+            let open: Option<String> = db.query_row(
+                "SELECT id FROM sync3_entities WHERE kind='messages' AND run_id=? AND json_extract(body,'$.entry.status')='streaming' LIMIT 1",
+                [run_id], |r| r.get(0)).optional()?;
+            if let Some(id) = open {
+                load(db, &mut projection, "messages", &id)?;
+            }
+        }
         Event::MessageCreated {
             run_id, message_id, ..
         } => {
-            load(db, &mut projection, "runs", run_id)?;
+            if let Some(run) = run_id {
+                load(db, &mut projection, "runs", run)?;
+            }
             load(db, &mut projection, "messages", message_id)?;
         }
-        Event::TextAppended { message_id, .. } => {
+        Event::TextAppended { message_id, .. }
+        | Event::PartPut { message_id, .. }
+        | Event::MessageFinished { message_id, .. } => {
             load(db, &mut projection, "messages", message_id)?;
             if let Some(message) = projection.messages.get(message_id) {
-                let run = message.run_id.clone();
-                load(db, &mut projection, "runs", &run)?;
+                if let Some(run) = message.run_id.clone() {
+                    load(db, &mut projection, "runs", &run)?;
+                }
             }
         }
-        Event::ToolStarted {
-            run_id, tool_id, ..
-        } => {
-            load(db, &mut projection, "runs", run_id)?;
-            load(db, &mut projection, "tools", tool_id)?;
-        }
-        Event::ToolFinished { tool_id, .. } => {
-            load(db, &mut projection, "tools", tool_id)?;
-            if let Some(tool) = projection.tools.get(tool_id) {
-                let run = tool.run_id.clone();
-                load(db, &mut projection, "runs", &run)?;
-            }
-        }
-        Event::InputRequested {
-            run_id, request_id, ..
-        } => {
-            load(db, &mut projection, "runs", run_id)?;
-            load(db, &mut projection, "inputs", request_id)?;
+        Event::AttachmentSealed { upload_id, .. } => {
+            load(db, &mut projection, "attachments", upload_id)?
         }
     }
     let before = serde_json::to_value(&projection)?;

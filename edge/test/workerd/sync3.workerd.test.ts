@@ -5,6 +5,7 @@ import invalid from "../../../fixtures/sync3/invalid.json";
 import numbers from "../../../fixtures/sync3/numbers.json";
 import runCommand from "../../../fixtures/sync3/run-command.json";
 import lifecycle from "../../../fixtures/sync3/command-lifecycle.json";
+import partShapes from "../../../fixtures/sync3/part-validation.json";
 import { Sync3Log } from "../../src/sync3-log";
 import { validateOperation, type Operation, type Reply } from "../../src/sync3-protocol";
 
@@ -20,15 +21,44 @@ const queued = (id: string, text = "hello"): Operation => validateOperation({
   } } },
 });
 describe("sync3 real SQLite commit/receipt boundary", () => {
+  it("bounds accumulated message bytes without dropping previously committed deltas", async () => {
+    await inLog("message-budget", log => {
+      log.initialize("account", "host"); log.append(ops().slice(0, 5));
+      for (let i = 0; i < 5; i++) {
+        const op: Operation = { id: `budget-${i}`, actor: "host", ownerEpoch: 1,
+          event: { type: "textAppended", messageId: "message", partId: "text", offset: 6 + i * 60 * 1024, text: "x".repeat(60 * 1024) } };
+        const before = log.get("messages", "message");
+        if (i < 4) log.append([op]);
+        else {
+          expect(() => log.append([op])).toThrow("message_too_large");
+          expect(log.get("messages", "message")).toEqual(before);
+        }
+      }
+      expect(log.state().head).toBe(9);
+    });
+  });
+  it("never commits rejected part data or advances its cursor", async () => {
+    await inLog("private-part-inputs", log => {
+      log.initialize("account", "host"); log.append(ops().slice(0, 4));
+      for (const part of partShapes.invalid) {
+        const op = { id: "invalid-part", actor: "host", ownerEpoch: 1,
+          event: { type: "partPut", messageId: "message", index: 0, part } };
+        expect(() => log.append([op as unknown as Operation])).toThrow();
+        expect(log.state().head).toBe(4);
+        expect(log.get("messages", "message")?.entry.parts).toEqual([]);
+      }
+    });
+  });
   it.each(lifecycle)("persists sparse command lifecycle and rejects poison rows: $name", async scenario => {
     await inLog(`lifecycle-${scenario.name}`, log => {
-      log.initialize("account", "host"); log.append([ops()[0]]);
+      log.initialize("account", "host"); log.append(ops().slice(0, "initialPrefix" in scenario ? scenario.initialPrefix : 1));
       scenario.steps.forEach((step, index) => {
         const op = validateOperation({ id: `step-${index}`, actor: step.actor, ownerEpoch: "ownerEpoch" in step ? step.ownerEpoch : 1, event: step.event });
-        const before = log.get("commands", "command"), head = log.state().head;
+        const before = log.get("commands", "command"), message = log.get("messages", "message"), head = log.state().head;
         if ("error" in step && step.error) {
           expect(() => log.append([op])).toThrow(step.error);
           expect(log.get("commands", "command")).toEqual(before);
+          expect(log.get("messages", "message")).toEqual(message);
           expect(log.state().head).toBe(head);
         } else log.append([op]);
       });
@@ -66,14 +96,14 @@ describe("sync3 real SQLite commit/receipt boundary", () => {
     await inLog("replay", log => {
       log.initialize("account", "host");
       const first = log.append(ops());
-      expect(first.receipts.map(r => r.seq)).toEqual([1,2,3,4,5,6,7,8,9,10]);
+      expect(first.receipts.map(r => r.seq)).toEqual(ops().map((_, i) => i + 1));
       expect(log.append(ops())).toEqual(first);
-      expect(log.state().head).toBe(10);
+      expect(log.state().head).toBe(ops().length);
     });
     await inLog("replay", log => {
       // New object model over the persisted tables, not cached dedupe state.
-      expect(log.append(ops()).receipts.at(-1)?.seq).toBe(10);
-      expect(log.get("messages", "message")?.text).toBe("你好!");
+      expect(log.append(ops()).receipts.at(-1)?.seq).toBe(ops().length);
+      expect(log.get("messages", "message")?.entry.parts[0]).toMatchObject({ kind: "text", text: "你好!" });
     });
   });
   it("invalid last operation rolls back earlier event, projection and head", async () => {

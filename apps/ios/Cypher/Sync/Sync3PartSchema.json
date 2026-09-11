@@ -1,0 +1,35 @@
+{
+  "oneOf": [
+    {"object":{"kind":{"enum":["text"]},"id":"entityId","text":"string"}},
+    {"object":{"kind":{"enum":["error"]},"id":"entityId","message":"string"}},
+    {"object":{
+      "kind":{"enum":["input"]},"id":"entityId","requestId":"entityId","resolved":"bool",
+      "questions":{"array":{"object":{
+        "id":"nonemptyString","header":"string","question":"string",
+        "options":{"array":"string","max":256},"multiSelect":"bool"
+      }},"max":256}
+    }},
+    {
+      "object":{
+        "kind":{"enum":["tool"]},"id":"entityId","isError":"bool","resolved":"bool",
+        "call":{"oneOf":[
+          {"object":{"kind":{"enum":["exec"]},"command":"string"}},
+          {"object":{"kind":{"enum":["readFile","writeFile","editFile"]},"path":"string"}},
+          {"object":{"kind":{"enum":["applyPatch"]},"path":"string"},"optional":["path"]},
+          {"object":{"kind":{"enum":["search"]},"pattern":"string","path":"string"},"optional":["path"]},
+          {"object":{"kind":{"enum":["glob"]},"pattern":"string"}},
+          {"object":{"kind":{"enum":["webFetch"]},"url":"string"}},
+          {"object":{"kind":{"enum":["webSearch"]},"query":"string"}},
+          {"object":{"kind":{"enum":["todo"]},"items":{"array":{"object":{"text":"string","done":"bool"}},"max":256}}},
+          {"object":{"kind":{"enum":["mcp"]},"server":"string","tool":"string"}},
+          {"object":{"kind":{"enum":["unknown"]},"name":"string"}},
+          {"object":{"kind":{"enum":["unknown"]},"name":{"enum":["subagent"]},"input":{"object":{"agent":"string","task":"string","async":"bool"}}}}
+        ]},
+        "output":"string","progress":"string","outputRef":"string","outputBytes":"uint","diffRef":"string",
+        "diff":{"object":{"path":"string","oldText":"string","newText":"string"},"optional":["oldText"]},
+        "diffStats":{"array":{"object":{"path":"string","additions":"uint","deletions":"uint"}},"max":256}
+      },
+      "optional":["output","progress","diff","outputRef","outputBytes","diffRef","diffStats"]
+    }
+  ]
+}
