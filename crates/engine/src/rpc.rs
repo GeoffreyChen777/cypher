@@ -458,6 +458,7 @@ pub struct EngineRpc {
     updater: Option<cypher_update::Updater>,
     pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
     local_import: Option<crate::local_import::LocalImporter>,
+    title_settings: Option<crate::title_settings::TitleSettingsStore>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -502,9 +503,19 @@ impl EngineRpc {
             updater: None,
             pi_runtime: None,
             local_import: None,
+            title_settings: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
         }
+    }
+
+    /// Share the device's title preferences with the automatic title runner.
+    pub fn with_title_settings(
+        mut self,
+        settings: crate::title_settings::TitleSettingsStore,
+    ) -> Self {
+        self.title_settings = Some(settings);
+        self
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1195,6 +1206,8 @@ fn forwardable(method: &str) -> bool {
             | methods::START_MCP_AUTH
             | methods::LOGOUT_MCP_SERVER
             | methods::LIST_MODELS
+            | methods::GET_TITLE_MODEL_SETTINGS
+            | methods::SET_TITLE_MODEL_SETTINGS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::RETRY_COMMAND
@@ -1715,6 +1728,53 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
+            }
+            methods::GET_TITLE_MODEL_SETTINGS => {
+                let store = self.title_settings.as_ref().ok_or_else(|| {
+                    RpcError::Failed(
+                        "Title settings unavailable; update this device's engine".into(),
+                    )
+                })?;
+                let settings = store.load().map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&settings)
+            }
+            methods::SET_TITLE_MODEL_SETTINGS => {
+                // Require an explicit model field, including null for Auto.
+                // An accidental {} must not clear the user's chosen model.
+                if params.get("model").is_none() {
+                    return Err(RpcError::BadParams(
+                        "model is required (null selects Automatic)".into(),
+                    ));
+                }
+                let settings: cypher_proto::TitleModelSettings = parse_params(params)?;
+                crate::title_settings::validate(&settings)
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
+                let store = self.title_settings.as_ref().ok_or_else(|| {
+                    RpcError::Failed(
+                        "Title settings unavailable; update this device's engine".into(),
+                    )
+                })?;
+                if let Some(model) = &settings.model {
+                    let harness = self
+                        .registry
+                        .resolve(HarnessId::Pi)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let models =
+                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
+                            .await
+                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if !models.iter().any(|candidate| candidate.id == *model) {
+                        return Err(RpcError::BadParams(
+                            "Model is not in this device's Pi catalog; refresh and choose again"
+                                .into(),
+                        ));
+                    }
+                }
+                store
+                    .save(&settings)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&settings)
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
@@ -2662,6 +2722,8 @@ mod tests {
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::LIST_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
+        assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
+        assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
         assert!(forwardable(methods::FETCH_ALL));
     }
 

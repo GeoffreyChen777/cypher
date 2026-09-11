@@ -62,6 +62,8 @@ pub mod methods {
     pub const START_MCP_AUTH: &str = "StartMcpAuth";
     pub const LOGOUT_MCP_SERVER: &str = "LogoutMcpServer";
     pub const LIST_MODELS: &str = "ListModels";
+    pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";
+    pub const SET_TITLE_MODEL_SETTINGS: &str = "SetTitleModelSettings";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Re-issue a failed/expired durable message command with a fresh command

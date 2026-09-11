@@ -10,6 +10,7 @@ use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
+use super::titles::TitlesPage;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -17,6 +18,7 @@ use crate::theme::Theme;
 
 pub struct HarnessesPage {
     state: Entity<AppState>,
+    titles: Entity<TitlesPage>,
     packages: Loadable<PiPackagesSnapshot>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -51,8 +53,10 @@ impl HarnessesPage {
             }
             cx.notify();
         });
+        let titles = cx.new(|cx| TitlesPage::new_embedded(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
+            titles,
             packages: Loadable::Idle,
             target,
             generation,
@@ -429,26 +433,33 @@ impl Render for HarnessesPage {
             .size_full()
             .overflow_y_scroll()
             .child(
-            widgets::page_column()
-                .child(widgets::page_header(&theme, "Agents", None))
-                .child(
-                    widgets::page_subtitle(
-                        &theme,
-                        "Cypher uses an isolated Pi runtime. Download it and manage its plugins here without changing your system Pi.",
+                widgets::page_column()
+                    .child(widgets::page_header(&theme, "Agents", None))
+                    .child(
+                        widgets::page_subtitle(
+                            &theme,
+                            "Manage Pi and its extensions for this device.",
+                        )
+                        .max_w(px(560.0))
+                        .line_height(px(20.0)),
                     )
-                    .max_w(px(560.0))
-                    .line_height(px(20.0)),
-                )
-                .children(
-                    self.error
-                        .clone()
-                        .map(|message| widgets::error_strip(&theme, message).into_any_element()),
-                )
-                .when_some(self.target.read(cx).unavailable(cx), |el, error|
-                    el.child(widgets::warning_strip(&theme, error)))
-                .when(self.busy, |el| el.child(widgets::page_subtitle(&theme, "Updating the selected device…")))
-                .child(body),
-        )
+                    .children(
+                        self.error.clone().map(|message| {
+                            widgets::error_strip(&theme, message).into_any_element()
+                        }),
+                    )
+                    .when_some(self.target.read(cx).unavailable(cx), |el, error| {
+                        el.child(widgets::warning_strip(&theme, error))
+                    })
+                    .when(self.busy, |el| {
+                        el.child(widgets::page_subtitle(
+                            &theme,
+                            "Updating the selected device…",
+                        ))
+                    })
+                    .child(body)
+                    .child(div().mt(px(32.0)).child(self.titles.clone())),
+            )
     }
 }
 

@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod providers;
 pub mod setup;
 pub mod shortcuts;
+pub mod titles;
 pub mod widgets;
 
 /// Sidebar drag-resize bounds (px).

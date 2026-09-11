@@ -355,6 +355,16 @@ impl PiRuntimeManager {
                     return Err("Pi Runtime metadata does not match its manifest.".into());
                 }
                 probe_runtime(&unpacked, &self.inner.paths.agent_dir)?;
+                // A process killed during an older install can leave a
+                // same-version directory behind with only part of the
+                // archive extracted. Do not let that tombstone block every
+                // future retry: the staged directory has already passed all
+                // validation, so replace the invalid destination atomically
+                // under the install mutex.
+                if destination.exists() && validate_runtime_dir(&destination).is_err() {
+                    std::fs::remove_dir_all(&destination)
+                        .map_err(|err| format!("Could not remove incomplete Pi Runtime: {err}"))?;
+                }
                 match std::fs::rename(&unpacked, &destination) {
                     Ok(()) => {}
                     Err(err) if destination.is_dir() => {

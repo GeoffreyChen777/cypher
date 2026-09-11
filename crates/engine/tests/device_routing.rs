@@ -676,6 +676,58 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
             .unwrap();
         assert!(packages.is_object());
     }
+    // Title settings persist only on the addressed device and validate against
+    // THAT device's model catalog, never the UI/local engine catalog.
+    let selected = client
+        .call(
+            methods::SET_TITLE_MODEL_SETTINGS,
+            serde_json::json!({"targetDeviceId":"device-b","model":"device-b/model"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["model"], "device-b/model");
+    assert_eq!(
+        b.title_settings.load().unwrap().model.as_deref(),
+        Some("device-b/model")
+    );
+    assert_eq!(a.title_settings.load().unwrap().model, None);
+    assert_eq!(
+        client
+            .call(
+                methods::GET_TITLE_MODEL_SETTINGS,
+                serde_json::json!({"targetDeviceId":"device-b"})
+            )
+            .await
+            .unwrap()["model"],
+        "device-b/model"
+    );
+    for params in [
+        serde_json::json!({"targetDeviceId":"device-b","model":"device-a/model"}),
+        serde_json::json!({"targetDeviceId":"device-b","model":" "}),
+        serde_json::json!({"targetDeviceId":"device-b"}),
+        serde_json::json!({"targetDeviceId":"missing-device","model":null}),
+    ] {
+        assert!(
+            client
+                .call(methods::SET_TITLE_MODEL_SETTINGS, params)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        b.title_settings.load().unwrap().model.as_deref(),
+        Some("device-b/model")
+    );
+    client
+        .call(
+            methods::SET_TITLE_MODEL_SETTINGS,
+            serde_json::json!({"targetDeviceId":"device-b","model":null}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.title_settings.load().unwrap().model, None);
+    assert_eq!(a.title_settings.load().unwrap().model, None);
+
     for (method, action) in [
         (methods::LIST_PI_PROVIDERS, "list"),
         (methods::SAVE_PI_PROVIDER, "save"),
