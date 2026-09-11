@@ -3,14 +3,14 @@
     "id": "numbers", "actor": "phone", "ownerEpoch": 1,
     "event": {
       "type": "commandQueued", "commandId": "numeric-command",
-      "command": {"type": "respondInput", "requestId": "request", "answer": [1.0, -0.0, 1.25, {"count": 1e3}]}
+      "command": {"id":"numeric-command","issuedBy":"phone","issuedAt":1000,"basedOn":null,"expiresAt":null,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"numeric-message","request":{"prompt":"numbers","model":null,"reasoning":null,"modelOptions":{"numbers":[1.0,-0.0,1.25,{"count":1e3}]},"cwd":"/fixture","sandbox":"read-only","autoApprove":false,"resume":null}}}
     }
   },
   "canonical": {
     "id": "numbers", "actor": "phone", "ownerEpoch": 1,
     "event": {
       "type": "commandQueued", "commandId": "numeric-command",
-      "command": {"type": "respondInput", "requestId": "request", "answer": [1, 0, 1.25, {"count": 1000}]}
+      "command": {"id":"numeric-command","issuedBy":"phone","issuedAt":1000,"basedOn":null,"expiresAt":null,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"numeric-message","request":{"prompt":"numbers","model":null,"reasoning":null,"modelOptions":{"numbers":[1,0,1.25,{"count":1000}]},"cwd":"/fixture","sandbox":"read-only","autoApprove":false,"resume":null}}}
     }
   }
 }

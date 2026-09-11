@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import golden from "../../../fixtures/sync3/golden.json";
 import invalid from "../../../fixtures/sync3/invalid.json";
 import numbers from "../../../fixtures/sync3/numbers.json";
+import runCommand from "../../../fixtures/sync3/run-command.json";
+import lifecycle from "../../../fixtures/sync3/command-lifecycle.json";
 import { Sync3Log } from "../../src/sync3-log";
 import { validateOperation, type Operation, type Reply } from "../../src/sync3-protocol";
 
@@ -11,11 +13,37 @@ function inLog<T>(name: string, work: (log: Sync3Log) => T): Promise<T> {
   return runInDurableObject(stub, (_, state) => work(new Sync3Log(state.storage)));
 }
 const ops = () => golden.operations.map(validateOperation);
-const queued = (id: string): Operation => ({
+const queued = (id: string, text = "hello"): Operation => validateOperation({
   id, actor: "phone", ownerEpoch: 1,
-  event: { type: "commandQueued", commandId: id, command: { type: "send", text: "hello" } },
+  event: { type: "commandQueued", commandId: id, command: { ...runCommand, id, payload: {
+    ...runCommand.payload, request: { ...runCommand.payload.request, prompt: text },
+  } } },
 });
 describe("sync3 real SQLite commit/receipt boundary", () => {
+  it.each(lifecycle)("persists sparse command lifecycle and rejects poison rows: $name", async scenario => {
+    await inLog(`lifecycle-${scenario.name}`, log => {
+      log.initialize("account", "host"); log.append([ops()[0]]);
+      scenario.steps.forEach((step, index) => {
+        const op = validateOperation({ id: `step-${index}`, actor: step.actor, ownerEpoch: "ownerEpoch" in step ? step.ownerEpoch : 1, event: step.event });
+        const before = log.get("commands", "command"), head = log.state().head;
+        if ("error" in step && step.error) {
+          expect(() => log.append([op])).toThrow(step.error);
+          expect(log.get("commands", "command")).toEqual(before);
+          expect(log.state().head).toBe(head);
+        } else log.append([op]);
+      });
+    });
+    await inLog(`lifecycle-${scenario.name}`, log => {
+      expect(log.get("commands", "command")?.command.status).toBe(scenario.status);
+      if (scenario.name === "rejected-before-run") {
+        expect(log.hasAcceptedRun("run")).toBe(false);
+        log.transferOwner(1, "new-host");
+      }
+      if (scenario.name === "applied-and-immutable") {
+        expect(() => log.transferOwner(1, "new-host")).toThrow("execution_unresolved");
+      }
+    });
+  });
   it("canonical numeric input answers deduplicate and persist consistently", async () => {
     await inLog("numeric-domain", log => {
       log.initialize("account", "host");
@@ -83,9 +111,7 @@ describe("sync3 real SQLite commit/receipt boundary", () => {
   it("bounds page bytes and resumes at the last delivered event", async () => {
     await inLog("bytes", log => {
       log.initialize("account", "host");
-      const large = (id: string) => ({ ...queued(id), event: {
-        type: "commandQueued", commandId: id, command: { type: "send", text: "x".repeat(110_000) },
-      }} as Operation);
+      const large = (id: string) => queued(id, "x".repeat(110_000));
       for (let i=0;i<5;i++) log.append([large(`large-${i}`)]);
       const first=log.page(1,0,5);
       expect(first.rows.length).toBe(2); expect(first.done).toBe(false);

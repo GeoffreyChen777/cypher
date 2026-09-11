@@ -57,10 +57,26 @@ events are host-authored; command enqueue is multi-device. An account member
 is trusted within its account; an actor label is not a cryptographic device
 identity. User/organization authorization remains mandatory at the Worker.
 
-Initial event vocabulary: command queued/accepted, run started, message created,
+Initial event vocabulary: command queued/accepted/resolved/cancelled, run started, message created,
 text appended (byte offset checked), tool started/finished, input requested,
 run finished. Semantic run events carry stable run/message/part identifiers.
 No executable closures or arbitrary client-provided SQL are transported.
+
+`commandQueued.command` now carries the full `SessionCommandEntry`, not the
+initial text-only command. Its identity/issuer must match the event envelope,
+and new entries must be pending and unresolved. Cancellation is issuer-only
+and loses the race to acceptance. Only the host resolves commands; applied
+requires prior acceptance, and all resolutions are immutable. A rejected
+claim cannot start a run or strand an otherwise idle ownership transfer.
+
+The closed command shape descriptor is shared from
+`apps/ios/Cypher/Sync/Sync3CommandSchema.json` (bundled on iOS, embedded in Rust,
+imported by Edge). Validation happens before decoding can discard unknown
+properties or default omitted fields. This preserves model settings, worktrees,
+comment prompts, attachment descriptors, input labels and retry identity.
+Legacy Loro frontiers are not accepted on this wire. The local normalized
+SQLite format is now **4**; earlier prototype formats are rejected without
+resetting or migrating their contents. The network version remains **3**.
 
 ## Deployment and migration boundaries
 
@@ -84,6 +100,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
   reconstructed-log replay and conflicting ID.
 - [x] Bounded cursor resume, immutable page ceiling, gap and epoch rejection.
 - [x] Host ownership fence and reducer validation.
+- [x] Complete command payloads, issuer/identity checks, cancellation races and
+  immutable resolution, with shared three-language validation/lifecycle cases.
 - [x] Rust durable outbox and transactional cursor/reducer.
 - [x] Rust transport: lost ACK repair, healthy-live zero HTTP, pongs cannot
   hide business timeout, semantic epoch conflict parks without a retry storm.
@@ -129,19 +147,20 @@ traffic invokes no HTTP repair. This is not an actual harness execution test.
 
 Results:
 
-- Rust proto/sync: **86 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **90 passed**, two opt-in legacy live-edge tests ignored.
   Document-model tests: **99 passed** after extracting the full command DTO
   into `cypher-proto`; no normal-client protocol was switched by that extraction.
-- Edge: **102 unit + 44 workerd passed**; typecheck and bundle build passed.
-- iOS `Cypher` scheme: **180 passed**, including eleven v3 tests, on an isolated
+- Edge: **109 unit + 50 workerd passed**; typecheck and bundle build passed.
+- iOS `Cypher` scheme: **182 passed**, including thirteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine tests: **143 passed**; UI tests: **672 passed**.
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
 - The live smoke also hands a private normalized SQLite file from Rust to Swift
-  and back, including pending numeric input answers and an ACK that must not
-  skip the cursor. Both directions pass.
+  and back, including numeric model options, a host command resolution and an
+  ACK that must not skip the cursor. Rust can then re-enqueue its original
+  body without creating a false conflict against Swift's persisted receipt.
 - With 1,000 unrelated historical commands present, one text append makes
   exactly three local row changes: its message, its event and the cursor.
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
@@ -152,6 +171,11 @@ Results:
   https://github.com/GeoffreyChen777/cypher/actions/runs/34606348029.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
+
+Admission owner/epoch fences are tested at the server and in the pure reducer.
+Native journals replay authenticated, already-committed history; they do not
+compare a historical author against today's owner. Native transactional tests
+still enforce the business transitions, canonical receipts and cursor boundary.
 
 Current limitations are deliberate release blockers, not hidden fallbacks:
 normal Engine/SessionStore still use chat2; the v3 namespace is only configured

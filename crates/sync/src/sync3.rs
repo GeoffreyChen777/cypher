@@ -42,7 +42,7 @@ impl Journal {
         let prototype: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync3_projection')",
             [], |r| r.get(0))?;
-        if prototype || ![0, 3].contains(&format) {
+        if prototype || ![0, 4].contains(&format) {
             // Never silently reopen a different storage format as empty.
             return Err(invalid("unsupported_journal_format"));
         }
@@ -93,7 +93,7 @@ impl Journal {
         if identity != (account.into(), room.into(), actor.into()) {
             return Err(invalid("scope_mismatch"));
         }
-        tx.pragma_update(None, "user_version", 3)?;
+        tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
         Ok(Self {
             db,
@@ -449,6 +449,12 @@ impl Lifecycle {
 mod tests {
     use super::*;
     use wire::{Command, Event, Receipt};
+    fn command(id: &str) -> Command {
+        let mut value: Command =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/run-command.json")).unwrap();
+        value.id = id.into();
+        value
+    }
     fn operation() -> Operation {
         Operation {
             id: "queued".into(),
@@ -456,9 +462,7 @@ mod tests {
             owner_epoch: 1,
             event: Event::CommandQueued {
                 command_id: "cmd".into(),
-                command: Command::Send {
-                    text: "hello".into(),
-                },
+                command: command("cmd"),
             },
         }
     }
@@ -480,6 +484,89 @@ mod tests {
             done: true,
             rows,
         }
+    }
+
+    #[test]
+    fn shared_command_lifecycle_uses_sparse_transactional_projection() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../fixtures/sync3/command-lifecycle.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.sqlite");
+            let mut j = Journal::open(&path, "account", "room", "phone").unwrap();
+            j.accept_state(&state(100)).unwrap();
+            let mut rows = vec![Row {
+                seq: 1,
+                operation: serde_json::from_value(fixture["operations"][0].clone()).unwrap(),
+            }];
+            j.apply_page(&page(rows.clone(), 1)).unwrap();
+            for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+                // Admission ownership is checked by the authoritative server.
+                // A committed historical page may predate the current owner.
+                // Those fences are tested by the pure reducer, not re-applied
+                // against today's owner while replaying authenticated history.
+                if matches!(
+                    step["error"].as_str(),
+                    Some("not_owner" | "stale_owner_epoch")
+                ) {
+                    continue;
+                }
+                let op = serde_json::from_value(serde_json::json!({
+                    "id":format!("step-{i}"),"actor":step["actor"],
+                    "ownerEpoch":step.get("ownerEpoch").unwrap_or(&serde_json::Value::from(1)),
+                    "event":step["event"]
+                }))
+                .unwrap();
+                let before = j.projection().unwrap();
+                let mut candidate = rows.clone();
+                candidate.push(Row {
+                    seq: candidate.len() as u64 + 1,
+                    operation: op,
+                });
+                let result = j.apply_page(&page(candidate.clone(), candidate.len() as u64));
+                if step["error"].is_string() {
+                    assert!(result.is_err(), "{case}");
+                    assert_eq!(j.cursor().unwrap(), rows.len() as u64);
+                    assert_eq!(j.projection().unwrap(), before);
+                } else {
+                    result.unwrap();
+                    rows = candidate;
+                }
+            }
+            drop(j);
+            let j = Journal::open(&path, "account", "room", "phone").unwrap();
+            assert_eq!(j.cursor().unwrap(), rows.len() as u64);
+            assert_eq!(
+                serde_json::to_value(j.projection().unwrap().commands["command"].command.status)
+                    .unwrap(),
+                case["status"]
+            );
+        }
+    }
+
+    #[test]
+    fn previous_prototype_is_rejected_without_reinitializing_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA user_version=3; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('keep');").unwrap();
+        drop(db);
+        assert!(Journal::open(&path, "account", "room", "phone").is_err());
+        let db = rusqlite::Connection::open(path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -570,7 +657,7 @@ mod tests {
         let mut conflict = operation();
         conflict.event = Event::CommandQueued {
             command_id: "other".into(),
-            command: Command::Interrupt {},
+            command: command("other"),
         };
         assert!(j.enqueue(&conflict).is_err());
         drop(j);
@@ -642,7 +729,7 @@ mod tests {
                         owner_epoch: 1,
                         event: Event::CommandQueued {
                             command_id: format!("history-{i}"),
-                            command: Command::Interrupt {},
+                            command: command(&format!("history-{i}")),
                         },
                     },
                 })

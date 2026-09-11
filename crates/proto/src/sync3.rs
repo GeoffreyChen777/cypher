@@ -3,8 +3,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+mod command;
 
 pub const VERSION: u8 = 3;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
@@ -30,11 +32,20 @@ pub struct Operation {
 pub enum Event {
     CommandQueued {
         command_id: String,
+        #[serde(deserialize_with = "command::deserialize")]
         command: Command,
     },
     CommandAccepted {
         command_id: String,
         run_id: String,
+    },
+    CommandResolved {
+        command_id: String,
+        status: SessionCommandStatus,
+        resolution: Option<String>,
+    },
+    CommandCancelled {
+        command_id: String,
     },
     RunStarted {
         run_id: String,
@@ -70,19 +81,7 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum Command {
-    Send { text: String },
-    Steer { text: String },
-    Interrupt {},
-    RespondInput { request_id: String, answer: Value },
-}
+pub type Command = SessionCommandEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +182,20 @@ pub fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+pub fn valid_entity_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 200
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:#~".contains(&b))
+}
+fn entity_id(value: &str) -> Result<(), &'static str> {
+    if valid_entity_id(value) {
+        Ok(())
+    } else {
+        Err("invalid_id")
+    }
+}
 
 fn id(id: &str) -> Result<(), &'static str> {
     if valid_id(id) {
@@ -219,20 +232,28 @@ fn validate_json(value: &Value, depth: usize) -> Result<(), &'static str> {
 
 impl Operation {
     /// JSON has one number domain. JS serializes 1.0/-0.0 as 1/0;
-    /// canonicalize input answers before persisting or comparing receipts.
+    /// canonicalize model options before persisting or comparing receipts.
     pub fn canonicalized(&self) -> std::borrow::Cow<'_, Self> {
         if let Event::CommandQueued {
-            command: Command::RespondInput { .. },
+            command:
+                Command {
+                    payload: SessionCommandPayload::Run { .. },
+                    ..
+                },
             ..
         } = &self.event
         {
             let mut result = self.clone();
             if let Event::CommandQueued {
-                command: Command::RespondInput { answer, .. },
+                command:
+                    Command {
+                        payload: SessionCommandPayload::Run { request, .. },
+                        ..
+                    },
                 ..
             } = &mut result.event
             {
-                canonical_json(answer);
+                request.model_options.values_mut().for_each(canonical_json);
             }
             std::borrow::Cow::Owned(result)
         } else {
@@ -251,26 +272,41 @@ impl Operation {
                 command,
             } => {
                 id(command_id)?;
-                if let Command::RespondInput { request_id, answer } = command {
-                    id(request_id)?;
-                    validate_json(answer, 3)?;
+                command::validate(command)?;
+                if command.id != *command_id || command.issued_by != self.actor {
+                    return Err("command_identity_mismatch");
                 }
             }
             Event::CommandAccepted { command_id, run_id } => {
                 id(command_id)?;
                 id(run_id)?;
             }
+            Event::CommandResolved {
+                command_id, status, ..
+            } => {
+                id(command_id)?;
+                if !matches!(
+                    status,
+                    SessionCommandStatus::Applied
+                        | SessionCommandStatus::Rejected
+                        | SessionCommandStatus::Expired
+                        | SessionCommandStatus::Superseded
+                ) {
+                    return Err("invalid_command_resolution");
+                }
+            }
+            Event::CommandCancelled { command_id } => id(command_id)?,
             Event::RunStarted { run_id } | Event::RunFinished { run_id, .. } => id(run_id)?,
             Event::MessageCreated {
                 run_id, message_id, ..
             } => {
                 id(run_id)?;
-                id(message_id)?;
+                entity_id(message_id)?;
             }
             Event::TextAppended {
                 message_id, offset, ..
             } => {
-                id(message_id)?;
+                entity_id(message_id)?;
                 if *offset > MAX_SAFE_INTEGER {
                     return Err("invalid_offset");
                 }
@@ -279,14 +315,14 @@ impl Operation {
                 run_id, tool_id, ..
             } => {
                 id(run_id)?;
-                id(tool_id)?;
+                entity_id(tool_id)?;
             }
-            Event::ToolFinished { tool_id, .. } => id(tool_id)?,
+            Event::ToolFinished { tool_id, .. } => entity_id(tool_id)?,
             Event::InputRequested {
                 run_id, request_id, ..
             } => {
                 id(run_id)?;
-                id(request_id)?;
+                entity_id(request_id)?;
             }
         }
         if serde_json::to_vec(self).map_err(|_| "invalid_json")?.len() > MAX_FRAME_BYTES / 2 {
@@ -378,7 +414,11 @@ impl Projection {
         if op.owner_epoch != owner_epoch {
             return Err("stale_owner_epoch");
         }
-        if !matches!(op.event, Event::CommandQueued { .. }) && op.actor != owner {
+        if !matches!(
+            op.event,
+            Event::CommandQueued { .. } | Event::CommandCancelled { .. }
+        ) && op.actor != owner
+        {
             return Err("not_owner");
         }
         match &op.event {
@@ -400,20 +440,50 @@ impl Projection {
             }
             Event::CommandAccepted { command_id, run_id } => {
                 let cmd = self.commands.get_mut(command_id).ok_or("unknown_command")?;
+                if cmd.command.status != SessionCommandStatus::Pending {
+                    return Err("command_resolved");
+                }
                 if cmd.run_id.is_some() {
                     return Err("command_already_accepted");
                 }
                 cmd.run_id = Some(run_id.clone());
             }
+            Event::CommandResolved {
+                command_id,
+                status,
+                resolution,
+            } => {
+                let cmd = self.commands.get_mut(command_id).ok_or("unknown_command")?;
+                if cmd.command.status != SessionCommandStatus::Pending {
+                    return Err("command_resolved");
+                }
+                if *status == SessionCommandStatus::Applied && cmd.run_id.is_none() {
+                    return Err("command_not_accepted");
+                }
+                cmd.command.status = *status;
+                cmd.command.resolution = resolution.clone();
+            }
+            Event::CommandCancelled { command_id } => {
+                let cmd = self.commands.get_mut(command_id).ok_or("unknown_command")?;
+                if cmd.actor != op.actor {
+                    return Err("not_command_author");
+                }
+                if cmd.run_id.is_some() || cmd.command.status != SessionCommandStatus::Pending {
+                    return Err("command_not_cancellable");
+                }
+                cmd.command.status = SessionCommandStatus::Cancelled;
+            }
             Event::RunStarted { run_id } => {
                 if self.runs.contains_key(run_id) {
                     return Err("run_exists");
                 }
-                if !self
-                    .commands
-                    .values()
-                    .any(|c| c.run_id.as_ref() == Some(run_id))
-                {
+                if !self.commands.values().any(|c| {
+                    c.run_id.as_ref() == Some(run_id)
+                        && matches!(
+                            c.command.status,
+                            SessionCommandStatus::Pending | SessionCommandStatus::Applied
+                        )
+                }) {
                     return Err("run_not_accepted");
                 }
                 self.runs.insert(run_id.clone(), RunState::default());
@@ -514,6 +584,89 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_complete_command_validation() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
+        let cases: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/sync3/command-validation.json"
+        ))
+        .unwrap();
+        for payload in cases["payloads"].as_array().unwrap() {
+            let mut op = fixture["operations"][0].clone();
+            op["event"]["command"]["payload"] = payload.clone();
+            serde_json::from_value::<Operation>(op)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        for edit in cases["invalid"].as_array().unwrap() {
+            let mut op = fixture["operations"][0].clone();
+            let path: Vec<&str> = edit["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap())
+                .collect();
+            let (key, parent) = path.split_last().unwrap();
+            let command = &mut op["event"]["command"];
+            let parent = if parent.is_empty() {
+                command
+            } else {
+                command
+                    .pointer_mut(&format!("/{}", parent.join("/")))
+                    .unwrap()
+            };
+            if edit["remove"] == true {
+                parent.as_object_mut().unwrap().remove(*key);
+            } else {
+                parent[*key] = edit["value"].clone();
+            }
+            assert!(
+                serde_json::from_value::<Operation>(op).map_or(true, |o| o.validate().is_err()),
+                "{edit}"
+            );
+        }
+        let mut interrupt = fixture["operations"][0].clone();
+        interrupt["event"]["command"]["payload"] = serde_json::json!({"kind":"interrupt"});
+        interrupt["event"]["command"]["basedOn"] = Value::Null;
+        assert!(serde_json::from_value::<Operation>(interrupt).is_err());
+    }
+
+    #[test]
+    fn shared_command_lifecycle_is_fenced_and_failures_are_atomic() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
+        let queued: Operation = serde_json::from_value(fixture["operations"][0].clone()).unwrap();
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../fixtures/sync3/command-lifecycle.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let mut projection = Projection::default();
+            projection.apply(&queued, "host", 1).unwrap();
+            for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+                let op: Operation = serde_json::from_value(serde_json::json!({
+                    "id":format!("step-{i}"),"actor":step["actor"],
+                    "ownerEpoch":step.get("ownerEpoch").unwrap_or(&Value::from(1)),
+                    "event":step["event"]
+                }))
+                .unwrap();
+                let before = projection.clone();
+                let result = projection.apply(&op, "host", 1);
+                if let Some(error) = step["error"].as_str() {
+                    assert_eq!(result, Err(error), "{case}");
+                    assert_eq!(projection, before);
+                } else {
+                    result.unwrap();
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(projection.commands["command"].command.status).unwrap(),
+                case["status"]
+            );
+        }
+    }
 
     #[test]
     fn golden_events_reduce_and_reject_late_output() {

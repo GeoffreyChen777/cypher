@@ -1,17 +1,17 @@
 /** Experimental typed v3 protocol; no Loro/WASM and no implicit chat2 conversion. */
+import { validCommand, isEntityId, type Command, type CommandStatus } from "./sync3-command";
+export type { Command } from "./sync3-command";
 export const VERSION = 3;
 export const MAX_FRAME_BYTES = 256 * 1024;
 export const MAX_BATCH_OPS = 64;
 export const MAX_OPERATION_BYTES = MAX_FRAME_BYTES / 2;
 const utf8 = new TextEncoder();
 
-export type Command =
-  | { type: "send" | "steer"; text: string }
-  | { type: "interrupt" }
-  | { type: "respondInput"; requestId: string; answer: unknown };
 export type Event =
   | { type: "commandQueued"; commandId: string; command: Command }
   | { type: "commandAccepted"; commandId: string; runId: string }
+  | { type: "commandResolved"; commandId: string; status: CommandStatus; resolution: string | null }
+  | { type: "commandCancelled"; commandId: string }
   | { type: "runStarted"; runId: string }
   | { type: "messageCreated"; runId: string; messageId: string; role: "user" | "assistant" }
   | { type: "textAppended"; messageId: string; offset: number; text: string }
@@ -81,6 +81,7 @@ export function validateOperation(value: unknown): Operation {
   if (!ev || typeof ev !== "object") reject("invalid_event");
   const fields: Record<string, string[]> = {
     commandQueued: ["commandId", "command"], commandAccepted: ["commandId", "runId"],
+    commandResolved: ["commandId", "status", "resolution"], commandCancelled: ["commandId"],
     runStarted: ["runId"], messageCreated: ["runId", "messageId", "role"],
     textAppended: ["messageId", "offset", "text"], toolStarted: ["runId", "toolId", "name"],
     toolFinished: ["toolId", "failed", "summary"], inputRequested: ["runId", "requestId", "prompt"],
@@ -88,24 +89,25 @@ export function validateOperation(value: unknown): Operation {
   };
   if (typeof ev.type !== "string" || !Object.hasOwn(fields, ev.type)) reject("invalid_event");
   shape(ev, ["type", ...fields[ev.type]]);
-  for (const k of ["commandId", "runId", "messageId", "toolId", "requestId"]) {
+  for (const k of ["commandId", "runId"]) {
     if (Object.hasOwn(ev, k)) identifier(ev[k]);
   }
+  for (const k of ["messageId", "toolId", "requestId"]) if (Object.hasOwn(ev, k) && !isEntityId(ev[k])) reject("invalid_id");
   for (const k of ["text", "name", "summary", "prompt"]) if (Object.hasOwn(ev, k)) text(ev[k]);
   if (ev.type === "textAppended" && !safeInteger(ev.offset)) reject("invalid_offset");
   if (ev.type === "messageCreated" && (typeof ev.role !== "string" || !["user", "assistant"].includes(ev.role))) reject("invalid_role");
   if (ev.type === "toolFinished" && typeof ev.failed !== "boolean") reject("invalid_tool_result");
   if (ev.type === "runFinished" && (typeof ev.outcome !== "string" || !["completed", "failed", "interrupted"].includes(ev.outcome))) reject("invalid_outcome");
   if (ev.type === "commandQueued") {
-    const cmd = ev.command as Record<string, unknown>;
-    if (!cmd || typeof cmd !== "object") reject("invalid_command");
-    switch (cmd.type) {
-      case "send": case "steer": shape(cmd, ["type", "text"]); text(cmd.text); break;
-      case "interrupt": shape(cmd, ["type"]); break;
-      case "respondInput":
-        shape(cmd, ["type", "requestId", "answer"]); identifier(cmd.requestId); break;
-      default: reject("invalid_command");
-    }
+    const cmd = ev.command;
+    if (!validCommand(cmd)) reject("invalid_command");
+    if (cmd.status !== "pending" || cmd.resolution !== null) reject("command_not_pending");
+    if (cmd.id !== ev.commandId || cmd.issuedBy !== op.actor) reject("command_identity_mismatch");
+    if (cmd.payload.kind === "interrupt" && !cmd.basedOn?.turnId) reject("interrupt_requires_target");
+  }
+  if (ev.type === "commandResolved") {
+    if (typeof ev.status !== "string" || !["applied", "rejected", "expired", "superseded"].includes(ev.status)) reject("invalid_command_resolution");
+    if (ev.resolution !== null) text(ev.resolution);
   }
   validateJSON(op);
   if (byteLength(JSON.stringify(op)) > MAX_OPERATION_BYTES) reject("operation_too_large");
@@ -161,7 +163,7 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
   validateOperation(op);
   if (op.ownerEpoch !== ownerEpoch) reject("stale_owner_epoch");
   const ev = op.event;
-  if (ev.type !== "commandQueued" && op.actor !== owner) reject("not_owner");
+  if (ev.type !== "commandQueued" && ev.type !== "commandCancelled" && op.actor !== owner) reject("not_owner");
   const live = (run: string) => {
     if (store.get("runs", run)?.outcome !== null) reject("run_not_live");
   };
@@ -172,8 +174,23 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
     case "commandAccepted": {
       const cmd = store.get("commands", ev.commandId);
       if (!cmd) reject("unknown_command");
+      if (cmd.command.status !== "pending") reject("command_resolved");
       if (cmd.runId !== null) reject("command_already_accepted");
       store.set("commands", ev.commandId, { ...cmd, runId: ev.runId }); break;
+    }
+    case "commandResolved": {
+      const cmd = store.get("commands", ev.commandId);
+      if (!cmd) reject("unknown_command");
+      if (cmd.command.status !== "pending") reject("command_resolved");
+      if (ev.status === "applied" && cmd.runId === null) reject("command_not_accepted");
+      store.set("commands", ev.commandId, { ...cmd, command: { ...cmd.command, status: ev.status, resolution: ev.resolution } }); break;
+    }
+    case "commandCancelled": {
+      const cmd = store.get("commands", ev.commandId);
+      if (!cmd) reject("unknown_command");
+      if (cmd.actor !== op.actor) reject("not_command_author");
+      if (cmd.runId !== null || cmd.command.status !== "pending") reject("command_not_cancellable");
+      store.set("commands", ev.commandId, { ...cmd, command: { ...cmd.command, status: "cancelled" } }); break;
     }
     case "runStarted":
       if (store.get("runs", ev.runId)) reject("run_exists");

@@ -8,6 +8,7 @@ temporary databases after shutdown. Run from any working directory.
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -34,9 +35,11 @@ def main():
     room = str(uuid.uuid4())
     with tempfile.TemporaryDirectory(prefix="cypher-sync3-smoke-") as tmp:
         swift = Path(tmp) / "swift-smoke"
+        shutil.copyfile(ROOT / "apps/ios/Cypher/Sync/Sync3CommandSchema.json", Path(tmp) / "Sync3CommandSchema.json")
         run(["xcrun", "swiftc", "-parse-as-library",
              "apps/ios/Cypher/Sync/RegistryCore.swift",
              "apps/ios/Cypher/Sync/Sync3Protocol.swift",
+             "apps/ios/Cypher/Sync/Sync3CommandSchema.swift",
              "apps/ios/Cypher/Sync/Sync3Journal.swift",
              "apps/ios/Cypher/Sync/Sync3Client.swift",
              "apps/ios/Cypher/Sync/Sync3HTTPTransport.swift",

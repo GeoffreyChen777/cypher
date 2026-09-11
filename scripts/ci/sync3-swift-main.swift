@@ -45,6 +45,13 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
             let rows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: 11, operation: canonical)]))
             try shared.applyPage(["type": .string("page"), "version": .int(3), "epoch": .int(1),
                                   "through": .int(11), "next": .int(11), "rows": rows, "done": .bool(true)])
+            let resolved = try Sync3Operation(id: "resolved", actor: "host", ownerEpoch: 1, event: [
+                "type": .string("commandResolved"), "commandId": .string("command"),
+                "status": .string("applied"), "resolution": .null,
+            ])
+            let resolvedRows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: 12, operation: resolved)]))
+            try shared.applyPage(["type": .string("page"), "version": .int(3), "epoch": .int(1),
+                                  "through": .int(12), "next": .int(12), "rows": resolvedRows, "done": .bool(true)])
             print("PASS: Swift read Rust SQLite state/outbox and applied the canonical receipt")
             return
         }
@@ -63,9 +70,11 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
             try await wait(client, cursor: 10)
             let projected = try liveJournal.projection
             precondition(projected == fixture.projection)
+            var entry = fixture.operations[0].event["command"]!.objectValue!
+            entry["id"] = .string("swift-command"); entry["issuedBy"] = .string("swift-reader")
             let command = try Sync3Operation(id: "swift-op", actor: "swift-reader", ownerEpoch: 1,
                                             event: ["type": .string("commandQueued"), "commandId": .string("swift-command"),
-                                                    "command": .object(["type": .string("send"), "text": .string("From Swift")])])
+                                                    "command": .object(entry)])
             try client.enqueue(command)
             try await wait(client, cursor: 11)
             precondition(client.status.repairs == 0)

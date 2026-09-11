@@ -29,7 +29,8 @@ review submissions.
    including comments, attachments, side chats, input responses and recovery.
    The portable command DTO now lives in `cypher-proto` rather than the Loro
    document crate. `fixtures/sync3/run-command.json` covers the actual complete
-   run payload; it is a domain fixture, not yet a v3 wire operation.
+   run payload, now carried by the v3 `commandQueued` wire operation. Shared
+   validation and lifecycle vectors cover strict parsing and durable decisions.
    Distinguish a semantic turn from a persistent harness process: a parked
    process can serve multiple turns, so its process ID cannot blindly become
    a single already-finished v3 run ID.

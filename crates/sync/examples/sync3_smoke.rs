@@ -125,7 +125,18 @@ async fn main() {
                 .unwrap();
             println!("PASS: Rust wrote a private normalized SQLite journal for Swift");
         } else {
-            assert_eq!(journal.cursor().unwrap(), 11);
+            assert_eq!(journal.cursor().unwrap(), 12);
+            assert_eq!(
+                journal.projection().unwrap().commands["command"]
+                    .command
+                    .status,
+                cypher_proto::SessionCommandStatus::Applied
+            );
+            // Re-enqueue the original Rust body after Swift has written the
+            // receipt: JSON key ordering must not create a phantom conflict.
+            journal
+                .enqueue(&serde_json::from_value(numbers["source"].clone()).unwrap())
+                .unwrap();
             assert!(journal.pending().unwrap().is_empty());
             assert_eq!(
                 serde_json::to_value(

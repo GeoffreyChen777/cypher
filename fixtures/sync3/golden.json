@@ -1,6 +1,6 @@
 {
   "operations": [
-    {"id":"op-1","actor":"phone","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"command","command":{"type":"send","text":"Hello"}}},
+    {"id":"op-1","actor":"phone","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"command","command":{"id":"command","issuedBy":"phone","issuedAt":1000,"sentAt":1000,"basedOn":{"turnId":"previous-turn","frontier":null},"expiresAt":86401000,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"user-message","agentPrompt":"Selected context\nVisible prompt","request":{"prompt":"Visible prompt","harness":"pi","model":"fixture-model","reasoning":"high","modelOptions":{"fast":true},"cwd":"/workspace/project","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":["/workspace/image.png"],"pendingAttachments":[{"uploadId":"upload-one","fileName":"pending.png"}],"worktree":{"repoPath":"/workspace/project","baseRef":"main","nameHint":"review"}}}}}},
     {"id":"op-2","actor":"host","ownerEpoch":1,"event":{"type":"commandAccepted","commandId":"command","runId":"run"}},
     {"id":"op-3","actor":"host","ownerEpoch":1,"event":{"type":"runStarted","runId":"run"}},
     {"id":"op-4","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":"run","messageId":"message","role":"assistant"}},
@@ -12,7 +12,7 @@
     {"id":"op-10","actor":"host","ownerEpoch":1,"event":{"type":"runFinished","runId":"run","outcome":"completed"}}
   ],
   "projection": {
-    "commands": {"command":{"command":{"type":"send","text":"Hello"},"actor":"phone","runId":"run"}},
+    "commands": {"command":{"command":{"id":"command","issuedBy":"phone","issuedAt":1000,"sentAt":1000,"basedOn":{"turnId":"previous-turn","frontier":null},"expiresAt":86401000,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"user-message","agentPrompt":"Selected context\nVisible prompt","request":{"prompt":"Visible prompt","harness":"pi","model":"fixture-model","reasoning":"high","modelOptions":{"fast":true},"cwd":"/workspace/project","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":["/workspace/image.png"],"pendingAttachments":[{"uploadId":"upload-one","fileName":"pending.png"}],"worktree":{"repoPath":"/workspace/project","baseRef":"main","nameHint":"review"}}}},"actor":"phone","runId":"run"}},
     "runs": {"run":{"outcome":"completed"}},
     "messages": {"message":{"runId":"run","role":"assistant","text":"你好!"}},
     "tools": {"tool":{"runId":"run","name":"read","failed":false,"summary":"Read one file"}},

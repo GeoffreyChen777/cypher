@@ -1,0 +1,32 @@
+{
+  "payloads": [
+    {"kind":"steer","prompt":"Visible steer","messageId":"user-message~1","agentPrompt":"Context\nVisible steer"},
+    {"kind":"interrupt"},
+    {"kind":"respondInput","requestId":"question:1","answers":[{"questionId":"choice#1","labels":["Yes","自定义回答"]}]}
+  ],
+  "invalid": [
+    {"path":["id"],"value":"different-command"},
+    {"path":["issuedBy"],"value":"other-device"},
+    {"path":["issuedAt"],"remove":true},
+    {"path":["issuedAt"],"value":-1},
+    {"path":["sentAt"],"value":null},
+    {"path":["status"],"value":"applied"},
+    {"path":["resolution"],"value":"forged host decision"},
+    {"path":["basedOn","frontier"],"value":"old-loro-frontier"},
+    {"path":["payload","unexpected"],"value":true},
+    {"path":["payload","agentPrompt"],"value":null},
+    {"path":["payload","messageId"],"value":"../escape"},
+    {"path":["payload","request","unexpected"],"value":1},
+    {"path":["payload","request","modelOptions"],"remove":true},
+    {"path":["payload","request","modelOptions","unsafe"],"value":9007199254740992},
+    {"path":["payload","request","harness"],"value":"unknown-harness"},
+    {"path":["payload","request","reasoning"],"value":"unknown-level"},
+    {"path":["payload","request","sandbox"],"value":"unknown-sandbox"},
+    {"path":["payload","request","autoApprove"],"value":"true"},
+    {"path":["payload","request","attachments"],"value":[]},
+    {"path":["payload","request","pendingAttachments", "0", "extra"],"value":"discard me"},
+    {"path":["payload","request","worktree","extra"],"value":true},
+    {"path":["payload"],"value":{"kind":"respondInput","requestId":"request","answers":[{"questionId":"q","labels":[1]}]}},
+    {"path":["payload"],"value":{"kind":"interrupt","unexpected":true}}
+  ]
+}

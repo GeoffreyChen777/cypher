@@ -1,0 +1,68 @@
+{
+  "object": {
+    "id": "id",
+    "issuedBy": "id",
+    "issuedAt": "uint",
+    "sentAt": "uint",
+    "basedOn": {"nullable": {"object": {"turnId": {"nullable": "entityId"}, "frontier": "null"}}},
+    "expiresAt": {"nullable": "uint"},
+    "status": {"enum": ["pending", "applied", "rejected", "expired", "superseded", "cancelled"]},
+    "resolution": {"nullable": "string"},
+    "payload": {
+      "oneOf": [
+        {
+          "object": {
+            "kind": {"enum": ["run"]},
+            "messageId": "entityId",
+            "agentPrompt": "string",
+            "request": {
+              "object": {
+                "prompt": "string",
+                "harness": {"enum": ["pi", "claude-code", "codex", "cursor", "grok", "hermes", "mock"]},
+                "model": {"nullable": "string"},
+                "reasoning": {"nullable": {"enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode", "ultrathink"]}},
+                "modelOptions": {"map": "json", "max": 128},
+                "cwd": "nonemptyString",
+                "sandbox": {"enum": ["read-only", "workspace-write", "danger-full-access"]},
+                "autoApprove": "bool",
+                "resume": {"nullable": "string"},
+                "attachments": {"array": "nonemptyString", "min": 1, "max": 64},
+                "pendingAttachments": {
+                  "array": {"object": {"uploadId": "id", "fileName": "nonemptyString"}},
+                  "min": 1, "max": 64
+                },
+                "worktree": {
+                  "object": {"repoPath": "nonemptyString", "baseRef": "nonemptyString", "nameHint": "string"},
+                  "optional": ["nameHint"]
+                }
+              },
+              "optional": ["harness", "attachments", "pendingAttachments", "worktree"]
+            }
+          },
+          "optional": ["agentPrompt"]
+        },
+        {
+          "object": {
+            "kind": {"enum": ["steer"]},
+            "prompt": "string",
+            "messageId": {"nullable": "entityId"},
+            "agentPrompt": "string"
+          },
+          "optional": ["agentPrompt"]
+        },
+        {"object": {"kind": {"enum": ["interrupt"]}}},
+        {
+          "object": {
+            "kind": {"enum": ["respondInput"]},
+            "requestId": "entityId",
+            "answers": {
+              "array": {"object": {"questionId": "entityId", "labels": {"array": "string", "max": 256}}},
+              "max": 256
+            }
+          }
+        }
+      ]
+    }
+  },
+  "optional": ["sentAt"]
+}

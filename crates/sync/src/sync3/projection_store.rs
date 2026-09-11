@@ -75,14 +75,17 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
     operation.validate().map_err(invalid)?;
     let mut projection = Projection::default();
     match &operation.event {
-        Event::CommandQueued { command_id, .. } | Event::CommandAccepted { command_id, .. } => {
+        Event::CommandQueued { command_id, .. }
+        | Event::CommandAccepted { command_id, .. }
+        | Event::CommandResolved { command_id, .. }
+        | Event::CommandCancelled { command_id } => {
             load(db, &mut projection, "commands", command_id)?;
         }
         Event::RunStarted { run_id } => {
             load(db, &mut projection, "runs", run_id)?;
             let command: Option<String> = db
                 .query_row(
-                    "SELECT id FROM sync3_entities WHERE kind='commands' AND run_id=? LIMIT 1",
+                    "SELECT id FROM sync3_entities WHERE kind='commands' AND run_id=? AND json_extract(body,'$.command.status') IN ('pending','applied') LIMIT 1",
                     [run_id],
                     |r| r.get(0),
                 )

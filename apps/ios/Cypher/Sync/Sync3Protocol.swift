@@ -19,6 +19,13 @@ enum Sync3Wire {
         guard case .int(let n) = value, n >= 0, n <= maxSafeInteger else { try fail("invalid_integer") }
         return n
     }
+    static func entityIdentifier(_ value: JSONValue?) throws -> String {
+        guard case .string(let s) = value, !s.isEmpty, s.utf8.count <= 200,
+              s.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0)
+                  || (97...122).contains($0) || [45, 95, 46, 58, 35, 126].contains($0) })
+        else { try fail("invalid_id") }
+        return s
+    }
     static func string(_ value: JSONValue?) throws -> String {
         guard case .string(let s) = value else { try fail("invalid_text") }
         return s
@@ -87,6 +94,7 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         let type = try Sync3Wire.string(event["type"])
         let fields: [String: [String]] = [
             "commandQueued": ["commandId", "command"], "commandAccepted": ["commandId", "runId"],
+            "commandResolved": ["commandId", "status", "resolution"], "commandCancelled": ["commandId"],
             "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role"],
             "textAppended": ["messageId", "offset", "text"], "toolStarted": ["runId", "toolId", "name"],
             "toolFinished": ["toolId", "failed", "summary"], "inputRequested": ["runId", "requestId", "prompt"],
@@ -94,8 +102,11 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         ]
         guard let keys = fields[type] else { try Sync3Wire.fail("invalid_event") }
         try Sync3Wire.shape(event, ["type"] + keys)
-        for key in ["commandId", "runId", "messageId", "toolId", "requestId"] where event[key] != nil {
+        for key in ["commandId", "runId"] where event[key] != nil {
             _ = try Sync3Wire.identifier(event[key])
+        }
+        for key in ["messageId", "toolId", "requestId"] where event[key] != nil {
+            _ = try Sync3Wire.entityIdentifier(event[key])
         }
         for key in ["text", "name", "summary", "prompt"] where event[key] != nil {
             _ = try Sync3Wire.string(event[key])
@@ -110,14 +121,19 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         }
         if type == "commandQueued" {
             guard let cmd = event["command"]?.objectValue else { try Sync3Wire.fail("invalid_command") }
-            switch cmd["type"]?.stringValue {
-            case "send", "steer":
-                try Sync3Wire.shape(cmd, ["type", "text"]); _ = try Sync3Wire.string(cmd["text"])
-            case "interrupt": try Sync3Wire.shape(cmd, ["type"])
-            case "respondInput":
-                try Sync3Wire.shape(cmd, ["type", "requestId", "answer"]); _ = try Sync3Wire.identifier(cmd["requestId"])
-            default: try Sync3Wire.fail("invalid_command")
+            try Sync3CommandSchema.validate(.object(cmd))
+            guard cmd["status"] == .string("pending"), cmd["resolution"] == .null else { try Sync3Wire.fail("command_not_pending") }
+            guard cmd["id"] == event["commandId"], cmd["issuedBy"] == .string(actor) else { try Sync3Wire.fail("command_identity_mismatch") }
+            if cmd["payload"]?.objectValue?["kind"] == .string("interrupt"),
+               cmd["basedOn"]?.objectValue?["turnId"]?.stringValue == nil {
+                try Sync3Wire.fail("interrupt_requires_target")
             }
+        }
+        if type == "commandResolved" {
+            guard ["applied", "rejected", "expired", "superseded"].contains(event["status"]?.stringValue ?? "") else {
+                try Sync3Wire.fail("invalid_command_resolution")
+            }
+            if event["resolution"] != .null { _ = try Sync3Wire.string(event["resolution"]) }
         }
         try Sync3Wire.validateJSON(.object(event), depth: 1)
         guard try Sync3Wire.encode(self).count <= Sync3Wire.maxFrameBytes / 2 else { try Sync3Wire.fail("operation_too_large") }
@@ -138,15 +154,17 @@ struct Sync3Projection: Codable, Equatable, Sendable {
     /// Validate disk rows before the reducer touches them. A damaged cache
     /// becomes a recovery error, never a forced-unwrap process crash.
     mutating func install(kind: String, id: String, record: [String: JSONValue]) throws {
-        _ = try Sync3Wire.identifier(.string(id))
+        _ = try Sync3Wire.entityIdentifier(.string(id))
         func nullableID(_ value: JSONValue?) throws {
             if value != .null { _ = try Sync3Wire.identifier(value) }
         }
         switch kind {
         case "commands":
             try Sync3Wire.shape(record, ["command", "actor", "runId"])
-            _ = try Sync3Operation(id: "p", actor: Sync3Wire.identifier(record["actor"]), ownerEpoch: 1,
-                                  event: ["type": .string("commandQueued"), "commandId": .string(id), "command": record["command"]!])
+            try Sync3CommandSchema.validate(record["command"]!)
+            guard let command = record["command"]?.objectValue, command["id"] == .string(id),
+                  command["issuedBy"] == record["actor"] else { try Sync3Wire.fail("invalid_projection") }
+            _ = try Sync3Wire.identifier(record["actor"])
             try nullableID(record["runId"]); commands[id] = record
         case "runs":
             try Sync3Wire.shape(record, ["outcome"])
@@ -184,7 +202,7 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         try op.validate()
         guard op.ownerEpoch == ownerEpoch else { try Sync3Wire.fail("stale_owner_epoch") }
         let e = op.event, type = e["type"]!.stringValue!
-        if type != "commandQueued", op.actor != owner { try Sync3Wire.fail("not_owner") }
+        if type != "commandQueued", type != "commandCancelled", op.actor != owner { try Sync3Wire.fail("not_owner") }
         switch type {
         case "commandQueued":
             let id = e["commandId"]!.stringValue!
@@ -193,12 +211,28 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         case "commandAccepted":
             let id = e["commandId"]!.stringValue!
             guard var cmd = commands[id] else { try Sync3Wire.fail("unknown_command") }
+            guard cmd["command"]?.objectValue?["status"] == .string("pending") else { try Sync3Wire.fail("command_resolved") }
             guard cmd["runId"] == .null else { try Sync3Wire.fail("command_already_accepted") }
             cmd["runId"] = e["runId"]; commands[id] = cmd
+        case "commandResolved", "commandCancelled":
+            let id = e["commandId"]!.stringValue!
+            guard var cmd = commands[id], var entry = cmd["command"]?.objectValue else { try Sync3Wire.fail("unknown_command") }
+            if type == "commandCancelled" {
+                guard cmd["actor"] == .string(op.actor) else { try Sync3Wire.fail("not_command_author") }
+                guard cmd["runId"] == .null, entry["status"] == .string("pending") else { try Sync3Wire.fail("command_not_cancellable") }
+                entry["status"] = .string("cancelled")
+            } else {
+                guard entry["status"] == .string("pending") else { try Sync3Wire.fail("command_resolved") }
+                if e["status"] == .string("applied"), cmd["runId"] == .null { try Sync3Wire.fail("command_not_accepted") }
+                entry["status"] = e["status"]; entry["resolution"] = e["resolution"]
+            }
+            cmd["command"] = .object(entry); commands[id] = cmd
         case "runStarted":
             let run = e["runId"]!.stringValue!
             guard runs[run] == nil else { try Sync3Wire.fail("run_exists") }
-            guard commands.values.contains(where: { $0["runId"] == e["runId"] }) else { try Sync3Wire.fail("run_not_accepted") }
+            guard commands.values.contains(where: {
+                $0["runId"] == e["runId"] && ["pending", "applied"].contains($0["command"]?.objectValue?["status"]?.stringValue ?? "")
+            }) else { try Sync3Wire.fail("run_not_accepted") }
             runs[run] = ["outcome": .null]
         case "messageCreated":
             let id = e["messageId"]!.stringValue!, run = e["runId"]!.stringValue!

@@ -437,15 +437,17 @@ mod tests {
         }
     }
     fn op() -> Operation {
+        let mut command: Command =
+            serde_json::from_str(include_str!("../../../../fixtures/sync3/run-command.json"))
+                .unwrap();
+        command.id = "cmd".into();
         Operation {
             id: "one".into(),
             actor: "phone".into(),
             owner_epoch: 1,
             event: Event::CommandQueued {
                 command_id: "cmd".into(),
-                command: Command::Send {
-                    text: "hello".into(),
-                },
+                command,
             },
         }
     }

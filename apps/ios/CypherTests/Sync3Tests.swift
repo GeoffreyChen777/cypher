@@ -3,6 +3,89 @@ import XCTest
 
 @MainActor
 final class Sync3Tests: XCTestCase {
+    private func sharedJSON(_ name: String) throws -> JSONValue {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: root.appendingPathComponent("fixtures/sync3/\(name).json")))
+    }
+    func testCompleteCommandValidation() throws {
+        let queued = try fixture().operations[0]
+        let vectors = try sharedJSON("command-validation").objectValue!
+        if case .array(let payloads) = vectors["payloads"] {
+            for payload in payloads {
+                var e = queued.event, c = e["command"]!.objectValue!
+                c["payload"] = payload; e["command"] = .object(c)
+                XCTAssertNoThrow(try Sync3Operation(id: queued.id, actor: queued.actor, ownerEpoch: 1, event: e))
+            }
+        } else { XCTFail("missing payloads") }
+        func edit(_ node: JSONValue, path: ArraySlice<String>, value: JSONValue?) -> JSONValue {
+            let key = path.first!, tail = path.dropFirst()
+            if var object = node.objectValue {
+                if tail.isEmpty { object[key] = value }
+                else { object[key] = edit(object[key]!, path: tail, value: value) }
+                return .object(object)
+            }
+            if case .array(var array) = node, let index = Int(key) {
+                array[index] = edit(array[index], path: tail, value: value); return .array(array)
+            }
+            preconditionFailure("invalid fixture edit path")
+        }
+        if case .array(let invalid) = vectors["invalid"] {
+            for mutation in invalid {
+                let m = mutation.objectValue!
+                guard case .array(let path) = m["path"] else { return XCTFail("missing path") }
+                var e = queued.event
+                e["command"] = edit(e["command"]!, path: path.map { $0.stringValue! }[...], value: m["remove"] == .bool(true) ? nil : m["value"])
+                XCTAssertThrowsError(try Sync3Operation(id: queued.id, actor: queued.actor, ownerEpoch: 1, event: e), "\(mutation)")
+            }
+        } else { XCTFail("missing invalid cases") }
+        var e = queued.event, c = e["command"]!.objectValue!
+        c["payload"] = .object(["kind": .string("interrupt")]); c["basedOn"] = .null; e["command"] = .object(c)
+        XCTAssertThrowsError(try Sync3Operation(id: queued.id, actor: queued.actor, ownerEpoch: 1, event: e))
+    }
+    func testSharedCommandLifecyclePersistsAndRejectsWithoutCursorAdvance() throws {
+        let queued = try fixture().operations[0]
+        guard case .array(let scenarios) = try sharedJSON("command-lifecycle") else { return XCTFail("missing scenarios") }
+        for scenario in scenarios {
+            let c = scenario.objectValue!, url = try directory().appendingPathComponent("journal.sqlite")
+            var journal: Sync3Journal? = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+            try journal!.acceptState(state(head: 1))
+            var committed = [queued]
+            var pure = Sync3Projection()
+            try pure.apply(queued, owner: "host", ownerEpoch: 1)
+            try journal!.applyPage(page(committed))
+            guard case .array(let steps) = c["steps"] else { return XCTFail("missing steps") }
+            for (index, value) in steps.enumerated() {
+                let step = value.objectValue!
+                let op = try Sync3Operation(id: "step-\(index)", actor: step["actor"]!.stringValue!,
+                                            ownerEpoch: (try? Sync3Wire.integer(step["ownerEpoch"])) ?? 1,
+                                            event: step["event"]!.objectValue!)
+                let before = try journal!.projection
+                if let error = step["error"]?.stringValue {
+                    let beforePure = pure
+                    XCTAssertThrowsError(try pure.apply(op, owner: "host", ownerEpoch: 1)) {
+                        XCTAssertEqual($0 as? Sync3Error, .protocolError(error))
+                    }
+                    XCTAssertEqual(pure, beforePure)
+                    // Historical pages are already fenced by the server at
+                    // commit time; do not judge a past owner using today's fence.
+                    if ["not_owner", "stale_owner_epoch"].contains(error) { continue }
+                    XCTAssertThrowsError(try journal!.applyPage(page(committed + [op]))) {
+                        XCTAssertEqual($0 as? Sync3Error, .protocolError(error))
+                    }
+                    XCTAssertEqual(try journal!.cursor, Int64(committed.count))
+                    XCTAssertEqual(try journal!.projection, before)
+                } else {
+                    try pure.apply(op, owner: "host", ownerEpoch: 1)
+                    committed.append(op); try journal!.applyPage(page(committed))
+                }
+            }
+            journal = nil
+            journal = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+            XCTAssertEqual(try journal!.projection.commands["command"]?["command"]?.objectValue?["status"], c["status"])
+            XCTAssertEqual(try journal!.cursor, Int64(committed.count))
+        }
+    }
     private func fixture() throws -> (operations: [Sync3Operation], projection: Sync3Projection) {
         struct Fixture: Decodable { let operations: [Sync3Operation]; let projection: Sync3Projection }
         // Simulator tests run on the build host, using the same checked-in
@@ -202,15 +285,15 @@ final class Sync3Tests: XCTestCase {
     func testJavaScriptNumericNormalizationPreservesOperationIdentity() throws {
         let journal = try Sync3Journal(url: directory().appendingPathComponent("journal.sqlite"),
                                       account: "account", room: "room", actor: "phone")
-        let source = try Sync3Operation(id: "numbers", actor: "phone", ownerEpoch: 1, event: [
-            "type": .string("commandQueued"), "commandId": .string("numeric-command"),
-            "command": .object(["type": .string("respondInput"), "requestId": .string("request"),
-                               "answer": .array([.double(1), .double(-0.0), .double(1.25), .object(["count": .double(1e3)])])])
-        ])
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let fixture = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: root.appendingPathComponent("fixtures/sync3/numbers.json")))
         let canonical = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(fixture["canonical"]!))
+        var event = canonical.event, entry = event["command"]!.objectValue!
+        var payload = entry["payload"]!.objectValue!, request = payload["request"]!.objectValue!
+        request["modelOptions"] = .object(["numbers": .array([.double(1), .double(-0.0), .double(1.25), .object(["count": .double(1e3)])])])
+        payload["request"] = .object(request); entry["payload"] = .object(payload); event["command"] = .object(entry)
+        let source = try Sync3Operation(id: canonical.id, actor: "phone", ownerEpoch: 1, event: event)
         XCTAssertEqual(source, canonical)
         try journal.enqueue(source); try journal.enqueue(canonical)
         XCTAssertEqual(try journal.pending(), [canonical])
