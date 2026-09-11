@@ -1,6 +1,7 @@
 // Host-only cross-language smoke runner. Compiled explicitly by sync3-smoke.py,
 // never linked into the iOS application. RegistryCore's clock dependency:
 import Foundation
+import CryptoKit
 func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
 @main struct Sync3SwiftSmoke {
@@ -71,6 +72,43 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
                 request.setValue("Bearer sync3-user@sync3-org", forHTTPHeaderField: "Authorization")
                 return request
             })
+            if CommandLine.arguments.count >= 6, CommandLine.arguments[4] == "--writer" {
+                let report = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[5])))
+                let writerHead = try Sync3Wire.integer(report["head"])
+                try await wait(client, cursor: writerHead)
+                var before: Int64?, messages: [[String: JSONValue]] = []
+                while true {
+                    let page = try liveJournal.messageWindow(before: before)
+                    precondition(page.through == writerHead)
+                    if page.messages.isEmpty { break }
+                    before = try Sync3Wire.integer(page.messages[0]["createdSeq"])
+                    messages.insert(contentsOf: page.messages, at: 0)
+                }
+                let expectedMessages = try Sync3Wire.integer(report["messages"])
+                precondition(messages.count == Int(expectedMessages))
+                var parts: [JSONValue] = []
+                for message in messages {
+                    let entry = message["entry"]!.objectValue!
+                    precondition(entry["status"] == .string("complete"))
+                    guard case .array(let values) = entry["parts"] else { throw Sync3Error.protocolError("invalid_message") }
+                    for part in values {
+                        if let p = part.objectValue, p["kind"] == .string("text"),
+                           var last = parts.last?.objectValue, last["kind"] == .string("text"), last["id"] == p["id"] {
+                            last["text"] = .string(last["text"]!.stringValue! + p["text"]!.stringValue!)
+                            parts[parts.count - 1] = .object(last)
+                        } else { parts.append(part) }
+                    }
+                }
+                // This is a test-only aggregate digest, not a transport frame
+                // or the normal bounded UI view.
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                let digest = SHA256.hash(data: try encoder.encode(parts)).map { String(format: "%02x", $0) }.joined()
+                precondition(digest == report["partsDigest"]?.stringValue)
+                precondition(client.status.repairs == 0)
+                await client.stop()
+                print("PASS: Swift reads bounded Rust producer through workerd; full Unicode/tool digest and ordered window paging; HTTP repairs=0")
+                return
+            }
             try await wait(client, cursor: head)
             let projected = try liveJournal.projection
             precondition(projected == fixture.projection)

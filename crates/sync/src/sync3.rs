@@ -8,6 +8,7 @@ use std::path::Path;
 
 mod projection_store;
 pub mod transport;
+pub mod writer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,6 +23,24 @@ pub enum Error {
 }
 fn invalid(code: &str) -> Error {
     Error::Protocol(code.into())
+}
+
+fn enqueue_into(db: &Connection, operation: &Operation) -> Result<(), Error> {
+    let operation = operation.canonicalized();
+    let existing: Option<String> = db.query_row(
+        "SELECT operation FROM sync3_outbox WHERE id=? UNION ALL SELECT operation FROM sync3_events WHERE id=? LIMIT 1",
+        params![operation.id, operation.id], |r| r.get(0)).optional()?;
+    if let Some(body) = existing {
+        if serde_json::from_str::<Operation>(&body)? != *operation {
+            return Err(invalid("operation_id_conflict"));
+        }
+    } else {
+        db.execute(
+            "INSERT INTO sync3_outbox(id,operation) VALUES(?,?)",
+            params![operation.id, serde_json::to_string(&operation)?],
+        )?;
+    }
+    Ok(())
 }
 
 pub struct Journal {
@@ -89,7 +108,11 @@ impl Journal {
               PRIMARY KEY(kind,id));
             CREATE INDEX IF NOT EXISTS sync3_entity_run ON sync3_entities(kind,run_id);
             CREATE INDEX IF NOT EXISTS sync3_entity_seq ON sync3_entities(seq);
-            CREATE UNIQUE INDEX IF NOT EXISTS sync3_message_order ON sync3_entities(created_seq) WHERE kind='messages';",
+            CREATE UNIQUE INDEX IF NOT EXISTS sync3_message_order ON sync3_entities(created_seq) WHERE kind='messages';
+            CREATE TABLE IF NOT EXISTS sync3_writers(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,header TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync3_writer_items(
+              writer_id TEXT NOT NULL,kind TEXT NOT NULL,ordinal INTEGER NOT NULL,body TEXT NOT NULL,
+              PRIMARY KEY(writer_id,kind,ordinal));",
         )?;
         let tx = db.transaction()?;
         tx.execute(
@@ -238,46 +261,149 @@ impl Journal {
     /// Persist before the UI reports "queued". No optimistic mutation to the
     /// authoritative projection and no automatic regeneration of retry IDs.
     pub fn enqueue(&mut self, operation: &Operation) -> Result<(), Error> {
-        operation.validate().map_err(invalid)?;
-        let operation = operation.canonicalized();
-        if operation.actor != self.actor {
-            return Err(invalid("actor_mismatch"));
+        self.enqueue_batch(std::slice::from_ref(operation))
+    }
+    /// One producer frame is all-or-nothing in the durable outbox. Producers
+    /// must advance their local folding cursor only after this returns Ok.
+    pub fn enqueue_batch(&mut self, operations: &[Operation]) -> Result<(), Error> {
+        if operations.is_empty() || operations.len() > wire::MAX_BATCH_OPS {
+            return Err(invalid("invalid_batch"));
         }
-        let body = serde_json::to_string(&operation)?;
+        for operation in operations {
+            operation.validate().map_err(invalid)?;
+            if operation.actor != self.actor {
+                return Err(invalid("actor_mismatch"));
+            }
+        }
+        if serde_json::to_vec(&Request::Push {
+            version: wire::VERSION,
+            operations: operations.to_vec(),
+        })?
+        .len()
+            > wire::MAX_FRAME_BYTES
+        {
+            return Err(invalid("frame_too_large"));
+        }
         let tx = self.db.transaction()?;
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT operation FROM sync3_outbox WHERE id=?",
-                [&operation.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            if serde_json::from_str::<Operation>(&existing)? != *operation {
-                return Err(invalid("operation_id_conflict"));
-            }
-        } else {
-            // An applied ID may have already been removed from the outbox.
-            let committed: Option<String> = tx
-                .query_row(
-                    "SELECT operation FROM sync3_events WHERE id=?",
-                    [&operation.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(committed) = committed {
-                if serde_json::from_str::<Operation>(&committed)? != *operation {
-                    return Err(invalid("operation_id_conflict"));
-                }
-            } else {
-                tx.execute(
-                    "INSERT INTO sync3_outbox(id,operation) VALUES(?,?)",
-                    params![operation.id, body],
-                )?;
-            }
+        for operation in operations {
+            enqueue_into(&tx, operation)?;
         }
         tx.commit()?;
         Ok(())
+    }
+    /// Persist only changed producer metadata, not its complete source fold or
+    /// historical transcript. The revision also fences concurrent/stale writers.
+    pub fn enqueue_writer_frame(&mut self, frame: &writer::Frame) -> Result<(), Error> {
+        if frame.actor != self.actor {
+            return Err(invalid("actor_mismatch"));
+        }
+        for op in &frame.operations {
+            op.validate().map_err(invalid)?;
+            if op.actor != self.actor {
+                return Err(invalid("actor_mismatch"));
+            }
+        }
+        if frame.operations.len() > wire::MAX_BATCH_OPS
+            || serde_json::to_vec(&Request::Push {
+                version: wire::VERSION,
+                operations: frame.operations.clone(),
+            })?
+            .len()
+                > wire::MAX_FRAME_BYTES
+        {
+            return Err(invalid("frame_too_large"));
+        }
+        let tx = self.db.transaction()?;
+        let old: Option<(u64, String)> = tx
+            .query_row(
+                "SELECT revision,header FROM sync3_writers WHERE id=?",
+                [&frame.root],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let next_revision = frame
+            .expected_revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("writer_exhausted"))?;
+        if old
+            .as_ref()
+            .is_some_and(|(revision, header)| *revision == next_revision && header == &frame.header)
+        {
+            // Retry after the sink committed but its caller lost the result.
+            // Do not resurrect rows if a future pruning implementation loses
+            // a required receipt/checkpoint: fail closed instead.
+            for op in &frame.operations {
+                let body: Option<String> = tx.query_row(
+                    "SELECT operation FROM sync3_outbox WHERE id=? UNION ALL SELECT operation FROM sync3_events WHERE id=? LIMIT 1",
+                    params![op.id, op.id], |r| r.get(0)).optional()?;
+                if body
+                    .map(|b| serde_json::from_str::<Operation>(&b))
+                    .transpose()?
+                    .as_ref()
+                    != Some(op)
+                {
+                    return Err(invalid("writer_checkpoint_conflict"));
+                }
+            }
+            for (kind, ordinal, body) in &frame.updates {
+                let old: Option<String> = tx.query_row(
+                    "SELECT body FROM sync3_writer_items WHERE writer_id=? AND kind=? AND ordinal=?",
+                    params![frame.root, kind, ordinal], |r| r.get(0)).optional()?;
+                if old.as_ref() != Some(body) {
+                    return Err(invalid("writer_checkpoint_conflict"));
+                }
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        if old.as_ref().map(|(revision, _)| *revision).unwrap_or(0) != frame.expected_revision {
+            return Err(invalid("writer_checkpoint_conflict"));
+        }
+        for operation in &frame.operations {
+            enqueue_into(&tx, operation)?;
+        }
+        for (kind, ordinal, body) in &frame.updates {
+            tx.execute(
+                "INSERT INTO sync3_writer_items(writer_id,kind,ordinal,body) VALUES(?,?,?,?)
+                 ON CONFLICT(writer_id,kind,ordinal) DO UPDATE SET body=excluded.body",
+                params![frame.root, kind, ordinal, body],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO sync3_writers(id,revision,header) VALUES(?,?,?)
+             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,header=excluded.header",
+            params![frame.root, next_revision, frame.header],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Loading a producer checkpoint permits transcript recovery only. It is
+    /// not permission to redispatch a harness or repeat uncertain side effects.
+    pub fn load_writer(&self, root: &str) -> Result<Option<writer::TranscriptWriter>, Error> {
+        let tx = self.db.unchecked_transaction()?;
+        let header: Option<(u64, String)> = tx
+            .query_row(
+                "SELECT revision,header FROM sync3_writers WHERE id=?",
+                [root],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((revision, header)) = header else {
+            return Ok(None);
+        };
+        let rows = {
+            let mut query = tx.prepare("SELECT kind,ordinal,body FROM sync3_writer_items WHERE writer_id=? ORDER BY kind,ordinal")?;
+            query
+                .query_map([root], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let writer = writer::TranscriptWriter::restore(&header, rows)?;
+        if writer.root_id() != root || writer.actor() != self.actor || writer.revision() != revision
+        {
+            return Err(invalid("writer_checkpoint_conflict"));
+        }
+        tx.commit()?;
+        Ok(Some(writer))
     }
     pub fn pending(&self) -> Result<Vec<Operation>, Error> {
         let mut query = self.db.prepare(

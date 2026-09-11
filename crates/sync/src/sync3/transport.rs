@@ -110,7 +110,15 @@ impl Client {
     }
     /// Successful return means local durable enqueue only, not cloud ACK.
     pub fn enqueue(&self, operation: &Operation) -> Result<(), Error> {
-        lock(&self.journal).enqueue(operation)?;
+        self.enqueue_batch(std::slice::from_ref(operation))
+    }
+    pub fn enqueue_batch(&self, operations: &[Operation]) -> Result<(), Error> {
+        lock(&self.journal).enqueue_batch(operations)?;
+        let _ = self.nudge.try_send(());
+        Ok(())
+    }
+    pub fn enqueue_writer_frame(&self, frame: &super::writer::Frame) -> Result<(), Error> {
+        lock(&self.journal).enqueue_writer_frame(frame)?;
         let _ = self.nudge.try_send(());
         Ok(())
     }

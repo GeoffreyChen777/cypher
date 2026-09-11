@@ -12,6 +12,7 @@ mod transcript;
 
 pub const VERSION: u8 = 3;
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_OPERATION_BYTES: usize = MAX_FRAME_BYTES / 2;
 pub const MAX_BATCH_OPS: usize = 64;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
@@ -372,7 +373,7 @@ impl Operation {
                 }
             }
         }
-        if serde_json::to_vec(self).map_err(|_| "invalid_json")?.len() > MAX_FRAME_BYTES / 2 {
+        if serde_json::to_vec(self).map_err(|_| "invalid_json")?.len() > MAX_OPERATION_BYTES {
             return Err("operation_too_large");
         }
         Ok(())

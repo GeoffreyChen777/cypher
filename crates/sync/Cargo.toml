@@ -20,6 +20,7 @@ rusqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+sha2.workspace = true
 
 [features]
 # In-process registry server speaking the DO's JSON WS protocol — test

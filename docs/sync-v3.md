@@ -98,8 +98,8 @@ Each projected message is bounded to 256 KiB / 256 parts. Individually bounded
 text deltas may accumulate beyond the 64-KiB single-string wire budget: native
 reload validates this stored aggregate separately, without relaxing admission.
 Overflow must trigger producer rollover, not truncation or a larger frame.
-The bounded producer, actual attachment transfer and normal-client rendering
-still need integration. An
+The bounded producer exists; normal Engine adoption, actual attachment
+transfer and normal-client rendering still need integration. An
 `attachmentSealed` record alone does not establish file upload or availability.
 
 Messages now retain the immutable committed position of `messageCreated`.
@@ -115,6 +115,29 @@ made window cost grow with history. Byte-limited pages use at most one bounded
 row of lookahead and do not skip the first excluded row. These local APIs are
 not new remote endpoints, and their view watermark must not replace the
 replication cursor. Normal-client use and bounded replay remain unfinished.
+
+### Durable bounded producer
+
+`sync3::writer::TranscriptWriter` consumes the storage-independent native fold
+one bounded frame at a time. Callers must retain the full append-only source
+and continue while `Progress.more` is true. Text is split on UTF-8 boundaries
+with JSON escaping included in the physical message budget. Continuations
+retain the logical root and ordered parts; scoped repeated IDs also roll over.
+Tools reserve space for late updates, and all children close before the root.
+Oversized structured public fields fail with `part_requires_artifact`; they
+are neither silently clipped nor evidence that an artifact has been uploaded.
+
+`Journal::enqueue_writer_frame` atomically persists operations and sparse
+producer checkpoint rows. `Client::enqueue_writer_frame` additionally wakes
+the transport. Only this durable acceptance advances the producer, not a
+network send. An ambiguous sink result retains the exact frame for retry;
+restart restores offsets, source high-water hashes and finalization progress.
+Observed but unwritten text cannot silently disappear on resume. Checkpoints
+contain metadata and hashes, not another copy of the transcript or private
+tool input. Revision conflicts fail closed. A token append changes four rows:
+its operation, producer header, current chunk and current source slot, rather
+than rewriting every prior slot. These private producer tables are additive
+to native SQLite format 6 and are not replicated wire entities.
 
 ## Deployment and migration boundaries
 
@@ -144,6 +167,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
   identity, UTF-8 deltas and atomic per-message byte-budget rejection.
 - [x] Immutable committed message order and indexed, row/byte-bounded local
   render windows, including clock skew, late updates, paging and restart.
+- [x] Bounded native-fold producer, durable sparse checkpoints, exact frame
+  retry, lossless rollover, late structured updates and resumable finalization.
 - [x] Rust durable outbox and transactional cursor/reducer.
 - [x] Rust transport: lost ACK repair, healthy-live zero HTTP, pongs cannot
   hide business timeout, semantic epoch conflict parks without a retry storm.
@@ -185,11 +210,15 @@ python3 scripts/ci/sync3-smoke.py
 The smoke owns a loopback-only workerd process group and temporary databases.
 Rust writes twelve events; Swift reads the identical projection and writes a
 thirteenth command; a fresh Rust client reads that Swift command. Healthy WS
-traffic invokes no HTTP repair. This is not an actual harness execution test.
+traffic invokes no HTTP repair. A separate room exercises the real bounded
+Rust producer with a megabyte-scale escaped Unicode/NFD transcript, producer
+restart and late tool resolution. Rust and Swift verify the complete normalized
+part digest; Swift uses ordered, bounded window paging. This is not an actual
+harness execution test.
 
 Results:
 
-- Rust proto/sync: **114 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **123 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
@@ -201,6 +230,11 @@ Results:
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
+- The existing Engine E2E suite also passes **18 tests** when run serially
+  (one paid-provider test remains explicitly ignored). Two default-parallel
+  runs hit existing 10-second status/streaming deadlines under local load;
+  serial success is not evidence that this timing sensitivity is resolved.
+  The v3 producer is not yet on that legacy Engine execution path.
 - The live smoke also hands a private normalized SQLite file from Rust to Swift
   and back, including numeric model options, a host command resolution and an
   ACK that must not skip the cursor. Rust can then re-enqueue its original
@@ -208,6 +242,11 @@ Results:
   Both runtimes also read the immutable-order index from that shared file.
 - With 1,000 unrelated historical commands present, one text append makes
   exactly three local row changes: its message, its event and the cursor.
+- Nine producer tests cover multibyte/escaped rollover, private-input removal,
+  late tool/question resolution, ambiguous durable acceptance, restart with
+  an unwritten suffix, rollback on a later conflicting operation, repeated
+  scoped IDs, sparse checkpoint writes, 70-message interrupted finalization,
+  invalid checkpoint offsets/revisions, and empty terminal output.
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
   Full-part vectors also prove lossless known tool variants, nested shape
   rejection and removal of private raw tool inputs. Shared lifecycle cases
@@ -217,9 +256,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `98fa016`, including Linux backend,
+- GitHub CI passed all five jobs for `f38a480`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34630311152.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34633914806.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 
@@ -235,7 +274,7 @@ WorkspaceHub, semantic notification pipeline or checkpoint/pruning was added.
 Client projections now use sparse SQLite entity rows: applying one text append
 loads its message/run dependencies and writes only the changed message, event
 and cursor. Applied event history is still retained; checkpoint/pruning and
-bounded large-history views remain release blockers. The unreleased initial
+normal-client adoption of bounded views remain release blockers. The unreleased initial
 whole-projection journal format is rejected explicitly, never silently reset.
 The socket authorization deadline is capped by the verified JWT expiry and
 five minutes; full control-channel reauthentication/revocation is still pending.

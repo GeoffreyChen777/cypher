@@ -37,7 +37,10 @@ review submissions.
    The native entry/part models, folding, privacy projection and continuation
    helpers are also storage-independent now. Full part/delta operations and
    tools/questions/status/continuation metadata now exist on the wire. The
-   actual bounded writer and normal-client rendering are not implemented yet.
+   bounded, durable producer is now implemented and tested through real
+   workerd and Swift. Normal Engine writer adoption and client rendering are
+   still required. Oversized structured public fields need a verified
+   artifact policy; the producer rejects them rather than truncating them.
    Transcript ordering now derives from authoritative committed positions,
    not timestamps or entity rows' last-update positions. Indexed, bounded
    native render-window reads are available; normal clients still need to

@@ -72,6 +72,10 @@ def main():
                 run([ROOT / "target/debug/examples/sync3_smoke", base, room])
                 run([swift, ROOT / "fixtures/sync3/golden.json", base, room])
                 run([ROOT / "target/debug/examples/sync3_smoke", base, room, "--verify-swift"])
+                writer_room = str(uuid.uuid4())
+                writer_report = Path(tmp) / "writer-report.json"
+                run([ROOT / "target/debug/examples/sync3_smoke", base, writer_room, "--writer", writer_report])
+                run([swift, ROOT / "fixtures/sync3/golden.json", base, writer_room, "--writer", writer_report])
             except BaseException:
                 print(log_path.read_text()[-8000:])
                 raise

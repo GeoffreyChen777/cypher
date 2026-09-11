@@ -77,6 +77,15 @@ async fn main() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
     let head = fixture["operations"].as_array().unwrap().len() as u64;
+    if std::env::args().nth(3).as_deref() == Some("--writer") {
+        writer_smoke(
+            &path,
+            fixture,
+            std::env::args().nth(4).expect("report path"),
+        )
+        .await;
+        return;
+    }
     if matches!(
         std::env::args().nth(3).as_deref(),
         Some("--write-journal" | "--verify-journal")
@@ -268,5 +277,188 @@ async fn main() {
     host.shutdown().await;
     println!(
         "PASS: workerd ↔ Rust host/phone; {head} typed events; UTF-8; restart; healthy HTTP repairs=0"
+    );
+}
+
+async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: String) {
+    use cypher_proto::{
+        MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolCall,
+        parts::render_parts, sync3::Event,
+    };
+    use cypher_sync::sync3::writer::TranscriptWriter;
+    use sha2::{Digest, Sha256};
+    let response = reqwest::Client::new()
+        .post(format!("{path}init"))
+        .bearer_auth("sync3-user@sync3-org")
+        .json(&serde_json::json!({"owner":"host"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let dir = tempfile::tempdir().unwrap();
+    let repairs = Arc::new(AtomicUsize::new(0));
+    let url = Arc::new(StaticUrl(format!(
+        "{}ws?token=sync3-user%40sync3-org",
+        path.replacen("http:", "ws:", 1)
+    )));
+    let repair: Arc<dyn RepairTransport> = Arc::new(HttpRepair {
+        url: format!("{path}exchange"),
+        requests: repairs.clone(),
+    });
+    let host = Client::spawn(
+        Journal::open(&dir.path().join("host.sqlite"), "account", path, "host").unwrap(),
+        url.clone(),
+        Some(repair.clone()),
+        Tuning::default(),
+    );
+    let phone = Client::spawn(
+        Journal::open(&dir.path().join("phone.sqlite"), "account", path, "phone").unwrap(),
+        url,
+        Some(repair),
+        Tuning::default(),
+    );
+    wait_cursor(&host, 0).await;
+    wait_cursor(&phone, 0).await;
+    let prefix: Vec<Operation> = serde_json::from_value(fixture["operations"].clone()).unwrap();
+    phone.enqueue(&prefix[0]).unwrap();
+    wait_cursor(&host, 1).await;
+    host.enqueue_batch(&prefix[1..3]).unwrap();
+    wait_cursor(&host, 3).await;
+    let entry = SessionMessageEntry {
+        id: "writer-message".into(),
+        role: MessageRole::Assistant,
+        device_id: "host".into(),
+        created_at: 1000,
+        parts: vec![],
+        status: Some(MessageStatus::Streaming),
+        continuation_of: None,
+    };
+    let mut writer = TranscriptWriter::new("host".into(), 1, Some("run".into()), &entry).unwrap();
+    let mut parts = vec![
+        MessagePart::Text {
+            id: "before".into(),
+            text: "Before tool".into(),
+        },
+        MessagePart::Tool {
+            id: "tool".into(),
+            call: ToolCall::WriteFile {
+                path: "fixture".into(),
+                content: Some("fixture-private-input".repeat(100_000)),
+            },
+            resolved: false,
+            is_error: false,
+            output: None,
+            progress: Some("working".into()),
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+        },
+        MessagePart::Text {
+            id: "long".into(),
+            text: "你好🙂e\u{301}\n\"\\\0".repeat(70_000),
+        },
+    ];
+    let first = writer
+        .sync(&parts, |frame| host.enqueue_writer_frame(frame))
+        .unwrap();
+    assert!(first.more);
+    let mut head = 3 + first.operations as u64;
+    // Simulate producer destruction after durable enqueue, independently of
+    // whether the transport has already received its ACK.
+    drop(writer);
+    let mut writer = host
+        .journal()
+        .lock()
+        .unwrap()
+        .load_writer("writer-message")
+        .unwrap()
+        .unwrap();
+    loop {
+        let progress = writer
+            .sync(&parts, |frame| host.enqueue_writer_frame(frame))
+            .unwrap();
+        head += progress.operations as u64;
+        if !progress.more {
+            break;
+        }
+    }
+    if let MessagePart::Tool {
+        resolved,
+        output,
+        progress,
+        ..
+    } = &mut parts[1]
+    {
+        *resolved = true;
+        *output = Some("File written".into());
+        *progress = None;
+    }
+    loop {
+        let progress = writer
+            .finish(&parts, Some(MessageStatus::Complete), |frame| {
+                host.enqueue_writer_frame(frame)
+            })
+            .unwrap();
+        head += progress.operations as u64;
+        if !progress.more {
+            break;
+        }
+    }
+    host.enqueue(&Operation {
+        id: "writer-run-finished".into(),
+        actor: "host".into(),
+        owner_epoch: 1,
+        event: Event::RunFinished {
+            run_id: "run".into(),
+            outcome: cypher_proto::sync3::Outcome::Completed,
+        },
+    })
+    .unwrap();
+    head += 1;
+    wait_cursor(&host, head).await;
+    wait_cursor(&phone, head).await;
+    let projection = phone.journal().lock().unwrap().projection().unwrap();
+    let mut messages = projection.messages.into_values().collect::<Vec<_>>();
+    messages.sort_by_key(|m| m.created_seq);
+    assert!(messages.len() > 3);
+    let mut actual = Vec::<MessagePart>::new();
+    for message in &messages {
+        assert_eq!(message.entry.status, Some(MessageStatus::Complete));
+        for part in &message.entry.parts {
+            if let MessagePart::Text { id, text } = part {
+                if let Some(MessagePart::Text {
+                    id: old_id,
+                    text: old_text,
+                }) = actual.last_mut()
+                {
+                    if old_id == id {
+                        old_text.push_str(text);
+                        continue;
+                    }
+                }
+            }
+            actual.push(part.clone());
+        }
+    }
+    let expected = render_parts(&parts);
+    assert_eq!(actual, expected);
+    let mut value = serde_json::to_value(expected).unwrap();
+    value.sort_all_objects();
+    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+    std::fs::write(
+        report_path,
+        serde_json::to_vec(&serde_json::json!({
+            "head":head, "partsDigest":digest, "messages":messages.len()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(repairs.load(Ordering::SeqCst), 0);
+    host.shutdown().await;
+    phone.shutdown().await;
+    println!(
+        "PASS: bounded Rust producer → real workerd → Rust reader; Unicode rollover, late tool resolution, durable producer restart; HTTP repairs=0"
     );
 }
