@@ -38,8 +38,10 @@ review submissions.
    helpers are also storage-independent now. Full part/delta operations and
    tools/questions/status/continuation metadata now exist on the wire. The
    actual bounded writer and normal-client rendering are not implemented yet.
-   Derive transcript ordering from authoritative committed positions, not
-   timestamps or entity rows' last-update positions.
+   Transcript ordering now derives from authoritative committed positions,
+   not timestamps or entity rows' last-update positions. Indexed, bounded
+   native render-window reads are available; normal clients still need to
+   adopt them rather than loading the complete projection.
    Part IDs are message-scoped (including repeated live-plan IDs), not globally
    unique tool IDs. The existing 256-KiB segment budget is larger than a v3
    operation's 128-KiB limit: use part/delta operations and bounded rollover,

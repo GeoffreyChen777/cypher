@@ -46,6 +46,62 @@ final class Sync3Tests: XCTestCase {
         }
         XCTAssertEqual(try journal!.cursor, 9)
     }
+    func testBoundedWindowKeepsCommitOrderAcrossClockSkewUpdatesAndRestart() throws {
+        let f = try sharedJSON("message-order").objectValue!
+        let operations = try JSONDecoder().decode([Sync3Operation].self, from: Sync3Wire.encode(f["operations"]!))
+        let url = try directory().appendingPathComponent("ordered.sqlite")
+        var j: Sync3Journal? = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+        try j!.acceptState(state(head: 10)); try j!.applyPage(page(operations))
+        j = nil
+        j = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
+        let window = try j!.messageWindow()
+        XCTAssertEqual(window.through, 10)
+        XCTAssertEqual(JSONValue.array(window.messages.map { $0["entry"]!.objectValue!["id"]! }), f["ids"])
+        XCTAssertEqual(JSONValue.array(window.messages.map { $0["createdSeq"]! }), f["positions"])
+        let newest = try j!.messageWindow(limit: 2)
+        XCTAssertEqual(newest.messages.count, 2)
+        let older = try j!.messageWindow(before: Sync3Wire.integer(newest.messages[0]["createdSeq"]), limit: 2)
+        XCTAssertEqual(older.messages.count, 1)
+        XCTAssertEqual(older.messages[0]["entry"]?.objectValue?["id"], .string("z"))
+        XCTAssertTrue(try j!.messageWindow(before: 1).messages.isEmpty)
+        XCTAssertThrowsError(try j!.messageWindow(limit: 0))
+        XCTAssertThrowsError(try j!.messageWindow(limit: 33))
+        XCTAssertThrowsError(try j!.messageWindow(before: -1))
+    }
+    func testWindowByteBudgetDoesNotSkipLargeMessages() throws {
+        let j = try Sync3Journal(url: directory().appendingPathComponent("large.sqlite"), account: "account", room: "room", actor: "phone")
+        try j.acceptState(state(head: 48))
+        var seq: Int64 = 0
+        func append(_ event: [String: JSONValue]) throws {
+            seq += 1
+            let op = try Sync3Operation(id: "op-\(seq)", actor: "host", ownerEpoch: 1, event: event)
+            let rows = try JSONDecoder().decode(JSONValue.self, from: Sync3Wire.encode([Sync3Row(seq: seq, operation: op)]))
+            try j.applyPage(["version": .int(3), "type": .string("page"), "epoch": .int(1),
+                "through": .int(seq), "next": .int(seq), "rows": rows, "done": .bool(true)])
+        }
+        let text = JSONValue.string(String(repeating: "x", count: 60 * 1024))
+        for i in 0..<8 {
+            let id = JSONValue.string("message-\(i)")
+            try append(["type": .string("messageCreated"), "runId": .null, "messageId": id, "role": .string("user"),
+                        "deviceId": .string("host"), "createdAt": .int(1), "continuationOf": .null])
+            try append(["type": .string("partPut"), "messageId": id, "index": .int(0),
+                        "part": .object(["kind": .string("text"), "id": .string("text"), "text": text])])
+            for chunk in 1...3 {
+                try append(["type": .string("textAppended"), "messageId": id, "partId": .string("text"),
+                            "offset": .int(Int64(chunk * 60 * 1024)), "text": text])
+            }
+            try append(["type": .string("messageFinished"), "messageId": id, "status": .null])
+        }
+        let tail = try j.messageWindow()
+        XCTAssertEqual(tail.through, 48)
+        XCTAssertEqual(tail.messages.count, 4)
+        XCTAssertLessThanOrEqual(try tail.messages.reduce(0) { try $0 + Sync3Wire.encode($1).count }, 1024 * 1024)
+        let older = try j.messageWindow(before: Sync3Wire.integer(tail.messages[0]["createdSeq"]))
+        XCTAssertEqual(older.messages.count, 4)
+        XCTAssertEqual(older.messages[0]["entry"]?.objectValue?["id"], .string("message-0"))
+        XCTAssertEqual(tail.messages[0]["entry"]?.objectValue?["id"], .string("message-4"))
+        XCTAssertTrue(try j.messageWindow(before: Sync3Wire.integer(older.messages[0]["createdSeq"])).messages.isEmpty)
+    }
     func testCompleteCommandValidation() throws {
         let queued = try fixture().operations[0]
         let vectors = try sharedJSON("command-validation").objectValue!
@@ -91,7 +147,7 @@ final class Sync3Tests: XCTestCase {
             try journal!.acceptState(state(head: Int64(prefix)))
             var committed = Array(base.prefix(prefix))
             var pure = Sync3Projection()
-            for op in committed { try pure.apply(op, owner: "host", ownerEpoch: 1) }
+            for (i, op) in committed.enumerated() { try pure.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(i + 1)) }
             try journal!.applyPage(page(committed))
             guard case .array(let steps) = c["steps"] else { return XCTFail("missing steps") }
             for (index, value) in steps.enumerated() {
@@ -102,7 +158,7 @@ final class Sync3Tests: XCTestCase {
                 let before = try journal!.projection
                 if let error = step["error"]?.stringValue {
                     let beforePure = pure
-                    XCTAssertThrowsError(try pure.apply(op, owner: "host", ownerEpoch: 1)) {
+                    XCTAssertThrowsError(try pure.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(committed.count + 1))) {
                         XCTAssertEqual($0 as? Sync3Error, .protocolError(error))
                     }
                     XCTAssertEqual(pure, beforePure)
@@ -115,7 +171,7 @@ final class Sync3Tests: XCTestCase {
                     XCTAssertEqual(try journal!.cursor, Int64(committed.count))
                     XCTAssertEqual(try journal!.projection, before)
                 } else {
-                    try pure.apply(op, owner: "host", ownerEpoch: 1)
+                    try pure.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(committed.count + 1))
                     committed.append(op); try journal!.applyPage(page(committed))
                 }
             }
@@ -153,17 +209,17 @@ final class Sync3Tests: XCTestCase {
     func testSharedGoldenAndUTF8Offsets() throws {
         let f = try fixture()
         var p = Sync3Projection()
-        for op in f.operations { try p.apply(op, owner: "host", ownerEpoch: 1) }
+        for (i, op) in f.operations.enumerated() { try p.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(i + 1)) }
         XCTAssertEqual(p, f.projection)
-        XCTAssertThrowsError(try p.apply(f.operations[5], owner: "host", ownerEpoch: 1))
+        XCTAssertThrowsError(try p.apply(f.operations[5], owner: "host", ownerEpoch: 1, seq: Int64(f.operations.count + 1)))
         var wrong = Sync3Projection()
-        for op in f.operations.prefix(5) { try wrong.apply(op, owner: "host", ownerEpoch: 1) }
+        for (i, op) in f.operations.prefix(5).enumerated() { try wrong.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(i + 1)) }
         var event = f.operations[5].event; event["offset"] = .int(2)
         let op = try Sync3Operation(id: "wrong", actor: "host", ownerEpoch: 1, event: event)
-        XCTAssertThrowsError(try wrong.apply(op, owner: "host", ownerEpoch: 1))
+        XCTAssertThrowsError(try wrong.apply(op, owner: "host", ownerEpoch: 1, seq: 6))
         XCTAssertEqual(wrong.messages["message"]?["entry"]?.objectValue?["parts"], .array([.object(["kind": .string("text"), "id": .string("text"), "text": .string("你好")])]))
         let system = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(sharedJSON("system-message")))
-        try wrong.apply(system, owner: "host", ownerEpoch: 1)
+        try wrong.apply(system, owner: "host", ownerEpoch: 1, seq: 6)
         XCTAssertEqual(wrong.messages["system-message#c1"]?["entry"]?.objectValue?["role"], .string("system"))
     }
     func testDurableOutboxRestartAndAckDoesNotSkipCursor() throws {

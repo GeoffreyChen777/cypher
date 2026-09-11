@@ -3,6 +3,13 @@
 import Foundation
 import SQLite3
 
+struct Sync3MessageWindow {
+    let through: Int64
+    /// Ascending immutable creation sequence; first.createdSeq is the next
+    /// exclusive `before` cursor. Empty messages means no older entries.
+    let messages: [[String: JSONValue]]
+}
+
 @MainActor
 final class Sync3Journal {
     private var db: OpaquePointer?
@@ -21,7 +28,7 @@ final class Sync3Journal {
             sqlite3_busy_timeout(db, 5_000)
             let format = try query("PRAGMA user_version").first?[0]
             let prototype = try query("SELECT name FROM sqlite_master WHERE type='table' AND name='sync3_projection'")
-            guard prototype.isEmpty, format == "0" || format == "5" else { try Sync3Wire.fail("unsupported_journal_format") }
+            guard prototype.isEmpty, format == "0" || format == "6" else { try Sync3Wire.fail("unsupported_journal_format") }
             for path in [url.path, url.path + "-wal", url.path + "-shm"] where FileManager.default.fileExists(atPath: path) {
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
             }
@@ -42,16 +49,17 @@ final class Sync3Journal {
             try execute("CREATE TABLE IF NOT EXISTS sync3_events(seq INTEGER PRIMARY KEY,id TEXT UNIQUE NOT NULL,operation TEXT NOT NULL)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS sync3_entities(
-                kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,run_id TEXT,seq INTEGER NOT NULL,
+                kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,run_id TEXT,seq INTEGER NOT NULL,created_seq INTEGER,
                 PRIMARY KEY(kind,id))
                 """)
             try execute("CREATE INDEX IF NOT EXISTS sync3_entity_run ON sync3_entities(kind,run_id)")
             try execute("CREATE INDEX IF NOT EXISTS sync3_entity_seq ON sync3_entities(seq)")
+            try execute("CREATE UNIQUE INDEX IF NOT EXISTS sync3_message_order ON sync3_entities(created_seq) WHERE kind='messages'")
             try transaction {
                 try execute("INSERT OR IGNORE INTO sync3_meta(singleton,account,room,actor) VALUES(1,?,?,?)", [account, room, actor])
                 let identity = try query("SELECT account,room,actor FROM sync3_meta WHERE singleton=1")
                 guard identity.first == [account, room, actor] else { try Sync3Wire.fail("scope_mismatch") }
-                try execute("PRAGMA user_version=5")
+                try execute("PRAGMA user_version=6")
             }
         } catch {
             sqlite3_close(db); db = nil; throw error
@@ -70,6 +78,29 @@ final class Sync3Journal {
             }
             return projection
         }
+    }
+    func messageWindow(before: Int64? = nil, limit: Int = 32) throws -> Sync3MessageWindow {
+        guard (1...32).contains(limit), before.map({ $0 >= 0 && $0 <= Sync3Wire.maxSafeInteger }) ?? true else {
+            try Sync3Wire.fail("invalid_window")
+        }
+        var through: Int64 = 0, messages: [[String: JSONValue]] = []
+        try transaction(readOnly: true) {
+            through = try cursor
+            let rows = try query(
+                "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?",
+                [String(before ?? (Sync3Wire.maxSafeInteger + 1)), String(limit)], byteBudget: (1, 1024 * 1024))
+            for row in rows {
+                let body = row[1]!
+                let record = try JSONDecoder().decode([String: JSONValue].self, from: Data(body.utf8))
+                guard let seq = Int64(row[2]!), seq > 0, seq <= through, record["createdSeq"] == .int(seq) else {
+                    try Sync3Wire.fail("invalid_projection")
+                }
+                var checked = Sync3Projection()
+                try checked.install(kind: "messages", id: row[0]!, record: record)
+                messages.append(record)
+            }
+        }
+        return Sync3MessageWindow(through: through, messages: messages.reversed())
     }
     func hello() throws -> [String: JSONValue] {
         ["type": .string("hello"), "version": .int(3), "actor": .string(actor),
@@ -224,15 +255,16 @@ final class Sync3Journal {
         }
         let before = projection.tables
         // The authenticated server authorized historical epochs at commit.
-        try projection.apply(operation, owner: operation.actor, ownerEpoch: operation.ownerEpoch)
+        try projection.apply(operation, owner: operation.actor, ownerEpoch: operation.ownerEpoch, seq: seq)
         for (kind, records) in projection.tables {
             for (id, record) in records where before[kind]?[id] != record {
                 let body = try json(record)
+                let createdSeq = try record["createdSeq"].map { String(try Sync3Wire.integer($0)) }
                 guard body.utf8.count <= Sync3Wire.maxFrameBytes * 4 else { try Sync3Wire.fail("entity_too_large") }
                 try execute("""
-                    INSERT INTO sync3_entities(kind,id,body,run_id,seq) VALUES(?,?,?,?,?)
+                    INSERT INTO sync3_entities(kind,id,body,run_id,seq,created_seq) VALUES(?,?,?,?,?,?)
                     ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id,seq=excluded.seq
-                    """, [kind, id, body, record["runId"]?.stringValue, String(seq)])
+                    """, [kind, id, body, record["runId"]?.stringValue, String(seq), createdSeq])
             }
         }
     }
@@ -250,15 +282,15 @@ final class Sync3Journal {
     private func decodeOperation(_ text: String) throws -> Sync3Operation {
         try JSONDecoder().decode(Sync3Operation.self, from: Data(text.utf8))
     }
-    private func transaction(_ body: () throws -> Void) throws {
-        try execute("BEGIN IMMEDIATE")
+    private func transaction(readOnly: Bool = false, _ body: () throws -> Void) throws {
+        try execute(readOnly ? "BEGIN" : "BEGIN IMMEDIATE")
         do { try body(); try execute("COMMIT") }
         catch { try? execute("ROLLBACK"); throw error }
     }
     private func execute(_ sql: String, _ params: [String?] = []) throws {
         _ = try query(sql, params)
     }
-    private func query(_ sql: String, _ params: [String?] = []) throws -> [[String?]] {
+    private func query(_ sql: String, _ params: [String?] = [], byteBudget: (column: Int, max: Int)? = nil) throws -> [[String?]] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { try Sync3Wire.fail("storage_prepare") }
         defer { sqlite3_finalize(statement) }
@@ -269,14 +301,24 @@ final class Sync3Journal {
             guard rc == SQLITE_OK else { try Sync3Wire.fail("storage_bind") }
         }
         var result: [[String?]] = []
+        var used = 0
         while true {
             let rc = sqlite3_step(statement)
             if rc == SQLITE_DONE { return result }
             guard rc == SQLITE_ROW else { try Sync3Wire.fail("storage_write") }
-            result.append((0..<sqlite3_column_count(statement)).map { column in
+            let row: [String?] = (0..<sqlite3_column_count(statement)).map { column in
                 guard let text = sqlite3_column_text(statement, column) else { return nil }
                 return String(cString: text)
-            })
+            }
+            if let budget = byteBudget {
+                guard row.indices.contains(budget.column), let body = row[budget.column] else { try Sync3Wire.fail("storage_read") }
+                if used + body.utf8.count > budget.max {
+                    guard !result.isEmpty else { try Sync3Wire.fail("message_too_large") }
+                    return result
+                }
+                used += body.utf8.count
+            }
+            result.append(row)
         }
     }
 }

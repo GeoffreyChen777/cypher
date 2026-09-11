@@ -7,9 +7,16 @@ import lifecycle from "../../fixtures/sync3/command-lifecycle.json";
 import systemMessage from "../../fixtures/sync3/system-message.json";
 import partShapes from "../../fixtures/sync3/part-validation.json";
 import {
-  applyOperation, canonical, parseRequest, validateOperation,
-  type EntityKind, type Projection, type ProjectionStore,
+  applyOperation as applyCommitted, canonical, parseRequest, validateOperation,
+  type EntityKind, type Projection, type ProjectionStore, type Operation,
 } from "./sync3-protocol";
+
+const heads = new WeakMap<ProjectionStore, number>();
+function applyOperation(store: ProjectionStore, op: Operation, owner: string, epoch: number): void {
+  const seq = (heads.get(store) ?? 0) + 1;
+  applyCommitted(store, op, owner, epoch, seq);
+  heads.set(store, seq);
+}
 
 function memory(): { projection: Projection; store: ProjectionStore } {
   const projection: Projection = { commands: {}, runs: {}, messages: {}, attachments: {} };

@@ -122,7 +122,7 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
     let before = serde_json::to_value(&projection)?;
     // Historical writes were fenced by the server at commit time.
     projection
-        .apply(operation, &operation.actor, operation.owner_epoch)
+        .apply(operation, &operation.actor, operation.owner_epoch, seq)
         .map_err(invalid)?;
     let after = serde_json::to_value(&projection)?;
     for kind in KINDS {
@@ -139,9 +139,9 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
             }
             let run_id = record.get("runId").and_then(Value::as_str);
             db.execute(
-                "INSERT INTO sync3_entities(kind,id,body,run_id,seq) VALUES(?,?,?,?,?)
+                "INSERT INTO sync3_entities(kind,id,body,run_id,seq,created_seq) VALUES(?,?,?,?,?,?)
                  ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id,seq=excluded.seq",
-                params![kind, id, body, run_id, seq])?;
+                params![kind, id, body, run_id, seq, record.get("createdSeq").and_then(Value::as_u64)])?;
         }
     }
     Ok(())

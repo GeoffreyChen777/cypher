@@ -6,6 +6,7 @@ import numbers from "../../../fixtures/sync3/numbers.json";
 import runCommand from "../../../fixtures/sync3/run-command.json";
 import lifecycle from "../../../fixtures/sync3/command-lifecycle.json";
 import partShapes from "../../../fixtures/sync3/part-validation.json";
+import order from "../../../fixtures/sync3/message-order.json";
 import { Sync3Log } from "../../src/sync3-log";
 import { validateOperation, type Operation, type Reply } from "../../src/sync3-protocol";
 
@@ -21,6 +22,45 @@ const queued = (id: string, text = "hello"): Operation => validateOperation({
   } } },
 });
 describe("sync3 real SQLite commit/receipt boundary", () => {
+  it("caps window bytes without skipping any preceding large messages", async () => {
+    await inLog("window-budget", log => {
+      log.initialize("account", "host");
+      let seq = 0;
+      const append = (event: Operation["event"]) => log.append([{ id: `op-${++seq}`, actor: "host", ownerEpoch: 1, event }]);
+      const text = "x".repeat(60 * 1024);
+      for (let i = 0; i < 8; i++) {
+        const messageId = `message-${i}`;
+        append({ type: "messageCreated", runId: null, messageId, role: "user", deviceId: "host", createdAt: 1, continuationOf: null });
+        append({ type: "partPut", messageId, index: 0, part: { kind: "text", id: "text", text } });
+        for (let chunk = 1; chunk <= 3; chunk++) append({ type: "textAppended", messageId, partId: "text", offset: chunk * 60 * 1024, text });
+        append({ type: "messageFinished", messageId, status: null });
+      }
+      const tail = log.messageWindow(), older = log.messageWindow(tail.messages[0].createdSeq);
+      expect(tail.through).toBe(48);
+      expect(tail.messages.map(m => m.entry.id)).toEqual(["message-4", "message-5", "message-6", "message-7"]);
+      expect(older.messages.map(m => m.entry.id)).toEqual(["message-0", "message-1", "message-2", "message-3"]);
+      expect(log.messageWindow(older.messages[0].createdSeq).messages).toEqual([]);
+    });
+  });
+  it("preserves creation order across skewed clocks, late updates and duplicate delivery", async () => {
+    await inLog("message-order", log => {
+      log.initialize("account", "host");
+      const operations = order.operations.map(validateOperation);
+      log.append(operations.slice(0, 6));
+      expect(() => log.transferOwner(1, "new-host")).toThrow("execution_unresolved");
+      log.append(operations.slice(6)); log.append(operations);
+      const window = log.messageWindow();
+      expect(window.through).toBe(10);
+      expect(window.messages.map(m => m.entry.id)).toEqual(order.ids);
+      expect(window.messages.map(m => m.createdSeq)).toEqual(order.positions);
+      expect(window.messages[0].entry.parts[0]).toMatchObject({ text: "first updated" });
+      expect(log.messageWindow(undefined, 2).messages.map(m => m.entry.id)).toEqual(["a", "z#c1"]);
+      expect(log.messageWindow(3, 2).messages.map(m => m.entry.id)).toEqual(["z"]);
+      expect(log.messageWindow(1).messages).toEqual([]);
+      expect(() => log.messageWindow(undefined, 33)).toThrow("invalid_window");
+      expect(() => log.messageWindow(-1)).toThrow("invalid_window");
+    });
+  });
   it("bounds accumulated message bytes without dropping previously committed deltas", async () => {
     await inLog("message-budget", log => {
       log.initialize("account", "host"); log.append(ops().slice(0, 5));

@@ -16,7 +16,7 @@
   "projection": {
     "commands": {"command":{"command":{"id":"command","issuedBy":"phone","issuedAt":1000,"sentAt":1000,"basedOn":{"turnId":"previous-turn","frontier":null},"expiresAt":86401000,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"user-message","agentPrompt":"Selected context\nVisible prompt","request":{"prompt":"Visible prompt","harness":"pi","model":"fixture-model","reasoning":"high","modelOptions":{"fast":true},"cwd":"/workspace/project","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":["/workspace/image.png"],"pendingAttachments":[{"uploadId":"upload-one","fileName":"pending.png"}],"worktree":{"repoPath":"/workspace/project","baseRef":"main","nameHint":"review"}}}},"actor":"phone","runId":"run"}},
     "runs": {"run":{"outcome":"completed"}},
-    "messages": {"message":{"runId":"run","entry":{"id":"message","role":"assistant","deviceId":"host","createdAt":1000,"status":"complete","parts":[
+    "messages": {"message":{"createdSeq":4,"runId":"run","entry":{"id":"message","role":"assistant","deviceId":"host","createdAt":1000,"status":"complete","parts":[
       {"kind":"text","id":"text","text":"你好!"},
       {"kind":"tool","id":"tool","call":{"kind":"readFile","path":"file.txt"},"isError":false,"resolved":true,"output":"Read one file","outputRef":"chat/tool","outputBytes":512,"diffRef":"chat/tool.diff","diffStats":[{"path":"file.txt","additions":1,"deletions":0}]},
       {"kind":"input","id":"question","requestId":"question","questions":[{"id":"choice","header":"Confirm","question":"Continue?","options":["Yes","No"],"multiSelect":false}],"resolved":false}

@@ -127,6 +127,10 @@ async fn main() {
             println!("PASS: Rust wrote a private normalized SQLite journal for Swift");
         } else {
             assert_eq!(journal.cursor().unwrap(), head + 2);
+            let window = journal.message_window(None, 32).unwrap();
+            assert_eq!(window.through, head + 2);
+            assert_eq!(window.messages.len(), 1);
+            assert_eq!(window.messages[0].created_seq, 4);
             assert_eq!(
                 journal.projection().unwrap().commands["command"]
                     .command

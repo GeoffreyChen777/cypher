@@ -29,6 +29,16 @@ pub struct Journal {
     actor: String,
 }
 
+/// A bounded render window, not a replacement for the replication cursor.
+/// Messages are returned oldest-first. Pass the first created_seq as `before`
+/// to obtain the preceding window, without OFFSET scans or timestamp ties.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageWindow {
+    pub through: u64,
+    pub messages: Vec<wire::MessageState>,
+}
+
 impl Journal {
     /// The account+room binding is persisted and checked even if a caller
     /// accidentally opens another account's filename. Never clear on mismatch.
@@ -42,7 +52,7 @@ impl Journal {
         let prototype: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync3_projection')",
             [], |r| r.get(0))?;
-        if prototype || ![0, 5].contains(&format) {
+        if prototype || ![0, 6].contains(&format) {
             // Never silently reopen a different storage format as empty.
             return Err(invalid("unsupported_journal_format"));
         }
@@ -75,10 +85,11 @@ impl Journal {
             CREATE TABLE IF NOT EXISTS sync3_events(
               seq INTEGER PRIMARY KEY,id TEXT UNIQUE NOT NULL,operation TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sync3_entities(
-              kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,run_id TEXT,seq INTEGER NOT NULL,
+              kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,run_id TEXT,seq INTEGER NOT NULL,created_seq INTEGER,
               PRIMARY KEY(kind,id));
             CREATE INDEX IF NOT EXISTS sync3_entity_run ON sync3_entities(kind,run_id);
-            CREATE INDEX IF NOT EXISTS sync3_entity_seq ON sync3_entities(seq);",
+            CREATE INDEX IF NOT EXISTS sync3_entity_seq ON sync3_entities(seq);
+            CREATE UNIQUE INDEX IF NOT EXISTS sync3_message_order ON sync3_entities(created_seq) WHERE kind='messages';",
         )?;
         let tx = db.transaction()?;
         tx.execute(
@@ -93,7 +104,7 @@ impl Journal {
         if identity != (account.into(), room.into(), actor.into()) {
             return Err(invalid("scope_mismatch"));
         }
-        tx.pragma_update(None, "user_version", 5)?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
         Ok(Self {
             db,
@@ -119,6 +130,55 @@ impl Journal {
     }
     pub fn projection(&self) -> Result<Projection, Error> {
         projection_store::read(&self.db)
+    }
+    pub fn message_window(
+        &self,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<MessageWindow, Error> {
+        if limit == 0 || limit > 32 || before.is_some_and(|n| n > wire::MAX_SAFE_INTEGER) {
+            return Err(invalid("invalid_window"));
+        }
+        // Cursor and rows belong to the same read snapshot, even if another
+        // process commits to this file between individual SELECTs.
+        let tx = self.db.unchecked_transaction()?;
+        let through = tx.query_row("SELECT cursor FROM sync3_meta WHERE singleton=1", [], |r| {
+            r.get(0)
+        })?;
+        let mut messages = Vec::new();
+        {
+            let mut query = tx.prepare(
+                "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?")?;
+            let mut rows =
+                query.query(params![before.unwrap_or(wire::MAX_SAFE_INTEGER + 1), limit])?;
+            let mut used = 0;
+            while let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                let body: String = row.get(1)?;
+                if body.len() > wire::MAX_MESSAGE_BYTES {
+                    return Err(invalid("message_too_large"));
+                }
+                if used + body.len() > 1024 * 1024 {
+                    break;
+                }
+                let raw: serde_json::Value = serde_json::from_str(&body)?;
+                let message: wire::MessageState = serde_json::from_value(raw.clone())?;
+                let seq: u64 = row.get(2)?;
+                if seq == 0
+                    || seq > through
+                    || message.created_seq != seq
+                    || message.entry.id != id
+                    || serde_json::to_value(&message)? != raw
+                {
+                    return Err(invalid("invalid_projection"));
+                }
+                used += body.len();
+                messages.push(message);
+            }
+        }
+        messages.reverse();
+        tx.commit()?;
+        Ok(MessageWindow { through, messages })
     }
     pub fn hello(&self) -> Result<Request, Error> {
         Ok(Request::Hello {
@@ -448,6 +508,176 @@ impl Lifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn message_windows_use_immutable_commit_order_and_an_index() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/message-order.json"))
+                .unwrap();
+        let operations: Vec<Operation> =
+            serde_json::from_value(fixture["operations"].clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ordered.sqlite");
+        let mut j = Journal::open(&file, "account", "room", "phone").unwrap();
+        j.accept_state(&state(operations.len() as u64)).unwrap();
+        j.apply_page(&page(
+            operations
+                .into_iter()
+                .enumerate()
+                .map(|(i, operation)| Row {
+                    seq: i as u64 + 1,
+                    operation,
+                })
+                .collect(),
+            10,
+        ))
+        .unwrap();
+        drop(j);
+        let j = Journal::open(&file, "account", "room", "phone").unwrap();
+        let window = j.message_window(None, 32).unwrap();
+        assert_eq!(window.through, 10);
+        assert_eq!(
+            serde_json::to_value(
+                window
+                    .messages
+                    .iter()
+                    .map(|m| &m.entry.id)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            fixture["ids"]
+        );
+        assert_eq!(
+            serde_json::to_value(
+                window
+                    .messages
+                    .iter()
+                    .map(|m| m.created_seq)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            fixture["positions"]
+        );
+        assert_eq!(
+            serde_json::to_value(&window.messages[0]).unwrap()["entry"]["parts"][0]["text"],
+            "first updated"
+        );
+        assert_eq!(
+            j.db.query_row(
+                "SELECT seq FROM sync3_entities WHERE kind='messages' AND id='z'",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            10
+        );
+        let newest = j.message_window(None, 2).unwrap();
+        assert_eq!(
+            newest
+                .messages
+                .iter()
+                .map(|m| m.entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z#c1"]
+        );
+        let older = j
+            .message_window(Some(newest.messages[0].created_seq), 2)
+            .unwrap();
+        assert_eq!(older.messages[0].entry.id, "z");
+        assert!(j.message_window(Some(1), 2).unwrap().messages.is_empty());
+        for (before, count) in [(None, 0), (None, 33), (Some(wire::MAX_SAFE_INTEGER + 1), 1)] {
+            assert!(j.message_window(before, count).is_err());
+        }
+        let plan: String = j.db.query_row(
+            "EXPLAIN QUERY PLAN SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?",
+            params![100, 32], |r| r.get(3)).unwrap();
+        assert!(plan.contains("sync3_message_order"), "{plan}");
+    }
+    #[test]
+    fn window_byte_budget_and_paging_do_not_skip_large_messages() {
+        let mut j = Journal::open(Path::new(":memory:"), "account", "room", "phone").unwrap();
+        j.accept_state(&state(48)).unwrap();
+        let mut seq = 0;
+        for i in 0..8 {
+            let id = format!("message-{i}");
+            let events = [
+                wire::Event::MessageCreated {
+                    run_id: None,
+                    message_id: id.clone(),
+                    role: wire::Role::User,
+                    device_id: "host".into(),
+                    created_at: 1,
+                    continuation_of: None,
+                },
+                wire::Event::PartPut {
+                    message_id: id.clone(),
+                    index: 0,
+                    part: cypher_proto::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(60 * 1024),
+                    },
+                },
+                wire::Event::TextAppended {
+                    message_id: id.clone(),
+                    part_id: "text".into(),
+                    offset: 60 * 1024,
+                    text: "x".repeat(60 * 1024),
+                },
+                wire::Event::TextAppended {
+                    message_id: id.clone(),
+                    part_id: "text".into(),
+                    offset: 120 * 1024,
+                    text: "x".repeat(60 * 1024),
+                },
+                wire::Event::TextAppended {
+                    message_id: id.clone(),
+                    part_id: "text".into(),
+                    offset: 180 * 1024,
+                    text: "x".repeat(60 * 1024),
+                },
+                wire::Event::MessageFinished {
+                    message_id: id,
+                    status: None,
+                },
+            ];
+            for event in events {
+                seq += 1;
+                j.apply_page(&page(
+                    vec![Row {
+                        seq,
+                        operation: Operation {
+                            id: format!("op-{seq}"),
+                            actor: "host".into(),
+                            owner_epoch: 1,
+                            event,
+                        },
+                    }],
+                    seq,
+                ))
+                .unwrap();
+            }
+        }
+        let tail = j.message_window(None, 32).unwrap();
+        assert_eq!(tail.messages.len(), 4);
+        assert!(
+            tail.messages
+                .iter()
+                .map(|m| serde_json::to_vec(m).unwrap().len())
+                .sum::<usize>()
+                <= 1024 * 1024
+        );
+        let older = j
+            .message_window(Some(tail.messages[0].created_seq), 32)
+            .unwrap();
+        assert_eq!(older.messages.len(), 4);
+        assert_eq!(older.messages[0].entry.id, "message-0");
+        assert_eq!(tail.messages[0].entry.id, "message-4");
+        assert!(
+            j.message_window(Some(older.messages[0].created_seq), 32)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
     use wire::{Command, Event, Receipt};
     fn command(id: &str) -> Command {
         let mut value: Command =
@@ -559,22 +789,28 @@ mod tests {
     #[test]
     fn previous_prototype_is_rejected_without_reinitializing_its_data() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.sqlite");
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("PRAGMA user_version=3; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('keep');").unwrap();
-        drop(db);
-        assert!(Journal::open(&path, "account", "room", "phone").is_err());
-        let db = rusqlite::Connection::open(path).unwrap();
-        assert_eq!(
-            db.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "keep"
-        );
-        assert_eq!(
-            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
-                .unwrap(),
-            3
-        );
+        for format in 3..=5 {
+            let path = dir.path().join(format!("old-{format}.sqlite"));
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.pragma_update(None, "user_version", format).unwrap();
+            db.execute_batch(
+                "CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('keep');",
+            )
+            .unwrap();
+            drop(db);
+            assert!(Journal::open(&path, "account", "room", "phone").is_err());
+            let db = rusqlite::Connection::open(path).unwrap();
+            assert_eq!(
+                db.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "keep"
+            );
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                    .unwrap(),
+                format
+            );
+        }
     }
 
     #[test]

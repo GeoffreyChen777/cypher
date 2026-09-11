@@ -420,6 +420,8 @@ pub struct RunState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MessageState {
+    /// Immutable position of messageCreated in the committed room log.
+    pub created_seq: u64,
     pub run_id: Option<String>,
     pub entry: SessionMessageEntry,
 }
@@ -466,8 +468,12 @@ impl Projection {
         op: &Operation,
         owner: &str,
         owner_epoch: u64,
+        seq: u64,
     ) -> Result<(), &'static str> {
         op.validate()?;
+        if seq == 0 || seq > MAX_SAFE_INTEGER {
+            return Err("invalid_sequence");
+        }
         let op = op.canonicalized();
         if op.owner_epoch != owner_epoch {
             return Err("stale_owner_epoch");
@@ -563,6 +569,7 @@ impl Projection {
                 self.messages.insert(
                     message_id.clone(),
                     MessageState {
+                        created_seq: seq,
                         run_id: run_id.clone(),
                         entry: SessionMessageEntry {
                             id: message_id.clone(),
@@ -662,9 +669,20 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
         let mut projection = Projection::default();
-        for value in fixture["operations"].as_array().unwrap().iter().take(5) {
+        for (i, value) in fixture["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(5)
+            .enumerate()
+        {
             projection
-                .apply(&serde_json::from_value(value.clone()).unwrap(), "host", 1)
+                .apply(
+                    &serde_json::from_value(value.clone()).unwrap(),
+                    "host",
+                    1,
+                    i as u64 + 1,
+                )
                 .unwrap();
         }
         for i in 0..5 {
@@ -680,7 +698,7 @@ mod tests {
                     text: "x".repeat(60 * 1024),
                 },
             };
-            let result = projection.apply(&op, "host", 1);
+            let result = projection.apply(&op, "host", 1, i + 6);
             if i < 4 {
                 result.unwrap();
             } else {
@@ -770,11 +788,13 @@ mod tests {
         .unwrap();
         for case in cases {
             let mut projection = Projection::default();
+            let mut seq = 1;
             for op in initial
                 .iter()
                 .take(case["initialPrefix"].as_u64().unwrap_or(1) as usize)
             {
-                projection.apply(op, "host", 1).unwrap();
+                projection.apply(op, "host", 1, seq).unwrap();
+                seq += 1;
             }
             for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
                 let op: Operation = serde_json::from_value(serde_json::json!({
@@ -784,12 +804,13 @@ mod tests {
                 }))
                 .unwrap();
                 let before = projection.clone();
-                let result = projection.apply(&op, "host", 1);
+                let result = projection.apply(&op, "host", 1, seq);
                 if let Some(error) = step["error"].as_str() {
                     assert_eq!(result, Err(error), "{case}");
                     assert_eq!(projection, before);
                 } else {
                     result.unwrap();
+                    seq += 1;
                 }
             }
             assert_eq!(
@@ -808,17 +829,19 @@ mod tests {
             serde_json::from_str(include_str!("../../../fixtures/sync3/system-message.json"))
                 .unwrap();
         let mut system_projection = Projection::default();
-        for op in &ops[..3] {
-            system_projection.apply(op, "host", 1).unwrap();
+        for (i, op) in ops[..3].iter().enumerate() {
+            system_projection
+                .apply(op, "host", 1, i as u64 + 1)
+                .unwrap();
         }
-        system_projection.apply(&system, "host", 1).unwrap();
+        system_projection.apply(&system, "host", 1, 4).unwrap();
         assert_eq!(
             system_projection.messages["system-message#c1"].entry.role,
             Role::System
         );
         let mut p = Projection::default();
-        for op in &ops {
-            p.apply(op, "host", 1).unwrap();
+        for (i, op) in ops.iter().enumerate() {
+            p.apply(op, "host", 1, i as u64 + 1).unwrap();
         }
         assert_eq!(serde_json::to_value(&p).unwrap(), fixture["projection"]);
         assert_eq!(
@@ -835,7 +858,8 @@ mod tests {
                     },
                 },
                 "host",
-                1
+                1,
+                ops.len() as u64 + 1
             ),
             Err("run_not_live")
         );

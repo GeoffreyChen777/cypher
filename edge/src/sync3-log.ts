@@ -1,5 +1,5 @@
 import {
-  applyOperation, byteLength, canonical, isId, MAX_BATCH_OPS, MAX_FRAME_BYTES,
+  applyOperation, byteLength, canonical, isId, MAX_BATCH_OPS, MAX_FRAME_BYTES, MAX_MESSAGE_BYTES,
   reject, safeInteger, validateOperation, VERSION,
   type EntityKind, type Operation, type Projection, type ProjectionStore, type Reply, type Row,
 } from "./sync3-protocol";
@@ -14,9 +14,10 @@ export class Sync3Log implements ProjectionStore {
     storage.sql.exec(`CREATE TABLE IF NOT EXISTS v3_events (
       seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, operation TEXT NOT NULL)`);
     storage.sql.exec(`CREATE TABLE IF NOT EXISTS v3_entities (
-      kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, run_id TEXT,
+      kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, run_id TEXT, created_seq INTEGER,
       PRIMARY KEY(kind,id))`);
     storage.sql.exec("CREATE INDEX IF NOT EXISTS v3_entity_run ON v3_entities(kind,run_id)");
+    storage.sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS v3_message_order ON v3_entities(created_seq) WHERE kind='messages'");
   }
   initialize(account: string, owner: string): void {
     if (!account || !isId(owner)) reject("invalid_owner");
@@ -50,14 +51,34 @@ export class Sync3Log implements ProjectionStore {
     // limit. Transcript chunk rollover is a client duty, not silent truncation.
     if (byteLength(body) > MAX_FRAME_BYTES * 4) reject("entity_too_large");
     const runId = (value as { runId?: string | null }).runId ?? null;
-    this.storage.sql.exec("INSERT INTO v3_entities(kind,id,body,run_id) VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id",
-      kind, id, body, runId);
+    const createdSeq = (value as { createdSeq?: number }).createdSeq ?? null;
+    this.storage.sql.exec("INSERT INTO v3_entities(kind,id,body,run_id,created_seq) VALUES(?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,run_id=excluded.run_id",
+      kind, id, body, runId, createdSeq);
   }
   hasAcceptedRun(runId: string): boolean {
     return this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='commands' AND run_id=? AND json_extract(body,'$.command.status') IN ('pending','applied') LIMIT 1", runId).toArray().length > 0;
   }
   hasOpenMessage(runId: string): boolean {
     return this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='messages' AND run_id=? AND json_extract(body,'$.entry.status')='streaming' LIMIT 1", runId).toArray().length > 0;
+  }
+  /** Local bounded projection read; not a new remotely exposed endpoint. */
+  messageWindow(before?: number, limit = 32): { through: number; messages: Projection["messages"][string][] } {
+    if (!safeInteger(limit) || limit < 1 || limit > 32 || (before !== undefined && !safeInteger(before))) reject("invalid_window");
+    return this.storage.transactionSync(() => {
+      const through = this.state().head, messages: Projection["messages"][string][] = [];
+      let used = 0;
+      for (const row of this.storage.sql.exec<{ id: string; body: string; created_seq: number }>(
+        "SELECT id,body,created_seq FROM v3_entities INDEXED BY v3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?",
+        before ?? Number.MAX_SAFE_INTEGER + 1, limit)) {
+        const size = byteLength(row.body);
+        if (size > MAX_MESSAGE_BYTES) reject("message_too_large");
+        if (used + size > 1024 * 1024) break;
+        const message = JSON.parse(row.body) as Projection["messages"][string];
+        if (row.created_seq <= 0 || row.created_seq > through || message.createdSeq !== row.created_seq || message.entry.id !== row.id) reject("invalid_projection");
+        used += size; messages.push(message);
+      }
+      return { through, messages: messages.reverse() };
+    });
   }
   append(operations: Operation[], actor?: string): Extract<Reply, { type: "ack" }> {
     if (!operations.length || operations.length > MAX_BATCH_OPS) reject("invalid_batch");
@@ -82,7 +103,7 @@ export class Sync3Log implements ProjectionStore {
           continue;
         }
         if (!safeInteger(m.head + 1)) reject("sequence_exhausted");
-        applyOperation(this, op, m.owner, m.owner_epoch);
+        applyOperation(this, op, m.owner, m.owner_epoch, m.head + 1);
         this.storage.sql.exec("INSERT INTO v3_events(seq,id,operation) VALUES(?,?,?)", ++m.head, op.id, body);
         receipts.push({ id: op.id, seq: m.head });
       }

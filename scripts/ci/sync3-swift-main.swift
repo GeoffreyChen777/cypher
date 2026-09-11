@@ -9,7 +9,7 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
         let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
         let head = Int64(fixture.operations.count)
         var projection = Sync3Projection()
-        for op in fixture.operations { try projection.apply(op, owner: "host", ownerEpoch: 1) }
+        for (i, op) in fixture.operations.enumerated() { try projection.apply(op, owner: "host", ownerEpoch: 1, seq: Int64(i + 1)) }
         precondition(projection == fixture.projection)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("cypher-sync3-swift-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -34,6 +34,9 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
                                           account: "account", room: "shared-room", actor: "phone")
             let before = try shared.projection, cursor = try shared.cursor
             precondition(before == fixture.projection && cursor == head)
+            let window = try shared.messageWindow()
+            precondition(window.through == head && window.messages.count == 1)
+            precondition(window.messages[0]["createdSeq"] == .int(4))
             let numbersURL = URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent().appendingPathComponent("numbers.json")
             let numbers = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: numbersURL))
             let canonical = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(numbers["canonical"]!))

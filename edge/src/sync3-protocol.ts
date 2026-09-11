@@ -160,7 +160,7 @@ export function canonical(value: unknown): string {
 export interface Projection {
   commands: Record<string, { command: Command; actor: string; runId: string | null }>;
   runs: Record<string, { outcome: "completed" | "failed" | "interrupted" | null }>;
-  messages: Record<string, { runId: string | null; entry: Entry }>;
+  messages: Record<string, { createdSeq: number; runId: string | null; entry: Entry }>;
   attachments: Record<string, { path: string; fileName: string }>;
 }
 export type EntityKind = keyof Projection;
@@ -170,7 +170,8 @@ export interface ProjectionStore {
   hasAcceptedRun(runId: string): boolean;
   hasOpenMessage(runId: string): boolean;
 }
-export function applyOperation(store: ProjectionStore, op: Operation, owner: string, ownerEpoch: number): void {
+export function applyOperation(store: ProjectionStore, op: Operation, owner: string, ownerEpoch: number, seq: number): void {
+  if (!safeInteger(seq) || seq === 0) reject("invalid_sequence");
   validateOperation(op);
   if (op.ownerEpoch !== ownerEpoch) reject("stale_owner_epoch");
   const ev = op.event;
@@ -221,7 +222,7 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
     case "messageCreated":
       if (ev.runId !== null) live(ev.runId);
       if (store.get("messages", ev.messageId)) reject("message_exists");
-      store.set("messages", ev.messageId, { runId: ev.runId, entry: {
+      store.set("messages", ev.messageId, { createdSeq: seq, runId: ev.runId, entry: {
         id: ev.messageId, role: ev.role, deviceId: ev.deviceId, createdAt: ev.createdAt,
         parts: [], status: "streaming", ...(ev.continuationOf === null ? {} : { continuationOf: ev.continuationOf }),
       } }); break;

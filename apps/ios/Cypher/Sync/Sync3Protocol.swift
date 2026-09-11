@@ -190,7 +190,8 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             }
             runs[id] = record
         case "messages":
-            try Sync3Wire.shape(record, ["runId", "entry"]); try nullableID(record["runId"])
+            try Sync3Wire.shape(record, ["createdSeq", "runId", "entry"]); try nullableID(record["runId"])
+            guard try Sync3Wire.integer(record["createdSeq"]) > 0 else { try Sync3Wire.fail("invalid_sequence") }
             guard let entry = record["entry"]?.objectValue, entry["id"] == .string(id),
                   case .array(let parts) = entry["parts"], parts.count <= 256 else { try Sync3Wire.fail("invalid_message") }
             let required: Set<String> = ["id", "role", "parts", "createdAt", "deviceId"]
@@ -235,7 +236,8 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         guard try encoder.encode(record).count <= 256 * 1024 else { try Sync3Wire.fail("message_too_large") }
         messages[id] = record
     }
-    mutating func apply(_ op: Sync3Operation, owner: String, ownerEpoch: Int64) throws {
+    mutating func apply(_ op: Sync3Operation, owner: String, ownerEpoch: Int64, seq: Int64) throws {
+        guard seq > 0, seq <= Sync3Wire.maxSafeInteger else { try Sync3Wire.fail("invalid_sequence") }
         try op.validate()
         guard op.ownerEpoch == ownerEpoch else { try Sync3Wire.fail("stale_owner_epoch") }
         let e = op.event, type = e["type"]!.stringValue!
@@ -278,7 +280,7 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             var entry: [String: JSONValue] = ["id": .string(id), "role": e["role"]!, "parts": .array([]),
                                              "createdAt": e["createdAt"]!, "deviceId": e["deviceId"]!, "status": .string("streaming")]
             if e["continuationOf"] != .null { entry["continuationOf"] = e["continuationOf"] }
-            messages[id] = ["runId": e["runId"]!, "entry": .object(entry)]
+            messages[id] = ["createdSeq": .int(seq), "runId": e["runId"]!, "entry": .object(entry)]
         case "partPut":
             let id = e["messageId"]!.stringValue!
             var msg = try writable(id), entry = msg["entry"]!.objectValue!

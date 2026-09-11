@@ -77,7 +77,7 @@ imported by Edge). Validation happens before decoding can discard unknown
 properties or default omitted fields. This preserves model settings, worktrees,
 comment prompts, attachment descriptors, input labels and retry identity.
 Legacy Loro frontiers are not accepted on this wire. The local normalized
-SQLite format is now **5**; earlier prototype formats are rejected without
+SQLite format is now **6**; earlier prototype formats are rejected without
 resetting or migrating their contents. The network version remains **3**.
 
 The complete native transcript entry/part models, event fold, render privacy
@@ -98,9 +98,23 @@ Each projected message is bounded to 256 KiB / 256 parts. Individually bounded
 text deltas may accumulate beyond the 64-KiB single-string wire budget: native
 reload validates this stored aggregate separately, without relaxing admission.
 Overflow must trigger producer rollover, not truncation or a larger frame.
-The bounded producer, authoritative transcript ordering, actual attachment
-transfer and normal-client rendering still need integration. An
+The bounded producer, actual attachment transfer and normal-client rendering
+still need integration. An
 `attachmentSealed` record alone does not establish file upload or availability.
+
+Messages now retain the immutable committed position of `messageCreated`.
+The server assigns it from the log, not from an author-supplied field. Native
+replay derives the identical position. Updates retain that position even if
+the message's last-update sequence becomes newest; timestamps are never an
+ordering authority. Native and DO-local render-window APIs return at most
+32 messages / 1 MiB of JSON bodies, oldest-first, using an exclusive creation
+cursor to read older pages. Cursor and rows share a read transaction.
+The ordered partial index is explicitly selected: an execution-plan test
+caught SQLite preferring a kind-only index with a sort, which would have
+made window cost grow with history. Byte-limited pages use at most one bounded
+row of lookahead and do not skip the first excluded row. These local APIs are
+not new remote endpoints, and their view watermark must not replace the
+replication cursor. Normal-client use and bounded replay remain unfinished.
 
 ## Deployment and migration boundaries
 
@@ -128,6 +142,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
   immutable resolution, with shared three-language validation/lifecycle cases.
 - [x] Full rendered-part wire shapes, continuation/status metadata, scoped part
   identity, UTF-8 deltas and atomic per-message byte-budget rejection.
+- [x] Immutable committed message order and indexed, row/byte-bounded local
+  render windows, including clock skew, late updates, paging and restart.
 - [x] Rust durable outbox and transactional cursor/reducer.
 - [x] Rust transport: lost ACK repair, healthy-live zero HTTP, pongs cannot
   hide business timeout, semantic epoch conflict parks without a retry storm.
@@ -173,13 +189,13 @@ traffic invokes no HTTP repair. This is not an actual harness execution test.
 
 Results:
 
-- Rust proto/sync: **112 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **114 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
   No normal-client protocol was switched by these extractions.
-- Edge: **112 unit + 53 workerd passed**; typecheck and bundle build passed.
-- iOS `Cypher` scheme: **184 passed**, including fifteen v3 tests, on an isolated
+- Edge: **112 unit + 55 workerd passed**; typecheck and bundle build passed.
+- iOS `Cypher` scheme: **186 passed**, including seventeen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine tests: **143 passed**; UI tests: **672 passed**.
   The prior icon failure was fixed by preferring package-name matches over
@@ -189,6 +205,7 @@ Results:
   and back, including numeric model options, a host command resolution and an
   ACK that must not skip the cursor. Rust can then re-enqueue its original
   body without creating a false conflict against Swift's persisted receipt.
+  Both runtimes also read the immutable-order index from that shared file.
 - With 1,000 unrelated historical commands present, one text append makes
   exactly three local row changes: its message, its event and the cursor.
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
@@ -200,9 +217,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `d9e754f`, including Linux backend,
+- GitHub CI passed all five jobs for `98fa016`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34618678863.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34630311152.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 
