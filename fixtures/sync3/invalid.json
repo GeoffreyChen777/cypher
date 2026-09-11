@@ -6,7 +6,7 @@
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"runStarted","runId":"r","extra":true}},
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"unknown","runId":"r"}},
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"textAppended","messageId":"m","offset":-1,"text":"x"}},
-  {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":"r","messageId":"m","role":"system"}},
+  {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":"r","messageId":"m","role":"unknown"}},
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"toolFinished","toolId":"t","failed":1,"summary":"x"}},
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"c","command":{"type":"interrupt","extra":"x"}}},
   {"id":"a","actor":"host","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"c","command":{"type":"respondInput","requestId":"r","answer":9007199254740992}}},

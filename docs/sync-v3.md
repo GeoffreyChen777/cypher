@@ -78,6 +78,14 @@ Legacy Loro frontiers are not accepted on this wire. The local normalized
 SQLite format is now **4**; earlier prototype formats are rejected without
 resetting or migrating their contents. The network version remains **3**.
 
+The complete native transcript entry/part models, event fold, render privacy
+policy and continuation helpers now live in `cypher-proto`. The running-code
+path in `engine::sessions` uses that shared fold/privacy implementation; only
+its persistence writer is still the legacy document writer. `cargo tree -p
+cypher-proto --edges normal` contains no Loro dependency. System message roles
+and native `#c` continuation identifiers are accepted by all three v3 readers.
+This extraction does **not** yet add full part/entry operations to the wire.
+
 ## Deployment and migration boundaries
 
 - New DO class/namespace; never rename `cypher-edge` or existing DO bindings.
@@ -147,10 +155,12 @@ traffic invokes no HTTP repair. This is not an actual harness execution test.
 
 Results:
 
-- Rust proto/sync: **90 passed**, two opt-in legacy live-edge tests ignored.
-  Document-model tests: **99 passed** after extracting the full command DTO
-  into `cypher-proto`; no normal-client protocol was switched by that extraction.
-- Edge: **109 unit + 50 workerd passed**; typecheck and bundle build passed.
+- Rust proto/sync: **110 passed**, two opt-in legacy live-edge tests ignored.
+  Document unit tests: **81 passed**; its integration test also passes.
+  Eighteen existing fold tests moved from doc to proto, and two new transcript
+  tests cover lossless data roundtrip and non-mutating render-only privacy.
+  No normal-client protocol was switched by these extractions.
+- Edge: **110 unit + 50 workerd passed**; typecheck and bundle build passed.
 - iOS `Cypher` scheme: **182 passed**, including thirteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine tests: **143 passed**; UI tests: **672 passed**.
@@ -166,9 +176,9 @@ Results:
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `43ecaaa`, including Linux backend,
+- GitHub CI passed all five jobs for `d9e754f`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34606348029.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34618678863.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 

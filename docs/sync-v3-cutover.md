@@ -34,6 +34,16 @@ review submissions.
    Distinguish a semantic turn from a persistent harness process: a parked
    process can serve multiple turns, so its process ID cannot blindly become
    a single already-finished v3 run ID.
+   The native entry/part models, folding, privacy projection and continuation
+   helpers are also storage-independent now. The next writer must preserve
+   full tools/questions/status/continuation metadata, not flatten them to text.
+   Part IDs are message-scoped (including repeated live-plan IDs), not globally
+   unique tool IDs. The existing 256-KiB segment budget is larger than a v3
+   operation's 128-KiB limit: use part/delta operations and bounded rollover,
+   not oversized whole-message replacements.
+   Before any external side effect, the host must obtain a committed owner
+   fence and durably record its execution claim. A crash with an uncertain
+   claim is recovery work, never an automatic second dispatch.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

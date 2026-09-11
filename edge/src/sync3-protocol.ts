@@ -13,7 +13,7 @@ export type Event =
   | { type: "commandResolved"; commandId: string; status: CommandStatus; resolution: string | null }
   | { type: "commandCancelled"; commandId: string }
   | { type: "runStarted"; runId: string }
-  | { type: "messageCreated"; runId: string; messageId: string; role: "user" | "assistant" }
+  | { type: "messageCreated"; runId: string; messageId: string; role: "user" | "assistant" | "system" }
   | { type: "textAppended"; messageId: string; offset: number; text: string }
   | { type: "toolStarted"; runId: string; toolId: string; name: string }
   | { type: "toolFinished"; toolId: string; failed: boolean; summary: string }
@@ -95,7 +95,7 @@ export function validateOperation(value: unknown): Operation {
   for (const k of ["messageId", "toolId", "requestId"]) if (Object.hasOwn(ev, k) && !isEntityId(ev[k])) reject("invalid_id");
   for (const k of ["text", "name", "summary", "prompt"]) if (Object.hasOwn(ev, k)) text(ev[k]);
   if (ev.type === "textAppended" && !safeInteger(ev.offset)) reject("invalid_offset");
-  if (ev.type === "messageCreated" && (typeof ev.role !== "string" || !["user", "assistant"].includes(ev.role))) reject("invalid_role");
+  if (ev.type === "messageCreated" && (typeof ev.role !== "string" || !["user", "assistant", "system"].includes(ev.role))) reject("invalid_role");
   if (ev.type === "toolFinished" && typeof ev.failed !== "boolean") reject("invalid_tool_result");
   if (ev.type === "runFinished" && (typeof ev.outcome !== "string" || !["completed", "failed", "interrupted"].includes(ev.outcome))) reject("invalid_outcome");
   if (ev.type === "commandQueued") {
@@ -149,7 +149,7 @@ export function canonical(value: unknown): string {
 export interface Projection {
   commands: Record<string, { command: Command; actor: string; runId: string | null }>;
   runs: Record<string, { outcome: "completed" | "failed" | "interrupted" | null }>;
-  messages: Record<string, { runId: string; role: "user" | "assistant"; text: string }>;
+  messages: Record<string, { runId: string; role: "user" | "assistant" | "system"; text: string }>;
   tools: Record<string, { runId: string; name: string; failed: boolean | null; summary: string | null }>;
   inputs: Record<string, { runId: string; prompt: string }>;
 }

@@ -4,6 +4,7 @@ import invalid from "../../fixtures/sync3/invalid.json";
 import numbers from "../../fixtures/sync3/numbers.json";
 import commands from "../../fixtures/sync3/command-validation.json";
 import lifecycle from "../../fixtures/sync3/command-lifecycle.json";
+import systemMessage from "../../fixtures/sync3/system-message.json";
 import {
   applyOperation, canonical, parseRequest, validateOperation,
   type EntityKind, type Projection, type ProjectionStore,
@@ -67,6 +68,12 @@ describe("sync3 shared contract", () => {
     const { projection, store } = memory();
     for (const value of golden.operations) applyOperation(store, validateOperation(value), "host", 1);
     expect(projection).toEqual(golden.projection);
+  });
+  it("retains system roles and continuation identities", () => {
+    const { projection, store } = memory();
+    for (const value of golden.operations.slice(0, 3)) applyOperation(store, validateOperation(value), "host", 1);
+    applyOperation(store, validateOperation(systemMessage), "host", 1);
+    expect(projection.messages["system-message#c1"].role).toBe("system");
   });
   it("fences wrong actors and stale owners before mutation", () => {
     const { projection, store } = memory();

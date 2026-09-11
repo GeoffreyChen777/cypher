@@ -112,7 +112,7 @@ struct Sync3Operation: Codable, Equatable, Sendable {
             _ = try Sync3Wire.string(event[key])
         }
         if type == "textAppended" { _ = try Sync3Wire.integer(event["offset"]) }
-        if type == "messageCreated", ![JSONValue.string("user"), .string("assistant")].contains(event["role"]) {
+        if type == "messageCreated", ![JSONValue.string("user"), .string("assistant"), .string("system")].contains(event["role"]) {
             try Sync3Wire.fail("invalid_role")
         }
         if type == "toolFinished", event["failed"]?.boolValue == nil { try Sync3Wire.fail("invalid_tool_result") }
@@ -176,7 +176,7 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         case "messages":
             try Sync3Wire.shape(record, ["runId", "role", "text"])
             _ = try Sync3Wire.identifier(record["runId"]); _ = try Sync3Wire.string(record["text"])
-            guard ["user", "assistant"].contains(record["role"]?.stringValue ?? "") else { try Sync3Wire.fail("invalid_role") }
+            guard ["user", "assistant", "system"].contains(record["role"]?.stringValue ?? "") else { try Sync3Wire.fail("invalid_role") }
             messages[id] = record
         case "tools":
             try Sync3Wire.shape(record, ["runId", "name", "failed", "summary"])

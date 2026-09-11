@@ -123,6 +123,9 @@ final class Sync3Tests: XCTestCase {
         let op = try Sync3Operation(id: "wrong", actor: "host", ownerEpoch: 1, event: event)
         XCTAssertThrowsError(try wrong.apply(op, owner: "host", ownerEpoch: 1))
         XCTAssertEqual(wrong.messages["message"]?["text"], .string("你好"))
+        let system = try JSONDecoder().decode(Sync3Operation.self, from: Sync3Wire.encode(sharedJSON("system-message")))
+        try wrong.apply(system, owner: "host", ownerEpoch: 1)
+        XCTAssertEqual(wrong.messages["system-message#c1"]?["role"], .string("system"))
     }
     func testDurableOutboxRestartAndAckDoesNotSkipCursor() throws {
         let f = try fixture(), url = try directory().appendingPathComponent("journal.sqlite")

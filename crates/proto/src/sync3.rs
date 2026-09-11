@@ -83,12 +83,7 @@ pub enum Event {
 
 pub type Command = SessionCommandEntry;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Role {
-    User,
-    Assistant,
-}
+pub type Role = crate::MessageRole;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -673,6 +668,18 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
         let ops: Vec<Operation> = serde_json::from_value(fixture["operations"].clone()).unwrap();
+        let system: Operation =
+            serde_json::from_str(include_str!("../../../fixtures/sync3/system-message.json"))
+                .unwrap();
+        let mut system_projection = Projection::default();
+        for op in &ops[..3] {
+            system_projection.apply(op, "host", 1).unwrap();
+        }
+        system_projection.apply(&system, "host", 1).unwrap();
+        assert_eq!(
+            system_projection.messages["system-message#c1"].role,
+            Role::System
+        );
         let mut p = Projection::default();
         for op in &ops {
             p.apply(op, "host", 1).unwrap();

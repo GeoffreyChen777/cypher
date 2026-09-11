@@ -25,16 +25,14 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use cypher_doc::{
-    DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    fold_event_into_parts, sanitize_tool_call,
-};
+use cypher_doc::{DocError, STREAM_COMMIT_MS, SegmentWriter, SessionDoc};
 use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
+use cypher_proto::parts::{fold_event_into_parts, render_parts};
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, SubagentRun,
-    SubagentRunStatus, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, MessagePart, MessageRole, MessageStatus, RunRequest,
+    Session, SessionStatus, SubagentRun, SubagentRunStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1466,48 +1464,6 @@ fn fail_running_subagents(runs: &mut [SubagentRun], now_ms: i64, reason: &str) -
 }
 
 // ── run task ────────────────────────────────────────────────────────────────
-
-/// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
-/// entry. Full inputs live only in the local run journal.
-fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
-    parts
-        .iter()
-        .map(|part| match part {
-            MessagePart::Tool {
-                id,
-                call,
-                is_error,
-                resolved,
-                output,
-                progress,
-                diff,
-                output_ref,
-                output_bytes,
-                diff_ref,
-                diff_stats,
-            } => MessagePart::Tool {
-                id: id.clone(),
-                call: sanitize_tool_call(call),
-                is_error: *is_error,
-                resolved: *resolved,
-                // Output summaries, diff stats, and sidecar refs are
-                // deliberately kept: unlike raw tool inputs they are the
-                // transcript's record of what happened, and the strip already
-                // bounded them (docs/chat2-sync.md A1). The transient
-                // progress tail rides through too — the fold clears it on
-                // resolve, so it never survives a settled chip.
-                output: output.clone(),
-                progress: progress.clone(),
-                diff: diff.clone(),
-                output_ref: output_ref.clone(),
-                output_bytes: *output_bytes,
-                diff_ref: diff_ref.clone(),
-                diff_stats: diff_stats.clone(),
-            },
-            other => other.clone(),
-        })
-        .collect()
-}
 
 /// The persisted assistant text of a folded segment (workspace preview source).
 fn folded_text(parts: &[MessagePart]) -> String {
