@@ -60,6 +60,11 @@ review submissions.
    API coverage on the experimental path. Normal dispatch, payload policy,
    persistent-process lifecycle and source-journal durability still need
    integration; restoring an old database image is not safe crash-resume proof.
+   Normal Engine blind re-dispatch paths have now been removed: neither fresh
+   boot recovery, failure before `SessionStarted`, nor an unconfirmed steering
+   mailbox delivery automatically starts the request again. The original
+   output and session reference remain available for explicit review and a
+   new user action. This does not replace the required v3 host integration.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

@@ -126,6 +126,17 @@ Recovery of the same crash-surviving database is not rollback/import of an old
 local backup; migration must quarantine uncertain restored intents rather than
 treating an old `Prepared` image as evidence that execution never happened.
 
+The normal Engine no longer automatically re-dispatches a fresh crashed
+request, a stream that fails before `SessionStarted`, or an accepted steering
+request lacking `Steered` confirmation. Reusing a user-message ID only deduped
+the transcript, not the external effects; absence of telemetry was not proof
+of non-execution. Boot recovery and unconfirmed delivery now retain output and
+surface review-required errors. Original harness session references remain
+available for explicit continuation. Old auto-resume budget files are left
+untouched but no longer consumed or reset. Normal dispatch still requires the
+v3 integration above; these changes remove known unsafe retry routes rather
+than claiming that integration is complete.
+
 The complete native transcript entry/part models, event fold, render privacy
 policy and continuation helpers now live in `cypher-proto`. The running-code
 path in `engine::sessions` uses that shared fold/privacy implementation; only
@@ -241,8 +252,9 @@ Each item requires evidence. Unchecked items are not implemented/verified.
 - [ ] Full process-kill/hibernation/network fault matrix across all runtimes.
 - [x] Desktop and iOS local build/test regression suites.
 - [ ] Release CI and target-platform artifact validation on the final revision.
-- [x] Dev UI rebuilt/restarted; existing headless engine and data dirs retained,
-  new UI socket verified against the existing engine socket.
+- [x] Dev UI rebuilt/restarted and its engine connection verified. Data dirs
+  retained; the engine is restarted only after checking its scope and tasks
+  when the implemented behavior requires it.
 - [ ] Authorized production canary and physical iOS notification verification.
 
 ## Cost acceptance (same workload, not just fewer delivered messages)
@@ -282,9 +294,12 @@ Results:
 - iOS `Cypher` scheme: **187 passed**, including eighteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine unit tests: **147 passed**; UI tests: **672 passed**.
-  Latest Dev UI restart: PID `48968`, preserved headless PID `27074`; the
-  startup log `/tmp/cypher-v3-execution-dev-ui.log` and live Unix socket peer
-  confirm reconnection to the intended development engine.
+  Latest Dev restart: engine PID `65019`, UI PID `65060`. Before restarting
+  this engine, IPC confirmed local-only mode, no active public sessions or
+  subagents, and no additional private chat handles; no child process existed.
+  Both data directories were preserved. New startup logs are
+  `/tmp/cypher-no-blind-retry-dev-{engine,ui}.log`; live IPC confirmed the same
+  device ID, chat and session status, and the UI's socket peer.
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
@@ -297,9 +312,21 @@ Results:
   Kicks are bounded/coalesced, and shutdown cancels listeners and closes handles
   that register late. Four deterministic tests cover these boundaries.
   Parallel E2E duration fell from roughly 90 seconds to under one second on
-  this machine. The complete Engine suite passes **323 tests**, with three
+  this machine. The complete Engine suite passes **325 tests**, with three
   explicitly opt-in provider/live-edge tests ignored. No v3 harness integration
   is implied: that normal execution path still uses the legacy writer.
+- Normal restart/steering regression suites passed five consecutive runs.
+  Tests perform an actual temporary-file effect before a simulated child
+  failure with no steering confirmation, proving neither `Steer` nor a `Run`
+  routed into that mailbox causes an automatic second harness invocation.
+  A later explicit user request is a completion barrier and retains the
+  prior error/user entry. The confirmed-steer test observes an actual
+  `Steered` event, not merely optimistic `Working`, before interrupting.
+  The Side Chat suite also passed five consecutive runs: its status-watch
+  test now holds the mock run until the subscriber observes Working, then
+  releases completion and observes Idle. A latest-value watch is not an
+  event ledger, so an instant mock completion could legitimately coalesce
+  the old test's intermediate state.
 - Fourteen local execution-gate tests cover ACK/application boundaries,
   prepare/terminal transaction rollback, exact retries, lost permits and
   restart, competing same-actor/same-run intents, cancellation, missing
@@ -332,9 +359,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `a9199aa`, including Linux backend,
+- GitHub CI passed all five jobs for `2a04fdd`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34648473897.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34651479697.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 

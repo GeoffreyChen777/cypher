@@ -80,21 +80,15 @@ struct RunHandle {
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
-    /// event — the at-least-once ledger. A run can die with accepted steers
-    /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
-    /// discarding queued boundary steers): the run task drains this at exit
-    /// and re-dispatches each entry as a fresh turn, so an accepted message
-    /// can never silently evaporate from a transcript that shows it as sent.
+    /// event. On exit these become visible uncertainty, never fresh dispatch:
+    /// the harness may have acted before its confirmation was delivered.
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
 }
 
-/// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
-/// `prompt` is the VISIBLE prompt (the doc user entry); `agent_prompt` the
-/// optional EFFECTIVE override the harness should receive.
+/// One accepted-but-unconfirmed steer. The original command/user entry retains
+/// its content; this delivery ledger is not another retry queue.
 #[derive(Debug, Clone)]
 struct RoutedSteer {
-    prompt: String,
-    agent_prompt: Option<String>,
     message_id: String,
 }
 
@@ -493,39 +487,8 @@ impl SessionsEngine {
         agent_prompt: Option<String>,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(
-            chat_id,
-            harness_id,
-            request,
-            agent_prompt,
-            message_id,
-            false,
-        )
-        .await
-    }
-
-    /// [`Self::dispatch`] with the startup-crash retry marker: the retry
-    /// re-dispatches with `startup_retry = true`, which makes that attempt
-    /// final (its own startup death surfaces instead of retrying again).
-    /// Boxed future: `drive_run` re-enters this for that retry, and the
-    /// erasure breaks the opaque-type cycle the recursion would otherwise form.
-    fn dispatch_with<'a>(
-        &'a self,
-        chat_id: &'a str,
-        harness_id: HarnessId,
-        request: RunRequest,
-        agent_prompt: Option<String>,
-        message_id: Option<String>,
-        startup_retry: bool,
-    ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(
-            chat_id,
-            harness_id,
-            request,
-            agent_prompt,
-            message_id,
-            startup_retry,
-        ))
+        self.dispatch_inner(chat_id, harness_id, request, agent_prompt, message_id)
+            .await
     }
 
     async fn dispatch_inner(
@@ -534,8 +497,7 @@ impl SessionsEngine {
         harness_id: HarnessId,
         mut request: RunRequest,
         agent_prompt: Option<String>,
-        mut message_id: Option<String>,
-        startup_retry: bool,
+        message_id: Option<String>,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
@@ -568,8 +530,6 @@ impl SessionsEngine {
             let sent = if steerable {
                 let mut ledger = lock(&ledger);
                 ledger.push_back(RoutedSteer {
-                    prompt: request.prompt.clone(),
-                    agent_prompt: agent_prompt.clone(),
                     message_id: user_id.clone(),
                 });
                 let message = SteerMessage {
@@ -599,25 +559,23 @@ impl SessionsEngine {
                     self.inner.note_message(chat_id, &visible_prompt);
                     return Ok(run_id);
                 }
-                // The run died around the send. If its exit drain already
-                // claimed the entry, that re-dispatch owns the message —
-                // otherwise reclaim it and fall through to a fresh run.
+                // Delivery succeeded. A concurrent exit cannot turn missing
+                // confirmation into permission to execute the request again.
                 let reclaimed = {
                     let mut ledger = lock(&ledger);
                     let before = ledger.len();
                     ledger.retain(|s| s.message_id != user_id);
                     ledger.len() != before
                 };
-                if !reclaimed {
-                    self.inner.note_message(chat_id, &visible_prompt);
-                    return Ok(run_id);
+                if reclaimed {
+                    self.inner.note_uncertain_delivery(chat_id, handle.doc())?;
+                    self.set_status(chat_id, SessionStatus::Errored, false);
                 }
-                // Keep the already-written doc entry's id for the fresh run
-                // below (write_user_message dedupes by id).
-                message_id = Some(user_id);
+                self.inner.note_message(chat_id, &visible_prompt);
+                return Ok(run_id);
             }
             // Mailbox closed (runtime mid-teardown / non-steering harness) or
-            // the routed run died with the message reclaimed: replace it.
+            // no delivery was accepted: a fresh dispatch is safe.
             self.interrupt(chat_id).await?;
         }
 
@@ -630,13 +588,10 @@ impl SessionsEngine {
         // chat's stored harness session): callers always send `resume: None`;
         // the engine threads the chat's prior harness session back in so a new
         // process (app restart) continues the same harness conversation. The
-        // startup-crash retry injects too — a stale id is the harness's
-        // problem now (`session/load` falls back to `session/new` internally),
-        // and starting the retry fresh silently dropped a good conversation.
-        let mut resume_injected = false;
+        // reference survives failures for an EXPLICIT next user request.
+        // No first telemetry does not prove a child caused no effects.
         if request.resume.is_none() {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
-            resume_injected = request.resume.is_some();
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
@@ -709,12 +664,7 @@ impl SessionsEngine {
             controls,
             engine_rx,
             cancel_rx,
-            RunResumeState {
-                user_message_id: user_id,
-                resume_injected,
-                startup_retry,
-                agent_prompt,
-            },
+            agent_prompt,
         ));
         Ok(run_id)
     }
@@ -770,8 +720,6 @@ impl SessionsEngine {
         let sent = {
             let mut ledger = lock(&ledger);
             ledger.push_back(RoutedSteer {
-                prompt: prompt.to_string(),
-                agent_prompt: agent_prompt.clone(),
                 message_id: user_id.clone(),
             });
             let message = SteerMessage {
@@ -792,7 +740,7 @@ impl SessionsEngine {
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
-        // path) — a reclaim falls back to dispatch, which just re-snapshots.
+        // path). Missing confirmation is not permission to re-dispatch.
         if let Some(request) = self.last_request(chat_id) {
             self.note_turn_start(chat_id, &request.cwd);
         }
@@ -801,10 +749,8 @@ impl SessionsEngine {
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
-        // The run died around the send. Exit drain claimed the entry → its
-        // re-dispatch owns the message; still ours → reclaim and report
-        // NotSteerable so the executor falls back to a fresh dispatch
-        // (same message id — the doc entry dedupes).
+        // The mailbox accepted this request. Only the party reclaiming its
+        // ledger entry emits the uncertainty note; neither party retries it.
         let reclaimed = {
             let mut ledger = lock(&ledger);
             let before = ledger.len();
@@ -812,7 +758,8 @@ impl SessionsEngine {
             ledger.len() != before
         };
         if reclaimed {
-            return Ok(SteerOutcome::NotSteerable);
+            self.inner.note_uncertain_delivery(chat_id, handle.doc())?;
+            self.set_status(chat_id, SessionStatus::Errored, false);
         }
         self.inner.note_message(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
@@ -951,15 +898,10 @@ impl SessionsEngine {
 
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
     /// mid-stream), stamp this device's abandoned `streaming` doc entries `aborted`
-    /// with a VISIBLE "Run interrupted by engine restart" error part, close the
-    /// journal with a synthetic `Done{interrupted}` — and then PICK THE RUN BACK
-    /// UP: a fresh crashed turn with revival budget left is re-dispatched against
-    /// the remembered harness session (zeron: "not just eulogized";
-    /// `MAX_AUTO_RESUME` = 3 consecutive revivals, fresh = crashed < 12h ago).
+    /// with a visible uncertainty note and close the local event stream.
+    /// Preserve the harness reference for an explicit next request, but never
+    /// automatically resend: a crash cannot prove tools caused no effects.
     pub fn recover_stale(&self) -> Result<usize, EngineError> {
-        const MAX_AUTO_RESUME: u32 = 3;
-        const RESUME_FRESH_MS: i64 = 12 * 60 * 60 * 1000;
-
         let stale = self.inner.journal.stale_sessions()?;
         let mut recovered = 0usize;
         for chat_id in stale {
@@ -969,47 +911,12 @@ impl SessionsEngine {
             let handle = self.doc_handle(&chat_id)?;
             // Harness continuity first: the crashed run's session id may only
             // exist in the journal (the debounced workspace-row write may
-            // never have landed) — remember it so the revived run resumes the
-            // same harness conversation (zeron recoverDraft, sessions.ts:538).
+            // never have landed). Keep it without launching another process.
             if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
                 self.inner
                     .remember_harness_session(&chat_id, &session_id, &cwd);
             }
-            // The revival prompt: the last user message (idempotent re-dispatch
-            // under the SAME id — `write_user_message` dedupes by id, so the
-            // transcript never shows a duplicate).
-            let prompt = handle.doc().read_entries().ok().and_then(|entries| {
-                entries
-                    .iter()
-                    .rev()
-                    .find(|e| e.role == MessageRole::User)
-                    .and_then(|e| {
-                        e.parts.iter().find_map(|p| match p {
-                            MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
-                            _ => None,
-                        })
-                    })
-            });
-            let attempts = self.inner.journal.resume_attempts(&chat_id);
-            let fresh = handle
-                .doc()
-                .read_entries()
-                .ok()
-                .and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .find(|e| e.status == Some(MessageStatus::Streaming))
-                        .map(|e| now_ms() - e.created_at < RESUME_FRESH_MS)
-                })
-                .unwrap_or(false);
-            let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
-
-            let note = if will_resume {
-                "Run interrupted by engine restart — resuming"
-            } else {
-                "Run interrupted by engine restart"
-            };
+            let note = "Run interrupted by engine restart. External effects may already have occurred. Review the existing output and affected resources before explicitly continuing; the request was not automatically retried.";
             let done = AgentEvent::Done {
                 status: DoneStatus::Interrupted,
                 result: None,
@@ -1018,62 +925,9 @@ impl SessionsEngine {
             };
             self.inner.publish(&chat_id, &done);
             let stamped = handle.mark_abandoned_streams(note)?.len();
-            self.set_status(&chat_id, SessionStatus::Idle, false);
-            tracing::info!(chat = %chat_id, stamped, will_resume, attempts, "recovered stale session journal");
+            self.set_status(&chat_id, SessionStatus::Errored, false);
+            tracing::info!(chat = %chat_id, stamped, "recovered stale session journal; execution requires review");
             recovered += 1;
-
-            if !will_resume {
-                continue;
-            }
-            let attempt = self.inner.journal.note_resume_attempt(&chat_id);
-            let (user_id, prompt_text) = prompt.expect("gated by will_resume");
-            let sessions = self.clone();
-            tokio::spawn(async move {
-                let Some(host) = sessions.inner.doc_host() else {
-                    return;
-                };
-                let request = sessions
-                    .last_request(&chat_id)
-                    .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
-                    // Last resort: the journal's own cwd (zeron's draft config)
-                    // — a crash can predate the debounced workspace-row write.
-                    .or_else(|| {
-                        let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
-                        Some(RunRequest {
-                            prompt: String::new(),
-                            harness: None,
-                            model: None,
-                            reasoning: None,
-                            model_options: Default::default(),
-                            cwd,
-                            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
-                            auto_approve: false,
-                            attachments: Vec::new(),
-                            pending_attachments: Vec::new(),
-                            resume: None,
-                            worktree: None,
-                        })
-                    });
-                let Some(mut request) = request else {
-                    tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
-                    return;
-                };
-                request.prompt = prompt_text;
-                request.resume = None; // dispatch re-injects the remembered session
-                request.attachments = Vec::new();
-                let harness_id = host.harness_for_request(&chat_id, &request);
-                match sessions
-                    .dispatch(&chat_id, harness_id, request, Some(user_id))
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
-                    }
-                    Err(err) => {
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
-                    }
-                }
-            });
         }
         Ok(recovered)
     }
@@ -1108,6 +962,37 @@ impl SessionsEngine {
 }
 
 impl Inner {
+    fn note_uncertain_delivery(&self, chat_id: &str, doc: &SessionDoc) -> Result<(), EngineError> {
+        let note = "The agent process ended before confirming one or more delivered requests. External effects may already have occurred. Review the existing output and affected resources before explicitly continuing; nothing was automatically retried.";
+        self.publish(
+            chat_id,
+            &AgentEvent::Error {
+                message: note.into(),
+            },
+        );
+        self.publish(
+            chat_id,
+            &AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                result: None,
+                error: Some(note.into()),
+                session_id: None,
+            },
+        );
+        doc.push_message(&cypher_proto::SessionMessageEntry {
+            id: new_id(),
+            role: MessageRole::Assistant,
+            device_id: self.device_id.clone(),
+            created_at: now_ms(),
+            status: Some(MessageStatus::Aborted),
+            continuation_of: None,
+            parts: vec![MessagePart::Error {
+                id: new_id(),
+                message: note.into(),
+            }],
+        })?;
+        Ok(())
+    }
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// For temporary Side Chats the journal is skipped (host-memory only — no
     /// durable run journal until promotion); the hub broadcast (the private
@@ -1529,19 +1414,6 @@ fn expand_home(cwd: &str) -> String {
     }
 }
 
-/// Resume bookkeeping for one run task: which user entry the run answers (so
-/// the startup-crash retry re-dispatches idempotently against the same doc
-/// entry), whether `dispatch` injected the resume id itself (only
-/// engine-injected resumes retry — a caller-specified resume fails loudly),
-/// whether this run already IS the retry (one attempt only), and the
-/// EFFECTIVE prompt override (the Comment feature) the retry must re-deliver.
-struct RunResumeState {
-    user_message_id: String,
-    resume_injected: bool,
-    startup_retry: bool,
-    agent_prompt: Option<String>,
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -1553,7 +1425,7 @@ async fn drive_run(
     controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
-    resume_state: RunResumeState,
+    agent_prompt: Option<String>,
 ) {
     let device_id = inner.device_id.clone();
     let plugin_epoch = inner.plugin_epoch.load(Ordering::SeqCst);
@@ -1561,21 +1433,9 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
-    // Kept whole for the startup-crash retry (same user entry; dispatch
-    // re-injects the stored resume id). Option so the retry branch (inside
-    // the event loop) can take ownership. Carries the VISIBLE prompt — the
-    // retry re-derives the effective override from `resume_state.agent_prompt`.
-    let mut retry_request = Some(RunRequest {
-        resume: None,
-        worktree: None,
-        ..request.clone()
-    });
     // The harness receives the EFFECTIVE prompt (visible unless an override
     // rides the command). `request` itself stays the visible truth.
-    let effective = resume_state
-        .agent_prompt
-        .clone()
-        .unwrap_or_else(|| request.prompt.clone());
+    let effective = agent_prompt.unwrap_or_else(|| request.prompt.clone());
     let mut harness_request = request.clone();
     harness_request.prompt = effective;
     let mut stream = match harness.run(harness_request, controls).await {
@@ -1623,7 +1483,6 @@ async fn drive_run(
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
     let mut interrupted = false;
-    let mut saw_session_started = false;
     // Liveness heartbeat: this loop RUNNING is proof the harness stream is
     // open, so freshness must not depend on events arriving. Silent stretches
     // are normal and UNBOUNDED — a long tool call, redacted thinking, an
@@ -2000,67 +1859,9 @@ async fn drive_run(
             _ => {}
         }
 
-        // Startup-crash retry: a run that dies before ever starting (errored
-        // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
-        // failed to come up — not that the injected resume id was bad. Since
-        // the ACP conversion (2026-08-08) a stale id is handled inside the
-        // harness (`session/load` falls back to `session/new`), so the old
-        // guess here — tombstone the id, retry fresh — fired only on child
-        // startup failures and permanently severed GOOD conversations (user
-        // incident 2026-08-13). The id stays; retry ONCE against the same
-        // user entry, resume and all, in case the crash was transient. A
-        // helper that is down hard fails the retry too and surfaces its
-        // crash text (the harness now appends exit status + stderr).
-        if resume_state.resume_injected
-            && !resume_state.startup_retry
-            && !saw_session_started
-            && folded.is_empty()
-            && !interrupted
-            && matches!(
-                &event,
-                AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    ..
-                }
-            )
-            && let Some(retry) = retry_request.take()
-        {
-            tracing::warn!(
-                chat = %chat_id,
-                "run died before session start; retrying once (resume kept)"
-            );
-            // This harness owner is gone (nothing ever started under it).
-            inner.fail_orphaned_subagents(&chat_id, "Subagent owner failed to start");
-            inner.remove_run(&chat_id, &run_id);
-            let engine = SessionsEngine {
-                inner: inner.clone(),
-            };
-            let chat = chat_id.clone();
-            let message_id = resume_state.user_message_id.clone();
-            tokio::spawn(async move {
-                // The user entry write inside dispatch is idempotent by
-                // message id; `startup_retry` makes this attempt final.
-                if let Err(err) = engine
-                    .dispatch_with(
-                        &chat,
-                        harness_id,
-                        retry,
-                        resume_state.agent_prompt.clone(),
-                        Some(message_id),
-                        true,
-                    )
-                    .await
-                {
-                    tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
-                    // No run is coming: leaving the row Working would spin
-                    // the session forever with nothing behind it.
-                    engine
-                        .inner
-                        .set_status(&chat, SessionStatus::Errored, false);
-                }
-            });
-            return;
-        }
+        // Never re-dispatch after an errored stream, even before the first
+        // SessionStarted. Lack of telemetry cannot prove lack of effects.
+        // Keep the original error and session reference for explicit review.
 
         // A steer boundary splits the assistant entry exactly where the fold resets.
         if let AgentEvent::Steered {
@@ -2107,7 +1908,6 @@ async fn drive_run(
             AgentEvent::SessionStarted {
                 session_id, cwd, ..
             } => {
-                saw_session_started = true;
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
                 inner.remember_harness_session(&chat_id, session_id, cwd);
@@ -2192,11 +1992,6 @@ async fn drive_run(
                 }
                 inner.note_message(&chat_id, &folded_text(&folded));
             }
-            if *status == DoneStatus::Completed {
-                // A cleanly completed turn resets the auto-resume revival
-                // budget: only consecutive crash-revive-crash cycles spend it.
-                inner.journal.clear_resume_attempts(&chat_id);
-            }
             // Exchange completed on an untitled chat → name it (fire-and-forget;
             // interrupted/errored turns never trigger naming).
             if *status == DoneStatus::Completed
@@ -2223,7 +2018,6 @@ async fn drive_run(
                 entry_id = new_id();
                 segment_started = now_ms();
                 // Resume-retry is strictly a first-turn concern.
-                saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
                 inner.set_status(&chat_id, SessionStatus::Idle, false);
@@ -2244,7 +2038,7 @@ async fn drive_run(
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
-    // it — re-dispatched below) or reclaims it and starts a fresh run itself.
+    // its uncertainty note) or reclaims it and reports uncertainty itself.
     let orphans: Vec<RoutedSteer> = lock(&inner.runs)
         .get(&chat_id)
         .filter(|h| h.run_id == run_id)
@@ -2264,45 +2058,12 @@ async fn drive_run(
     };
     inner.fail_orphaned_subagents(&chat_id, owner_reason);
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status(&chat_id, final_status, false);
-    if !interrupted && !orphans.is_empty() {
-        // The dying run accepted these into its mailbox but never confirmed a
-        // Steered boundary (idle-reaper race, a mid-turn error discarding
-        // queued boundary steers, a parked child death). Their user entries
-        // are already in the transcript — a message that shows as sent must
-        // never silently not run. Re-dispatch each as a fresh turn
-        // (write_user_message dedupes by id; resume is engine-injected).
-        let engine = SessionsEngine {
-            inner: inner.clone(),
-        };
-        let chat = chat_id.clone();
-        tokio::spawn(async move {
-            for steer in orphans {
-                let Some(mut request) = engine.last_request(&chat) else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
-                    break;
-                };
-                request.prompt = steer.prompt.clone();
-                request.resume = None;
-                request.attachments = Vec::new();
-                tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
-                if let Err(err) = engine
-                    .dispatch_augmented(
-                        &chat,
-                        harness_id,
-                        request,
-                        steer.agent_prompt.clone(),
-                        Some(steer.message_id.clone()),
-                    )
-                    .await
-                {
-                    tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
-                    engine
-                        .inner
-                        .set_status(&chat, SessionStatus::Errored, false);
-                    break;
-                }
-            }
-        });
+    if !orphans.is_empty() {
+        if let Err(err) = inner.note_uncertain_delivery(&chat_id, doc_ref) {
+            tracing::error!(chat = %chat_id, error = %err, "could not persist delivery uncertainty");
+        }
+        inner.set_status(&chat_id, SessionStatus::Errored, false);
+    } else {
+        inner.set_status(&chat_id, final_status, false);
     }
 }
