@@ -1,0 +1,16 @@
+{
+  "source": {
+    "id": "numbers", "actor": "phone", "ownerEpoch": 1,
+    "event": {
+      "type": "commandQueued", "commandId": "numeric-command",
+      "command": {"type": "respondInput", "requestId": "request", "answer": [1.0, -0.0, 1.25, {"count": 1e3}]}
+    }
+  },
+  "canonical": {
+    "id": "numbers", "actor": "phone", "ownerEpoch": 1,
+    "event": {
+      "type": "commandQueued", "commandId": "numeric-command",
+      "command": {"type": "respondInput", "requestId": "request", "answer": [1, 0, 1.25, {"count": 1000}]}
+    }
+  }
+}

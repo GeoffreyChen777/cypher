@@ -9,6 +9,7 @@ pub mod entities;
 pub mod motion;
 pub mod session_fork;
 pub mod side_chat;
+pub mod sync3;
 pub mod view;
 pub mod workspace;
 

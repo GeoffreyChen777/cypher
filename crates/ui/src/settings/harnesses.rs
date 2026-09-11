@@ -486,7 +486,6 @@ fn tokens_match(tokens: &[String], keywords: &[&str]) -> bool {
 /// packages return `None` so the row can fall back to an initial tile.
 pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'static str> {
     use crate::icons;
-    let tokens = package_tokens(name, description);
     const RULES: &[(&[&str], &str)] = &[
         (&["search", "searches", "searching"], icons::MAGNIFER),
         (&["compaction", "compacting"], icons::FOLD_VERTICAL),
@@ -533,10 +532,19 @@ pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'st
         (&["web", "http", "browser", "fetch"], icons::GLOBAL),
         (&["file", "files", "folder", "filesystem"], icons::FOLDER),
     ];
-    RULES
-        .iter()
-        .find(|(keywords, _)| tokens_match(&tokens, keywords))
-        .map(|(_, icon)| *icon)
+    // A specific package name wins over incidental prose ("provider-agnostic"
+    // does not make gpt-fast a provider plugin). Descriptions are fallback.
+    [
+        package_tokens(name, None),
+        package_tokens(name, description),
+    ]
+    .iter()
+    .find_map(|tokens| {
+        RULES
+            .iter()
+            .find(|(keywords, _)| tokens_match(tokens, keywords))
+            .map(|(_, icon)| *icon)
+    })
 }
 
 pub(crate) fn package_initial(name: &str) -> SharedString {
@@ -760,6 +768,14 @@ mod tests {
         assert_eq!(
             package_icon("pi-github-tools", None),
             Some(icons::GIT_BRANCH)
+        );
+        assert_eq!(
+            package_icon("pi-provider-newapi", Some("Fast integration")),
+            Some(icons::CLOUD)
+        );
+        assert_eq!(
+            package_icon("@acme/pi-widget-kit", Some("MCP integration")),
+            Some(icons::COMMAND)
         );
     }
 

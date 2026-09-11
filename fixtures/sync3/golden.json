@@ -1,0 +1,21 @@
+{
+  "operations": [
+    {"id":"op-1","actor":"phone","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"command","command":{"type":"send","text":"Hello"}}},
+    {"id":"op-2","actor":"host","ownerEpoch":1,"event":{"type":"commandAccepted","commandId":"command","runId":"run"}},
+    {"id":"op-3","actor":"host","ownerEpoch":1,"event":{"type":"runStarted","runId":"run"}},
+    {"id":"op-4","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":"run","messageId":"message","role":"assistant"}},
+    {"id":"op-5","actor":"host","ownerEpoch":1,"event":{"type":"textAppended","messageId":"message","offset":0,"text":"你好"}},
+    {"id":"op-6","actor":"host","ownerEpoch":1,"event":{"type":"textAppended","messageId":"message","offset":6,"text":"!"}},
+    {"id":"op-7","actor":"host","ownerEpoch":1,"event":{"type":"toolStarted","runId":"run","toolId":"tool","name":"read"}},
+    {"id":"op-8","actor":"host","ownerEpoch":1,"event":{"type":"toolFinished","toolId":"tool","failed":false,"summary":"Read one file"}},
+    {"id":"op-9","actor":"host","ownerEpoch":1,"event":{"type":"inputRequested","runId":"run","requestId":"question","prompt":"Continue?"}},
+    {"id":"op-10","actor":"host","ownerEpoch":1,"event":{"type":"runFinished","runId":"run","outcome":"completed"}}
+  ],
+  "projection": {
+    "commands": {"command":{"command":{"type":"send","text":"Hello"},"actor":"phone","runId":"run"}},
+    "runs": {"run":{"outcome":"completed"}},
+    "messages": {"message":{"runId":"run","role":"assistant","text":"你好!"}},
+    "tools": {"tool":{"runId":"run","name":"read","failed":false,"summary":"Read one file"}},
+    "inputs": {"question":{"runId":"run","prompt":"Continue?"}}
+  }
+}

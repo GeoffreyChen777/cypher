@@ -68,6 +68,8 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo fmt --all --check
+      - name: v3 protocol, durable journal and transport fault regressions
+        run: cargo test --locked -p cypher-proto -p cypher-sync --features cypher-sync/mock-server
       - run: cargo test --locked --no-default-features -p cypher -p cypher-env -p cypher-harness -p cypher-engine -p cypher-update -p cypher-rpc
       - run: cargo clippy --locked -p cypher-update --all-targets -- -D warnings
       - run: cargo build --locked --no-default-features -p cypher
@@ -93,3 +95,20 @@ jobs:
           cargo test --locked -p cypher-ui --lib state::tests
           cargo test --locked -p cypher-ui --lib notification_activity::tests
           cargo test --locked -p cypher-ui --lib unix_engine_directory_does_not_redirect_client_preferences
+
+  sync3-cross-language:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: npm ci --prefix edge
+      - name: Rust ↔ isolated workerd ↔ native Swift
+        run: python3 scripts/ci/sync3-smoke.py

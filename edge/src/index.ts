@@ -42,17 +42,18 @@
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, AUTH_DEADLINE_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
+import { Sync3Room } from "./sync3-room";
 import { PushDevice } from "./push-device";
 export { APNsSender } from "./apns-sender";
 import { object, readNotificationJSON } from "./notifications-model";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PushDevice };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PushDevice, Sync3Room };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -83,7 +84,8 @@ const forward = (
   userId: string,
   path: string,
   search?: string,
-  roomKind?: "workspace"
+  roomKind?: "workspace",
+  authDeadline?: number
 ): Promise<Response> => {
   const stub = ns.get(ns.idFromName(name));
   const url = new URL(request.url);
@@ -96,6 +98,8 @@ const forward = (
   // can assert it. Do not drop this line; passthrough would let a caller
   // choose their own room kind.
   headers.delete(ROOM_KIND_HEADER);
+  headers.delete(AUTH_DEADLINE_HEADER);
+  if (authDeadline !== undefined) headers.set(AUTH_DEADLINE_HEADER, String(authDeadline));
   headers.set(AUTH_USER_HEADER, userId);
   if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
@@ -188,6 +192,20 @@ export default {
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
+
+    // No existing room/data is silently promoted to v3. Scope is derived from
+    // verified user AND org, never from a client-supplied auth header.
+    if (parts[0] === "sync3") {
+      if (env.SYNC3_ENABLED !== "true" || !env.SYNC3_ROOMS) return json({ error: "not_enabled" }, 404);
+      if (parts.length !== 5 || parts[2] !== "chats" ||
+          !ID_RE.test(parts[1]) || !ID_RE.test(parts[3]) ||
+          !["init", "exchange", "ws"].includes(parts[4])) return json({ error: "not_found" }, 404);
+      if (auth.orgId !== parts[1]) return json({ error: "forbidden" }, 403);
+      const room = JSON.stringify(["sync3", auth.orgId, auth.userId, parts[3]]);
+      const deadline = Math.min(Date.now() + 300_000, auth.expiresAtMs ?? (env.AUTH_MODE === "dev" ? Infinity : 0));
+      if (!Number.isFinite(deadline) || deadline <= Date.now()) return json({ error: "reauth_required" }, 401);
+      return forward(env.SYNC3_ROOMS, room, request, auth.userId, `/${parts[4]}`, "", undefined, deadline);
+    }
 
     // ── session rooms ───────────────────────────────────────────────────────
     if (parts[0] === "session" && parts[1] && ID_RE.test(parts[1]) && parts[2] === "ws") {
