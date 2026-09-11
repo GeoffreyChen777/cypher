@@ -3,6 +3,10 @@
 User decision: **no legacy protocol compatibility**. This is a release plan,
 not a claim that the migration or deployment has happened.
 
+iOS publication scope was separately confirmed: **TestFlight for the existing
+tester scope only**. No new tester invitations, public links or App Store
+review submissions.
+
 ## Non-negotiable cutover properties
 
 - The supported production clients use v3 only. No fallback to chat2, s2,
@@ -23,6 +27,12 @@ not a claim that the migration or deployment has happened.
 
 1. Complete the event model against existing command/transcript features,
    including comments, attachments, side chats, input responses and recovery.
+   The portable command DTO now lives in `cypher-proto` rather than the Loro
+   document crate. `fixtures/sync3/run-command.json` covers the actual complete
+   run payload; it is a domain fixture, not yet a v3 wire operation.
+   Distinguish a semantic turn from a persistent harness process: a parked
+   process can serve multiple turns, so its process ID cannot blindly become
+   a single already-finished v3 run ID.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

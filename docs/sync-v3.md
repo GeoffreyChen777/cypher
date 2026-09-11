@@ -8,6 +8,8 @@ new client releases after completion. Work is isolated on
 `sync-v3-direct-cutover`; do not push incomplete changes to `main` (it deploys).
 Old protocol writers must be refused after cutover, not dual-written or used as
 a fallback. Retaining and verifying migration backups remains mandatory.
+The iOS release target is confirmed as TestFlight for existing testers only;
+App Store submission and expanding the testing audience are not authorized.
 
 This is the new protocol selected on 2026-09-11, not a change to chat2's polling
 intervals. Existing rooms, databases, and production migrations stay intact.
@@ -127,7 +129,9 @@ traffic invokes no HTTP repair. This is not an actual harness execution test.
 
 Results:
 
-- Rust proto/sync: **84 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **86 passed**, two opt-in legacy live-edge tests ignored.
+  Document-model tests: **99 passed** after extracting the full command DTO
+  into `cypher-proto`; no normal-client protocol was switched by that extraction.
 - Edge: **102 unit + 44 workerd passed**; typecheck and bundle build passed.
 - iOS `Cypher` scheme: **180 passed**, including eleven v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
@@ -143,6 +147,11 @@ Results:
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
+- GitHub CI passed all five jobs for `43ecaaa`, including Linux backend,
+  macOS workspace and the native Swift/workerd/Rust smoke:
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34606348029.
+  Later implementation commits and the final release still require their own
+  CI evidence; this run is not a deployment.
 
 Current limitations are deliberate release blockers, not hidden fallbacks:
 normal Engine/SessionStore still use chat2; the v3 namespace is only configured

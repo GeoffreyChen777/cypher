@@ -8,123 +8,17 @@
 //!    a newer command of the same kind supersedes steer/interrupt; an interrupt whose
 //!    `based_on.turn_id` is already past → Superseded; otherwise Execute.
 
-use serde::{Deserialize, Serialize};
-
-use cypher_proto::{PendingAttachment, RunRequest, UserInputAnswer};
-
-use crate::constants::COMMAND_DEFAULT_TTL_MS;
+use cypher_proto::PendingAttachment;
+pub use cypher_proto::{
+    CommandBasedOn, SessionCommandEntry, SessionCommandKind, SessionCommandPayload,
+    SessionCommandStatus,
+};
 
 /// How long a Run carrying pending attachments may wait for its uploads to be
 /// sealed before the host expires it (aligned with the engine's staging-dir
 /// TTL, so a wedged upload can't leave the command Pending forever). Bounded
 /// wait is a product requirement: the durable queue must eventually resolve.
 pub const ATTACHMENT_SEAL_GRACE_MS: i64 = 10 * 60 * 1000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionCommandKind {
-    Run,
-    Steer,
-    Interrupt,
-    RespondInput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionCommandStatus {
-    Pending,
-    Applied,
-    Rejected,
-    Expired,
-    Superseded,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum SessionCommandPayload {
-    #[serde(rename_all = "camelCase")]
-    Run {
-        request: RunRequest,
-        /// Client-minted message id for the optimistic user entry (dedup key).
-        message_id: String,
-        /// Optional EFFECTIVE harness prompt override (the Comment feature):
-        /// the doc user entry keeps `request.prompt` (the visible truth)
-        /// while the agent receives this augmented prompt when present.
-        /// Additive + serde-defaulted for wire compat (old payloads stay
-        /// byte-identical).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_prompt: Option<String>,
-    },
-    #[serde(rename_all = "camelCase")]
-    Steer {
-        prompt: String,
-        message_id: Option<String>,
-        /// See [`SessionCommandPayload::Run::agent_prompt`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_prompt: Option<String>,
-    },
-    Interrupt {},
-    #[serde(rename_all = "camelCase")]
-    RespondInput {
-        request_id: String,
-        answers: Vec<UserInputAnswer>,
-    },
-}
-
-impl SessionCommandPayload {
-    pub fn kind(&self) -> SessionCommandKind {
-        match self {
-            SessionCommandPayload::Run { .. } => SessionCommandKind::Run,
-            SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
-            SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
-            SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommandBasedOn {
-    pub turn_id: Option<String>,
-    pub frontier: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionCommandEntry {
-    pub id: String,
-    pub payload: SessionCommandPayload,
-    pub issued_by: String,
-    /// Epoch millis.
-    pub issued_at: i64,
-    #[serde(default)]
-    pub based_on: Option<CommandBasedOn>,
-    /// Epoch millis; defaults to issued_at + COMMAND_DEFAULT_TTL_MS when absent.
-    #[serde(default)]
-    pub expires_at: Option<i64>,
-    pub status: SessionCommandStatus,
-    #[serde(default)]
-    pub resolution: Option<String>,
-    /// Epoch millis of the ORIGINAL user send — the first attempt's
-    /// `issued_at`. Preserved across retries (`retry_command` copies it from
-    /// the failed attempt) so the UI can show the true send time/order even
-    /// after a reissue. Additive + serde-defaulted: legacy entries written
-    /// before this field existed stay byte-identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sent_at: Option<i64>,
-}
-
-impl SessionCommandEntry {
-    pub fn kind(&self) -> SessionCommandKind {
-        self.payload.kind()
-    }
-
-    pub fn effective_expiry(&self) -> i64 {
-        self.expires_at
-            .unwrap_or(self.issued_at + COMMAND_DEFAULT_TTL_MS)
-    }
-}
 
 /// Rule 2: only the composer that issued a still-pending command may cancel it.
 pub fn can_composer_cancel(entry: &SessionCommandEntry, device_id: &str) -> bool {
@@ -235,6 +129,8 @@ pub fn evaluate_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::COMMAND_DEFAULT_TTL_MS;
+    use cypher_proto::RunRequest;
 
     fn entry(id: &str, payload: SessionCommandPayload, issued_at: i64) -> SessionCommandEntry {
         SessionCommandEntry {

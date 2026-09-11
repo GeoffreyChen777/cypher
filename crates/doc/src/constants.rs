@@ -22,6 +22,6 @@ pub const TAIL_MESSAGE_COUNT: usize = 64;
 /// Terminal output batching cadence (ms).
 pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 12;
 /// Default TTL for durable commands.
-pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+pub use cypher_proto::COMMAND_DEFAULT_TTL_MS;
 /// Current session doc schema version (`meta.schemaVersion`).
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
