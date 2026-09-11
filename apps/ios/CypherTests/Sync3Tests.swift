@@ -1,8 +1,27 @@
 import XCTest
+import SQLite3
 @testable import Cypher
 
 @MainActor
 final class Sync3Tests: XCTestCase {
+    func testEarlierPrototypeIsRejectedWithoutResettingData() throws {
+        let url = try directory().appendingPathComponent("earlier.sqlite")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "PRAGMA user_version=6; CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('keep');", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db); db = nil
+        XCTAssertThrowsError(try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")) {
+            XCTAssertEqual($0 as? Sync3Error, .protocolError("unsupported_journal_format"))
+        }
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT value, (SELECT user_version FROM pragma_user_version) FROM sentinel", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        XCTAssertEqual(String(cString: sqlite3_column_text(statement, 0)), "keep")
+        XCTAssertEqual(sqlite3_column_int(statement, 1), 6)
+    }
     private func sharedJSON(_ name: String) throws -> JSONValue {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -178,6 +197,10 @@ final class Sync3Tests: XCTestCase {
             journal = nil
             journal = try Sync3Journal(url: url, account: "account", room: "room", actor: "phone")
             XCTAssertEqual(try journal!.projection.commands["command"]?["command"]?.objectValue?["status"], c["status"])
+            if let expected = c["acceptedOpId"] {
+                XCTAssertEqual(try journal!.projection.commands["command"]?["acceptedOpId"], expected)
+                XCTAssertEqual(pure.commands["command"]?["acceptedOpId"], expected)
+            }
             XCTAssertEqual(try journal!.cursor, Int64(committed.count))
         }
     }

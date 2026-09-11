@@ -46,6 +46,7 @@ fn enqueue_into(db: &Connection, operation: &Operation) -> Result<(), Error> {
 pub struct Journal {
     db: Connection,
     actor: String,
+    scope: [u8; 32],
 }
 
 /// A bounded render window, not a replacement for the replication cursor.
@@ -71,7 +72,7 @@ impl Journal {
         let prototype: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync3_projection')",
             [], |r| r.get(0))?;
-        if prototype || ![0, 6].contains(&format) {
+        if prototype || ![0, 7].contains(&format) {
             // Never silently reopen a different storage format as empty.
             return Err(invalid("unsupported_journal_format"));
         }
@@ -127,11 +128,20 @@ impl Journal {
         if identity != (account.into(), room.into(), actor.into()) {
             return Err(invalid("scope_mismatch"));
         }
-        tx.pragma_update(None, "user_version", 6)?;
+        tx.pragma_update(None, "user_version", 7)?;
         tx.commit()?;
         Ok(Self {
             db,
             actor: actor.into(),
+            scope: {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(serde_json::to_vec(&(
+                    "sync3-journal-scope-v1",
+                    account,
+                    room,
+                ))?)
+                .into()
+            },
         })
     }
     pub fn actor(&self) -> &str {
@@ -294,6 +304,9 @@ impl Journal {
     /// Persist only changed producer metadata, not its complete source fold or
     /// historical transcript. The revision also fences concurrent/stale writers.
     pub fn enqueue_writer_frame(&mut self, frame: &writer::Frame) -> Result<(), Error> {
+        if frame.scope() != &self.scope {
+            return Err(invalid("writer_scope_mismatch"));
+        }
         if frame.actor != self.actor {
             return Err(invalid("actor_mismatch"));
         }
@@ -398,12 +411,25 @@ impl Journal {
                 .collect::<Result<Vec<_>, _>>()?
         };
         let writer = writer::TranscriptWriter::restore(&header, rows)?;
-        if writer.root_id() != root || writer.actor() != self.actor || writer.revision() != revision
+        if writer.root_id() != root
+            || writer.actor() != self.actor
+            || writer.revision() != revision
+            || writer.scope() != &self.scope
         {
             return Err(invalid("writer_checkpoint_conflict"));
         }
         tx.commit()?;
         Ok(Some(writer))
+    }
+    /// Bind the producer to this account/room before any callback can enqueue
+    /// its frames. An actor ID alone is not an account or room boundary.
+    pub fn new_writer(
+        &self,
+        owner_epoch: u64,
+        run_id: Option<String>,
+        entry: &cypher_proto::SessionMessageEntry,
+    ) -> Result<writer::TranscriptWriter, Error> {
+        writer::TranscriptWriter::new(self.scope, self.actor.clone(), owner_epoch, run_id, entry)
     }
     pub fn pending(&self) -> Result<Vec<Operation>, Error> {
         let mut query = self.db.prepare(
@@ -909,13 +935,22 @@ mod tests {
                     .unwrap(),
                 case["status"]
             );
+            if let Some(expected) = case.get("acceptedOpId") {
+                assert_eq!(
+                    serde_json::to_value(
+                        &j.projection().unwrap().commands["command"].accepted_op_id
+                    )
+                    .unwrap(),
+                    *expected
+                );
+            }
         }
     }
 
     #[test]
     fn previous_prototype_is_rejected_without_reinitializing_its_data() {
         let dir = tempfile::tempdir().unwrap();
-        for format in 3..=5 {
+        for format in 3..=6 {
             let path = dir.path().join(format!("old-{format}.sqlite"));
             let db = rusqlite::Connection::open(&path).unwrap();
             db.pragma_update(None, "user_version", format).unwrap();

@@ -17,6 +17,7 @@ type Hash = [u8; 32];
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    scope: Hash,
     actor: String,
     owner_epoch: u64,
     run_id: Option<String>,
@@ -103,6 +104,9 @@ pub struct Frame {
     more: bool,
 }
 impl Frame {
+    pub(super) fn scope(&self) -> &Hash {
+        &self.next.header.config.scope
+    }
     pub fn operations(&self) -> &[Operation] {
         &self.operations
     }
@@ -124,7 +128,8 @@ pub struct TranscriptWriter {
 impl TranscriptWriter {
     /// `entry` supplies metadata only. The fold and final status are supplied
     /// separately. No entry is emitted until there is an actual part.
-    pub fn new(
+    pub(super) fn new(
+        scope: Hash,
         actor: String,
         owner_epoch: u64,
         run_id: Option<String>,
@@ -140,6 +145,7 @@ impl TranscriptWriter {
             status: Some(MessageStatus::Streaming),
         };
         let mut config = Config {
+            scope,
             actor,
             owner_epoch,
             run_id,
@@ -153,7 +159,7 @@ impl TranscriptWriter {
         config.seed = hash(&serde_json::to_vec(&config)?);
         let state = State {
             header: Header {
-                version: 1,
+                version: 2,
                 config,
                 revision: 0,
                 next_op: 0,
@@ -176,6 +182,9 @@ impl TranscriptWriter {
     }
     pub fn root_id(&self) -> &str {
         &self.state.header.config.entry.id
+    }
+    pub(super) fn scope(&self) -> &Hash {
+        &self.state.header.config.scope
     }
     pub(super) fn actor(&self) -> &str {
         &self.state.header.config.actor
@@ -342,10 +351,11 @@ impl TranscriptWriter {
 
     pub(super) fn restore(header: &str, rows: Vec<(String, usize, String)>) -> Result<Self, Error> {
         let header: Header = serde_json::from_str(header)?;
-        if header.version != 1 || !header.config.entry.parts.is_empty() {
+        if header.version != 2 || !header.config.entry.parts.is_empty() {
             return Err(invalid("invalid_writer_checkpoint"));
         }
         let checked = Self::new(
+            header.config.scope,
             header.config.actor.clone(),
             header.config.owner_epoch,
             header.config.run_id.clone(),

@@ -285,7 +285,6 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
         MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolCall,
         parts::render_parts, sync3::Event,
     };
-    use cypher_sync::sync3::writer::TranscriptWriter;
     use sha2::{Digest, Sha256};
     let response = reqwest::Client::new()
         .post(format!("{path}init"))
@@ -333,7 +332,12 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
         status: Some(MessageStatus::Streaming),
         continuation_of: None,
     };
-    let mut writer = TranscriptWriter::new("host".into(), 1, Some("run".into()), &entry).unwrap();
+    let mut writer = host
+        .journal()
+        .lock()
+        .unwrap()
+        .new_writer(1, Some("run".into()), &entry)
+        .unwrap();
     let mut parts = vec![
         MessagePart::Text {
             id: "before".into(),

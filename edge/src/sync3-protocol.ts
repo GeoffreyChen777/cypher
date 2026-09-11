@@ -11,9 +11,9 @@ const utf8 = new TextEncoder();
 
 export type Event =
   | { type: "commandQueued"; commandId: string; command: Command }
-  | { type: "commandAccepted"; commandId: string; runId: string }
+  | { type: "commandClaimAttempted"; commandId: string; runId: string }
   | { type: "commandResolved"; commandId: string; status: CommandStatus; resolution: string | null }
-  | { type: "commandCancelled"; commandId: string }
+  | { type: "commandCancelAttempted"; commandId: string }
   | { type: "runStarted"; runId: string }
   | { type: "messageCreated"; runId: string | null; messageId: string; role: Entry["role"]; deviceId: string; createdAt: number; continuationOf: string | null }
   | { type: "partPut"; messageId: string; index: number; part: Part }
@@ -82,8 +82,8 @@ export function validateOperation(value: unknown): Operation {
   const ev = op.event as Record<string, unknown>;
   if (!ev || typeof ev !== "object") reject("invalid_event");
   const fields: Record<string, string[]> = {
-    commandQueued: ["commandId", "command"], commandAccepted: ["commandId", "runId"],
-    commandResolved: ["commandId", "status", "resolution"], commandCancelled: ["commandId"],
+    commandQueued: ["commandId", "command"], commandClaimAttempted: ["commandId", "runId"],
+    commandResolved: ["commandId", "status", "resolution"], commandCancelAttempted: ["commandId"],
     runStarted: ["runId"], messageCreated: ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
     partPut: ["messageId", "index", "part"], textAppended: ["messageId", "partId", "offset", "text"],
     messageFinished: ["messageId", "status"], attachmentSealed: ["uploadId", "path", "fileName"],
@@ -158,7 +158,7 @@ export function canonical(value: unknown): string {
 }
 
 export interface Projection {
-  commands: Record<string, { command: Command; actor: string; runId: string | null }>;
+  commands: Record<string, { command: Command; actor: string; runId: string | null; acceptedOpId: string | null }>;
   runs: Record<string, { outcome: "completed" | "failed" | "interrupted" | null }>;
   messages: Record<string, { createdSeq: number; runId: string | null; entry: Entry }>;
   attachments: Record<string, { path: string; fileName: string }>;
@@ -175,7 +175,7 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
   validateOperation(op);
   if (op.ownerEpoch !== ownerEpoch) reject("stale_owner_epoch");
   const ev = op.event;
-  if (ev.type !== "commandQueued" && ev.type !== "commandCancelled" && op.actor !== owner) reject("not_owner");
+  if (ev.type !== "commandQueued" && ev.type !== "commandCancelAttempted" && op.actor !== owner) reject("not_owner");
   const live = (run: string) => {
     if (store.get("runs", run)?.outcome !== null) reject("run_not_live");
   };
@@ -193,13 +193,14 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
   switch (ev.type) {
     case "commandQueued":
       if (store.get("commands", ev.commandId)) reject("command_exists");
-      store.set("commands", ev.commandId, { command: ev.command, actor: op.actor, runId: null }); break;
-    case "commandAccepted": {
+      store.set("commands", ev.commandId, { command: ev.command, actor: op.actor, runId: null, acceptedOpId: null }); break;
+    case "commandClaimAttempted": {
       const cmd = store.get("commands", ev.commandId);
       if (!cmd) reject("unknown_command");
-      if (cmd.command.status !== "pending") reject("command_resolved");
-      if (cmd.runId !== null) reject("command_already_accepted");
-      store.set("commands", ev.commandId, { ...cmd, runId: ev.runId }); break;
+      if (cmd.command.status === "pending" && cmd.runId === null) {
+        store.set("commands", ev.commandId, { ...cmd, runId: ev.runId, acceptedOpId: op.id });
+      }
+      break;
     }
     case "commandResolved": {
       const cmd = store.get("commands", ev.commandId);
@@ -208,12 +209,14 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
       if (ev.status === "applied" && cmd.runId === null) reject("command_not_accepted");
       store.set("commands", ev.commandId, { ...cmd, command: { ...cmd.command, status: ev.status, resolution: ev.resolution } }); break;
     }
-    case "commandCancelled": {
+    case "commandCancelAttempted": {
       const cmd = store.get("commands", ev.commandId);
       if (!cmd) reject("unknown_command");
       if (cmd.actor !== op.actor) reject("not_command_author");
-      if (cmd.runId !== null || cmd.command.status !== "pending") reject("command_not_cancellable");
-      store.set("commands", ev.commandId, { ...cmd, command: { ...cmd.command, status: "cancelled" } }); break;
+      if (cmd.runId === null && cmd.command.status === "pending") {
+        store.set("commands", ev.commandId, { ...cmd, command: { ...cmd.command, status: "cancelled" } });
+      }
+      break;
     }
     case "runStarted":
       if (store.get("runs", ev.runId)) reject("run_exists");

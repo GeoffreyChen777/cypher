@@ -76,6 +76,7 @@ describe("sync3 shared contract", () => {
       } else applyOperation(store, op, "host", 1);
     });
     expect(projection.commands.command.command.status).toBe(scenario.status);
+    if ("acceptedOpId" in scenario) expect(projection.commands.command.acceptedOpId).toBe(scenario.acceptedOpId);
   });
   it("uses the shared canonical JSON number domain", () => {
     // Receipt identity is canonical JSON bytes, not Object.is(-0, 0).

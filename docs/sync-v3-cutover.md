@@ -52,6 +52,10 @@ review submissions.
    Before any external side effect, the host must obtain a committed owner
    fence and durably record its execution claim. A crash with an uncertain
    claim is recovery work, never an automatic second dispatch.
+   The user selected server-ordered durable claim/cancel decisions. Winning
+   operation identity is now retained on the command; ordinary losing attempts
+   commit without poisoning the batch. Host integration must wait for its own
+   winning decision before publishing run start and claiming local execution.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

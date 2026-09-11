@@ -28,7 +28,7 @@ final class Sync3Journal {
             sqlite3_busy_timeout(db, 5_000)
             let format = try query("PRAGMA user_version").first?[0]
             let prototype = try query("SELECT name FROM sqlite_master WHERE type='table' AND name='sync3_projection'")
-            guard prototype.isEmpty, format == "0" || format == "6" else { try Sync3Wire.fail("unsupported_journal_format") }
+            guard prototype.isEmpty, format == "0" || format == "7" else { try Sync3Wire.fail("unsupported_journal_format") }
             for path in [url.path, url.path + "-wal", url.path + "-shm"] where FileManager.default.fileExists(atPath: path) {
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
             }
@@ -59,7 +59,7 @@ final class Sync3Journal {
                 try execute("INSERT OR IGNORE INTO sync3_meta(singleton,account,room,actor) VALUES(1,?,?,?)", [account, room, actor])
                 let identity = try query("SELECT account,room,actor FROM sync3_meta WHERE singleton=1")
                 guard identity.first == [account, room, actor] else { try Sync3Wire.fail("scope_mismatch") }
-                try execute("PRAGMA user_version=6")
+                try execute("PRAGMA user_version=7")
             }
         } catch {
             sqlite3_close(db); db = nil; throw error
@@ -230,7 +230,7 @@ final class Sync3Journal {
         }
         let e = operation.event
         switch e["type"]!.stringValue! {
-        case "commandQueued", "commandAccepted", "commandResolved", "commandCancelled": try load("commands", e["commandId"]!.stringValue!)
+        case "commandQueued", "commandClaimAttempted", "commandResolved", "commandCancelAttempted": try load("commands", e["commandId"]!.stringValue!)
         case "runStarted":
             let run = e["runId"]!.stringValue!
             try load("runs", run)

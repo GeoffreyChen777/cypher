@@ -45,7 +45,7 @@ pub enum Event {
         #[serde(deserialize_with = "command::deserialize")]
         command: Command,
     },
-    CommandAccepted {
+    CommandClaimAttempted {
         command_id: String,
         run_id: String,
     },
@@ -55,7 +55,7 @@ pub enum Event {
         #[serde(deserialize_with = "required_option")]
         resolution: Option<String>,
     },
-    CommandCancelled {
+    CommandCancelAttempted {
         command_id: String,
     },
     RunStarted {
@@ -290,7 +290,7 @@ impl Operation {
                     return Err("command_identity_mismatch");
                 }
             }
-            Event::CommandAccepted { command_id, run_id } => {
+            Event::CommandClaimAttempted { command_id, run_id } => {
                 id(command_id)?;
                 id(run_id)?;
             }
@@ -308,7 +308,7 @@ impl Operation {
                     return Err("invalid_command_resolution");
                 }
             }
-            Event::CommandCancelled { command_id } => id(command_id)?,
+            Event::CommandCancelAttempted { command_id } => id(command_id)?,
             Event::RunStarted { run_id } | Event::RunFinished { run_id, .. } => id(run_id)?,
             Event::MessageCreated {
                 run_id,
@@ -412,6 +412,10 @@ pub struct CommandState {
     pub command: Command,
     pub actor: String,
     pub run_id: Option<String>,
+    /// Only this committed attempt won dispatch authority. Matching a run ID
+    /// alone is insufficient: two attempts may target the same running turn.
+    #[serde(deserialize_with = "required_option")]
+    pub accepted_op_id: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -481,7 +485,7 @@ impl Projection {
         }
         if !matches!(
             op.event,
-            Event::CommandQueued { .. } | Event::CommandCancelled { .. }
+            Event::CommandQueued { .. } | Event::CommandCancelAttempted { .. }
         ) && op.actor != owner
         {
             return Err("not_owner");
@@ -500,18 +504,16 @@ impl Projection {
                         command: command.clone(),
                         actor: op.actor.clone(),
                         run_id: None,
+                        accepted_op_id: None,
                     },
                 );
             }
-            Event::CommandAccepted { command_id, run_id } => {
+            Event::CommandClaimAttempted { command_id, run_id } => {
                 let cmd = self.commands.get_mut(command_id).ok_or("unknown_command")?;
-                if cmd.command.status != SessionCommandStatus::Pending {
-                    return Err("command_resolved");
+                if cmd.command.status == SessionCommandStatus::Pending && cmd.run_id.is_none() {
+                    cmd.run_id = Some(run_id.clone());
+                    cmd.accepted_op_id = Some(op.id.clone());
                 }
-                if cmd.run_id.is_some() {
-                    return Err("command_already_accepted");
-                }
-                cmd.run_id = Some(run_id.clone());
             }
             Event::CommandResolved {
                 command_id,
@@ -528,15 +530,14 @@ impl Projection {
                 cmd.command.status = *status;
                 cmd.command.resolution = resolution.clone();
             }
-            Event::CommandCancelled { command_id } => {
+            Event::CommandCancelAttempted { command_id } => {
                 let cmd = self.commands.get_mut(command_id).ok_or("unknown_command")?;
                 if cmd.actor != op.actor {
                     return Err("not_command_author");
                 }
-                if cmd.run_id.is_some() || cmd.command.status != SessionCommandStatus::Pending {
-                    return Err("command_not_cancellable");
+                if cmd.run_id.is_none() && cmd.command.status == SessionCommandStatus::Pending {
+                    cmd.command.status = SessionCommandStatus::Cancelled;
                 }
-                cmd.command.status = SessionCommandStatus::Cancelled;
             }
             Event::RunStarted { run_id } => {
                 if self.runs.contains_key(run_id) {
@@ -818,6 +819,13 @@ mod tests {
                 serde_json::to_value(projection.commands["command"].command.status).unwrap(),
                 case["status"]
             );
+            if let Some(expected) = case.get("acceptedOpId") {
+                assert_eq!(
+                    serde_json::to_value(&projection.commands["command"].accepted_op_id).unwrap(),
+                    *expected,
+                    "{case}"
+                );
+            }
         }
     }
 

@@ -57,7 +57,7 @@ events are host-authored; command enqueue is multi-device. An account member
 is trusted within its account; an actor label is not a cryptographic device
 identity. User/organization authorization remains mandatory at the Worker.
 
-Current event vocabulary: command queued/accepted/resolved/cancelled, run started,
+Current event vocabulary: command queued, claim/cancel attempted, command resolved, run started,
 message created, indexed part put, text appended (part-scoped byte offset
 checked), message finished, attachment sealed, run finished. The initial toy
 tool/input events have been removed, not retained as compatibility aliases.
@@ -77,8 +77,28 @@ imported by Edge). Validation happens before decoding can discard unknown
 properties or default omitted fields. This preserves model settings, worktrees,
 comment prompts, attachment descriptors, input labels and retry identity.
 Legacy Loro frontiers are not accepted on this wire. The local normalized
-SQLite format is now **6**; earlier prototype formats are rejected without
+SQLite format is now **7**; earlier prototype formats are rejected without
 resetting or migrating their contents. The network version remains **3**.
+
+#### Durable claim/cancel decisions
+
+The user selected **server-ordered durable decisions**, not client-side
+guessing/removal of rejected outbox work. `commandClaimAttempted` and
+`commandCancelAttempted` are committed attempts. An authorized attempt that
+loses an ordinary claim/cancel race is a replayable no-op, not a rejected
+batch that parks the chat. Unknown commands, wrong authors and stale ownership
+epochs still fail closed. The first winning claim stores `acceptedOpId` with
+its run ID; later attempts cannot overwrite either, even when they request
+the same run ID. Repeated delivery returns the same committed receipt.
+
+The host must first await its claim's committed decision and match
+`acceptedOpId` to its own durable intent. It must not batch a speculative
+`runStarted` behind an unconfirmed claim: a losing claim grants no run.
+Committed run fencing and a local, non-replayable execution claim are then
+required before external effects. Those host-dispatch primitives and actual
+harness integration are still release blockers; the protocol alone does not
+grant exactly-once external execution. The previous prototype event names are
+rejected rather than maintained as compatibility aliases.
 
 The complete native transcript entry/part models, event fold, render privacy
 policy and continuation helpers now live in `cypher-proto`. The running-code
@@ -118,7 +138,10 @@ replication cursor. Normal-client use and bounded replay remain unfinished.
 
 ### Durable bounded producer
 
-`sync3::writer::TranscriptWriter` consumes the storage-independent native fold
+`Journal::new_writer` binds a `sync3::writer::TranscriptWriter` to the account,
+room and actor before any callback can enqueue a frame. Cross-scope callbacks
+and copied foreign checkpoints fail closed, including when actor IDs match.
+The writer consumes the storage-independent native fold
 one bounded frame at a time. Callers must retain the full append-only source
 and continue while `Progress.more` is true. Text is split on UTF-8 boundaries
 with JSON escaping included in the physical message budget. Continuations
@@ -137,7 +160,8 @@ contain metadata and hashes, not another copy of the transcript or private
 tool input. Revision conflicts fail closed. A token append changes four rows:
 its operation, producer header, current chunk and current source slot, rather
 than rewriting every prior slot. These private producer tables are additive
-to native SQLite format 6 and are not replicated wire entities.
+to native SQLite format 7 and are not replicated wire entities. Private
+producer header version 2 includes the scope binding.
 
 ## Deployment and migration boundaries
 
@@ -163,6 +187,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
 - [x] Host ownership fence and reducer validation.
 - [x] Complete command payloads, issuer/identity checks, cancellation races and
   immutable resolution, with shared three-language validation/lifecycle cases.
+- [x] Durable claim/cancel attempts and immutable winning operation identity,
+  including same-run competition, receipt replay and transaction rollback.
 - [x] Full rendered-part wire shapes, continuation/status metadata, scoped part
   identity, UTF-8 deltas and atomic per-message byte-budget rejection.
 - [x] Immutable committed message order and indexed, row/byte-bounded local
@@ -218,13 +244,13 @@ harness execution test.
 
 Results:
 
-- Rust proto/sync: **123 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **125 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
   No normal-client protocol was switched by these extractions.
-- Edge: **112 unit + 55 workerd passed**; typecheck and bundle build passed.
-- iOS `Cypher` scheme: **186 passed**, including seventeen v3 tests, on an isolated
+- Edge: **114 unit + 59 workerd passed**; typecheck and bundle build passed.
+- iOS `Cypher` scheme: **187 passed**, including eighteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine unit tests: **147 passed**; UI tests: **672 passed**.
   The prior icon failure was fixed by preferring package-name matches over
@@ -249,11 +275,12 @@ Results:
   Both runtimes also read the immutable-order index from that shared file.
 - With 1,000 unrelated historical commands present, one text append makes
   exactly three local row changes: its message, its event and the cursor.
-- Nine producer tests cover multibyte/escaped rollover, private-input removal,
+- Eleven producer tests cover multibyte/escaped rollover, private-input removal,
   late tool/question resolution, ambiguous durable acceptance, restart with
   an unwritten suffix, rollback on a later conflicting operation, repeated
   scoped IDs, sparse checkpoint writes, 70-message interrupted finalization,
-  invalid checkpoint offsets/revisions, and empty terminal output.
+  invalid checkpoint offsets/revisions, empty terminal output, and account/
+  room/actor fencing of callbacks and copied checkpoints.
 - Shared negative fixtures prevent non-string roles/outcomes from committing.
   Full-part vectors also prove lossless known tool variants, nested shape
   rejection and removal of private raw tool inputs. Shared lifecycle cases
@@ -263,9 +290,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `ccea9e9`, including Linux backend,
+- GitHub CI passed all five jobs for `9c55c97`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34640670571.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34644801559.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 

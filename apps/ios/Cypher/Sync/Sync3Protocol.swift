@@ -93,8 +93,8 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         guard ownerEpoch > 0, ownerEpoch <= Sync3Wire.maxSafeInteger else { try Sync3Wire.fail("invalid_epoch") }
         let type = try Sync3Wire.string(event["type"])
         let fields: [String: [String]] = [
-            "commandQueued": ["commandId", "command"], "commandAccepted": ["commandId", "runId"],
-            "commandResolved": ["commandId", "status", "resolution"], "commandCancelled": ["commandId"],
+            "commandQueued": ["commandId", "command"], "commandClaimAttempted": ["commandId", "runId"],
+            "commandResolved": ["commandId", "status", "resolution"], "commandCancelAttempted": ["commandId"],
             "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
             "partPut": ["messageId", "index", "part"], "textAppended": ["messageId", "partId", "offset", "text"],
             "messageFinished": ["messageId", "status"], "attachmentSealed": ["uploadId", "path", "fileName"],
@@ -176,12 +176,14 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         }
         switch kind {
         case "commands":
-            try Sync3Wire.shape(record, ["command", "actor", "runId"])
+            try Sync3Wire.shape(record, ["command", "actor", "runId", "acceptedOpId"])
             try Sync3CommandSchema.validate(record["command"]!)
             guard let command = record["command"]?.objectValue, command["id"] == .string(id),
                   command["issuedBy"] == record["actor"] else { try Sync3Wire.fail("invalid_projection") }
             _ = try Sync3Wire.identifier(record["actor"])
-            try nullableID(record["runId"]); commands[id] = record
+            try nullableID(record["runId"]); try nullableID(record["acceptedOpId"])
+            guard (record["runId"] == .null) == (record["acceptedOpId"] == .null) else { try Sync3Wire.fail("invalid_command") }
+            commands[id] = record
         case "runs":
             try Sync3Wire.shape(record, ["outcome"])
             guard record["outcome"] == .null ||
@@ -241,24 +243,24 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         try op.validate()
         guard op.ownerEpoch == ownerEpoch else { try Sync3Wire.fail("stale_owner_epoch") }
         let e = op.event, type = e["type"]!.stringValue!
-        if type != "commandQueued", type != "commandCancelled", op.actor != owner { try Sync3Wire.fail("not_owner") }
+        if type != "commandQueued", type != "commandCancelAttempted", op.actor != owner { try Sync3Wire.fail("not_owner") }
         switch type {
         case "commandQueued":
             let id = e["commandId"]!.stringValue!
             guard commands[id] == nil else { try Sync3Wire.fail("command_exists") }
-            commands[id] = ["command": e["command"]!, "actor": .string(op.actor), "runId": .null]
-        case "commandAccepted":
+            commands[id] = ["command": e["command"]!, "actor": .string(op.actor), "runId": .null, "acceptedOpId": .null]
+        case "commandClaimAttempted":
             let id = e["commandId"]!.stringValue!
             guard var cmd = commands[id] else { try Sync3Wire.fail("unknown_command") }
-            guard cmd["command"]?.objectValue?["status"] == .string("pending") else { try Sync3Wire.fail("command_resolved") }
-            guard cmd["runId"] == .null else { try Sync3Wire.fail("command_already_accepted") }
-            cmd["runId"] = e["runId"]; commands[id] = cmd
-        case "commandResolved", "commandCancelled":
+            if cmd["command"]?.objectValue?["status"] == .string("pending"), cmd["runId"] == .null {
+                cmd["runId"] = e["runId"]; cmd["acceptedOpId"] = .string(op.id); commands[id] = cmd
+            }
+        case "commandResolved", "commandCancelAttempted":
             let id = e["commandId"]!.stringValue!
             guard var cmd = commands[id], var entry = cmd["command"]?.objectValue else { try Sync3Wire.fail("unknown_command") }
-            if type == "commandCancelled" {
+            if type == "commandCancelAttempted" {
                 guard cmd["actor"] == .string(op.actor) else { try Sync3Wire.fail("not_command_author") }
-                guard cmd["runId"] == .null, entry["status"] == .string("pending") else { try Sync3Wire.fail("command_not_cancellable") }
+                guard cmd["runId"] == .null, entry["status"] == .string("pending") else { break }
                 entry["status"] = .string("cancelled")
             } else {
                 guard entry["status"] == .string("pending") else { try Sync3Wire.fail("command_resolved") }

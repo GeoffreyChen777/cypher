@@ -1,4 +1,6 @@
 [
+  {"id":"old-claim","actor":"host","ownerEpoch":1,"event":{"type":"commandAccepted","commandId":"c","runId":"r"}},
+  {"id":"old-cancel","actor":"phone","ownerEpoch":1,"event":{"type":"commandCancelled","commandId":"c"}},
   {"id":"a","actor":"host","ownerEpoch":0,"event":{"type":"runStarted","runId":"r"}},
   {"id":"a","actor":"host","ownerEpoch":9007199254740992,"event":{"type":"runStarted","runId":"r"}},
   {"id":"a/b","actor":"host","ownerEpoch":1,"event":{"type":"runStarted","runId":"r"}},

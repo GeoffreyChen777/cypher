@@ -70,9 +70,9 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
     let mut projection = Projection::default();
     match &operation.event {
         Event::CommandQueued { command_id, .. }
-        | Event::CommandAccepted { command_id, .. }
+        | Event::CommandClaimAttempted { command_id, .. }
         | Event::CommandResolved { command_id, .. }
-        | Event::CommandCancelled { command_id } => {
+        | Event::CommandCancelAttempted { command_id } => {
             load(db, &mut projection, "commands", command_id)?;
         }
         Event::RunStarted { run_id } => {

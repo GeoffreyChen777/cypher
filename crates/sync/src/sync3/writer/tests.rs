@@ -16,7 +16,10 @@ fn entry() -> SessionMessageEntry {
     }
 }
 fn writer() -> TranscriptWriter {
-    TranscriptWriter::new("host".into(), 1, None, &entry()).unwrap()
+    Journal::open(Path::new(":memory:"), "account", "room", "host")
+        .unwrap()
+        .new_writer(1, None, &entry())
+        .unwrap()
 }
 fn text(id: &str, value: &str) -> MessagePart {
     MessagePart::Text {
@@ -388,6 +391,86 @@ fn empty_finish_persists_terminal_producer_without_a_fake_message() {
             more: false
         }
     );
+}
+
+#[test]
+fn producer_callbacks_cannot_cross_account_room_or_actor_boundaries() {
+    for (account, room, actor) in [
+        ("other-account", "room", "host"),
+        ("account", "other-room", "host"),
+        ("account", "room", "other-host"),
+    ] {
+        let mut foreign = Journal::open(Path::new(":memory:"), account, room, actor).unwrap();
+        let mut w = writer();
+        assert!(
+            w.sync(&[text("text", "private to original scope")], |frame| {
+                foreign.enqueue_writer_frame(frame)
+            })
+            .is_err()
+        );
+        assert!(foreign.pending().unwrap().is_empty());
+        assert!(foreign.load_writer("root").unwrap().is_none());
+        // A failed wrong-scope callback did not consume the immutable frame.
+        let mut original = Journal::open(Path::new(":memory:"), "account", "room", "host").unwrap();
+        finish_all(
+            &mut w,
+            &mut original,
+            &[text("text", "private to original scope")],
+        );
+        apply_outbox(&mut original);
+        assert_eq!(
+            joined_text(&ordered_parts(&original)),
+            "private to original scope"
+        );
+    }
+}
+
+#[test]
+fn copied_checkpoint_is_not_recoverable_under_a_different_scope() {
+    let mut original = Journal::open(Path::new(":memory:"), "account", "room", "host").unwrap();
+    let mut w = writer();
+    sync_all(&mut w, &mut original, &[text("text", "original")]);
+    let (revision, header): (u64, String) = original
+        .db
+        .query_row(
+            "SELECT revision,header FROM sync3_writers WHERE id='root'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let foreign = Journal::open(Path::new(":memory:"), "account", "other-room", "host").unwrap();
+    foreign
+        .db
+        .execute(
+            "INSERT INTO sync3_writers VALUES('root',?,?)",
+            params![revision, header],
+        )
+        .unwrap();
+    let mut query = original
+        .db
+        .prepare("SELECT kind,ordinal,body FROM sync3_writer_items")
+        .unwrap();
+    for row in query
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+    {
+        let (kind, ordinal, body) = row.unwrap();
+        foreign
+            .db
+            .execute(
+                "INSERT INTO sync3_writer_items VALUES('root',?,?,?)",
+                params![kind, ordinal, body],
+            )
+            .unwrap();
+    }
+    assert!(foreign.load_writer("root").is_err());
+    assert!(foreign.pending().unwrap().is_empty());
 }
 
 #[test]

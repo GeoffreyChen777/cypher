@@ -1,27 +1,42 @@
 [
-  {"name":"cancel-author-and-race","status":"cancelled","steps":[
-    {"actor":"other","event":{"type":"commandCancelled","commandId":"command"},"error":"not_command_author"},
-    {"actor":"phone","event":{"type":"commandCancelled","commandId":"command"}},
-    {"actor":"host","event":{"type":"commandAccepted","commandId":"command","runId":"run"},"error":"command_resolved"}
+  {"name":"cancel-author-and-race","status":"cancelled","acceptedOpId":null,"steps":[
+    {"actor":"other","event":{"type":"commandCancelAttempted","commandId":"command"},"error":"not_command_author"},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"},"error":"run_not_accepted"}
   ]},
-  {"name":"applied-and-immutable","status":"applied","steps":[
-    {"actor":"host","event":{"type":"commandAccepted","commandId":"command","runId":"run"}},
-    {"actor":"phone","event":{"type":"commandCancelled","commandId":"command"},"error":"command_not_cancellable"},
+  {"name":"applied-and-immutable","status":"applied","acceptedOpId":"step-0","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"applied","resolution":"dispatched"}},
     {"actor":"host","event":{"type":"runStarted","runId":"run"}},
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":"late"},"error":"command_resolved"}
   ]},
   {"name":"rejected-before-run","status":"rejected","steps":[
-    {"actor":"host","event":{"type":"commandAccepted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":"attachments unavailable"}},
     {"actor":"host","event":{"type":"runStarted","runId":"run"},"error":"run_not_accepted"}
   ]},
   {"name":"expiry","status":"expired","steps":[
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"expired","resolution":null}},
-    {"actor":"host","event":{"type":"commandAccepted","commandId":"command","runId":"run"},"error":"command_resolved"}
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}}
   ]},
   {"name":"superseded","status":"superseded","steps":[
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"superseded","resolution":"stale turn"}}
+  ]},
+  {"name":"one-winner-even-with-same-run-id","status":"pending","acceptedOpId":"step-0","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"other-run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"other-run"},"error":"run_not_accepted"},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"}}
+  ]},
+  {"name":"claim-still-requires-owner-fence","status":"pending","acceptedOpId":null,"steps":[
+    {"actor":"phone","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"},"error":"not_owner"},
+    {"actor":"host","ownerEpoch":2,"event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"},"error":"stale_owner_epoch"},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"missing","runId":"run"},"error":"unknown_command"}
   ]},
   {"name":"resolution-authority","status":"pending","steps":[
     {"actor":"phone","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":null},"error":"not_owner"},

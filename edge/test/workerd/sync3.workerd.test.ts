@@ -22,6 +22,39 @@ const queued = (id: string, text = "hello"): Operation => validateOperation({
   } } },
 });
 describe("sync3 real SQLite commit/receipt boundary", () => {
+  it("commits losing attempts without poisoning a batch and retains their receipts", async () => {
+    const loser: Operation = { id: "loser", actor: "host", ownerEpoch: 1,
+      event: { type: "commandClaimAttempted", commandId: "command", runId: "run" } };
+    let head = 0;
+    await inLog("claim-receipt", log => {
+      log.initialize("account", "host"); log.append(ops().slice(0, 2));
+      const independent = queued("independent");
+      independent.actor = "host";
+      if (independent.event.type === "commandQueued") independent.event.command.issuedBy = "host";
+      log.append([loser, independent], "host");
+      expect(log.get("commands", "command")?.acceptedOpId).toBe("op-2");
+      expect(log.get("commands", "independent")?.acceptedOpId).toBeNull();
+      head = log.state().head;
+      expect(head).toBe(4);
+    });
+    await inLog("claim-receipt", log => {
+      log.append([loser], "host"); // reply was lost; this is receipt replay
+      expect(log.state().head).toBe(head);
+      expect(log.get("commands", "command")?.acceptedOpId).toBe("op-2");
+    });
+  });
+  it("rolls back a winning decision if a later operation poisons its transaction", async () => {
+    await inLog("claim-rollback", log => {
+      log.initialize("account", "host"); log.append(ops().slice(0, 1));
+      const claim = ops()[1], poison = queued("poison");
+      poison.id = "op-1";
+      expect(() => log.append([claim, poison])).toThrow("operation_id_conflict");
+      expect(log.state().head).toBe(1);
+      expect(log.get("commands", "command")?.acceptedOpId).toBeNull();
+      log.append([claim], "host");
+      expect(log.get("commands", "command")?.acceptedOpId).toBe("op-2");
+    });
+  });
   it("caps window bytes without skipping any preceding large messages", async () => {
     await inLog("window-budget", log => {
       log.initialize("account", "host");
@@ -105,6 +138,7 @@ describe("sync3 real SQLite commit/receipt boundary", () => {
     });
     await inLog(`lifecycle-${scenario.name}`, log => {
       expect(log.get("commands", "command")?.command.status).toBe(scenario.status);
+      if ("acceptedOpId" in scenario) expect(log.get("commands", "command")?.acceptedOpId).toBe(scenario.acceptedOpId);
       if (scenario.name === "rejected-before-run") {
         expect(log.hasAcceptedRun("run")).toBe(false);
         log.transferOwner(1, "new-host");
