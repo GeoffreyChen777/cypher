@@ -23,6 +23,7 @@ pub mod doc_host;
 pub mod instance_lock;
 pub mod local_import;
 pub mod mcp;
+mod native_watch;
 pub mod pi_packages;
 pub mod pi_providers;
 pub mod pi_runtime;

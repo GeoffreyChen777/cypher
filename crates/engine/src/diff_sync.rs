@@ -112,9 +112,9 @@ struct CheckoutEntry {
     /// entry. Keep the entry until absence has lasted through the grace period.
     orphaned_since: Mutex<Option<std::time::Instant>>,
     /// Kick channel into the entry's debounce/sync task.
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: mpsc::Sender<()>,
     /// Keeps the recursive fs watchers alive; dropped on entry close.
-    watchers: Mutex<Vec<notify::RecommendedWatcher>>,
+    _watcher: Option<crate::native_watch::BackgroundWatch>,
 }
 
 /// Working-tree snapshot recorded when a chat's turn dispatches — the diff
@@ -217,6 +217,7 @@ impl CheckoutDiffSync {
         if let Some(task) = task {
             let _ = task.await;
         }
+        lock(&self.inner.entries).clear();
     }
 
     /// `WatchCheckoutDiffs` source: every tracked checkout's latest diff.
@@ -241,7 +242,7 @@ impl CheckoutDiffSync {
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
     pub fn sync_all(&self) {
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            let _ = entry.kick_tx.try_send(());
         }
     }
 
@@ -320,6 +321,14 @@ async fn resolve_identity(
 }
 
 async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
+    tokio::select! {
+        biased;
+        _ = inner.cancel.cancelled() => {},
+        _ = reconcile_owned(inner, chats, fresh) => {},
+    }
+}
+
+async fn reconcile_owned(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
     let _gate = inner.reconcile_gate.lock().await;
     // Group this device's cwd-bearing chats by canonical checkout identity.
     let mut groups: HashMap<String, (CheckoutIdentity, Vec<Chat>)> = HashMap::new();
@@ -394,7 +403,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
                     has_new
                 };
                 if has_new {
-                    let _ = entry.kick_tx.send(()); // new chat needs a sidecar now
+                    let _ = entry.kick_tx.try_send(()); // new chat needs a sidecar now
                 }
             }
             None => add_entry(inner, identity, chats),
@@ -467,40 +476,46 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
 }
 
 fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<Chat>) {
-    let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+    let (kick_tx, kick_rx) = mpsc::channel(1);
+    // Own native creation AND destruction outside the async runtime. A pending
+    // FSEvents registration must not keep an entry alive or join at runtime
+    // shutdown. The second kick closes the initial registration window.
+    let watch_identity = identity.clone();
+    let watch_kick = kick_tx.clone();
+    let watcher = crate::native_watch::BackgroundWatch::start(move || {
+        let watchers = build_watchers(&watch_identity, &watch_kick);
+        let _ = watch_kick.try_send(());
+        (!watchers.is_empty()).then_some(watchers)
+    })
+    .map_err(|err| tracing::debug!(error = %err, "diff-sync: watcher worker failed"))
+    .ok();
     let entry = Arc::new(CheckoutEntry {
         identity,
         chats: Mutex::new(chats),
         checksum: Mutex::new(None),
         orphaned_since: Mutex::new(None),
         kick_tx: kick_tx.clone(),
-        watchers: Mutex::new(Vec::new()),
+        _watcher: watcher,
     });
-    lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
+    {
+        let mut entries = lock(&inner.entries);
+        if inner.cancel.is_cancelled() {
+            return;
+        }
+        entries.insert(entry.identity.id.clone(), entry.clone());
+    }
     tokio::spawn(entry_task(
         Arc::downgrade(inner),
         Arc::downgrade(&entry),
         kick_rx,
         inner.cancel.clone(),
     ));
-    let _ = kick_tx.send(());
-
-    // Watcher setup can walk thousands of directories and block in FSEvents.
-    // Keep it off the async runtime; the initial kick covers the attachment
-    // window and the second kick closes it.
-    let weak = Arc::downgrade(&entry);
-    let identity = entry.identity.clone();
-    tokio::task::spawn_blocking(move || {
-        let Some(entry) = weak.upgrade() else { return };
-        let watchers = build_watchers(&identity, &kick_tx);
-        *lock(&entry.watchers) = watchers;
-        let _ = kick_tx.send(());
-    });
+    let _ = kick_tx.try_send(());
 }
 
 fn build_watchers(
     identity: &CheckoutIdentity,
-    kick_tx: &mpsc::UnboundedSender<()>,
+    kick_tx: &mpsc::Sender<()>,
 ) -> Vec<notify::RecommendedWatcher> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
@@ -508,7 +523,7 @@ fn build_watchers(
         let watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
                 if event.is_ok() {
-                    let _ = tx.send(());
+                    let _ = tx.try_send(());
                 }
             });
         match watcher {
@@ -532,13 +547,21 @@ fn build_watchers(
 async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
-    mut kick_rx: mpsc::UnboundedReceiver<()>,
+    mut kick_rx: mpsc::Receiver<()>,
     cancel: CancellationToken,
 ) {
-    while kick_rx.recv().await.is_some() {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            kick = kick_rx.recv() => if kick.is_none() { return },
+        }
         // Trailing debounce: wait for the burst to settle.
         loop {
-            match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => return,
+                next = tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()) => next,
+            };
+            match next {
                 Ok(Some(())) => continue,
                 Ok(None) => return, // entry closed mid-burst
                 Err(_) => break,
@@ -698,7 +721,7 @@ async fn diff_sync_task(
                 let chats = chats_rx.borrow().clone();
                 reconcile(&inner, chats, true).await;
                 for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
+                    let _ = entry.kick_tx.try_send(());
                 }
             }
         }

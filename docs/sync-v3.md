@@ -226,15 +226,22 @@ Results:
 - Edge: **112 unit + 55 workerd passed**; typecheck and bundle build passed.
 - iOS `Cypher` scheme: **186 passed**, including seventeen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
-- Desktop build passed. Engine tests: **143 passed**; UI tests: **672 passed**.
+- Desktop build passed. Engine unit tests: **147 passed**; UI tests: **672 passed**.
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
-- The existing Engine E2E suite also passes **18 tests** when run serially
-  (one paid-provider test remains explicitly ignored). Two default-parallel
-  runs hit existing 10-second status/streaming deadlines under local load;
-  serial success is not evidence that this timing sensitivity is resolved.
-  The v3 producer is not yet on that legacy Engine execution path.
+- The existing Engine E2E suite now passes **18 tests** with default parallelism
+  repeatedly (one paid-provider test remains explicitly ignored). Native stack
+  sampling identified synchronous `FSEventStreamStart` inside Spaces reconcile
+  blocking the executor, not a need for longer test deadlines. Native watch
+  creation/destruction now have a background owner; Diff watchers likewise no
+  longer pin entries or join a pending native registration at runtime teardown.
+  Kicks are bounded/coalesced, and shutdown cancels listeners and closes handles
+  that register late. Four deterministic tests cover these boundaries.
+  Parallel E2E duration fell from roughly 90 seconds to under one second on
+  this machine. The complete Engine suite passes **322 tests**, with three
+  explicitly opt-in provider/live-edge tests ignored. No v3 harness integration
+  is implied: that normal execution path still uses the legacy writer.
 - The live smoke also hands a private normalized SQLite file from Rust to Swift
   and back, including numeric model options, a host command resolution and an
   ACK that must not skip the cursor. Rust can then re-enqueue its original
@@ -256,9 +263,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `f38a480`, including Linux backend,
+- GitHub CI passed all five jobs for `ccea9e9`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34633914806.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34640670571.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 
