@@ -1,6 +1,7 @@
 use super::*;
 use cypher_proto::sync3::{Receipt, Reply, Row};
 use std::path::Path;
+mod source;
 
 fn queued() -> Operation {
     let fixture: serde_json::Value =

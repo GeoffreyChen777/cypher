@@ -117,7 +117,12 @@ impl Journal {
               writer_id TEXT NOT NULL,kind TEXT NOT NULL,ordinal INTEGER NOT NULL,body TEXT NOT NULL,
               PRIMARY KEY(writer_id,kind,ordinal));
             CREATE TABLE IF NOT EXISTS sync3_execution_intents(
-              command_id TEXT PRIMARY KEY,body TEXT NOT NULL);",
+              command_id TEXT PRIMARY KEY,body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync3_execution_source_events(
+              command_id TEXT NOT NULL,seq INTEGER NOT NULL CHECK(seq>0),
+              event TEXT NOT NULL,digest BLOB NOT NULL,
+              after_completion INTEGER NOT NULL CHECK(after_completion IN (0,1)),
+              PRIMARY KEY(command_id,seq));",
         )?;
         let tx = db.transaction()?;
         tx.execute(
@@ -308,15 +313,26 @@ impl Journal {
     /// Persist only changed producer metadata, not its complete source fold or
     /// historical transcript. The revision also fences concurrent/stale writers.
     pub fn enqueue_writer_frame(&mut self, frame: &writer::Frame) -> Result<(), Error> {
-        if frame.scope() != &self.scope {
+        let tx = self.db.transaction()?;
+        Self::write_writer_frame(&tx, &self.scope, &self.actor, frame)?;
+        tx.commit()?;
+        Ok(())
+    }
+    fn write_writer_frame(
+        tx: &Connection,
+        scope: &[u8; 32],
+        actor: &str,
+        frame: &writer::Frame,
+    ) -> Result<(), Error> {
+        if frame.scope() != scope {
             return Err(invalid("writer_scope_mismatch"));
         }
-        if frame.actor != self.actor {
+        if frame.actor != actor {
             return Err(invalid("actor_mismatch"));
         }
         for op in &frame.operations {
             op.validate().map_err(invalid)?;
-            if op.actor != self.actor {
+            if op.actor != actor {
                 return Err(invalid("actor_mismatch"));
             }
         }
@@ -330,7 +346,6 @@ impl Journal {
         {
             return Err(invalid("frame_too_large"));
         }
-        let tx = self.db.transaction()?;
         let old: Option<(u64, String)> = tx
             .query_row(
                 "SELECT revision,header FROM sync3_writers WHERE id=?",
@@ -370,14 +385,13 @@ impl Journal {
                     return Err(invalid("writer_checkpoint_conflict"));
                 }
             }
-            tx.commit()?;
             return Ok(());
         }
         if old.as_ref().map(|(revision, _)| *revision).unwrap_or(0) != frame.expected_revision {
             return Err(invalid("writer_checkpoint_conflict"));
         }
         for operation in &frame.operations {
-            enqueue_into(&tx, operation)?;
+            enqueue_into(tx, operation)?;
         }
         for (kind, ordinal, body) in &frame.updates {
             tx.execute(
@@ -391,7 +405,6 @@ impl Journal {
              ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,header=excluded.header",
             params![frame.root, next_revision, frame.header],
         )?;
-        tx.commit()?;
         Ok(())
     }
     /// Loading a producer checkpoint permits transcript recovery only. It is

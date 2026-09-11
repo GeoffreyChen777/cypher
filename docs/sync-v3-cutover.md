@@ -65,6 +65,12 @@ review submissions.
    mailbox delivery automatically starts the request again. The original
    output and session reference remain available for explicit review and a
    new user action. This does not replace the required v3 host integration.
+   The v3 SQLite source log now retains full decoded harness events before
+   publication, including large private inputs and late results after fence
+   loss. Gated producer writes verify source retention and ownership in the
+   same transaction; real SIGKILL recovery and bounded pure replay are tested.
+   Normal Engine still needs to adopt this source/publisher path in place of
+   its JSONL/Loro pipeline.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

@@ -137,6 +137,27 @@ untouched but no longer consumed or reset. Normal dispatch still requires the
 v3 integration above; these changes remove known unsafe retry routes rather
 than claiming that integration is complete.
 
+#### Private execution source log
+
+The v3 journal now persists complete decoded `AgentEvent` values in its
+scope-bound SQLite transaction, with stable per-command ordinals and SHA-256
+digests. Exact retries/overlap are idempotent; changed events, missing
+positions, ahead cursors, corrupt bodies and lossy schema reads fail explicitly.
+These raw source rows never enter the replication outbox or wake the network
+transport. Reads use indexed cursor pages, not whole-chat replay: at most
+32 events / 1 MiB, except one oversized event is returned intact to guarantee
+progress. A multi-event append has the same budget; a single large private
+tool event is retained without applying the smaller public-wire size limit.
+
+`new_execution_writer` binds the producer to the dispatched run and owner
+epoch. `enqueue_execution_frame` verifies the retained source position, live
+run, intent and ownership fence in the same transaction as producer metadata
+and outbox writes. Losing the publication fence blocks those writes, but a
+previously issued permit can still retain late raw observations in its
+original local scope. Observations after local completion are explicitly
+marked; replay cannot silently reopen that semantic run or issue a permit.
+Normal Engine source adoption and persistent-process lifecycle remain open.
+
 The complete native transcript entry/part models, event fold, render privacy
 policy and continuation helpers now live in `cypher-proto`. The running-code
 path in `engine::sessions` uses that shared fold/privacy implementation; only
@@ -285,7 +306,7 @@ permit through the real workerd claim and run-start receipts before publishing.
 
 Results:
 
-- Rust proto/sync: **139 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **151 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
@@ -294,12 +315,15 @@ Results:
 - iOS `Cypher` scheme: **187 passed**, including eighteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine unit tests: **147 passed**; UI tests: **672 passed**.
-  Latest Dev restart: engine PID `65019`, UI PID `65060`. Before restarting
+  Latest engine restart: PID `65019`. Before restarting
   this engine, IPC confirmed local-only mode, no active public sessions or
   subagents, and no additional private chat handles; no child process existed.
   Both data directories were preserved. New startup logs are
   `/tmp/cypher-no-blind-retry-dev-{engine,ui}.log`; live IPC confirmed the same
   device ID, chat and session status, and the UI's socket peer.
+  The subsequent source-log change rebuilt and restarted only UI PID `2902`,
+  preserving that engine; `/tmp/cypher-v3-source-dev-ui.log` and live IPC
+  verified its connection to the same development device.
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
@@ -336,7 +360,18 @@ Results:
   resolves a prior tool, and reloads the settled result without another
   dispatch. Raw private tool input remains in the local test journal and is
   absent from rendered parts. This test does not switch normal SessionStore
-  or establish power-loss durability for the existing JSONL raw-event journal.
+  and now uses the v3 SQLite source log instead of the old JSONL journal.
+  It reconstructs the exact source fold through bounded raw-event pages,
+  retains a post-completion observation without publishing it, and cannot
+  reacquire dispatch after reopening.
+- Source/publication regressions cover sparse writes, transaction rollback,
+  exact overlap, missing positions, scope/epoch loss, mismatched producer
+  contexts, schema/corruption rejection and a 2-MiB private tool event.
+  A subprocess test performs a simulated external file effect, commits its
+  raw observations, then is actually killed with SIGKILL without dropping
+  SQLite. Reopening retains the WAL data and requires reconciliation rather
+  than issuing another dispatch permit. This is process-crash evidence, not
+  a claim to have tested physical power failure.
 - The live smoke also hands a private normalized SQLite file from Rust to Swift
   and back, including numeric model options, a host command resolution and an
   ACK that must not skip the cursor. Rust can then re-enqueue its original
@@ -359,9 +394,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `2a04fdd`, including Linux backend,
+- GitHub CI passed all five jobs for `25cc040`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34651479697.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34653856079.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 

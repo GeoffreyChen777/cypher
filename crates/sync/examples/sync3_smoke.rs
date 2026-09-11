@@ -282,7 +282,9 @@ async fn main() {
 
 async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: String) {
     use cypher_proto::{
-        MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolCall, parts::render_parts,
+        AgentEvent, DoneStatus, MessagePart, MessageRole, MessageStatus, SessionMessageEntry,
+        ToolCall,
+        parts::{fold_event_into_parts, render_parts},
     };
     use cypher_sync::sync3::execution::{Plan, Progress as ExecutionProgress};
     use sha2::{Digest, Sha256};
@@ -348,36 +350,39 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
         .journal()
         .lock()
         .unwrap()
-        .new_writer(1, Some(permit.run_id().into()), &entry)
+        .new_execution_writer(&permit, &entry)
         .unwrap();
-    let mut parts = vec![
-        MessagePart::Text {
-            id: "before".into(),
+    let source = vec![
+        AgentEvent::TextDelta {
             text: "Before tool".into(),
         },
-        MessagePart::Tool {
+        AgentEvent::ToolCall {
             id: "tool".into(),
             call: ToolCall::WriteFile {
                 path: "fixture".into(),
                 content: Some("fixture-private-input".repeat(100_000)),
             },
-            resolved: false,
-            is_error: false,
-            output: None,
-            progress: Some("working".into()),
-            diff: None,
-            output_ref: None,
-            output_bytes: None,
-            diff_ref: None,
-            diff_stats: None,
         },
-        MessagePart::Text {
-            id: "long".into(),
+        AgentEvent::ToolProgress {
+            id: "tool".into(),
+            output: "working".into(),
+        },
+        AgentEvent::TextDelta {
             text: "你好🙂e\u{301}\n\"\\\0".repeat(70_000),
         },
     ];
+    let mut parts = Vec::new();
+    let mut source_seq = 0;
+    for event in source {
+        source_seq = host
+            .append_execution_events(&permit, source_seq + 1, std::slice::from_ref(&event))
+            .unwrap();
+        fold_event_into_parts(&mut parts, &event);
+    }
     let first = writer
-        .sync(&parts, |frame| host.enqueue_writer_frame(frame))
+        .sync(&parts, |frame| {
+            host.enqueue_execution_frame(&permit, source_seq, frame)
+        })
         .unwrap();
     assert!(first.more);
     let mut head = 3 + first.operations as u64;
@@ -393,28 +398,38 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
         .unwrap();
     loop {
         let progress = writer
-            .sync(&parts, |frame| host.enqueue_writer_frame(frame))
+            .sync(&parts, |frame| {
+                host.enqueue_execution_frame(&permit, source_seq, frame)
+            })
             .unwrap();
         head += progress.operations as u64;
         if !progress.more {
             break;
         }
     }
-    if let MessagePart::Tool {
-        resolved,
-        output,
-        progress,
-        ..
-    } = &mut parts[1]
-    {
-        *resolved = true;
-        *output = Some("File written".into());
-        *progress = None;
+    for event in [
+        AgentEvent::ToolResult {
+            id: "tool".into(),
+            is_error: false,
+            output: Some("File written".into()),
+            diff: None,
+        },
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        },
+    ] {
+        source_seq = host
+            .append_execution_events(&permit, source_seq + 1, std::slice::from_ref(&event))
+            .unwrap();
+        fold_event_into_parts(&mut parts, &event);
     }
     loop {
         let progress = writer
             .finish(&parts, Some(MessageStatus::Complete), |frame| {
-                host.enqueue_writer_frame(frame)
+                host.enqueue_execution_frame(&permit, source_seq, frame)
             })
             .unwrap();
         head += progress.operations as u64;

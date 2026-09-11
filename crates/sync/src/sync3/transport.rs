@@ -122,6 +122,25 @@ impl Client {
         let _ = self.nudge.try_send(());
         Ok(())
     }
+    /// Private source persistence must not create transport traffic.
+    pub fn append_execution_events(
+        &self,
+        permit: &super::execution::DispatchPermit,
+        first: u64,
+        events: &[cypher_proto::AgentEvent],
+    ) -> Result<u64, Error> {
+        lock(&self.journal).append_execution_events(permit, first, events)
+    }
+    pub fn enqueue_execution_frame(
+        &self,
+        permit: &super::execution::DispatchPermit,
+        source_seq: u64,
+        frame: &super::writer::Frame,
+    ) -> Result<(), Error> {
+        lock(&self.journal).enqueue_execution_frame(permit, source_seq, frame)?;
+        let _ = self.nudge.try_send(());
+        Ok(())
+    }
     pub fn prepare_execution(
         &self,
         command_id: &str,

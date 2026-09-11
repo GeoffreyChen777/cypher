@@ -1,7 +1,6 @@
 //! Experimental v3 dispatch integration, not the normal SessionStore cutover.
 //! Calls the real MockHarness API, folds its stream, journals raw events and
 //! publishes bounded render frames only after the durable dispatch gate.
-use cypher_engine::RunJournal;
 use cypher_harness::{Harness, RunControls, mock::MockHarness};
 use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, MessagePart, MessageRole, MessageStatus,
@@ -54,7 +53,6 @@ fn deliver(j: &mut Journal) {
 async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replica.sqlite");
-    let raw_path = dir.path().join("raw");
     let mut journal = Journal::open(&path, "account", "room", "host").unwrap();
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../fixtures/sync3/golden.json")).unwrap();
@@ -132,7 +130,6 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
         )
         .await
         .unwrap();
-    let raw = RunJournal::open(&raw_path).unwrap();
     let entry = SessionMessageEntry {
         id: "reply".into(),
         role: MessageRole::Assistant,
@@ -142,18 +139,20 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
         status: Some(MessageStatus::Streaming),
         continuation_of: None,
     };
-    let mut writer = journal
-        .new_writer(1, Some(permit.run_id().into()), &entry)
-        .unwrap();
+    let mut writer = journal.new_execution_writer(&permit, &entry).unwrap();
     let mut parts = vec![];
     let mut events = 0;
     while let Some(event) = stream.next().await {
         let event = event.unwrap();
         events += 1;
-        raw.append("room", &event).unwrap();
+        journal
+            .append_execution_events(&permit, events, std::slice::from_ref(&event))
+            .unwrap();
         fold_event_into_parts(&mut parts, &event);
         while writer
-            .sync(&parts, |frame| journal.enqueue_writer_frame(frame))
+            .sync(&parts, |frame| {
+                journal.enqueue_execution_frame(&permit, events, frame)
+            })
             .unwrap()
             .more
         {}
@@ -166,7 +165,7 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
     assert_eq!(events, 5);
     while writer
         .finish(&parts, Some(MessageStatus::Complete), |frame| {
-            journal.enqueue_writer_frame(frame)
+            journal.enqueue_execution_frame(&permit, events, frame)
         })
         .unwrap()
         .more
@@ -182,8 +181,22 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
     while !journal.pending().unwrap().is_empty() {
         deliver(&mut journal);
     }
+    journal
+        .append_execution_events(
+            &permit,
+            events + 1,
+            &[AgentEvent::TextDelta {
+                text: "late private observation".into(),
+            }],
+        )
+        .unwrap();
+    assert!(
+        journal.pending().unwrap().is_empty(),
+        "late observations are not published"
+    );
+    let run_id = permit.run_id().to_owned();
+    drop(permit);
     drop(writer);
-    drop(raw);
     drop(journal);
 
     let mut journal = Journal::open(&path, "account", "room", "host").unwrap();
@@ -192,10 +205,7 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
         Progress::Settled
     ));
     let projection = journal.projection().unwrap();
-    assert_eq!(
-        projection.runs[permit.run_id()].outcome,
-        Some(Outcome::Completed)
-    );
+    assert_eq!(projection.runs[&run_id].outcome, Some(Outcome::Completed));
     assert_eq!(
         projection.commands["command"].command.status,
         SessionCommandStatus::Applied
@@ -221,9 +231,29 @@ async fn durable_claim_drives_mock_stream_and_never_reissues_after_restart() {
             .unwrap()
             .contains("retained-private-content")
     );
-    let raw = RunJournal::open(raw_path).unwrap();
-    let replay = raw.replay("room", 0).unwrap();
-    assert_eq!(replay.len(), 5);
+    let mut replay = Vec::new();
+    let mut recovered_parts = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = journal.execution_events("command", cursor, 2).unwrap();
+        for record in page.events {
+            // Recovery is pure folding, never a harness call. Observations
+            // after completion are retained but cannot reopen the run.
+            if !record.after_completion {
+                fold_event_into_parts(&mut recovered_parts, &record.event);
+            }
+            replay.push(record.event);
+        }
+        cursor = page.next;
+        if cursor == page.through {
+            break;
+        }
+    }
+    assert_eq!(replay.len(), 6);
+    assert_eq!(
+        recovered_parts, parts,
+        "raw-event replay retains the complete source fold"
+    );
     assert!(
         serde_json::to_string(&replay)
             .unwrap()

@@ -104,6 +104,12 @@ pub struct Frame {
     more: bool,
 }
 impl Frame {
+    pub(super) fn execution_context(&self) -> (u64, Option<&str>) {
+        (
+            self.next.header.config.owner_epoch,
+            self.next.header.config.run_id.as_deref(),
+        )
+    }
     pub(super) fn scope(&self) -> &Hash {
         &self.next.header.config.scope
     }
