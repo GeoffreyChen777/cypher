@@ -6,6 +6,7 @@ use cypher_proto::sync3::{self as wire, Operation, Projection, Reply, Request, R
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
+pub mod execution;
 mod projection_store;
 pub mod transport;
 pub mod writer;
@@ -111,9 +112,12 @@ impl Journal {
             CREATE INDEX IF NOT EXISTS sync3_entity_seq ON sync3_entities(seq);
             CREATE UNIQUE INDEX IF NOT EXISTS sync3_message_order ON sync3_entities(created_seq) WHERE kind='messages';
             CREATE TABLE IF NOT EXISTS sync3_writers(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,header TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS sync3_writer_run ON sync3_writers(json_extract(header,'$.config.run_id'));
             CREATE TABLE IF NOT EXISTS sync3_writer_items(
               writer_id TEXT NOT NULL,kind TEXT NOT NULL,ordinal INTEGER NOT NULL,body TEXT NOT NULL,
-              PRIMARY KEY(writer_id,kind,ordinal));",
+              PRIMARY KEY(writer_id,kind,ordinal));
+            CREATE TABLE IF NOT EXISTS sync3_execution_intents(
+              command_id TEXT PRIMARY KEY,body TEXT NOT NULL);",
         )?;
         let tx = db.transaction()?;
         tx.execute(

@@ -56,6 +56,10 @@ review submissions.
    operation identity is now retained on the command; ordinary losing attempts
    commit without poisoning the batch. Host integration must wait for its own
    winning decision before publishing run start and claiming local execution.
+   The durable local intent/one-shot gate now exists, with real MockHarness
+   API coverage on the experimental path. Normal dispatch, payload policy,
+   persistent-process lifecycle and source-journal durability still need
+   integration; restoring an old database image is not safe crash-resume proof.
 2. Replace normal Engine and iOS SessionStore sync with v3. Keep local profiles
    functional. Verify actual mock-harness execution, not only event fixtures.
 3. Add the account-scoped WorkspaceHub control connection: metadata, demand

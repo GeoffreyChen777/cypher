@@ -122,6 +122,33 @@ impl Client {
         let _ = self.nudge.try_send(());
         Ok(())
     }
+    pub fn prepare_execution(
+        &self,
+        command_id: &str,
+        plan: super::execution::Plan,
+    ) -> Result<super::execution::Info, Error> {
+        let info = lock(&self.journal).prepare_execution(command_id, plan)?;
+        let _ = self.nudge.try_send(());
+        Ok(info)
+    }
+    pub fn advance_execution(&self, command_id: &str) -> Result<super::execution::Progress, Error> {
+        let progress = lock(&self.journal).advance_execution(command_id)?;
+        if matches!(progress, super::execution::Progress::WaitingForRun) {
+            let _ = self.nudge.try_send(());
+        }
+        Ok(progress)
+    }
+    pub fn complete_execution(
+        &self,
+        permit: &super::execution::DispatchPermit,
+        outcome: Option<cypher_proto::sync3::Outcome>,
+        status: cypher_proto::SessionCommandStatus,
+        resolution: Option<String>,
+    ) -> Result<(), Error> {
+        lock(&self.journal).complete_execution(permit, outcome, status, resolution)?;
+        let _ = self.nudge.try_send(());
+        Ok(())
+    }
     pub fn watch(&self) -> watch::Receiver<Status> {
         self.status.clone()
     }

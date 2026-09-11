@@ -95,10 +95,36 @@ The host must first await its claim's committed decision and match
 `acceptedOpId` to its own durable intent. It must not batch a speculative
 `runStarted` behind an unconfirmed claim: a losing claim grants no run.
 Committed run fencing and a local, non-replayable execution claim are then
-required before external effects. Those host-dispatch primitives and actual
-harness integration are still release blockers; the protocol alone does not
-grant exactly-once external execution. The previous prototype event names are
+required before external effects. The journal now implements that local gate;
+normal host-dispatch integration is still a release blocker. The protocol
+alone does not grant exactly-once external execution. The previous prototype event names are
 rejected rather than maintained as compatibility aliases.
+
+#### Local execution intents and one-shot dispatch
+
+`prepare_execution` atomically stores a scope/epoch-bound intent and its
+claim-attempt outbox operation. It never speculates a run start in the same
+batch. `advance_execution` checks committed history, not an ACKed-but-unapplied
+outbox row. Only the winning operation ID can enqueue the stable run start.
+After that start is committed, the journal commits `Claimed` before returning
+the sole non-cloneable/non-serializable dispatch permit. A subsequent call or
+process restart returns `RecoveryRequired`, including a crash just before the
+external call: uncertainty is intentionally not reinterpreted as permission.
+Run payloads cannot bypass the run fence by choosing a control plan.
+
+Known completion and terminal outbox operations commit together; the exact
+same completion can be retried without another dispatch. Unfinished bounded
+producers prevent premature run completion. Missing intent receipts are an
+explicit recovery error, not permission to reseed the claim or start.
+Private intent rows contain a command hash, not another complete prompt.
+Client wrappers wake the transport only after durable local operations.
+
+This gate is not payload-specific host policy: expiry, based-on, artifact
+availability and control-target eligibility still need to be checked before
+dispatch. Persistent harness process/semantic-turn integration remains open.
+Recovery of the same crash-surviving database is not rollback/import of an old
+local backup; migration must quarantine uncertain restored intents rather than
+treating an old `Prepared` image as evidence that execution never happened.
 
 The complete native transcript entry/part models, event fold, render privacy
 policy and continuation helpers now live in `cypher-proto`. The running-code
@@ -189,6 +215,8 @@ Each item requires evidence. Unchecked items are not implemented/verified.
   immutable resolution, with shared three-language validation/lifecycle cases.
 - [x] Durable claim/cancel attempts and immutable winning operation identity,
   including same-run competition, receipt replay and transaction rollback.
+- [x] Local durable execution intent, committed run fence and one-shot dispatch
+  gate; lost permits require reconciliation instead of another dispatch.
 - [x] Full rendered-part wire shapes, continuation/status metadata, scoped part
   identity, UTF-8 deltas and atomic per-message byte-budget rejection.
 - [x] Immutable committed message order and indexed, row/byte-bounded local
@@ -240,11 +268,12 @@ traffic invokes no HTTP repair. A separate room exercises the real bounded
 Rust producer with a megabyte-scale escaped Unicode/NFD transcript, producer
 restart and late tool resolution. Rust and Swift verify the complete normalized
 part digest; Swift uses ordered, bounded window paging. This is not an actual
-harness execution test.
+harness execution test. The writer smoke now obtains its local execution
+permit through the real workerd claim and run-start receipts before publishing.
 
 Results:
 
-- Rust proto/sync: **125 passed**, two opt-in legacy live-edge tests ignored.
+- Rust proto/sync: **139 passed**, two opt-in legacy live-edge tests ignored.
   Document unit tests: **81 passed**; its integration test also passes.
   Eighteen existing fold tests moved from doc to proto, and two new transcript
   tests cover lossless data roundtrip and non-mutating render-only privacy.
@@ -253,6 +282,9 @@ Results:
 - iOS `Cypher` scheme: **187 passed**, including eighteen v3 tests, on an isolated
   iPhone 17 Pro / iOS 26.5 simulator (removed after testing).
 - Desktop build passed. Engine unit tests: **147 passed**; UI tests: **672 passed**.
+  Latest Dev UI restart: PID `48968`, preserved headless PID `27074`; the
+  startup log `/tmp/cypher-v3-execution-dev-ui.log` and live Unix socket peer
+  confirm reconnection to the intended development engine.
   The prior icon failure was fixed by preferring package-name matches over
   incidental description keywords. The terminal test now checks the already
   documented/implemented `#191919` baseline; terminal rendering was not changed.
@@ -265,9 +297,19 @@ Results:
   Kicks are bounded/coalesced, and shutdown cancels listeners and closes handles
   that register late. Four deterministic tests cover these boundaries.
   Parallel E2E duration fell from roughly 90 seconds to under one second on
-  this machine. The complete Engine suite passes **322 tests**, with three
+  this machine. The complete Engine suite passes **323 tests**, with three
   explicitly opt-in provider/live-edge tests ignored. No v3 harness integration
   is implied: that normal execution path still uses the legacy writer.
+- Fourteen local execution-gate tests cover ACK/application boundaries,
+  prepare/terminal transaction rollback, exact retries, lost permits and
+  restart, competing same-actor/same-run intents, cancellation, missing
+  receipts, scope/epoch changes, plan validation and unfinished producers.
+  An experimental Engine integration test calls the actual `MockHarness` API
+  once after the gate, folds/journals its events, rolls over a Unicode response,
+  resolves a prior tool, and reloads the settled result without another
+  dispatch. Raw private tool input remains in the local test journal and is
+  absent from rendered parts. This test does not switch normal SessionStore
+  or establish power-loss durability for the existing JSONL raw-event journal.
 - The live smoke also hands a private normalized SQLite file from Rust to Swift
   and back, including numeric model options, a host command resolution and an
   ACK that must not skip the cursor. Rust can then re-enqueue its original
@@ -290,9 +332,9 @@ Results:
   the message limit; the Swift case reopens SQLite after every delta.
   Canonical numeric fixtures cover `1.0`, `-0.0`, fractional values and exponents;
   numeric representation changes must not poison the sender's own receipt.
-- GitHub CI passed all five jobs for `9c55c97`, including Linux backend,
+- GitHub CI passed all five jobs for `a9199aa`, including Linux backend,
   macOS workspace and the native Swift/workerd/Rust smoke:
-  https://github.com/GeoffreyChen777/cypher/actions/runs/34644801559.
+  https://github.com/GeoffreyChen777/cypher/actions/runs/34648473897.
   Later implementation commits and the final release still require their own
   CI evidence; this run is not a deployment.
 

@@ -282,9 +282,9 @@ async fn main() {
 
 async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: String) {
     use cypher_proto::{
-        MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolCall,
-        parts::render_parts, sync3::Event,
+        MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolCall, parts::render_parts,
     };
+    use cypher_sync::sync3::execution::{Plan, Progress as ExecutionProgress};
     use sha2::{Digest, Sha256};
     let response = reqwest::Client::new()
         .post(format!("{path}init"))
@@ -321,8 +321,20 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
     let prefix: Vec<Operation> = serde_json::from_value(fixture["operations"].clone()).unwrap();
     phone.enqueue(&prefix[0]).unwrap();
     wait_cursor(&host, 1).await;
-    host.enqueue_batch(&prefix[1..3]).unwrap();
+    host.prepare_execution("command", Plan::Run).unwrap();
+    wait_cursor(&host, 2).await;
+    assert!(matches!(
+        host.advance_execution("command").unwrap(),
+        ExecutionProgress::WaitingForRun
+    ));
     wait_cursor(&host, 3).await;
+    let ExecutionProgress::Dispatch(permit) = host.advance_execution("command").unwrap() else {
+        panic!("missing durable permit")
+    };
+    assert!(matches!(
+        host.advance_execution("command").unwrap(),
+        ExecutionProgress::RecoveryRequired
+    ));
     let entry = SessionMessageEntry {
         id: "writer-message".into(),
         role: MessageRole::Assistant,
@@ -336,7 +348,7 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
         .journal()
         .lock()
         .unwrap()
-        .new_writer(1, Some("run".into()), &entry)
+        .new_writer(1, Some(permit.run_id().into()), &entry)
         .unwrap();
     let mut parts = vec![
         MessagePart::Text {
@@ -410,17 +422,14 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
             break;
         }
     }
-    host.enqueue(&Operation {
-        id: "writer-run-finished".into(),
-        actor: "host".into(),
-        owner_epoch: 1,
-        event: Event::RunFinished {
-            run_id: "run".into(),
-            outcome: cypher_proto::sync3::Outcome::Completed,
-        },
-    })
+    host.complete_execution(
+        &permit,
+        Some(cypher_proto::sync3::Outcome::Completed),
+        cypher_proto::SessionCommandStatus::Applied,
+        None,
+    )
     .unwrap();
-    head += 1;
+    head += 2;
     wait_cursor(&host, head).await;
     wait_cursor(&phone, head).await;
     let projection = phone.journal().lock().unwrap().projection().unwrap();
