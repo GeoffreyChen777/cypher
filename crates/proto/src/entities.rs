@@ -380,6 +380,39 @@ pub struct FileSearchMatch {
     pub is_dir: bool,
 }
 
+/// Read-only, chat-checkout-scoped file browser. Paths are relative to cwd.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Device-local Pi model for all automatic session titles. None preserves the
+/// automatic small-model policy; a chosen model is never replaced on retries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleModelSettings {
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDirectory {
+    pub entries: Vec<WorkspaceFileEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileContent {
+    pub text: Option<String>,
+    pub bytes: u64,
+    /// Binary and non-UTF-8 files have no text preview.
+    pub binary: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffFileSummary {

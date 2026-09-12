@@ -267,6 +267,15 @@ final class DemoDataset {
                 ], createdAt: now - 3_400_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
         case "chat-picker":
+            // Match the real Pi RPC fallback, including the duplicated title.
+            let question = """
+            Which device should serve harness/model catalogs for the picker?
+
+            Context:
+            Each device has its own installed harnesses and model catalog.
+            After switching devices, the picker can still show the previous catalog.
+            The project's owning device is the source of truth for its sessions.
+            """
             return [
                 MessageEntry(id: "m1", role: .user, parts: [
                     .text(id: "t0", text: "The model picker shows stale catalogs after switching devices — where should the catalog come from?"),
@@ -274,8 +283,8 @@ final class DemoDataset {
                 MessageEntry(id: "m2", role: .assistant, parts: [
                     .text(id: "t0", text: "Two viable sources — the local device's harness install, or the space's owning device. The desktop recently moved to the latter (`aa128a6`). Before I wire the RPC, one decision:"),
                     .input(id: "req-1", requestId: "req-1", questions: [
-                        UserInputQuestion(id: "q1", header: "Catalog source",
-                                          question: "Which device should serve harness/model catalogs for the picker?",
+                        UserInputQuestion(id: "q1", header: question,
+                                          question: question,
                                           options: [
                                             "Space's device (Recommended)",
                                             "Local device",

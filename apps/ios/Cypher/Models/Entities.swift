@@ -99,6 +99,13 @@ enum ChatIndicator: Int {
     case working = 2
     case completed = 3
     case idle = 4
+
+    /// Projects keep activity visible while any session is running. Once all
+    /// runs stop, surface attention-needed states before unread completions.
+    static func projectSummary(_ indicators: [ChatIndicator]) -> ChatIndicator? {
+        if indicators.contains(.working) { return .working }
+        return indicators.min { $0.rawValue < $1.rawValue }
+    }
 }
 
 /// state.rs:277 — a Working/AwaitingInput row older than this reads as stale

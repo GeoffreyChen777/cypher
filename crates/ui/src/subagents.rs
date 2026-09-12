@@ -1029,6 +1029,7 @@ impl Render for SubagentsPanel {
         // Open OR playing the exit animation (get(), not as_open()) — the
         // anchored layer must stay mounted while the close eases out.
         let open = self.popup.get().is_some_and(|id| id == &chat_id);
+        let backing = theme.composer_accessory_bg();
 
         let mut trigger = div()
             .id("subagents-trigger")
@@ -1041,12 +1042,11 @@ impl Render for SubagentsPanel {
             .items_center()
             .gap(px(5.0))
             .cursor_pointer()
-            // Transparent at rest; a faint ink wash on hover — never a
-            // permanent border or background.
+            // Match Comments: always backed, with a quiet hover lift.
             .bg(motion::hover_blend(
                 "subagents-trigger",
-                crate::theme::ink(0.0),
-                crate::theme::ink(0.06),
+                backing,
+                backing.blend(crate::theme::ink(0.06)),
             ))
             .on_hover(motion::hover_listener("subagents-trigger"))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -1101,7 +1101,7 @@ impl Render for SubagentsPanel {
             ));
         }
 
-        trigger.into_any_element()
+        crate::frost::composer_accessory(trigger).into_any_element()
     }
 }
 

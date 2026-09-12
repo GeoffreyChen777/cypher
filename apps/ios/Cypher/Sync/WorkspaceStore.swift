@@ -272,10 +272,9 @@ final class WorkspaceStore {
         chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
     }
 
-    /// Aggregate most-urgent member status for a space's leading dot.
+    /// Aggregate active sessions for the project's trailing status indicator.
     func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
-        let members = chats(in: spaceId).map { indicator(for: $0) }
-        return members.min(by: { $0.rawValue < $1.rawValue })
+        ChatIndicator.projectSummary(chats(in: spaceId).map { indicator(for: $0) })
     }
 
     // MARK: Device relay (folder browsing / direct host RPCs)
@@ -307,6 +306,15 @@ final class WorkspaceStore {
         var params: [String: Any] = [:]
         if let path { params["path"] = path }
         return try await relay(for: deviceId).call(method: "ListFolders", params: params)
+    }
+
+    /// Only the read-only browser's fixed RPC set, on the chat's host device.
+    func workspaceBrowserCall<T: Decodable>(deviceId: String, method: String,
+                                            params: [String: Any]) async throws -> T {
+        guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
+            throw RelayError.notConnected
+        }
+        return try await relay(for: deviceId).call(method: method, params: params, timeoutSeconds: 30)
     }
 
     /// ListRefs on the target device — branches with current/worktree markers

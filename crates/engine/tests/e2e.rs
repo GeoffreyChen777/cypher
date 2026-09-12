@@ -578,7 +578,7 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         command_status(&core, "cmd-crashed"),
         Some((
             SessionCommandStatus::Rejected,
-            Some("interrupted before completion — retry to send again".into())
+            Some("interrupted before completion — execution outcome unknown; external effects may already have occurred. Review before explicitly retrying.".into())
         )),
         "dead command must have a durable terminal outcome"
     );
@@ -702,7 +702,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
     ));
     assert_eq!(
         core.sessions.session_status(CHAT).map(|s| s.status),
-        Some(SessionStatus::Idle)
+        Some(SessionStatus::Errored)
     );
 }
 

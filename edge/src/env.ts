@@ -7,6 +7,9 @@ export interface Env {
   /** chat2 session rooms (`chat2/{chatId}`) — dumb authenticated log relays
    * replacing SessionRoom's loro-aware s2 rooms (docs/chat2-sync.md). */
   CHAT_ROOMS: DurableObjectNamespace;
+  /** Experimental v3; deliberately unbound in production until acceptance. */
+  SYNC3_ROOMS?: DurableObjectNamespace;
+  SYNC3_ENABLED?: string;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */
@@ -34,6 +37,7 @@ export interface Env {
  * the caller's JWT. DOs trust it blindly — they are only reachable through
  * the Worker (design §2: "DO never sees an unauthenticated frame"). */
 export const AUTH_USER_HEADER = "x-cypher-auth-user";
+export const AUTH_DEADLINE_HEADER = "x-cypher-auth-deadline";
 
 /** Header the Worker stamps on requests forwarded into workspace-doc rooms
  * (`ws/{orgId}`). Membership (JWT org claim == orgId) is enforced at the

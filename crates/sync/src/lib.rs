@@ -15,6 +15,7 @@ pub mod chat_frames;
 pub mod dial;
 pub mod registry;
 mod store;
+pub mod sync3;
 mod types;
 pub mod wake;
 

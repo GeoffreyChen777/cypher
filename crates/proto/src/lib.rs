@@ -5,15 +5,22 @@
 //! harness-level passthrough (rate-limit meters), never persisted into docs.
 
 pub mod agent;
+pub mod command;
 pub mod entities;
 pub mod motion;
+pub mod parts;
 pub mod session_fork;
 pub mod side_chat;
+pub mod sync3;
+pub mod transcript;
 pub mod view;
 pub mod workspace;
 
 pub use agent::*;
+pub use command::*;
 pub use entities::*;
+pub use parts::{MSG_INLINE_MAX, MessagePart, MessageStatus, ToolDiffStat};
 pub use session_fork::*;
 pub use side_chat::*;
+pub use transcript::*;
 pub use workspace::*;

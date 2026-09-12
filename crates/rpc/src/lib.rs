@@ -62,6 +62,8 @@ pub mod methods {
     pub const START_MCP_AUTH: &str = "StartMcpAuth";
     pub const LOGOUT_MCP_SERVER: &str = "LogoutMcpServer";
     pub const LIST_MODELS: &str = "ListModels";
+    pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";
+    pub const SET_TITLE_MODEL_SETTINGS: &str = "SetTitleModelSettings";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Re-issue a failed/expired durable message command with a fresh command
@@ -131,6 +133,10 @@ pub mod methods {
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
+    /// Read-only browser; {chatId, cwd, path}. cwd must still be the chat's
+    /// assigned checkout, and path is relative with no symlink traversal.
+    pub const LIST_WORKSPACE_FILES: &str = "ListWorkspaceFiles";
+    pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).

@@ -23,6 +23,7 @@ pub mod doc_host;
 pub mod instance_lock;
 pub mod local_import;
 pub mod mcp;
+mod native_watch;
 pub mod pi_packages;
 pub mod pi_providers;
 pub mod pi_runtime;
@@ -38,6 +39,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 pub mod uploads;
+mod workspace_files;
 pub mod workspace_host;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
@@ -64,6 +66,7 @@ pub use side_chats::bounded_transcript_context;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
+pub mod title_settings;
 pub use uploads::{AttachmentChunk, Uploads};
 pub use workspace_host::{
     DEFAULT_ORG_ID, DEFAULT_USER_ID, WORKSPACE_DOC_ID, WorkspaceHost, WorkspaceHostConfig,
@@ -129,6 +132,7 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    pub title_settings: title_settings::TitleSettingsStore,
     /// Temporary Side Chats (round 21): engine-hosted chats opened from a
     /// settled selection. Owned HERE (not by [`EngineRpc`]) so every RPC
     /// service built from this core shares one manager and shutdown reaps
@@ -296,11 +300,11 @@ impl EngineCore {
             )
         });
         let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
-        sessions.set_titles(TitleGenerator::new(
-            workspace.clone(),
-            registry.clone(),
-            repos.clone(),
-        ));
+        let title_settings = title_settings::TitleSettingsStore::new(data_dir);
+        sessions.set_titles(
+            TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
+                .with_settings(title_settings.clone()),
+        );
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
@@ -319,6 +323,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            title_settings,
             side_chats,
             session_forks,
             device_id,
@@ -480,7 +485,8 @@ impl EngineCore {
             self.session_forks.clone(),
             self.workspace_scope,
         )
-        .with_auth(self.auth());
+        .with_auth(self.auth())
+        .with_title_settings(self.title_settings.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }

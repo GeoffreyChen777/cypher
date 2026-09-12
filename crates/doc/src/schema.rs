@@ -28,29 +28,7 @@ pub enum DocError {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageRole {
-    User,
-    Assistant,
-    System,
-}
-
-/// One entry in the doc's `messages` list (`SessionMessageEntry` in TS).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMessageEntry {
-    pub id: String,
-    pub role: MessageRole,
-    pub parts: Vec<MessagePart>,
-    /// Epoch millis.
-    pub created_at: i64,
-    pub device_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<MessageStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation_of: Option<String>,
-}
+pub use cypher_proto::{MessageRole, SessionMessageEntry};
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
 /// [`MessagePart`]: input parts key on their request id, error parts store `message`.

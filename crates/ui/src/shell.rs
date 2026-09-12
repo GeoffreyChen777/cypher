@@ -199,6 +199,7 @@ pub enum SettingsSection {
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
     Providers,
+    Titles,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Commands,
@@ -241,6 +242,7 @@ impl SettingsSection {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Providers => "Providers",
+            SettingsSection::Titles => "Automatic titles",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
@@ -954,6 +956,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     providers_page: Option<Entity<ProvidersPage>>,
+    titles_page: Option<Entity<crate::settings::titles::TitlesPage>>,
     settings_target: Entity<DeviceTarget>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     commands_page: Option<Entity<CommandsPage>>,
@@ -1346,6 +1349,7 @@ impl Shell {
             Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/providers") => Route::Settings(SettingsSection::Providers),
+            Some("settings/titles") => Route::Settings(SettingsSection::Titles),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/commands") => Route::Settings(SettingsSection::Commands),
             Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
@@ -1410,6 +1414,7 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             providers_page: None,
+            titles_page: None,
             settings_target,
             harnesses_page: None,
             commands_page: None,
@@ -2836,6 +2841,9 @@ impl Shell {
         if section == SettingsSection::Providers {
             self.providers_page = None;
         }
+        if section == SettingsSection::Titles {
+            self.titles_page = None;
+        }
         // Persisted chat preferences live in the global, not in this editor.
         // Re-enter without a stale font popup or an unfinished HEX draft.
         if section == SettingsSection::Appearance {
@@ -2911,6 +2919,20 @@ impl Shell {
     /// Lazily create the entity for a settings section and return it renderable.
     fn settings_outlet(&mut self, section: SettingsSection, cx: &mut Context<Self>) -> AnyElement {
         match section {
+            SettingsSection::Titles => {
+                if self.titles_page.is_none() {
+                    let state = self.state.clone();
+                    let target = self.settings_target.clone();
+                    self.titles_page = Some(
+                        cx.new(|cx| crate::settings::titles::TitlesPage::new(state, target, cx)),
+                    );
+                }
+                self.titles_page
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Providers => {
                 if self.providers_page.is_none() {
                     let state = self.state.clone();
@@ -4057,6 +4079,7 @@ impl Shell {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Providers => icons::KEY_MINIMALISTIC,
+            SettingsSection::Titles => icons::TUNING,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,

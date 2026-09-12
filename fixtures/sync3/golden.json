@@ -1,0 +1,27 @@
+{
+  "operations": [
+    {"id":"op-1","actor":"phone","ownerEpoch":1,"event":{"type":"commandQueued","commandId":"command","command":{"id":"command","issuedBy":"phone","issuedAt":1000,"sentAt":1000,"basedOn":{"turnId":"previous-turn","frontier":null},"expiresAt":86401000,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"user-message","agentPrompt":"Selected context\nVisible prompt","request":{"prompt":"Visible prompt","harness":"pi","model":"fixture-model","reasoning":"high","modelOptions":{"fast":true},"cwd":"/workspace/project","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":["/workspace/image.png"],"pendingAttachments":[{"uploadId":"upload-one","fileName":"pending.png"}],"worktree":{"repoPath":"/workspace/project","baseRef":"main","nameHint":"review"}}}}}},
+    {"id":"op-2","actor":"host","ownerEpoch":1,"event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"id":"op-3","actor":"host","ownerEpoch":1,"event":{"type":"runStarted","runId":"run"}},
+    {"id":"op-4","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":"run","messageId":"message","role":"assistant","deviceId":"host","createdAt":1000,"continuationOf":null}},
+    {"id":"op-5","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"message","index":0,"part":{"kind":"text","id":"text","text":"你好"}}},
+    {"id":"op-6","actor":"host","ownerEpoch":1,"event":{"type":"textAppended","messageId":"message","partId":"text","offset":6,"text":"!"}},
+    {"id":"op-7","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"tool","id":"tool","call":{"kind":"readFile","path":"file.txt"},"isError":false,"resolved":false}}},
+    {"id":"op-8","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"tool","id":"tool","call":{"kind":"readFile","path":"file.txt"},"isError":false,"resolved":true,"output":"Read one file","outputRef":"chat/tool","outputBytes":512,"diffRef":"chat/tool.diff","diffStats":[{"path":"file.txt","additions":1,"deletions":0}]}}},
+    {"id":"op-9","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"message","index":2,"part":{"kind":"input","id":"question","requestId":"question","questions":[{"id":"choice","header":"Confirm","question":"Continue?","options":["Yes","No"],"multiSelect":false}],"resolved":false}}},
+    {"id":"op-10","actor":"host","ownerEpoch":1,"event":{"type":"messageFinished","messageId":"message","status":"complete"}},
+    {"id":"op-11","actor":"host","ownerEpoch":1,"event":{"type":"runFinished","runId":"run","outcome":"completed"}},
+    {"id":"op-12","actor":"host","ownerEpoch":1,"event":{"type":"attachmentSealed","uploadId":"upload-one","path":"/workspace/pending.png","fileName":"pending.png"}}
+  ],
+  "projection": {
+    "commands": {"command":{"command":{"id":"command","issuedBy":"phone","issuedAt":1000,"sentAt":1000,"basedOn":{"turnId":"previous-turn","frontier":null},"expiresAt":86401000,"status":"pending","resolution":null,"payload":{"kind":"run","messageId":"user-message","agentPrompt":"Selected context\nVisible prompt","request":{"prompt":"Visible prompt","harness":"pi","model":"fixture-model","reasoning":"high","modelOptions":{"fast":true},"cwd":"/workspace/project","sandbox":"workspace-write","autoApprove":false,"resume":null,"attachments":["/workspace/image.png"],"pendingAttachments":[{"uploadId":"upload-one","fileName":"pending.png"}],"worktree":{"repoPath":"/workspace/project","baseRef":"main","nameHint":"review"}}}},"actor":"phone","runId":"run","acceptedOpId":"op-2"}},
+    "runs": {"run":{"outcome":"completed"}},
+    "messages": {"message":{"createdSeq":4,"runId":"run","entry":{"id":"message","role":"assistant","deviceId":"host","createdAt":1000,"status":"complete","parts":[
+      {"kind":"text","id":"text","text":"你好!"},
+      {"kind":"tool","id":"tool","call":{"kind":"readFile","path":"file.txt"},"isError":false,"resolved":true,"output":"Read one file","outputRef":"chat/tool","outputBytes":512,"diffRef":"chat/tool.diff","diffStats":[{"path":"file.txt","additions":1,"deletions":0}]},
+      {"kind":"input","id":"question","requestId":"question","questions":[{"id":"choice","header":"Confirm","question":"Continue?","options":["Yes","No"],"multiSelect":false}],"resolved":false}
+    ]}}},
+    "attachments": {"upload-one":{"path":"/workspace/pending.png","fileName":"pending.png"}},
+    "executions": {}
+  }
+}

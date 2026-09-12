@@ -1,0 +1,38 @@
+{
+  "valid": [
+    {"kind":"text","id":"text:1","text":"你好\nline"},
+    {"kind":"error","id":"error","message":"A retained error"},
+    {"kind":"input","id":"ask","requestId":"request","questions":[{"id":"question one","header":"Select","question":"Which?","options":["a","b"],"multiSelect":true}],"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"exec","command":"pwd"},"isError":false,"resolved":false,"progress":"working"},
+    {"kind":"tool","id":"t","call":{"kind":"readFile","path":"file"},"isError":false,"resolved":true,"output":"read","outputRef":"chat/t","outputBytes":100},
+    {"kind":"tool","id":"t","call":{"kind":"writeFile","path":"file"},"isError":false,"resolved":true,"diff":{"path":"file","newText":"new"},"diffRef":"chat/t.diff","diffStats":[{"path":"file","additions":1,"deletions":0}]},
+    {"kind":"tool","id":"t","call":{"kind":"editFile","path":"file"},"isError":true,"resolved":true,"diff":{"path":"file","oldText":"old","newText":"new"}},
+    {"kind":"tool","id":"t","call":{"kind":"applyPatch"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"search","pattern":"text","path":"file"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"glob","pattern":"*.rs"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"webFetch","url":"https://example.com"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"webSearch","query":"query"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"acp-plan","call":{"kind":"todo","items":[{"text":"Task","done":false}]},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"mcp","server":"fixture","tool":"read"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"unknown","name":"extension-tool"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"unknown","name":"subagent","input":{"agent":"fixture","task":"Summary only","async":true}},"isError":false,"resolved":false}
+  ],
+  "invalid": [
+    {"kind":"text","id":"p","text":"ok","extra":1},
+    {"kind":"text","id":"p","text":1},
+    {"kind":"text","id":"../p","text":"x"},
+    {"kind":"input","id":"p","requestId":"r","questions":[{"id":"q","header":"h","question":"q","options":[true],"multiSelect":false}],"resolved":false},
+    {"kind":"input","id":"p","requestId":"r","questions":[]},
+    {"kind":"tool","id":"t","call":{"kind":"readFile","path":"file"},"isError":1,"resolved":true},
+    {"kind":"tool","id":"t","call":{"kind":"writeFile","path":"file","content":"private input"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"editFile","path":"file","old_string":"private input"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"webFetch","url":"https://example.com","prompt":"private input"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"mcp","server":"s","tool":"t","input":{"secret":"private input"}},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"unknown","name":"extension","input":{"secret":"private input"}},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"unknown","name":"subagent"},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"todo","items":[{"text":"task","done":"yes"}]},"isError":false,"resolved":false},
+    {"kind":"tool","id":"t","call":{"kind":"exec","command":"pwd"},"isError":false,"resolved":false,"outputBytes":9007199254740992},
+    {"kind":"tool","id":"t","call":{"kind":"exec","command":"pwd"},"isError":false,"resolved":false,"diff":{"path":"f","newText":"x","extra":true}},
+    {"kind":"tool","id":"t","call":{"kind":"exec","command":"pwd"},"isError":false,"resolved":false,"output":null}
+  ]
+}

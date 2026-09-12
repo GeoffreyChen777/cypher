@@ -384,8 +384,8 @@ impl ChatDocHandle {
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
     /// ended (zeron folded "Run interrupted by backend restart" the same
-    /// way). Returns the stamped entries' `(id, created_at)` — recovery uses
-    /// them for the resume-freshness check.
+    /// way). Returns the stamped entries' `(id, created_at)` for inspection;
+    /// freshness never authorizes automatic re-execution.
     pub fn mark_abandoned_streams(&self, note: &str) -> Result<Vec<(String, i64)>, DocError> {
         let mut stamped = Vec::new();
         for entry in self.doc.read_entries()? {
@@ -2366,7 +2366,7 @@ impl DocHost {
                     handle,
                     &command_id,
                     SessionCommandStatus::Rejected,
-                    Some("interrupted before completion — retry to send again"),
+                    Some("interrupted before completion — execution outcome unknown; external effects may already have occurred. Review before explicitly retrying."),
                 );
                 skipped.insert(command_id);
             }

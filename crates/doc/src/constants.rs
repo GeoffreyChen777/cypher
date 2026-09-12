@@ -2,7 +2,7 @@
 //! Per the original design these are starting points — re-measure with real heavy sessions.
 
 /// Max bytes for a single message entry before continuation splitting.
-pub const MSG_INLINE_MAX: usize = 256 * 1024;
+pub use cypher_proto::MSG_INLINE_MAX;
 /// History retention window for shallow-snapshot trimming (days). Dropped
 /// 30 → 3 with the edge copy (2026-08-04): a month of op history per doc
 /// blew the shared loro-wasm heap on the edge isolate before any trim ran.
@@ -22,6 +22,6 @@ pub const TAIL_MESSAGE_COUNT: usize = 64;
 /// Terminal output batching cadence (ms).
 pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 12;
 /// Default TTL for durable commands.
-pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+pub use cypher_proto::COMMAND_DEFAULT_TTL_MS;
 /// Current session doc schema version (`meta.schemaVersion`).
 pub const SESSION_SCHEMA_VERSION: u32 = 1;

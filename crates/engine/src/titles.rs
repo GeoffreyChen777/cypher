@@ -5,8 +5,8 @@
 //! Flow (fire-and-forget from the run task; every failure is a silent skip with
 //! tracing — a title must never fail or delay a run):
 //! 1. skip when the chat already has a title (or has no workspace row);
-//! 2. pick the run harness's cheapest model (small-tier name heuristic, else the
-//!    last listed model — zeron's `cheapestModel`);
+//! 2. use this device's selected Pi title model; otherwise pick the run
+//!    harness's cheapest model (small-tier name heuristic, else the last);
 //! 3. run a one-shot, non-streaming-collected titling prompt through the
 //!    [`Harness`] trait (read-only sandbox, minimal reasoning, auto-approve),
 //!    retrying on cypher's short backoff ladder; fall back to the prompt's first
@@ -39,6 +39,7 @@ struct Inner {
     workspace: WorkspaceHost,
     registry: Arc<HarnessRegistry>,
     repos: Repos,
+    settings: Option<crate::title_settings::TitleSettingsStore>,
 }
 
 #[derive(Clone)]
@@ -53,8 +54,16 @@ impl TitleGenerator {
                 workspace,
                 registry,
                 repos,
+                settings: None,
             }),
         }
+    }
+
+    pub fn with_settings(mut self, settings: crate::title_settings::TitleSettingsStore) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure before sharing")
+            .settings = Some(settings);
+        self
     }
 
     /// Fire-and-forget: title `chat_id` if it's still untitled. Called by the run
@@ -148,6 +157,21 @@ impl TitleGenerator {
         prompt: &str,
         cwd: &str,
     ) -> Option<String> {
+        let configured = match &self.inner.settings {
+            Some(store) => match store.load() {
+                Ok(settings) => settings.model,
+                Err(error) => {
+                    tracing::warn!(%error, "title preferences unavailable; using text fallback");
+                    return None;
+                }
+            },
+            None => None,
+        };
+        let harness_id = if configured.is_some() {
+            HarnessId::Pi
+        } else {
+            harness_id
+        };
         let harness = match self.inner.registry.resolve(harness_id) {
             Ok(harness) => harness,
             Err(err) => {
@@ -155,24 +179,23 @@ impl TitleGenerator {
                 return None;
             }
         };
-        let cheap = cheapest_model(&harness.models().await.unwrap_or_default());
+        let cheap = if configured.is_some() {
+            None // Explicit selection never relies on catalog order or defaults.
+        } else {
+            cheapest_model(&harness.models().await.unwrap_or_default())
+        };
         let title_prompt = format!(
             "Reply with ONLY a concise 3-5 word title in Title Case (no quotes, no punctuation) \
              for a coding session that begins with this request:\n\n{prompt}"
         );
         for attempt in 0..=RETRY_DELAYS_MS.len() {
-            // Last attempt leaves the model unset so Pi uses its default.
-            // The cheap-tier name heuristic can pick uncallable catalog
-            // variants (e.g. `gpt-5.4-mini-openai-compact`).
-            let model = if attempt == RETRY_DELAYS_MS.len() {
-                None
-            } else {
-                cheap.clone()
-            };
+            // Only Automatic may use the default on its last retry. Explicit
+            // choices stay pinned even if unavailable or removed from catalog.
+            let model = title_model_for_attempt(configured.as_deref(), cheap.as_deref(), attempt);
             let request = RunRequest {
                 prompt: title_prompt.clone(),
                 harness: Some(harness_id),
-                model,
+                model: model.clone(),
                 reasoning: Some(ReasoningLevel::Minimal),
                 model_options: serde_json::Map::new(),
                 cwd: cwd.to_string(),
@@ -193,7 +216,7 @@ impl TitleGenerator {
                 Err(err) => {
                     tracing::warn!(
                         attempt = attempt + 1,
-                        model = cheap.as_deref().unwrap_or("default"),
+                        model = model.as_deref().unwrap_or("default"),
                         error = %err,
                         "automatic chat title generation attempt failed"
                     );
@@ -205,6 +228,16 @@ impl TitleGenerator {
         }
         None
     }
+}
+
+fn title_model_for_attempt(
+    configured: Option<&str>,
+    cheap: Option<&str>,
+    attempt: usize,
+) -> Option<String> {
+    configured
+        .or_else(|| (attempt < RETRY_DELAYS_MS.len()).then_some(cheap).flatten())
+        .map(str::to_owned)
 }
 
 /// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
@@ -286,6 +319,161 @@ async fn collect_text(
 mod tests {
     use super::*;
     use cypher_proto::Model;
+
+    #[test]
+    fn explicit_title_model_is_pinned_for_every_retry() {
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
+            assert_eq!(
+                title_model_for_attempt(Some("provider/chosen"), Some("cheap"), attempt).as_deref(),
+                Some("provider/chosen")
+            );
+        }
+        assert_eq!(
+            title_model_for_attempt(None, Some("cheap"), 0).as_deref(),
+            Some("cheap")
+        );
+        assert_eq!(
+            title_model_for_attempt(None, Some("cheap"), RETRY_DELAYS_MS.len()),
+            None
+        );
+    }
+
+    struct RecordingTitleHarness {
+        requests: Arc<std::sync::Mutex<Vec<RunRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl cypher_harness::Harness for RecordingTitleHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Pi
+        }
+        fn display_name(&self) -> &str {
+            "Title fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> cypher_proto::SteeringMode {
+            cypher_proto::SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, cypher_harness::HarnessError> {
+            // A pinned model must work without discovery and must not fall back
+            // to another catalog model when the chosen model fails.
+            Err(cypher_harness::HarnessError::Protocol(
+                "catalog offline".into(),
+            ))
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            _: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, cypher_harness::HarnessError>>,
+            cypher_harness::HarnessError,
+        > {
+            let fail = request.model.as_deref() == Some("provider/failing");
+            self.requests.lock().unwrap().push(request);
+            if fail {
+                return Err(cypher_harness::HarnessError::Protocol(
+                    "fixture failure".into(),
+                ));
+            }
+            Ok(futures::stream::iter(vec![
+                Ok(AgentEvent::TextDelta {
+                    text: "Chosen Model Title".into(),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            ])
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn device_choice_updates_live_and_failure_never_changes_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(RecordingTitleHarness {
+            requests: requests.clone(),
+        }));
+        let core =
+            crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Pi, None).unwrap();
+        let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone())
+            .with_settings(core.title_settings.clone());
+        for (id, model) in [
+            ("one", "provider/first"),
+            ("two", "provider/second"),
+            ("failure", "provider/failing"),
+        ] {
+            core.workspace
+                .create_chat(
+                    id,
+                    None,
+                    Some(&core.device_id),
+                    None,
+                    Some(dir.path().to_string_lossy().into()),
+                )
+                .unwrap();
+            core.title_settings
+                .save(&cypher_proto::TitleModelSettings {
+                    model: Some(model.into()),
+                })
+                .unwrap();
+            // Even a chat using another harness must use the configured Pi model.
+            generator
+                .generate(
+                    id,
+                    HarnessId::Mock,
+                    "Fix the title picker",
+                    dir.path().to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+            let expected = if id == "failure" {
+                "Fix the title picker"
+            } else {
+                "Chosen Model Title"
+            };
+            assert_eq!(
+                core.workspace.chat(id).unwrap().unwrap().title.as_deref(),
+                Some(expected)
+            );
+        }
+        let models: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                assert_eq!(r.harness, Some(HarnessId::Pi));
+                r.model.clone()
+            })
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                Some("provider/first".into()),
+                Some("provider/second".into()),
+                Some("provider/failing".into()),
+                Some("provider/failing".into()),
+                Some("provider/failing".into()),
+            ]
+        );
+        // Previously named chats must not be renamed by a changed preference.
+        generator
+            .generate("one", HarnessId::Mock, "different prompt", "")
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 5);
+        core.shutdown().await;
+    }
 
     fn model(id: &str, label: &str) -> Model {
         Model {

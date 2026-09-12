@@ -274,6 +274,44 @@ async fn target_device_id_routes_over_the_relay() {
         "remote folder listing must come from B's filesystem: {names:?}"
     );
 
+    // Read-only file browsing must remain on the selected host even when A
+    // has a chat with the same id and a same-named file of its own.
+    let a_files = dirs.path().join("a-files");
+    let b_files = dirs.path().join("b-files");
+    for (core, device, folder, text) in [
+        (&core_a, "device-a", &a_files, "from A"),
+        (&core_b, "device-b", &b_files, "from B"),
+    ] {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("which.txt"), text).unwrap();
+        core.workspace
+            .create_space("file-space", device, folder.to_str().unwrap(), None, false)
+            .unwrap();
+        core.workspace
+            .create_chat("file-chat", Some("file-space"), None, None, None)
+            .unwrap();
+    }
+    let file = client.call(methods::READ_WORKSPACE_FILE, serde_json::json!({
+        "targetDeviceId": "device-b", "chatId": "file-chat", "cwd": b_files, "path": "which.txt",
+    })).await.expect("remote read-only file");
+    assert_eq!(file["text"], "from B");
+    let files = client
+        .call(
+            methods::LIST_WORKSPACE_FILES,
+            serde_json::json!({
+                "targetDeviceId": "device-b", "chatId": "file-chat", "cwd": b_files, "path": "",
+            }),
+        )
+        .await
+        .expect("remote read-only directory");
+    assert_eq!(files["entries"][0]["name"], "which.txt");
+    assert!(client.call(methods::READ_WORKSPACE_FILE, serde_json::json!({
+        "targetDeviceId": "device-b", "chatId": "file-chat", "cwd": a_files, "path": "which.txt",
+    })).await.is_err(), "remote request must not fall back to A's checkout");
+    assert!(client.call(methods::READ_WORKSPACE_FILE, serde_json::json!({
+        "targetDeviceId": "device-b", "chatId": "file-chat", "cwd": b_files, "path": "../a-files/which.txt",
+    })).await.is_err(), "remote traversal cannot escape the assigned checkout");
+
     // Streaming proxy: WatchDocMessages against B's doc from A's IPC surface.
     let mut stream = client
         .subscribe(
@@ -638,6 +676,58 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
             .unwrap();
         assert!(packages.is_object());
     }
+    // Title settings persist only on the addressed device and validate against
+    // THAT device's model catalog, never the UI/local engine catalog.
+    let selected = client
+        .call(
+            methods::SET_TITLE_MODEL_SETTINGS,
+            serde_json::json!({"targetDeviceId":"device-b","model":"device-b/model"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected["model"], "device-b/model");
+    assert_eq!(
+        b.title_settings.load().unwrap().model.as_deref(),
+        Some("device-b/model")
+    );
+    assert_eq!(a.title_settings.load().unwrap().model, None);
+    assert_eq!(
+        client
+            .call(
+                methods::GET_TITLE_MODEL_SETTINGS,
+                serde_json::json!({"targetDeviceId":"device-b"})
+            )
+            .await
+            .unwrap()["model"],
+        "device-b/model"
+    );
+    for params in [
+        serde_json::json!({"targetDeviceId":"device-b","model":"device-a/model"}),
+        serde_json::json!({"targetDeviceId":"device-b","model":" "}),
+        serde_json::json!({"targetDeviceId":"device-b"}),
+        serde_json::json!({"targetDeviceId":"missing-device","model":null}),
+    ] {
+        assert!(
+            client
+                .call(methods::SET_TITLE_MODEL_SETTINGS, params)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        b.title_settings.load().unwrap().model.as_deref(),
+        Some("device-b/model")
+    );
+    client
+        .call(
+            methods::SET_TITLE_MODEL_SETTINGS,
+            serde_json::json!({"targetDeviceId":"device-b","model":null}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.title_settings.load().unwrap().model, None);
+    assert_eq!(a.title_settings.load().unwrap().model, None);
+
     for (method, action) in [
         (methods::LIST_PI_PROVIDERS, "list"),
         (methods::SAVE_PI_PROVIDER, "save"),

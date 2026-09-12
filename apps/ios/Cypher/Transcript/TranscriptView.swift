@@ -46,6 +46,7 @@ struct TranscriptView: View {
     /// Gates the reveal: false until the transcript has landed at the bottom.
     @State private var settled = false
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var hydrationTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -71,6 +72,7 @@ struct TranscriptView: View {
             .frame(maxWidth: Self.maxContentWidth)
             .frame(maxWidth: .infinity)
         }
+        .accessibilityIdentifier("chat-transcript")
         .scrollPosition($scrollPosition)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         .defaultScrollAnchor(.bottom)
@@ -117,7 +119,8 @@ struct TranscriptView: View {
             guard !isEmpty, !hydrated else { return }
             hydrated = true
             settled = false
-            Task { await settleToBottom() }
+            hydrationTask?.cancel()
+            hydrationTask = Task { await settleToBottom() }
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { [scroll] old, new in
             scroll.contentHeight = new
@@ -132,6 +135,7 @@ struct TranscriptView: View {
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { [scroll] _, new in
             scroll.contentOffsetY = new
+            scroll.motion.geometryChanged(now: Date().timeIntervalSinceReferenceDate)
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height + $0.contentInsets.bottom } action: { _, _ in
             // The viewport resized under the content — keyboard up/down, the
@@ -157,12 +161,16 @@ struct TranscriptView: View {
         .onScrollPhaseChange { [scroll] _, newPhase in
             // Desktop rule: the pin breaks only on USER input (wheel-up/drag),
             // never on streaming growth. Phases track the gesture.
-            scroll.userScrolling = newPhase == .interacting || newPhase == .decelerating
+            scroll.motion.changed(to: newPhase, now: Date().timeIntervalSinceReferenceDate)
+            // Invalidate callbacks queued by a previous gesture/transition.
+            // In particular, a second touch starts at tracking, not interacting.
+            scroll.correctionGeneration &+= 1
+            scroll.correctionScheduled = false
             // A gesture can END stranded past the content (a shrink landed
             // mid-drag; the in-flight clamps all yield to the user). Once the
             // scroll view goes quiet there is no later geometry event to
             // catch it — clamp here or the viewport stays blank.
-            if !scroll.userScrolling {
+            if newPhase == .idle {
                 correctPin()  // self-gates: pinned re-glue or stranded clamp
             }
         }
@@ -173,7 +181,8 @@ struct TranscriptView: View {
             // the keyboard inset (~keyboard-height at the bottom), which
             // both pinned the jump button on and put the 70pt re-stick band
             // permanently out of reach while typing. Unclamped on purpose:
-            // negative = stranded past the content (the resize clamp's cue).
+            // negative can be native rubber-banding; only treat it as a
+            // stranded layout after the motion/quiet gate releases.
             geo.contentSize.height - geo.visibleRect.maxY
         } action: { [scroll] old, new in
             scroll.distanceFromBottom = new
@@ -211,6 +220,13 @@ struct TranscriptView: View {
         }
         .onChange(of: contentSignature(rows)) {
             guard scroll.pinned else { return }
+            guard !scroll.keyboardTransitioning,
+                  !scroll.motion.blocksContentFollowing(now: Date().timeIntervalSinceReferenceDate) else {
+                // The idle correction uses the latest geometry, coalescing
+                // all tokens that arrived while the user owned the scroll.
+                correctPin()
+                return
+            }
             if reduceMotion {
                 scrollPosition.scrollTo(edge: .bottom)
             } else {
@@ -257,6 +273,28 @@ struct TranscriptView: View {
             // inset), so dip into it — the strip never hit-tests.
             .padding(.bottom, -12)
         }
+        .onDisappear {
+            hydrationTask?.cancel()
+            hydrationTask = nil
+            scroll.correctionGeneration &+= 1
+            scroll.correctionScheduled = false
+            scroll.requestCorrection = {}
+        }
+    }
+
+    /// One trailing correction, invalidated by the next touch or view exit.
+    /// Re-checking the gate on wake also handles geometry that arrives after
+    /// the idle phase callback, without clamping an unfinished rubber-band.
+    private func scheduleCorrection(after delay: TimeInterval) {
+        guard !scroll.correctionScheduled else { return }
+        scroll.correctionScheduled = true
+        let generation = scroll.correctionGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(max(0.01, delay)))
+            guard !Task.isCancelled, generation == scroll.correctionGeneration else { return }
+            scroll.correctionScheduled = false
+            correctPin()
+        }
     }
 
     /// Measured re-pin. The scroll-geometry numbers LIE while the keyboard is
@@ -273,7 +311,12 @@ struct TranscriptView: View {
     /// have reported (first layout), and stays out of the way of user drags
     /// and in-flight programmatic springs.
     private func correctPin(force: Bool = false) {
-        guard !scroll.userScrolling else { return }
+        guard !scroll.motion.isMoving else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        if scroll.motion.blocksPositioning(now: now) {
+            scheduleCorrection(after: scroll.motion.quietUntil - now)
+            return
+        }
         // The keyboard's whole transition is one no-correct window (UIKit
         // will/did notifications, flipped by SessionView) — the focus
         // sequence runs TWO boundary animations (composer morph, then the
@@ -281,28 +324,24 @@ struct TranscriptView: View {
         // between the two was the double-adjust stutter. SessionView requests
         // exactly one forced correction on didShow/didHide.
         guard force || !scroll.keyboardTransitioning else { return }
-        let now = Date().timeIntervalSinceReferenceDate
-        guard now >= scroll.animatingUntil else { return }
+        guard now >= scroll.animatingUntil else {
+            scheduleCorrection(after: scroll.animatingUntil - now)
+            return
+        }
         // While the composer boundary is mid-flight (card morph, panel swap)
         // nothing corrects — chasing a moving target was the stutter.
         // Trail instead: skip now, re-check after the boundary goes quiet.
         if !force, now - scroll.insetTopChangedAt < 0.12 {
-            if !scroll.correctionScheduled {
-                scroll.correctionScheduled = true
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 150_000_000)
-                    scroll.correctionScheduled = false
-                    correctPin()
-                }
-            }
+            scheduleCorrection(after: 0.15)
             return
         }
+        scroll.motion.didSettle()
         guard scroll.padGlobalMaxY > 0, scroll.insetTopGlobalY > 0 else {
             if scroll.pinned { scrollPosition.scrollTo(edge: .bottom) }
             return
         }
-        // < 0: overshot past the end — a blank band below the content, never
-        //      a legitimate state, corrected whether or not we're pinned.
+        // < 0 after native motion settles: overshot past the end due to a
+        //      reflow — not the legitimate rubber-band we yield to above.
         // > 0: tail parked short of the boundary — only wrong for a PINNED
         //      feed (an unpinned reader mid-history always measures > 0).
         let error = scroll.padGlobalMaxY - scroll.insetTopGlobalY
@@ -337,11 +376,12 @@ struct TranscriptView: View {
     private func settleToBottom() async {
         scroll.padGlobalMaxY = 0  // stale pad frames must not fake convergence
         for _ in 0..<60 {
-            guard scroll.pinned, !scroll.userScrolling else { break }
+            guard !Task.isCancelled, scroll.pinned, !scroll.userScrolling else { break }
             // Don't chase targets through a keyboard transition — the edge
             // math lies there and the budget burns on garbage jumps. The
             // didShow correction handles that endpoint; just wait it out.
-            if scroll.keyboardTransitioning {
+            if scroll.keyboardTransitioning ||
+                scroll.motion.blocksPositioning(now: Date().timeIntervalSinceReferenceDate) {
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 continue
             }
@@ -357,6 +397,7 @@ struct TranscriptView: View {
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        guard !Task.isCancelled else { return }
         settled = true
         // Revealed-with-CONTENT only: a settle that ran against a still-empty
         // projection must not latch, or the rows landing a beat later find
@@ -423,7 +464,8 @@ final class ScrollState {
     @ObservationIgnored var contentHeight: CGFloat = 0
     @ObservationIgnored var contentOffsetY: CGFloat = 0
     @ObservationIgnored var pinned = true
-    @ObservationIgnored var userScrolling = false
+    @ObservationIgnored var motion = TranscriptScrollMotion()
+    var userScrolling: Bool { motion.userScrolling }
     /// Programmatic spring deadline — correctPin stays quiet until it passes.
     @ObservationIgnored var animatingUntil: TimeInterval = 0
     /// Measured on-screen frames for correctPin: the transcript's bottom pad
@@ -438,6 +480,7 @@ final class ScrollState {
     @ObservationIgnored var keyboardTransitioning = false
     /// Trailing re-check dedupe: one scheduled correction at a time.
     @ObservationIgnored var correctionScheduled = false
+    @ObservationIgnored var correctionGeneration: UInt64 = 0
     /// Set by TranscriptView; SessionView invokes it on didShow/didHide.
     @ObservationIgnored var requestCorrection: () -> Void = {}
 }
@@ -756,7 +799,7 @@ struct InputChipView: View {
             Text("Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text(resolved ? header : "Awaiting your answer…")
+            Text(resolved ? (header == "Your input" ? "Answered" : header) : "Awaiting your answer…")
                 .font(Theme.sans(12))
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)

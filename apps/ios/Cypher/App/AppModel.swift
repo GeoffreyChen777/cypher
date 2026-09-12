@@ -346,7 +346,7 @@ final class AppModel {
     }
 
     func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
-        chats(in: spaceId).map { indicator(for: $0) }.min { $0.rawValue < $1.rawValue }
+        ChatIndicator.projectSummary(chats(in: spaceId).map { indicator(for: $0) })
     }
 
     func deviceName(_ deviceId: String) -> String {

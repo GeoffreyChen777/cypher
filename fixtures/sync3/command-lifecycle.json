@@ -1,0 +1,66 @@
+[
+  {"name":"cancel-author-and-race","status":"cancelled","acceptedOpId":null,"steps":[
+    {"actor":"other","event":{"type":"commandCancelAttempted","commandId":"command"},"error":"not_command_author"},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"},"error":"run_not_accepted"}
+  ]},
+  {"name":"applied-and-immutable","status":"applied","acceptedOpId":"step-0","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"applied","resolution":"dispatched"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"}},
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":"late"},"error":"command_resolved"}
+  ]},
+  {"name":"rejected-before-run","status":"rejected","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":"attachments unavailable"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"},"error":"run_not_accepted"}
+  ]},
+  {"name":"expiry","status":"expired","steps":[
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"expired","resolution":null}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}}
+  ]},
+  {"name":"superseded","status":"superseded","steps":[
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"superseded","resolution":"stale turn"}}
+  ]},
+  {"name":"one-winner-even-with-same-run-id","status":"pending","acceptedOpId":"step-0","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"other-run"}},
+    {"actor":"phone","event":{"type":"commandCancelAttempted","commandId":"command"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"other-run"},"error":"run_not_accepted"},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"}}
+  ]},
+  {"name":"claim-still-requires-owner-fence","status":"pending","acceptedOpId":null,"steps":[
+    {"actor":"phone","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"},"error":"not_owner"},
+    {"actor":"host","ownerEpoch":2,"event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"},"error":"stale_owner_epoch"},
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"missing","runId":"run"},"error":"unknown_command"}
+  ]},
+  {"name":"resolution-authority","status":"pending","steps":[
+    {"actor":"phone","event":{"type":"commandResolved","commandId":"command","status":"rejected","resolution":null},"error":"not_owner"},
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"applied","resolution":null},"error":"command_not_accepted"},
+    {"actor":"host","ownerEpoch":2,"event":{"type":"commandResolved","commandId":"command","status":"expired","resolution":null},"error":"stale_owner_epoch"}
+  ]},
+  {"name":"transcript-parts","initialPrefix":5,"status":"pending","steps":[
+    {"actor":"host","event":{"type":"textAppended","messageId":"message","partId":"text","offset":2,"text":"!"},"error":"text_offset_mismatch"},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":0,"part":{"kind":"text","id":"text","text":"replacement"}},"error":"text_requires_delta"},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"text","id":"text","text":"duplicate"}},"error":"part_exists"},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":2,"part":{"kind":"text","id":"gap","text":""}},"error":"part_gap"},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"input","id":"question","requestId":"request","questions":[{"id":"question one","header":"Choice","question":"Continue?","options":["Yes"],"multiSelect":false}],"resolved":false}}},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"input","id":"question","requestId":"request","questions":[{"id":"question one","header":"Choice","question":"Continue?","options":["Yes"],"multiSelect":false}],"resolved":true}}},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"input","id":"question","requestId":"request","questions":[{"id":"question one","header":"Choice","question":"Continue?","options":["Yes"],"multiSelect":false}],"resolved":false}},"error":"part_resolved"},
+    {"actor":"host","event":{"type":"partPut","messageId":"message","index":1,"part":{"kind":"input","id":"question","requestId":"request","questions":[{"id":"question one","header":"Choice","question":"Different question","options":["Yes"],"multiSelect":false}],"resolved":true}},"error":"question_changed"},
+    {"actor":"host","event":{"type":"runFinished","runId":"run","outcome":"completed"},"error":"unfinished_messages"},
+    {"actor":"host","event":{"type":"messageFinished","messageId":"message","status":"complete"}},
+    {"actor":"host","event":{"type":"textAppended","messageId":"message","partId":"text","offset":6,"text":"!"},"error":"message_finished"},
+    {"actor":"host","event":{"type":"messageCreated","runId":"run","messageId":"message#c1","role":"assistant","deviceId":"host","createdAt":1001,"continuationOf":"message"}},
+    {"actor":"host","event":{"type":"partPut","messageId":"message#c1","index":0,"part":{"kind":"text","id":"text","text":"Same part ID in a different message"}}},
+    {"actor":"host","event":{"type":"messageFinished","messageId":"message#c1","status":"aborted"}},
+    {"actor":"host","event":{"type":"runFinished","runId":"run","outcome":"completed"}},
+    {"actor":"host","event":{"type":"textAppended","messageId":"message","partId":"text","offset":6,"text":"late"},"error":"run_not_live"},
+    {"actor":"host","event":{"type":"attachmentSealed","uploadId":"upload","path":"/workspace/image.png","fileName":"image.png"}},
+    {"actor":"host","event":{"type":"attachmentSealed","uploadId":"upload","path":"/workspace/other.png","fileName":"image.png"},"error":"attachment_conflict"}
+  ]}
+]

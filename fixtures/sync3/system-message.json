@@ -1,0 +1,14 @@
+{
+  "id": "system-op",
+  "actor": "host",
+  "ownerEpoch": 1,
+  "event": {
+    "type": "messageCreated",
+    "runId": "run",
+    "messageId": "system-message#c1",
+    "role": "system",
+    "deviceId": "host",
+    "createdAt": 1000,
+    "continuationOf": null
+  }
+}

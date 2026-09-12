@@ -16,6 +16,8 @@ export interface Verified {
   readonly sessionId?: string;
   /** WorkOS `org_id` claim — the org the caller's session is scoped to. */
   readonly orgId?: string;
+  /** Verified JWT expiry; only used by v3's bounded socket authorization. */
+  readonly expiresAtMs?: number;
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -55,7 +57,8 @@ export const verifyToken = async (env: Env, token: string): Promise<Verified | u
     return {
       userId: payload.sub,
       sessionId: typeof payload.sid === "string" ? payload.sid : undefined,
-      orgId: typeof payload.org_id === "string" ? payload.org_id : undefined
+      orgId: typeof payload.org_id === "string" ? payload.org_id : undefined,
+      expiresAtMs: typeof payload.exp === "number" ? payload.exp * 1000 : undefined
     };
   } catch {
     return undefined;

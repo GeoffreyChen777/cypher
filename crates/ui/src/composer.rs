@@ -5030,7 +5030,7 @@ impl Composer {
     }
 
     /// The status-strip trigger: a compact Subagents-style indicator (`1
-    /// comment` / `N comments`, speech icon, transparent at rest, faint hover
+    /// comment` / `N comments`, speech icon, frosted backing and faint hover
     /// wash) that opens the upward inspector. Empty with no comments.
     pub fn render_comments_trigger(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.comments.is_empty() {
@@ -5043,6 +5043,7 @@ impl Composer {
             format!("{} comments", self.comments.len())
         };
         let open = self.comments_popup.get().is_some();
+        let backing = theme.composer_accessory_bg();
         let mut trigger = div()
             .id("comments-trigger")
             .h(px(22.0))
@@ -5055,8 +5056,8 @@ impl Composer {
             .cursor_pointer()
             .bg(crate::motion::hover_blend(
                 "comments-trigger",
-                crate::theme::ink(0.0),
-                crate::theme::ink(0.06),
+                backing,
+                backing.blend(crate::theme::ink(0.06)),
             ))
             .on_hover(crate::motion::hover_listener("comments-trigger"))
             .on_mouse_down(
@@ -5081,7 +5082,7 @@ impl Composer {
         if open {
             trigger = trigger.child(self.render_comments_inspector(cx));
         }
-        trigger.into_any_element()
+        crate::frost::composer_accessory(trigger).into_any_element()
     }
 
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):

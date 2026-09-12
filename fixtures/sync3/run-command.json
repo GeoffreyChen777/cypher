@@ -1,0 +1,29 @@
+{
+  "id": "command-run",
+  "issuedBy": "phone",
+  "issuedAt": 1000,
+  "sentAt": 1000,
+  "basedOn": {"turnId": "previous-turn", "frontier": null},
+  "expiresAt": 86401000,
+  "status": "pending",
+  "resolution": null,
+  "payload": {
+    "kind": "run",
+    "messageId": "user-message",
+    "agentPrompt": "Selected context\nVisible prompt",
+    "request": {
+      "prompt": "Visible prompt",
+      "harness": "pi",
+      "model": "fixture-model",
+      "reasoning": "high",
+      "modelOptions": {"fast": true},
+      "cwd": "/workspace/project",
+      "sandbox": "workspace-write",
+      "autoApprove": false,
+      "resume": null,
+      "attachments": ["/workspace/image.png"],
+      "pendingAttachments": [{"uploadId": "upload-one", "fileName": "pending.png"}],
+      "worktree": {"repoPath": "/workspace/project", "baseRef": "main", "nameHint": "review"}
+    }
+  }
+}

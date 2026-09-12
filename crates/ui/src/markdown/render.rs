@@ -24,7 +24,7 @@ use gpui::{
 use crate::theme::Theme;
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
-use super::veil::{RowVeil, apply_veil, slice_spans};
+use super::veil::{RowVeil, apply_veil};
 
 /// Gap between markdown blocks inside one message (zeron mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
@@ -159,12 +159,12 @@ pub struct RenderCache {
     style_revision: u64,
 }
 
-/// Cached per-line code runs (validity: code length + highlight identity).
+/// Cached code text/runs (validity: code length + highlight identity).
 pub struct CachedCode {
     code_len: usize,
     /// Slice-pointer identity + len of the highlight Arc that produced this.
     hl_key: (usize, usize),
-    lines: Vec<(SharedString, Vec<TextRun>)>,
+    flat: FlatText,
 }
 
 impl RenderCache {
@@ -1197,6 +1197,31 @@ fn code_block_theme(theme: &Theme) -> Theme {
     code
 }
 
+/// One selectable text model for the entire fence. Syntax spans are line-local,
+/// but literal newlines (including blank lines) belong in the model so partial
+/// copy/annotations preserve the source rather than joining non-empty rows.
+fn flatten_code(code: &str, highlight: CodeHighlight, theme: &Theme) -> FlatText {
+    let mono = font(theme.font_mono.clone());
+    let mut runs = Vec::new();
+    for (li, line) in code.split_inclusive('\n').enumerate() {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let spans = highlight
+            .and_then(|highlight| highlight.get(li))
+            .map(|spans| &spans[..])
+            .unwrap_or(&[]);
+        runs.extend(runs_for_syntax_line(body, spans, &mono, theme));
+        if line.ends_with('\n') {
+            runs.extend(runs_for_syntax_line("\n", &[], &mono, theme));
+        }
+    }
+    FlatText {
+        text: code.to_owned().into(),
+        runs,
+        links: Vec::new(),
+        code_ranges: Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_code_block(
     language: Option<&str>,
@@ -1207,31 +1232,16 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    let mono = font(theme.font_mono.clone());
     let code_theme = code_block_theme(theme);
     let chrome_color = theme.code_block_text.unwrap_or(theme.text_muted);
-    // Per-line strings + runs through the cross-frame cache (validity: code
+    // Whole-fence text + runs through the cross-frame cache (validity: code
     // length + highlight slice identity — a fresh highlight Arc re-derives).
     let hl_key = highlight.map_or((0, 0), |h| (h.as_ptr() as usize, h.len()));
     let build = || {
-        let lines: Vec<(SharedString, Vec<TextRun>)> = code
-            .split('\n')
-            .enumerate()
-            .map(|(li, line)| {
-                let spans = highlight
-                    .and_then(|h| h.get(li))
-                    .map(|t| &t[..])
-                    .unwrap_or(&[]);
-                (
-                    SharedString::from(line.to_string()),
-                    runs_for_syntax_line(line, spans, &mono, &code_theme),
-                )
-            })
-            .collect();
         Rc::new(CachedCode {
             code_len: code.len(),
             hl_key,
-            lines,
+            flat: flatten_code(code, highlight, &code_theme),
         })
     };
     let cached: Rc<CachedCode> = match &opts.cache {
@@ -1249,12 +1259,9 @@ fn render_code_block(
         }
         None => build(),
     };
-    // Streaming veil over appended code, tracked on the whole code text and
-    // sliced per line below (paint-only run recolor — heights stay exact).
-    let veil_spans = match &opts.veil {
-        Some(veil) => veil.borrow_mut().advance(ix, code, opts.now),
-        None => Vec::new(),
-    };
+    // Reuse the paragraph selection underlay, geometry and event listeners.
+    // This also applies the streaming veil without changing text or layout.
+    let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
     // Copy affordance (round 9; no source counterpart — the original block is
     // header + body only): a small ghost button in the block's top-right,
@@ -1334,21 +1341,13 @@ fn render_code_block(
                 .text_size(px(theme.markdown.code_size))
                 .line_height(px(theme.markdown.code_line_height))
                 .whitespace_nowrap()
+                .cursor_text()
                 .flex()
                 .flex_col()
-                .children((0..cached.lines.len()).scan(0usize, move |off, li| {
-                    let (line, runs) = &cached.lines[li];
-                    let start = *off;
-                    *off = start + line.len() + 1; // +1 for the '\n'
-                    let local = slice_spans(&veil_spans, start, start + line.len());
-                    let runs = apply_veil(runs.clone(), &local);
-                    Some(
-                        div()
-                            .h(px(theme.markdown.code_line_height))
-                            .flex_none()
-                            .child(StyledText::new(line.clone()).with_runs(runs)),
-                    )
-                })),
+                // Keep the selectable wrapper at intrinsic text width;
+                // stretching it to the viewport hides horizontal overflow.
+                .items_start()
+                .child(text),
         )
         // Overlay LAST so it paints above the header/body.
         .children(copy_button)
@@ -1411,6 +1410,186 @@ pub fn runs_for_syntax_line_with_plain(
 mod tests {
     use super::*;
     use crate::markdown::parser::InlineStyle;
+
+    #[test]
+    fn fenced_code_runs_cover_literal_newlines_tabs_and_unicode() {
+        let theme = Theme::dark();
+        for code in [
+            "",
+            "\n",
+            "x\n\n",
+            "\tlet café = \"你好\";\n\n    return café;",
+        ] {
+            let flat = flatten_code(code, None, &theme);
+            assert_eq!(flat.text.as_ref(), code);
+            assert_eq!(
+                flat.runs.iter().map(|run| run.len).sum::<usize>(),
+                code.len()
+            );
+            assert!(flat.links.is_empty());
+            assert!(flat.code_ranges.is_empty());
+        }
+        let code = "let x = 1;\n\nreturn x;";
+        let highlights = vec![
+            vec![HighlightSpan {
+                range: 0..3,
+                kind: HighlightKind::Keyword,
+            }],
+            vec![],
+            vec![HighlightSpan {
+                range: 0..6,
+                kind: HighlightKind::Keyword,
+            }],
+        ];
+        let flat = flatten_code(code, Some(&highlights), &theme);
+        assert_eq!(
+            flat.runs.iter().map(|run| run.len).sum::<usize>(),
+            code.len()
+        );
+        assert_eq!(
+            flat.runs[0].color,
+            theme.syntax.color(HighlightKind::Keyword)
+        );
+        let mut offset = 0;
+        let return_offset = code.find("return").unwrap();
+        for run in &flat.runs {
+            if offset == return_offset {
+                assert_eq!(run.len, 6);
+                assert_eq!(run.color, theme.syntax.color(HighlightKind::Keyword));
+            }
+            offset += run.len;
+        }
+    }
+
+    #[gpui::test]
+    fn fenced_code_drag_selects_across_blank_lines_and_reports_exact_quote(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::markdown::selection;
+        use gpui::MouseButton;
+        let _guard = selection::tests::state_lock();
+        let scope = selection::next_side_chat_scope();
+        let code = concat!(
+            "let answer = 42;\n\n    println!(\"你好\");\n",
+            "let long_line = \"012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\";\n",
+        );
+        let settled = Rc::new(RefCell::new(None));
+        struct CodeView {
+            scope: selection::SelectionScope,
+            code: &'static str,
+            settled: Rc<RefCell<Option<selection::SelectionSnapshot>>>,
+        }
+        impl gpui::Render for CodeView {
+            fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let mut opts = RenderOptions::settled("selection-code".into());
+                opts.scope = self.scope;
+                let captured = self.settled.clone();
+                opts.selection = Some(SelectionUi {
+                    on_started: Rc::new(|_, _| {}),
+                    on_cleared: Rc::new(|_, _| {}),
+                    on_settled: Rc::new(move |snapshot, _, _, _| {
+                        *captured.borrow_mut() = Some(snapshot);
+                    }),
+                });
+                div()
+                    .w(px(380.0))
+                    .child(selection_frame_reset(self.scope))
+                    .child(render_code_block(
+                        Some("rust"),
+                        self.code,
+                        0,
+                        0,
+                        &opts,
+                        &theme,
+                        None,
+                    ))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let window = cx.open_window(gpui::size(px(500.0), px(300.0)), |_, _| CodeView {
+            scope,
+            code,
+            settled: settled.clone(),
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let layout = REGISTRY.with(|registry| {
+            let registry = registry.borrow();
+            let entries = &registry[&scope];
+            assert_eq!(
+                entries.len(),
+                1,
+                "one source model, not disconnected code rows"
+            );
+            assert_eq!(entries[0].text.as_ref(), code);
+            entries[0].layout.clone()
+        });
+        let from = code.find("answer").unwrap();
+        let to = code.find("你好").unwrap() + "你好".len();
+        assert!(layout.bounds().size.width > px(380.0));
+        assert_eq!(layout.line_layouts().len(), code.split('\n').count());
+        let point_for = |index| {
+            layout.position_for_index(index).unwrap() + point(px(0.1), layout.line_height() / 2.0)
+        };
+        let start = point_for(from);
+        let end = point_for(to);
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        let expected = &code[from..to];
+        assert_eq!(selection::selected_text().as_deref(), Some(expected));
+        assert_eq!(settled.borrow().as_ref().unwrap().text, expected);
+        assert!(range_rects(&layout, &(from..to), 0.0, 0.0).len() >= 2);
+
+        // Reverse dragging must yield the same bytes and preserve indentation.
+        visual.simulate_mouse_down(end, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
+        assert_eq!(selection::selected_text().as_deref(), Some(expected));
+
+        // Horizontal scroll must move the actual selectable glyph geometry,
+        // not just the syntax paint; long lines remain unwrapped.
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: point(px(200.0), end.y),
+            delta: gpui::ScrollDelta::Pixels(point(px(-100.0), px(0.0))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        visual.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let scrolled = REGISTRY.with(|registry| registry.borrow()[&scope][0].layout.clone());
+        assert!(scrolled.bounds().origin.x < layout.bounds().origin.x);
+        let from = code.find("0123456789").unwrap() + 20;
+        let to = from + 10;
+        let inset = point(px(0.1), scrolled.line_height() / 2.0);
+        let start = scrolled.position_for_index(from).unwrap() + inset;
+        let end = scrolled.position_for_index(to).unwrap() + inset;
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        assert_eq!(selection::selected_text().as_deref(), Some(&code[from..to]));
+
+        visual.simulate_event(gpui::MouseDownEvent {
+            position: start,
+            modifiers: Default::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
+        let digits = code.split('"').nth(3).unwrap();
+        assert_eq!(selection::selected_text().as_deref(), Some(digits));
+        // Hidden overflow must not steal a click beside the code block.
+        visual.simulate_click(point(px(420.0), start.y), Default::default());
+        assert!(selection::selected_text().is_none());
+        selection::clear(scope);
+    }
 
     #[test]
     fn clipped_long_line_cannot_start_selection_in_the_other_diff_column() {
@@ -1572,8 +1751,8 @@ mod tests {
         let _ = render_code_block(None, "plain", 0, 0, &opts, &theme, None);
         let after = cache.borrow().code[&key].clone();
         assert!(!Rc::ptr_eq(&before, &after));
-        assert_eq!(before.lines[0].1[0].color, gpui::rgb(0xffccaa).into());
-        assert_eq!(after.lines[0].1[0].color, theme.code_block_text.unwrap());
+        assert_eq!(before.flat.runs[0].color, gpui::rgb(0xffccaa).into());
+        assert_eq!(after.flat.runs[0].color, theme.code_block_text.unwrap());
     }
 
     #[test]

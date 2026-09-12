@@ -36,11 +36,13 @@ use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
 const PARENT: &str = "chat-parent";
 const SELECTED: &str = "the exact selected quote for this side chat";
+type RunGate = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>;
 
 /// One-liner harness that RECORDS every RunRequest (the effective-prompt
 /// assertion) and streams a quick Done.
 struct RecordingHarness {
     requests: Arc<Mutex<Vec<RunRequest>>>,
+    next_run_gate: RunGate,
 }
 
 #[async_trait]
@@ -69,6 +71,10 @@ impl Harness for RecordingHarness {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.requests.lock().unwrap().push(request);
+        let gate = self.next_run_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.await.expect("test releases held run");
+        }
         let events: Vec<Result<AgentEvent, HarnessError>> = vec![
             Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Pi,
@@ -95,14 +101,17 @@ impl Harness for RecordingHarness {
 struct Rig {
     core: EngineCore,
     requests: Arc<Mutex<Vec<RunRequest>>>,
+    next_run_gate: RunGate,
     _dir: tempfile::TempDir,
 }
 
 fn assemble() -> Rig {
     let registry = HarnessRegistry::new();
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let next_run_gate = RunGate::default();
     registry.register(Arc::new(RecordingHarness {
         requests: requests.clone(),
+        next_run_gate: next_run_gate.clone(),
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
@@ -110,6 +119,7 @@ fn assemble() -> Rig {
     Rig {
         core,
         requests,
+        next_run_gate,
         _dir: dir,
     }
 }
@@ -125,6 +135,7 @@ fn assemble_arc() -> (
     let requests = Arc::new(Mutex::new(Vec::new()));
     registry.register(Arc::new(RecordingHarness {
         requests: requests.clone(),
+        next_run_gate: Default::default(),
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = Arc::new(
@@ -368,7 +379,11 @@ async fn start_send_promote_flow() {
         });
     }
 
-    // SECOND send: no injection.
+    // SECOND send: no injection. A watch holds the latest state, not every
+    // transient transition. Keep this run open until the subscriber has
+    // actually observed Working, instead of racing an instant Done.
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *rig.next_run_gate.lock().unwrap() = Some(gate);
     let before2 = rig.requests.lock().unwrap().len();
     rpc(
         &rig.core,
@@ -395,6 +410,11 @@ async fn start_send_promote_flow() {
         "side question two"
     );
     wait_for(
+        || statuses.lock().unwrap().iter().any(|s| s == "working"),
+        "watch observes held Working",
+    );
+    release.send(()).unwrap();
+    wait_for(
         || {
             rig.core
                 .sessions
@@ -403,8 +423,10 @@ async fn start_send_promote_flow() {
         },
         "second side run to settle",
     );
-    // Give the collector a beat to drain the watch's current value.
-    std::thread::sleep(Duration::from_millis(100));
+    wait_for(
+        || statuses.lock().unwrap().last().is_some_and(|s| s == "idle"),
+        "watch observes settled Idle",
+    );
     let seen = statuses.lock().unwrap().clone();
     assert!(
         seen.iter().any(|s| s == "working"),

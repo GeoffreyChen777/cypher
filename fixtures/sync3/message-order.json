@@ -1,0 +1,16 @@
+{
+  "operations": [
+    {"id":"order-1","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":null,"messageId":"z","role":"user","deviceId":"host","createdAt":1000,"continuationOf":null}},
+    {"id":"order-2","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"z","index":0,"part":{"kind":"text","id":"text","text":"first"}}},
+    {"id":"order-3","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":null,"messageId":"a","role":"user","deviceId":"host","createdAt":900,"continuationOf":null}},
+    {"id":"order-4","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"a","index":0,"part":{"kind":"text","id":"text","text":"second"}}},
+    {"id":"order-5","actor":"host","ownerEpoch":1,"event":{"type":"messageCreated","runId":null,"messageId":"z#c1","role":"user","deviceId":"host","createdAt":900,"continuationOf":"z"}},
+    {"id":"order-6","actor":"host","ownerEpoch":1,"event":{"type":"partPut","messageId":"z#c1","index":0,"part":{"kind":"text","id":"text","text":"third"}}},
+    {"id":"order-7","actor":"host","ownerEpoch":1,"event":{"type":"textAppended","messageId":"z","partId":"text","offset":5,"text":" updated"}},
+    {"id":"order-8","actor":"host","ownerEpoch":1,"event":{"type":"messageFinished","messageId":"a","status":null}},
+    {"id":"order-9","actor":"host","ownerEpoch":1,"event":{"type":"messageFinished","messageId":"z#c1","status":null}},
+    {"id":"order-10","actor":"host","ownerEpoch":1,"event":{"type":"messageFinished","messageId":"z","status":null}}
+  ],
+  "ids": ["z","a","z#c1"],
+  "positions": [1,3,5]
+}

@@ -16,6 +16,7 @@ struct SessionView: View {
     /// The view's own width, the only reliable basis for capping the principal
     /// toolbar item (its container proposes an unbounded width).
     @State private var viewWidth: CGFloat = 0
+    @State private var viewHeight: CGFloat = 0
 
     /// Shared with TranscriptView; owned here so the composer inset (which
     /// this view composes) can report its global top edge — the measured
@@ -25,6 +26,7 @@ struct SessionView: View {
     @State private var commentDrafts = CommentDrafts()
     @State private var catalog = RemotePiCatalog()
     @State private var connectionRetry = 0
+    @State private var workspaceDestination: WorkspaceDestination?
 
 
     private var chat: Chat? { model.chat(id: chatId) }
@@ -38,7 +40,10 @@ struct SessionView: View {
         Group {
             if let chat, let store = model.sessionStore(for: chat) {
                 content(chat: chat, store: store)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: {
+                        viewWidth = $0.width
+                        viewHeight = $0.height
+                    }
             } else {
                 VStack(spacing: 12) {
                     CypherPulse()
@@ -82,6 +87,16 @@ struct SessionView: View {
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("Files", systemImage: "folder") { workspaceDestination = .files }
+                        Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .accessibilityLabel("Session menu")
+                    .accessibilityIdentifier("workspace-browser")
+                }
                 if let relation = chat.child,
                    let parent = model.chat(id: relation.parentChatId),
                    parent.id != chat.id, parent.deviceId == chat.deviceId {
@@ -99,6 +114,10 @@ struct SessionView: View {
         .onAppear {
             commentDrafts.bind(to: chatId)
             model.markSeen(chatId: chatId)
+            if model.demo != nil, let destination = WorkspaceDestination(rawValue: model.launchSheet ?? "") {
+                model.launchSheet = nil
+                workspaceDestination = destination
+            }
             if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
                 let showList = model.launchSheet == "comments"
                 model.launchSheet = nil
@@ -114,12 +133,19 @@ struct SessionView: View {
         .sheet(isPresented: $commentDrafts.presented) {
             CommentsPanel(drafts: commentDrafts)
         }
+        .sheet(item: $workspaceDestination) { destination in
+            if let chat { WorkspaceBrowserView(model: model, chat: chat, destination: destination) }
+        }
+        .onChange(of: chatId) { _, _ in workspaceDestination = nil }
+        .onChange(of: chat?.cwd) { _, _ in workspaceDestination = nil }
+        .onChange(of: chat?.deviceId) { _, _ in workspaceDestination = nil }
         .onChange(of: path) { _, routes in
             if routes.last != .chat(chatId) {
                 commentDrafts.reset()
             }
         }
         .onChange(of: model.workspace.map { ObjectIdentifier($0) }) { _, _ in
+            workspaceDestination = nil
             // Account/workspace replacement invalidates an in-flight send's
             // annotation snapshot even if the navigation path hasn't changed.
             commentDrafts.reset()
@@ -209,18 +235,17 @@ struct SessionView: View {
                     }
                     Group {
                         if let request = store.openInputRequest, chat.config?.harness == "pi" {
-                            Button("Stop task") {
+                            QuestionPanel(requestId: request.requestId, questions: request.questions,
+                                          maximumHeight: min(560, max(180, viewHeight * 0.72)),
+                                          canRespond: canControl(chat), stop: {
                                 guard canControl(chat) else { return }
                                 controlError = store.sendInterrupt() ? nil : "Couldn't queue Stop. Please retry."
-                            }
-                            .font(Theme.sans(12))
-                            .disabled(!canControl(chat))
-                            QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
+                            }) { requestId, answers in
                                 guard canControl(chat) else { return }
                                 controlError = store.respondInput(requestId: requestId, answers: answers)
                                     ? nil : "Couldn't queue your answer. Please retry."
                             }
-                            .disabled(!canControl(chat))
+                            .id(request.requestId)
                         } else {
                             ComposerView(store: store, chat: chat, runLive: status == .working,
                                          catalog: catalog, connectionRetry: connectionRetry)

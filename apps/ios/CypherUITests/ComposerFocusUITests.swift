@@ -1,6 +1,31 @@
 import XCTest
 
 final class ComposerFocusUITests: XCTestCase {
+    func testRepeatedBottomDragsLeaveTheTailVisibleAndComposerUsable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]
+        app.launch()
+        let transcript = app.scrollViews.matching(identifier: "chat-transcript").firstMatch
+        let tail = app.descendants(matching: .any).matching(identifier: "steer-label").firstMatch
+        XCTAssertTrue(transcript.waitForExistence(timeout: 10))
+        XCTAssertTrue(tail.waitForExistence(timeout: 10))
+        let start = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let end = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+        for _ in 0..<5 {
+            start.press(forDuration: 0.02, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+        }
+        // This checks the endpoint, not frame-by-frame spring smoothness:
+        // XCUITest may itself wait for quiescence between gestures.
+        XCTAssertTrue(tail.isHittable, "Bottom overscroll must not leave a blank/stranded viewport")
+        let editor = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'composer-editor-'")).firstMatch
+        editor.tap()
+        let controls = app.descendants(matching: .any).matching(identifier: "composer-model-controls").firstMatch
+        XCTAssertTrue(controls.waitForExistence(timeout: 5))
+        editor.typeText("hi")
+        XCTAssertTrue(controls.exists)
+    }
+
     func testDemoSteerHasAQuietLabel() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]

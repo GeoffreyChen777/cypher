@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use cypher_proto::Space;
 
+use crate::native_watch::BackgroundWatch;
 use crate::repos::Repos;
 use crate::workspace_host::WorkspaceHost;
 
@@ -41,9 +42,9 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 
 struct SpaceEntry {
     path: PathBuf,
-    kick_tx: mpsc::UnboundedSender<()>,
+    kick_tx: mpsc::Sender<()>,
     /// Keeps the folder watcher alive; dropped on entry close.
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<BackgroundWatch>,
 }
 
 struct SpacesSyncInner {
@@ -97,6 +98,7 @@ impl SpacesSync {
         if let Some(task) = task {
             let _ = task.await;
         }
+        lock(&self.inner.entries).clear();
     }
 
     /// Reconcile + recheck now (tests / opportunistic callers).
@@ -104,13 +106,16 @@ impl SpacesSync {
         let spaces = self.inner.workspace.watch_spaces().borrow().clone();
         reconcile(&self.inner, &spaces);
         for entry in lock(&self.inner.entries).values() {
-            let _ = entry.kick_tx.send(());
+            let _ = entry.kick_tx.try_send(());
         }
     }
 }
 
 /// (Re)build the entry set for the spaces THIS device owns.
 fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
+    if inner.cancel.is_cancelled() {
+        return;
+    }
     let owned: HashMap<&str, &Space> = spaces
         .iter()
         .filter(|s| s.device_id == inner.device_id)
@@ -118,17 +123,26 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
         .collect();
 
     let mut entries = lock(&inner.entries);
+    if inner.cancel.is_cancelled() {
+        return;
+    }
     entries.retain(|id, _| owned.contains_key(id.as_str()));
     for (id, space) in owned {
         if entries.contains_key(id) {
             continue; // deviceId/path are immutable — nothing to refresh
         }
-        let (kick_tx, kick_rx) = mpsc::unbounded_channel();
+        // A kick is replaceable, not a durable event. Coalesce filesystem
+        // bursts rather than allocating an unbounded queue.
+        let (kick_tx, kick_rx) = mpsc::channel(1);
         // Non-recursive watcher on the space folder: `.git` appearing/vanishing
         // among the direct children is exactly the signal we need. Watch
         // failures are fine — the repair tick still converges.
-        let watcher = {
-            let tx = kick_tx.clone();
+        let watcher =
+            {
+                let tx = kick_tx.clone();
+                let path = space.path.clone();
+                BackgroundWatch::start(move || {
+            let callback_tx = tx.clone();
             let result =
                 notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
                     let Ok(event) = event else { return };
@@ -137,17 +151,22 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                         .iter()
                         .any(|p| p.file_name().is_some_and(|n| n == ".git"))
                     {
-                        let _ = tx.send(());
+                        let _ = callback_tx.try_send(());
                     }
                 });
             match result {
                 Ok(mut watcher) => {
                     use notify::Watcher as _;
-                    match watcher.watch(Path::new(&space.path), notify::RecursiveMode::NonRecursive)
+                    match watcher.watch(Path::new(&path), notify::RecursiveMode::NonRecursive)
                     {
-                        Ok(()) => Some(watcher),
+                        Ok(()) => {
+                            // Recheck changes that occurred while registration
+                            // was still pending and could not deliver events.
+                            let _ = tx.try_send(());
+                            Some(watcher)
+                        }
                         Err(err) => {
-                            tracing::debug!(path = %space.path, error = %err, "spaces: watch failed");
+                            tracing::debug!(path = %path, error = %err, "spaces: watch failed");
                             None
                         }
                     }
@@ -157,7 +176,8 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
                     None
                 }
             }
-        };
+            }).map_err(|err| tracing::debug!(error = %err, "spaces: watcher worker failed")).ok()
+            };
         let entry = Arc::new(SpaceEntry {
             path: PathBuf::from(&space.path),
             kick_tx: kick_tx.clone(),
@@ -170,7 +190,7 @@ fn reconcile(inner: &Arc<SpacesSyncInner>, spaces: &[Space]) {
             Arc::downgrade(&entry),
             kick_rx,
         ));
-        let _ = kick_tx.send(()); // initial check (boot / first observed)
+        let _ = kick_tx.try_send(()); // initial check (boot / first observed)
     }
 }
 
@@ -179,11 +199,22 @@ async fn entry_task(
     inner: Weak<SpacesSyncInner>,
     space_id: String,
     entry: Weak<SpaceEntry>,
-    mut kick_rx: mpsc::UnboundedReceiver<()>,
+    mut kick_rx: mpsc::Receiver<()>,
 ) {
-    while kick_rx.recv().await.is_some() {
+    let Some(cancel) = inner.upgrade().map(|inner| inner.cancel.clone()) else {
+        return;
+    };
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            kick = kick_rx.recv() => if kick.is_none() { return },
+        }
         loop {
-            match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => return,
+                next = tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()) => next,
+            };
+            match next {
                 Ok(Some(())) => continue,
                 Ok(None) => return, // entry closed mid-burst
                 Err(_) => break,
@@ -220,6 +251,12 @@ async fn check_space(inner: &Arc<SpacesSyncInner>, space_id: &str, path: &Path) 
     let Some(current) = current else {
         return; // deleted while checking
     };
+    if inner.cancel.is_cancelled()
+        || current.device_id != inner.device_id
+        || Path::new(&current.path) != path
+    {
+        return; // stale probe or shutdown: never stamp a replacement/remote row
+    }
     if current.git_detected == detected && current.checkout_id == checkout_id {
         return; // unchanged — no oplog growth
     }
@@ -294,10 +331,101 @@ async fn spaces_task(
                 let spaces = spaces_rx.borrow().clone();
                 reconcile(&inner, &spaces);
                 for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
+                    let _ = entry.kick_tx.try_send(());
                 }
                 sweep_orphans(&inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    struct DropNotice(Option<oneshot::Sender<std::thread::ThreadId>>);
+    impl Drop for DropNotice {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(std::thread::current().id());
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_registration_does_not_block_executor_or_leak_after_close() {
+        let executor = std::thread::current().id();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let watch = BackgroundWatch::start(move || {
+            let _ = entered_tx.send(std::thread::current().id());
+            // Model a native registration that cannot be cancelled. The
+            // timeout only prevents a regression from hanging the test.
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Some(DropNotice(Some(closed_tx)))
+        })
+        .unwrap();
+        let worker = tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(worker, executor);
+        // Timers and other command tasks remain runnable while registration
+        // waits; closing the entry does not wait for that native call either.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        drop(watch);
+        release_tx.send(()).unwrap();
+        let closer = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            closer, worker,
+            "late handle must be closed by its owner worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_handle_is_also_closed_off_executor() {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let watch = BackgroundWatch::start(move || {
+            let guard = DropNotice(Some(closed_tx));
+            let _ = ready_tx.send(std::thread::current().id());
+            Some(guard)
+        })
+        .unwrap();
+        let worker = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(worker, std::thread::current().id());
+        drop(watch);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            worker
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_registration_releases_its_captures_without_waiting_for_close() {
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let capture = DropNotice(Some(closed_tx));
+        let watch = BackgroundWatch::start(move || {
+            drop(capture);
+            None::<()>
+        })
+        .unwrap();
+        assert_ne!(
+            tokio::time::timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            std::thread::current().id()
+        );
+        drop(watch);
     }
 }
