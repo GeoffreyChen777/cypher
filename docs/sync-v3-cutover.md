@@ -87,6 +87,12 @@ review submissions.
 7. Make old routes and surviving old sockets reject requests at the cutover
    boundary. Keep migration access separate from normal-client access.
 
+Persistent harness occupancy is now a typed v3 projection entity across Rust,
+edge and iOS: semantic `runFinished` leaves the process occupied; explicit
+`executionFinished` is required after reconciliation before owner transfer.
+Presence expiry cannot release it. Real Engine/iOS lifecycle emission and
+authorized production canary verification remain required.
+
 ## Release order
 
 1. Complete the acceptance matrix; rerun native and CI suites on the exact

@@ -158,6 +158,18 @@ original local scope. Observations after local completion are explicitly
 marked; replay cannot silently reopen that semantic run or issue a permit.
 Normal Engine source adoption and persistent-process lifecycle remain open.
 
+#### Persistent harness occupancy
+
+Persistent harness processes are modeled separately from semantic runs.
+`executionStarted` opens a durable, owner-epoch-bound occupancy record for a
+pending run/steer command; `runFinished` does not close it. Only
+`executionFinished` can close the record, and only after all runs, accepted
+commands and open transcript work are reconciled. The edge and iOS reducers
+reject duplicate command occupancy, simultaneous open instances,
+wrong-actor/epoch closes and closes while unresolved work remains. Ownership
+transfer rejects any open occupancy, while presence/heartbeat expiry never
+transfers ownership. Real Engine/iOS lifecycle emission remains required.
+
 The complete native transcript entry/part models, event fold, render privacy
 policy and continuation helpers now live in `cypher-proto`. The running-code
 path in `engine::sessions` uses that shared fold/privacy implementation; only
