@@ -17,7 +17,7 @@ distribution through a device-development signing setup.
   the expected team/bundle ID, an iOS Team Store provisioning profile with
   no device list, `beta-reports-active = true`, no debug entitlement, and the
   required-reason privacy manifest.
-- The next release is prepared as `0.1.5` / build `2`, replacing the composer's
+- The next release is prepared as `0.1.5` / build `3`, replacing the composer's
   SwiftUI focus/notification bridge with an owned native editor and delegate.
   Build `0.1.5 (1)` was uploaded successfully, but the user reported the toolbar
   still failed to expand on focus on a physical phone. Build 2 passes Release
