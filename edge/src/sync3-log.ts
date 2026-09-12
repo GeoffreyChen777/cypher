@@ -61,6 +61,21 @@ export class Sync3Log implements ProjectionStore {
   hasOpenMessage(runId: string): boolean {
     return this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='messages' AND run_id=? AND json_extract(body,'$.entry.status')='streaming' LIMIT 1", runId).toArray().length > 0;
   }
+  hasExecution(commandId?: string): boolean {
+    return (commandId === undefined
+      ? this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='executions' AND json_extract(body,'$.closed')=0 LIMIT 1")
+      : this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='executions' AND json_extract(body,'$.commandId')=? LIMIT 1", commandId)).toArray().length > 0;
+  }
+  hasUnresolvedExecution(): boolean {
+    const pending = this.storage.sql.exec(`SELECT 1 FROM v3_entities c
+      LEFT JOIN v3_entities r ON r.kind='runs' AND r.id=c.run_id
+      WHERE c.kind='commands' AND json_extract(c.body,'$.acceptedOpId') IS NOT NULL AND
+      (json_extract(c.body,'$.command.status')='pending' OR
+       (json_extract(c.body,'$.command.status')='applied' AND
+        (r.id IS NULL OR json_extract(r.body,'$.outcome') IS NULL))) LIMIT 1`).toArray();
+    return pending.length > 0 || this.storage.sql.exec(
+      "SELECT 1 FROM v3_entities WHERE kind='runs' AND json_extract(body,'$.outcome') IS NULL LIMIT 1").toArray().length > 0;
+  }
   /** Local bounded projection read; not a new remotely exposed endpoint. */
   messageWindow(before?: number, limit = 32): { through: number; messages: Projection["messages"][string][] } {
     if (!safeInteger(limit) || limit < 1 || limit > 32 || (before !== undefined && !safeInteger(before))) reject("invalid_window");
@@ -143,7 +158,7 @@ export class Sync3Log implements ProjectionStore {
         AND (r.id IS NULL OR json_extract(r.body,'$.outcome') IS NULL) LIMIT 1`).toArray();
       const live = this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='runs' AND json_extract(body,'$.outcome') IS NULL LIMIT 1").toArray();
       const open = this.storage.sql.exec("SELECT 1 FROM v3_entities WHERE kind='messages' AND json_extract(body,'$.entry.status')='streaming' LIMIT 1").toArray();
-      if (uncertain.length || live.length || open.length) reject("execution_unresolved");
+      if (uncertain.length || live.length || open.length || this.hasExecution()) reject("execution_unresolved");
       this.storage.sql.exec("UPDATE v3_meta SET owner=?,owner_epoch=? WHERE singleton=1", owner, expectedEpoch + 1);
     });
   }

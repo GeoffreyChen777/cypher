@@ -21,6 +21,7 @@
       {"kind":"tool","id":"tool","call":{"kind":"readFile","path":"file.txt"},"isError":false,"resolved":true,"output":"Read one file","outputRef":"chat/tool","outputBytes":512,"diffRef":"chat/tool.diff","diffStats":[{"path":"file.txt","additions":1,"deletions":0}]},
       {"kind":"input","id":"question","requestId":"question","questions":[{"id":"choice","header":"Confirm","question":"Continue?","options":["Yes","No"],"multiSelect":false}],"resolved":false}
     ]}}},
-    "attachments": {"upload-one":{"path":"/workspace/pending.png","fileName":"pending.png"}}
+    "attachments": {"upload-one":{"path":"/workspace/pending.png","fileName":"pending.png"}},
+    "executions": {}
   }
 }

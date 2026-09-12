@@ -5,7 +5,7 @@ use cypher_proto::sync3::{Event, Operation, Projection};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-const KINDS: [&str; 4] = ["commands", "runs", "messages", "attachments"];
+const KINDS: [&str; 5] = ["commands", "executions", "runs", "messages", "attachments"];
 
 fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> Result<(), Error> {
     let body: Option<String> = db
@@ -19,6 +19,11 @@ fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> R
         return Ok(());
     };
     match kind {
+        "executions" => {
+            projection
+                .executions
+                .insert(id.into(), serde_json::from_str(&body)?);
+        }
         "commands" => {
             projection
                 .commands
@@ -45,7 +50,8 @@ fn load(db: &Connection, projection: &mut Projection, kind: &str, id: &str) -> R
 }
 
 pub(super) fn read(db: &Connection) -> Result<Projection, Error> {
-    let mut value = serde_json::json!({"commands":{},"runs":{},"messages":{},"attachments":{}});
+    let mut value =
+        serde_json::json!({"commands":{},"executions":{},"runs":{},"messages":{},"attachments":{}});
     let mut query = db.prepare("SELECT kind,id,body FROM sync3_entities ORDER BY kind,id")?;
     for row in query.query_map([], |r| {
         Ok((
@@ -69,6 +75,34 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
     operation.validate().map_err(invalid)?;
     let mut projection = Projection::default();
     match &operation.event {
+        Event::ExecutionStarted {
+            execution_id,
+            command_id,
+        } => {
+            load(db, &mut projection, "commands", command_id)?;
+            load(db, &mut projection, "executions", execution_id)?;
+            let mut query = db.prepare("SELECT id FROM sync3_entities WHERE kind='executions' AND (json_extract(body,'$.closed')=0 OR json_extract(body,'$.commandId')=?)")?;
+            for row in query.query_map([command_id], |r| r.get::<_, String>(0))? {
+                load(db, &mut projection, "executions", &row?)?;
+            }
+        }
+        Event::ExecutionFinished { execution_id } => {
+            load(db, &mut projection, "executions", execution_id)?;
+            // Only unresolved dependencies matter; indexed room records, not
+            // the potentially large transcript or raw source log.
+            let mut query = db.prepare("SELECT kind,id FROM sync3_entities WHERE
+                (kind='runs' AND json_extract(body,'$.outcome') IS NULL) OR
+                (kind='commands' AND run_id IS NOT NULL AND json_extract(body,'$.command.status') IN ('pending','applied'))")?;
+            for row in
+                query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            {
+                let (kind, id) = row?;
+                load(db, &mut projection, &kind, &id)?;
+                if let Some(run) = projection.commands.get(&id).and_then(|c| c.run_id.clone()) {
+                    load(db, &mut projection, "runs", &run)?;
+                }
+            }
+        }
         Event::CommandQueued { command_id, .. }
         | Event::CommandClaimAttempted { command_id, .. }
         | Event::CommandResolved { command_id, .. }

@@ -14,6 +14,8 @@ export type Event =
   | { type: "commandClaimAttempted"; commandId: string; runId: string }
   | { type: "commandResolved"; commandId: string; status: CommandStatus; resolution: string | null }
   | { type: "commandCancelAttempted"; commandId: string }
+  | { type: "executionStarted"; executionId: string; commandId: string }
+  | { type: "executionFinished"; executionId: string }
   | { type: "runStarted"; runId: string }
   | { type: "messageCreated"; runId: string | null; messageId: string; role: Entry["role"]; deviceId: string; createdAt: number; continuationOf: string | null }
   | { type: "partPut"; messageId: string; index: number; part: Part }
@@ -84,6 +86,7 @@ export function validateOperation(value: unknown): Operation {
   const fields: Record<string, string[]> = {
     commandQueued: ["commandId", "command"], commandClaimAttempted: ["commandId", "runId"],
     commandResolved: ["commandId", "status", "resolution"], commandCancelAttempted: ["commandId"],
+    executionStarted: ["executionId", "commandId"], executionFinished: ["executionId"],
     runStarted: ["runId"], messageCreated: ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
     partPut: ["messageId", "index", "part"], textAppended: ["messageId", "partId", "offset", "text"],
     messageFinished: ["messageId", "status"], attachmentSealed: ["uploadId", "path", "fileName"],
@@ -91,7 +94,7 @@ export function validateOperation(value: unknown): Operation {
   };
   if (typeof ev.type !== "string" || !Object.hasOwn(fields, ev.type)) reject("invalid_event");
   shape(ev, ["type", ...fields[ev.type]]);
-  for (const k of ["commandId", "runId", "deviceId", "uploadId"]) {
+  for (const k of ["commandId", "executionId", "runId", "deviceId", "uploadId"]) {
     if (Object.hasOwn(ev, k) && !(k === "runId" && ev.type === "messageCreated" && ev[k] === null)) identifier(ev[k]);
   }
   for (const k of ["messageId", "partId"]) if (Object.hasOwn(ev, k) && !isEntityId(ev[k])) reject("invalid_id");
@@ -158,6 +161,7 @@ export function canonical(value: unknown): string {
 }
 
 export interface Projection {
+  executions: Record<string, { commandId: string; actor: string; ownerEpoch: number; closed: boolean }>;
   commands: Record<string, { command: Command; actor: string; runId: string | null; acceptedOpId: string | null }>;
   runs: Record<string, { outcome: "completed" | "failed" | "interrupted" | null }>;
   messages: Record<string, { createdSeq: number; runId: string | null; entry: Entry }>;
@@ -169,6 +173,8 @@ export interface ProjectionStore {
   set<K extends EntityKind>(kind: K, id: string, value: Projection[K][string]): void;
   hasAcceptedRun(runId: string): boolean;
   hasOpenMessage(runId: string): boolean;
+  hasExecution(commandId?: string): boolean;
+  hasUnresolvedExecution(): boolean;
 }
 export function applyOperation(store: ProjectionStore, op: Operation, owner: string, ownerEpoch: number, seq: number): void {
   if (!safeInteger(seq) || seq === 0) reject("invalid_sequence");
@@ -191,6 +197,24 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
     store.set("messages", id, msg);
   };
   switch (ev.type) {
+    case "executionStarted": {
+      if (store.get("executions", ev.executionId)) reject("execution_exists");
+      const cmd = store.get("commands", ev.commandId);
+      if (!cmd) reject("unknown_command");
+      if (cmd.acceptedOpId === null || cmd.command.status !== "pending") reject("command_not_accepted");
+      if (!["run", "steer"].includes(cmd.command.payload.kind)) reject("invalid_execution_command");
+      if (store.hasExecution(ev.commandId)) reject("command_has_execution");
+      if (store.hasExecution()) reject("execution_busy");
+      store.set("executions", ev.executionId, { commandId: ev.commandId, actor: op.actor, ownerEpoch: op.ownerEpoch, closed: false }); break;
+    }
+    case "executionFinished": {
+      const execution = store.get("executions", ev.executionId);
+      if (!execution) reject("unknown_execution");
+      if (execution.closed) reject("execution_closed");
+      if (execution.actor !== op.actor || execution.ownerEpoch !== op.ownerEpoch) reject("execution_owner_mismatch");
+      if (store.hasUnresolvedExecution()) reject("execution_unresolved");
+      store.set("executions", ev.executionId, { ...execution, closed: true }); break;
+    }
     case "commandQueued":
       if (store.get("commands", ev.commandId)) reject("command_exists");
       store.set("commands", ev.commandId, { command: ev.command, actor: op.actor, runId: null, acceptedOpId: null }); break;

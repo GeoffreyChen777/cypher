@@ -230,6 +230,22 @@ final class Sync3Journal {
         }
         let e = operation.event
         switch e["type"]!.stringValue! {
+        case "executionStarted":
+            try load("commands", e["commandId"]!.stringValue!)
+            try load("executions", e["executionId"]!.stringValue!)
+            for row in try query("SELECT id FROM sync3_entities WHERE kind='executions' AND (json_extract(body,'$.closed')=0 OR json_extract(body,'$.commandId')=?)", [e["commandId"]!.stringValue!]) {
+                try load("executions", row[0]!)
+            }
+        case "executionFinished":
+            try load("executions", e["executionId"]!.stringValue!)
+            for row in try query("""
+                SELECT kind,id FROM sync3_entities WHERE
+                (kind='runs' AND json_extract(body,'$.outcome') IS NULL) OR
+                (kind='commands' AND run_id IS NOT NULL AND json_extract(body,'$.command.status') IN ('pending','applied'))
+                """) {
+                try load(row[0]!, row[1]!)
+                if let run = projection.commands[row[1]!]?["runId"]?.stringValue { try load("runs", run) }
+            }
         case "commandQueued", "commandClaimAttempted", "commandResolved", "commandCancelAttempted": try load("commands", e["commandId"]!.stringValue!)
         case "runStarted":
             let run = e["runId"]!.stringValue!

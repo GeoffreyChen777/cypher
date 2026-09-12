@@ -95,6 +95,7 @@ struct Sync3Operation: Codable, Equatable, Sendable {
         let fields: [String: [String]] = [
             "commandQueued": ["commandId", "command"], "commandClaimAttempted": ["commandId", "runId"],
             "commandResolved": ["commandId", "status", "resolution"], "commandCancelAttempted": ["commandId"],
+            "executionStarted": ["executionId", "commandId"], "executionFinished": ["executionId"],
             "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
             "partPut": ["messageId", "index", "part"], "textAppended": ["messageId", "partId", "offset", "text"],
             "messageFinished": ["messageId", "status"], "attachmentSealed": ["uploadId", "path", "fileName"],
@@ -160,12 +161,13 @@ struct Sync3Operation: Codable, Equatable, Sendable {
 struct Sync3Row: Codable, Equatable, Sendable { let seq: Int64; let operation: Sync3Operation }
 struct Sync3Projection: Codable, Equatable, Sendable {
     var commands: [String: [String: JSONValue]] = [:]
+    var executions: [String: [String: JSONValue]] = [:]
     var runs: [String: [String: JSONValue]] = [:]
     var messages: [String: [String: JSONValue]] = [:]
     var attachments: [String: [String: JSONValue]] = [:]
 
     var tables: [String: [String: [String: JSONValue]]] {
-        ["commands": commands, "runs": runs, "messages": messages, "attachments": attachments]
+        ["commands": commands, "executions": executions, "runs": runs, "messages": messages, "attachments": attachments]
     }
     /// Validate disk rows before the reducer touches them. A damaged cache
     /// becomes a recovery error, never a forced-unwrap process crash.
@@ -175,6 +177,13 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             if value != .null { _ = try Sync3Wire.identifier(value) }
         }
         switch kind {
+        case "executions":
+            try Sync3Wire.shape(record, ["commandId", "actor", "ownerEpoch", "closed"])
+            _ = try Sync3Wire.identifier(record["commandId"])
+            _ = try Sync3Wire.identifier(record["actor"])
+            guard try Sync3Wire.integer(record["ownerEpoch"]) > 0,
+                  record["closed"] == .bool(true) || record["closed"] == .bool(false) else { try Sync3Wire.fail("invalid_projection") }
+            executions[id] = record
         case "commands":
             try Sync3Wire.shape(record, ["command", "actor", "runId", "acceptedOpId"])
             try Sync3CommandSchema.validate(record["command"]!)
@@ -245,6 +254,32 @@ struct Sync3Projection: Codable, Equatable, Sendable {
         let e = op.event, type = e["type"]!.stringValue!
         if type != "commandQueued", type != "commandCancelAttempted", op.actor != owner { try Sync3Wire.fail("not_owner") }
         switch type {
+        case "executionStarted":
+            let id = e["executionId"]!.stringValue!, commandID = e["commandId"]!.stringValue!
+            guard executions[id] == nil else { try Sync3Wire.fail("execution_exists") }
+            guard let command = commands[commandID] else { try Sync3Wire.fail("unknown_command") }
+            guard command["acceptedOpId"] != .null, command["command"]?.objectValue?["status"] == .string("pending") else { try Sync3Wire.fail("command_not_accepted") }
+            guard ["run", "steer"].contains(command["command"]?.objectValue?["payload"]?.objectValue?["kind"]?.stringValue ?? "") else { try Sync3Wire.fail("invalid_execution_command") }
+            guard !executions.values.contains(where: { $0["commandId"] == .string(commandID) }) else { try Sync3Wire.fail("command_has_execution") }
+            guard !executions.values.contains(where: { $0["closed"] == .bool(false) }) else { try Sync3Wire.fail("execution_busy") }
+            executions[id] = ["commandId": .string(commandID), "actor": .string(op.actor), "ownerEpoch": .int(op.ownerEpoch), "closed": .bool(false)]
+        case "executionFinished":
+            let id = e["executionId"]!.stringValue!
+            guard var execution = executions[id] else { try Sync3Wire.fail("unknown_execution") }
+            guard execution["closed"] == .bool(false) else { try Sync3Wire.fail("execution_closed") }
+            guard execution["actor"] == .string(op.actor), execution["ownerEpoch"] == .int(op.ownerEpoch) else { try Sync3Wire.fail("execution_owner_mismatch") }
+            let pending = commands.values.contains { command in
+                guard command["acceptedOpId"] != .null else { return false }
+                let status = command["command"]?.objectValue?["status"]
+                if status == .string("pending") { return true }
+                if status == .string("applied") {
+                    guard let run = command["runId"]?.stringValue, let state = runs[run] else { return true }
+                    return state["outcome"] == .null
+                }
+                return false
+            }
+            guard !pending, !runs.values.contains(where: { $0["outcome"] == .null }) else { try Sync3Wire.fail("execution_unresolved") }
+            execution["closed"] = .bool(true); executions[id] = execution
         case "commandQueued":
             let id = e["commandId"]!.stringValue!
             guard commands[id] == nil else { try Sync3Wire.fail("command_exists") }

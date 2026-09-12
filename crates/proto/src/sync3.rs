@@ -58,6 +58,13 @@ pub enum Event {
     CommandCancelAttempted {
         command_id: String,
     },
+    ExecutionStarted {
+        execution_id: String,
+        command_id: String,
+    },
+    ExecutionFinished {
+        execution_id: String,
+    },
     RunStarted {
         run_id: String,
     },
@@ -309,6 +316,14 @@ impl Operation {
                 }
             }
             Event::CommandCancelAttempted { command_id } => id(command_id)?,
+            Event::ExecutionStarted {
+                execution_id,
+                command_id,
+            } => {
+                id(execution_id)?;
+                id(command_id)?;
+            }
+            Event::ExecutionFinished { execution_id } => id(execution_id)?,
             Event::RunStarted { run_id } | Event::RunFinished { run_id, .. } => id(run_id)?,
             Event::MessageCreated {
                 run_id,
@@ -401,9 +416,22 @@ fn canonical_json(value: &mut Value) {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Projection {
     pub commands: BTreeMap<String, CommandState>,
+    #[serde(default)]
+    pub executions: BTreeMap<String, ExecutionState>,
     pub runs: BTreeMap<String, RunState>,
     pub messages: BTreeMap<String, MessageState>,
     pub attachments: BTreeMap<String, AttachmentState>,
+}
+
+/// Durable, non-expiring occupancy of a persistent harness instance.
+/// Semantic run completion never closes this record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionState {
+    pub command_id: String,
+    pub actor: String,
+    pub owner_epoch: u64,
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -553,6 +581,74 @@ impl Projection {
                     return Err("run_not_accepted");
                 }
                 self.runs.insert(run_id.clone(), RunState::default());
+            }
+            Event::ExecutionStarted {
+                execution_id,
+                command_id,
+            } => {
+                if self.executions.contains_key(execution_id) {
+                    return Err("execution_exists");
+                }
+                let command = self.commands.get(command_id).ok_or("unknown_command")?;
+                if command.accepted_op_id.is_none()
+                    || command.command.status != SessionCommandStatus::Pending
+                {
+                    return Err("command_not_accepted");
+                }
+                if !matches!(
+                    command.command.payload,
+                    crate::SessionCommandPayload::Run { .. }
+                        | crate::SessionCommandPayload::Steer { .. }
+                ) {
+                    return Err("invalid_execution_command");
+                }
+                if self
+                    .executions
+                    .values()
+                    .any(|e| e.command_id == *command_id)
+                {
+                    return Err("command_has_execution");
+                }
+                if self.executions.values().any(|e| !e.closed) {
+                    return Err("execution_busy");
+                }
+                self.executions.insert(
+                    execution_id.clone(),
+                    ExecutionState {
+                        command_id: command_id.clone(),
+                        actor: op.actor.clone(),
+                        owner_epoch: op.owner_epoch,
+                        closed: false,
+                    },
+                );
+            }
+            Event::ExecutionFinished { execution_id } => {
+                let execution = self
+                    .executions
+                    .get(execution_id)
+                    .ok_or("unknown_execution")?;
+                if execution.closed {
+                    return Err("execution_closed");
+                }
+                if execution.actor != op.actor || execution.owner_epoch != op.owner_epoch {
+                    return Err("execution_owner_mismatch");
+                }
+                if self.runs.values().any(|r| r.outcome.is_none())
+                    || self.commands.values().any(|c| {
+                        c.accepted_op_id.is_some()
+                            && (c.command.status == SessionCommandStatus::Pending
+                                || (c.command.status == SessionCommandStatus::Applied
+                                    && c.run_id.as_ref().is_some_and(|id| {
+                                        self.runs.get(id).is_none_or(|r| r.outcome.is_none())
+                                    })))
+                    })
+                {
+                    return Err("execution_unresolved");
+                }
+                self.executions
+                    .get_mut(execution_id)
+                    .ok_or("unknown_execution")?
+                    .closed = true;
             }
             Event::MessageCreated {
                 run_id,

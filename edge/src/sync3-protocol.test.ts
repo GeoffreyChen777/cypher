@@ -19,7 +19,7 @@ function applyOperation(store: ProjectionStore, op: Operation, owner: string, ep
 }
 
 function memory(): { projection: Projection; store: ProjectionStore } {
-  const projection: Projection = { commands: {}, runs: {}, messages: {}, attachments: {} };
+  const projection: Projection = { commands: {}, executions: {}, runs: {}, messages: {}, attachments: {} };
   const store: ProjectionStore = {
     get<K extends EntityKind>(kind: K, id: string): Projection[K][string] | undefined {
       return Object.hasOwn(projection[kind], id) ? projection[kind][id] as Projection[K][string] : undefined;
@@ -29,6 +29,9 @@ function memory(): { projection: Projection; store: ProjectionStore } {
     },
     hasAcceptedRun: run => Object.values(projection.commands).some(c => c.runId === run && ["pending", "applied"].includes(c.command.status)),
     hasOpenMessage: run => Object.values(projection.messages).some(m => m.runId === run && m.entry.status === "streaming"),
+    hasExecution: command => Object.values(projection.executions).some(e => command === undefined ? !e.closed : e.commandId === command),
+    hasUnresolvedExecution: () => Object.values(projection.runs).some(r => r.outcome === null) || Object.values(projection.commands).some(c =>
+      c.acceptedOpId !== null && (c.command.status === "pending" || (c.command.status === "applied" && (c.runId === null || projection.runs[c.runId]?.outcome == null)))),
   };
   return { projection, store };
 }

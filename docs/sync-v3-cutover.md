@@ -19,6 +19,10 @@ review submissions.
   command outcomes during conversion. Uncertain execution is quarantined for
   explicit reconciliation, not automatically executed again.
 - Availability leases never transfer execution ownership.
+- Persistent harness instances have durable execution occupancy records,
+  separate from semantic runs (explicit user decision). These records do not
+  expire on heartbeat loss. A finished turn may leave its instance parked;
+  ownership transfer waits for verified instance closure and reconciliation.
 - Failure before activation leaves maintenance in effect and retained data
   intact. Failure after v3 writes requires a tested rollback that preserves
   those writes, not merely enabling the old routes.
