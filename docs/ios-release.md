@@ -22,7 +22,7 @@ distribution through a device-development signing setup.
   manifest checks. Xcode reported **Upload succeeded**.
 - App Store Connect build `93f7a3f1-4706-4cbe-8cd6-c7d43f98e7ca` is **VALID**.
   With explicit user confirmation, `usesNonExemptEncryption=false` was submitted
-  for this build. Internal state: **READY_FOR_BETA_TESTING**; external state:
+  for this build. Final internal state: **IN_BETA_TESTING**; external state:
   **READY_FOR_BETA_SUBMISSION**. No tester/group changes or review submission
   were performed; these states do not establish physical-device acceptance.
 - Evidence is under `/tmp/cypher-restored-0310/` on the release Mac, with
