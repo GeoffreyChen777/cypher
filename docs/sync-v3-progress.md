@@ -770,6 +770,11 @@ The enqueue and conversation source currently use separate SQLite databases;
 the remaining release step is to fold this insert into the source event
 transaction so a crash cannot commit one without the other.
 
+The queue worker was subsequently hardened to wait on a post-commit wake,
+retry in place with cancellation, and preserve the row when either delivery
+or receipt deletion fails. The final local engine test now covers these
+boundaries; the source/outbox transaction merge remains an explicit blocker.
+
 ## Continuation 29 — notification activity is event-driven
 
 - iOS notification coordination no longer starts a periodic 15-second HTTP
