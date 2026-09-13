@@ -7,11 +7,19 @@ import { AUTH_USER_HEADER, AUTH_ORG_HEADER, AUTH_DEADLINE_HEADER, EXPECTED_USER_
 import { Sync3Room } from "./sync3-room";
 import { WorkspaceHub } from "./workspace3-hub";
 import { PushDevice } from "./push-device";
+// Retained as non-routed Durable Object class exports while existing
+// production objects drain. They are not bound by the v3 Worker and receive
+// no new traffic; removing an exported class before a delete-class migration
+// makes Cloudflare reject the deployment.
+import { SessionRoom } from "./session-room";
+import { DeviceRoom } from "./device-room";
+import { RegistryRoom } from "./registry-room";
+import { ChatRoom } from "./chat-room";
 import { object, readNotificationJSON } from "./notifications-model";
 import installSh from "./install.sh";
 
 export { APNsSender } from "./apns-sender";
-export { PushDevice, Sync3Room, WorkspaceHub };
+export { PushDevice, Sync3Room, WorkspaceHub, SessionRoom, DeviceRoom, RegistryRoom, ChatRoom };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const json = (value: unknown, status = 200) => Response.json(value, { status });
