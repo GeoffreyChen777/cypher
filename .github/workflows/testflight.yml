@@ -1,0 +1,72 @@
+name: TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive-and-upload:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ASC_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: require App Store Connect credentials
+        run: test -n "$ASC_KEY_ID" -a -n "$ASC_ISSUER_ID" -a -n "$ASC_KEY_P8"
+      - name: install App Store Connect API key
+        run: |
+          install -d -m 700 "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$ASC_KEY_P8" > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+      - name: archive signed iPhoneOS build
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          out="$RUNNER_TEMP/cypher-ios"
+          xcodebuild archive -project apps/ios/Cypher.xcodeproj -scheme Cypher \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$out/Cypher.xcarchive" \
+            -allowProvisioningUpdates \
+            MARKETING_VERSION=0.1.6 CURRENT_PROJECT_VERSION=4
+      - name: export distribution IPA
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          out="$RUNNER_TEMP/cypher-ios"
+          cat > "$out/ExportOptions.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>export</string>
+            <key>teamID</key><string>999875MHT4</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>stripSwiftSymbols</key><true/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$out/Cypher.xcarchive" \
+            -exportOptionsPlist "$out/ExportOptions.plist" -exportPath "$out/export" \
+            -allowProvisioningUpdates
+          ipa="$(find "$out/export" -name '*.ipa' -print -quit)"
+          test -n "$ipa"
+          unzip -p "$ipa" Payload/*.app/Info.plist > "$out/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$out/Info.plist" | grep -Fx 'ai.mvp-lab.cypher.ios'
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$out/Info.plist" | grep -Fx '0.1.6'
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$out/Info.plist" | grep -Fx '4'
+          mkdir -p "$out/unpacked"
+          unzip -q "$ipa" -d "$out/unpacked"
+          codesign --verify --deep --strict "$out/unpacked/Payload/Cypher.app"
+      - name: upload existing-tester build to TestFlight
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          xcrun iTMSTransporter -m upload \
+            -assetFile "$RUNNER_TEMP/cypher-ios/export/"*.ipa \
+            -apiKey "$ASC_KEY_ID" -apiIssuer "$ASC_ISSUER_ID"
