@@ -147,6 +147,7 @@ pub struct EngineCore {
     /// durable root Pi chat on the source chat's host device.
     pub session_forks: SessionForks,
     notification_outbox: Arc<notification_outbox::NotificationOutbox>,
+    notification_worker: std::sync::Mutex<Option<notification_outbox::Worker>>,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -167,40 +168,6 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
-    fn drain_notification_outbox(&self, auth: Auth) {
-        let queue = self.notification_outbox.clone();
-        if !queue.begin_drain() {
-            return;
-        }
-        let user = self.workspace.user_id().to_owned();
-        let org = self.workspace.org_id().to_owned();
-        tokio::spawn(async move {
-            loop {
-                let pending = queue.pending().unwrap_or_default();
-                if pending.is_empty() {
-                    queue.end_drain();
-                    break;
-                }
-                let mut delivered = 0;
-                for (id, session) in pending {
-                    match auth.report_notification_event(&user, &org, &session).await {
-                        Ok(_) => {
-                            let _ = queue.remove(&id);
-                            delivered += 1;
-                        }
-                        Err(error) => {
-                            tracing::debug!(%error, "notification event delivery deferred");
-                            break;
-                        }
-                    }
-                }
-                if delivered == 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                }
-            }
-        });
-    }
-
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$CYPHER_ORG_ID` / `$CYPHER_USER_ID` (dev defaults `dev-org` /
@@ -346,8 +313,12 @@ impl EngineCore {
         let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
         let title_settings = title_settings::TitleSettingsStore::new(data_dir);
         let notification_outbox = Arc::new(
-            notification_outbox::NotificationOutbox::open(profile.store_root())
-                .map_err(|e| EngineError::Other(format!("notification outbox: {e}")))?,
+            notification_outbox::NotificationOutbox::open(
+                profile.store_root(),
+                profile.user_id(),
+                profile.org_id(),
+            )
+            .map_err(|e| EngineError::Other(format!("notification outbox: {e}")))?,
         );
         sessions.set_titles(
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
@@ -375,6 +346,7 @@ impl EngineCore {
             side_chats,
             session_forks,
             notification_outbox,
+            notification_worker: std::sync::Mutex::new(None),
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -396,16 +368,45 @@ impl EngineCore {
         let workspace = self.workspace.clone();
         let outbox = self.notification_outbox.clone();
         workspace.set_notification_event_hook(std::sync::Arc::new(move |session| {
-            let session = session.clone();
-            let outbox = outbox.clone();
-            tokio::spawn(async move {
-                if let Err(err) = outbox.enqueue(&session) {
-                    tracing::error!(error = %err, "notification event durability failed");
-                    return;
-                }
-            });
+            // Commit synchronously before scheduling transport work. This is
+            // still a separate DB from the session source, not an atomic
+            // source-event/outbox transaction.
+            if let Err(err) = outbox.enqueue(session) {
+                tracing::error!(error = %err, "notification event durability failed");
+            }
         }));
-        self.drain_notification_outbox(auth.clone());
+        let mut worker = self
+            .notification_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = worker.take() {
+            previous.cancel();
+        }
+        let user = workspace.user_id().to_owned();
+        let org = workspace.org_id().to_owned();
+        let sender = auth.clone();
+        *worker = Some(notification_outbox::Worker::spawn(
+            self.notification_outbox.clone(),
+            std::time::Duration::from_secs(30),
+            move |session| {
+                let auth = sender.clone();
+                let user = user.clone();
+                let org = org.clone();
+                async move {
+                    let receipt = auth
+                        .report_notification_event(&user, &org, &session)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if receipt.get("ok") == Some(&serde_json::Value::Bool(true))
+                        && receipt.get("ignored") != Some(&serde_json::Value::Bool(true))
+                    {
+                        Ok(())
+                    } else {
+                        Err("notification coordinator did not accept event".into())
+                    }
+                }
+            },
+        ));
         *self
             .auth
             .lock()
@@ -563,6 +564,14 @@ impl EngineCore {
     /// draining. Connected sockets remain authorized by their handshake, so
     /// clearing credentials alone is not a security boundary.
     pub fn disconnect_edge(&self) {
+        if let Some(worker) = self
+            .notification_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            worker.cancel();
+        }
         if let Some(links) = self.links() {
             links.disconnect_all();
         }
@@ -574,6 +583,14 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        let worker = self
+            .notification_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            worker.shutdown().await;
+        }
         // Reap temporary Side Chats FIRST: interrupt their live runs and drop
         // every ephemeral doc (host-memory only — dispose leaves no durable
         // remnants; a promoted chat is untouched) BEFORE the general session

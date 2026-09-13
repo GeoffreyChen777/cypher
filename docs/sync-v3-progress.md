@@ -752,6 +752,24 @@ This does not yet prove APNs delivery or notification activity replacement:
 physical device delivery, coordinator handoff under process kill, and the
 remaining old SessionDoc/chat2 retirement are still release gates.
 
+## Continuation 32 — notification queue wake/retry hardening
+
+- The notification outbox now opens with an account/org scope record and a
+  private 0600 SQLite file. Scope rebinding, symlink replacement, corrupt
+  bodies, oversized events and missing delete receipts fail closed.
+- The worker waits on a post-commit notification rather than polling an empty
+  queue, serializes one delivery, retains an event when its HTTP receipt or
+  delete fails, retries with a bounded backoff, and cancels without losing an
+  in-flight durable row. Restarting a fresh queue handle drains the retained
+  event without another session transition.
+- Four failure-boundary tests cover empty-start wakeup, retry, cancellation,
+  restart, scope fencing, order/deduplication, corruption and private file
+  permissions. Engine library tests pass **160 / 0 failures**.
+
+The enqueue and conversation source currently use separate SQLite databases;
+the remaining release step is to fold this insert into the source event
+transaction so a crash cannot commit one without the other.
+
 ## Continuation 29 — notification activity is event-driven
 
 - iOS notification coordination no longer starts a periodic 15-second HTTP
