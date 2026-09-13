@@ -226,7 +226,9 @@ async fn rpc(
 }
 
 fn wait_for(cond: impl Fn() -> bool, what: &str) {
-    for _ in 0..400 {
+    // Linux CI can schedule several fork/engine fixtures concurrently; this
+    // is a test observation timeout, not an execution deadline.
+    for _ in 0..1200 {
         if cond() {
             return;
         }
