@@ -7,12 +7,15 @@ without old-protocol compatibility**, and authorized production deployment and
 new client releases after completion. Work is isolated on
 `sync-v3-direct-cutover`; do not push incomplete changes to `main` (it deploys).
 Old protocol writers must be refused after cutover, not dual-written or used as
-a fallback. Retaining and verifying migration backups remains mandatory.
+a fallback. **The later fresh-rewrite authorization in `sync-v3-progress.md`
+supersedes old-data conversion and migration-backup requirements.** This is a
+breaking fresh v3 rollout; do not import or reseed retired data.
 The iOS release target is confirmed as TestFlight for existing testers only;
 App Store submission and expanding the testing audience are not authorized.
 
 This is the new protocol selected on 2026-09-11, not a change to chat2's polling
-intervals. Existing rooms, databases, and production migrations stay intact.
+intervals. Historical sections below describe earlier milestones; current
+implementation evidence and remaining gates are in `sync-v3-progress.md`.
 Do not advertise v3 to normal clients until the complete acceptance matrix below
 passes. Completing the protocol core alone is NOT completing the rollout.
 
@@ -56,6 +59,14 @@ An operation has `id`, `actor`, `ownerEpoch` and a typed `event`. Transcript
 events are host-authored; command enqueue is multi-device. An account member
 is trusted within its account; an actor label is not a cryptographic device
 identity. User/organization authorization remains mandatory at the Worker.
+
+Every conversation HTTP init/exchange and WS upgrade carries
+`x-cypher-expected-user`, frozen from the local account scope, independently
+of refreshed bearer credentials. The Worker compares it to verified auth
+**before selecting a Durable Object**. Wrong/missing assertions get 403.
+Organization still comes from the verified claim and scoped path. V3 data
+routes reject query strings, and clients do not follow redirects with scoped
+credentials or queued data. This header is an assertion, not authentication.
 
 Current event vocabulary: command queued, claim/cancel attempted, command resolved, run started,
 message created, indexed part put, text appended (part-scoped byte offset
@@ -238,13 +249,13 @@ producer header version 2 includes the scope binding.
 - New DO class/namespace; never rename `cypher-edge` or existing DO bindings.
 - Experimental endpoints must be explicitly enabled and use separate v3 room
   identities. They must not reinterpret chat2 payloads.
-- Migration requires a retained legacy snapshot, frozen write epoch, content
-  verification and reconciliation of unacknowledged commands. Old writers
-  receive upgrade-required rather than silently writing a frozen lineage.
+- Later authorization removed legacy data import/backups from the objective.
+  Old writers receive upgrade-required; no discard-and-ACK, reseed or hidden
+  compatibility path may pretend a write succeeded.
 - Normal release/production deployment, real-data migration and physical-device
   APNs validation require separate approval.
-- A rollback after v3 writes must preserve/convert those writes; flipping a
-  version number back is not rollback.
+- A deployment failure must not revive old writers or reinterpret native
+  command history as a fresh execution permit.
 
 ## Acceptance ledger
 

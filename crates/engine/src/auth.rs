@@ -330,8 +330,9 @@ impl Auth {
         let (token_tx, _) = watch::channel(0);
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("bounded non-redirecting auth transport");
         Self {
             inner: Arc::new(AuthInner {
                 config,
@@ -1135,7 +1136,7 @@ impl Auth {
             return Err(EngineError::Other("notification identity changed".into()));
         }
         let url = format!(
-            "{}/registry/{expected_org}/notifications/activity",
+            "{}/workspace3/{expected_org}/notifications/activity",
             self.inner.config.edge_url.trim_end_matches('/')
         );
         let response = self
@@ -1143,6 +1144,7 @@ impl Auth {
             .http
             .post(url)
             .bearer_auth(token)
+            .header(cypher_sync::EXPECTED_USER_HEADER, expected_user)
             .timeout(std::time::Duration::from_secs(5))
             .json(&body)
             .send()
@@ -1179,13 +1181,14 @@ impl Auth {
             return Err(EngineError::Other("notification identity changed".into()));
         }
         let url = format!(
-            "{}/registry/{expected_org}/notifications/event",
+            "{}/workspace3/{expected_org}/notifications/event",
             self.inner.config.edge_url.trim_end_matches('/')
         );
         self.inner
             .http
             .post(url)
             .bearer_auth(token)
+            .header(cypher_sync::EXPECTED_USER_HEADER, expected_user)
             .timeout(std::time::Duration::from_secs(5))
             .json(&serde_json::json!({
                 "chatId": session.chat_id,

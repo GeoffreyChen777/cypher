@@ -43,6 +43,22 @@
     {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"applied","resolution":null},"error":"command_not_accepted"},
     {"actor":"host","ownerEpoch":2,"event":{"type":"commandResolved","commandId":"command","status":"expired","resolution":null},"error":"stale_owner_epoch"}
   ]},
+  {"name":"autonomous-observation-is-not-a-new-command","status":"applied","acceptedOpId":"step-0","steps":[
+    {"actor":"host","event":{"type":"commandClaimAttempted","commandId":"command","runId":"run"}},
+    {"actor":"host","event":{"type":"runStarted","runId":"run"}},
+    {"actor":"host","event":{"type":"executionStarted","executionId":"process","commandId":"command"}},
+    {"actor":"host","event":{"type":"runFinished","runId":"run","outcome":"completed"}},
+    {"actor":"host","event":{"type":"commandResolved","commandId":"command","status":"applied","resolution":null}},
+    {"actor":"host","event":{"type":"runObserved","runId":"autonomous","executionId":"missing"},"error":"unknown_execution"},
+    {"actor":"phone","event":{"type":"runObserved","runId":"autonomous","executionId":"process"},"error":"not_owner"},
+    {"actor":"host","ownerEpoch":2,"event":{"type":"runObserved","runId":"autonomous","executionId":"process"},"error":"stale_owner_epoch"},
+    {"actor":"host","event":{"type":"runObserved","runId":"autonomous","executionId":"process"}},
+    {"actor":"host","event":{"type":"runObserved","runId":"autonomous","executionId":"process"},"error":"run_exists"},
+    {"actor":"host","event":{"type":"executionFinished","executionId":"process"},"error":"execution_unresolved"},
+    {"actor":"host","event":{"type":"runFinished","runId":"autonomous","outcome":"completed"}},
+    {"actor":"host","event":{"type":"executionFinished","executionId":"process"}},
+    {"actor":"host","event":{"type":"runObserved","runId":"later","executionId":"process"},"error":"execution_closed"}
+  ]},
   {"name":"transcript-parts","initialPrefix":5,"status":"pending","steps":[
     {"actor":"host","event":{"type":"textAppended","messageId":"message","partId":"text","offset":2,"text":"!"},"error":"text_offset_mismatch"},
     {"actor":"host","event":{"type":"partPut","messageId":"message","index":0,"part":{"kind":"text","id":"text","text":"replacement"}},"error":"text_requires_delta"},

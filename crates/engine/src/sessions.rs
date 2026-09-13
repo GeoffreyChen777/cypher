@@ -69,6 +69,7 @@ struct HarnessSessionRef {
 }
 
 struct RunHandle {
+    semantic_run: Arc<Mutex<Option<String>>>,
     run_id: String,
     steerable: bool,
     steer_tx: mpsc::Sender<SteerMessage>,
@@ -87,14 +88,17 @@ struct RunHandle {
 
 /// One accepted-but-unconfirmed steer. The original command/user entry retains
 /// its content; this delivery ledger is not another retry queue.
-#[derive(Debug, Clone)]
 struct RoutedSteer {
     message_id: String,
+    publication: Option<crate::session_replica::ExecutionPublication>,
 }
 
 struct Inner {
+    closed_occupancies:
+        Mutex<HashMap<String, (Arc<crate::session_replica::SessionReplica>, String)>>,
     device_id: String,
     journal: Arc<RunJournal>,
+    replicas: OnceLock<Arc<crate::session_replicas::SessionReplicas>>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
     /// doc-host reference each other through Arcs, so this back-edge must be
@@ -179,8 +183,10 @@ impl SessionsEngine {
         let (sessions_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
+                closed_occupancies: Mutex::new(HashMap::new()),
                 device_id,
                 journal,
+                replicas: OnceLock::new(),
                 registry,
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
@@ -476,6 +482,45 @@ impl SessionsEngine {
             .await
     }
 
+    pub fn set_replicas(&self, replicas: Arc<crate::session_replicas::SessionReplicas>) {
+        let _ = self.inner.replicas.set(replicas);
+    }
+    pub async fn session_replica(
+        &self,
+        chat_id: &str,
+    ) -> Result<Arc<crate::session_replica::SessionReplica>, EngineError> {
+        self.inner
+            .replicas
+            .get()
+            .ok_or_else(|| EngineError::Other("v3 replica store unavailable".into()))?
+            .get(chat_id)
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))
+    }
+    pub(crate) fn current_v3_run(&self, chat_id: &str) -> Option<String> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|h| lock(&h.semantic_run).clone())
+    }
+    pub(crate) fn mark_recovery_required(&self, chat_id: &str) {
+        if self.current_v3_run(chat_id).is_none() {
+            self.set_status(chat_id, SessionStatus::Errored, false);
+        }
+    }
+    pub(crate) fn reconcile_closed_process(&self, chat_id: &str) -> Result<bool, EngineError> {
+        let pending = lock(&self.inner.closed_occupancies).get(chat_id).cloned();
+        if let Some((replica, id)) = pending {
+            if !replica
+                .release_if_reconciled(&id)
+                .map_err(|e| EngineError::Other(e.to_string()))?
+            {
+                return Ok(false);
+            }
+            lock(&self.inner.closed_occupancies).remove(chat_id);
+        }
+        Ok(true)
+    }
+
     /// [`Self::dispatch`] with an EFFECTIVE harness prompt override (the
     /// Comment feature): the doc user entry keeps `request.prompt` (visible
     /// truth) while the agent receives `agent_prompt` when present.
@@ -487,8 +532,28 @@ impl SessionsEngine {
         agent_prompt: Option<String>,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_inner(chat_id, harness_id, request, agent_prompt, message_id)
+        self.dispatch_inner(chat_id, harness_id, request, agent_prompt, message_id, None)
             .await
+    }
+
+    pub(crate) async fn dispatch_admitted(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        request: RunRequest,
+        agent_prompt: Option<String>,
+        message_id: Option<String>,
+        publication: Option<crate::session_replica::ExecutionPublication>,
+    ) -> Result<String, EngineError> {
+        self.dispatch_inner(
+            chat_id,
+            harness_id,
+            request,
+            agent_prompt,
+            message_id,
+            publication,
+        )
+        .await
     }
 
     async fn dispatch_inner(
@@ -498,10 +563,41 @@ impl SessionsEngine {
         mut request: RunRequest,
         agent_prompt: Option<String>,
         message_id: Option<String>,
+        admitted: Option<crate::session_replica::ExecutionPublication>,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
+        let message_id = Some(message_id.unwrap_or_else(new_id));
+        let mut publication = if admitted.is_some() {
+            admitted
+        } else if !self.inner.is_ephemeral(chat_id) {
+            if let Some(replicas) = self.inner.replicas.get() {
+                Some(
+                    replicas
+                        .prepare(
+                            chat_id,
+                            cypher_proto::SessionCommandPayload::Run {
+                                request: request.clone(),
+                                message_id: message_id.clone().unwrap(),
+                                agent_prompt: agent_prompt.clone(),
+                            },
+                            &new_id(),
+                        )
+                        .await
+                        .map_err(|e| EngineError::Other(e.to_string()))?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(output) = &publication {
+            output
+                .set_cwd(&request.cwd)
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+        }
         // Visible prompt = the doc/user entry truth; the harness gets the
         // augmented effective prompt when `agent_prompt` is present.
         let visible_prompt = request.prompt.clone();
@@ -520,6 +616,13 @@ impl SessionsEngine {
         });
         if let Some((run_id, steerable, steer_tx, ledger)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
+            if steerable {
+                self.doc_handle(chat_id)?.write_user_message(
+                    &user_id,
+                    &visible_prompt,
+                    now_ms(),
+                )?;
+            }
             // The ledger entry and the mailbox send are atomic under the
             // ledger lock: the entry goes in BEFORE try_send, so the run
             // task can never observe an accepted mailbox message without its
@@ -531,6 +634,7 @@ impl SessionsEngine {
                 let mut ledger = lock(&ledger);
                 ledger.push_back(RoutedSteer {
                     message_id: user_id.clone(),
+                    publication: publication.take(),
                 });
                 let message = SteerMessage {
                     prompt: effective.clone(),
@@ -540,7 +644,9 @@ impl SessionsEngine {
                 if !ok {
                     // Mailbox closed (runtime mid-teardown / non-steering
                     // harness): drop the exact entry we just added.
-                    ledger.retain(|s| s.message_id != user_id);
+                    if let Some(index) = ledger.iter().position(|s| s.message_id == user_id) {
+                        publication = ledger.remove(index).and_then(|s| s.publication);
+                    }
                 }
                 ok
             } else {
@@ -628,6 +734,9 @@ impl SessionsEngine {
         lock(&self.inner.runs).insert(
             chat_id.to_string(),
             RunHandle {
+                semantic_run: Arc::new(Mutex::new(
+                    publication.as_ref().map(|p| p.run_id().to_owned()),
+                )),
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
                 steer_tx,
@@ -665,6 +774,7 @@ impl SessionsEngine {
             engine_rx,
             cancel_rx,
             agent_prompt,
+            publication,
         ));
         Ok(run_id)
     }
@@ -691,6 +801,18 @@ impl SessionsEngine {
         agent_prompt: Option<String>,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_admitted(chat_id, prompt, agent_prompt, message_id, None)
+            .await
+    }
+
+    pub(crate) async fn steer_admitted(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        agent_prompt: Option<String>,
+        message_id: Option<String>,
+        admitted: Option<crate::session_replica::ExecutionPublication>,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -705,6 +827,38 @@ impl SessionsEngine {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.clone().unwrap_or_else(new_id);
+        let mut publication = if admitted.is_some() {
+            admitted
+        } else if !self.inner.is_ephemeral(chat_id) {
+            if let Some(replicas) = self.inner.replicas.get() {
+                Some(
+                    replicas
+                        .prepare(
+                            chat_id,
+                            cypher_proto::SessionCommandPayload::Steer {
+                                prompt: prompt.into(),
+                                message_id: Some(user_id.clone()),
+                                agent_prompt: agent_prompt.clone(),
+                            },
+                            &new_id(),
+                        )
+                        .await
+                        .map_err(|e| EngineError::Other(e.to_string()))?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(output) = &publication {
+            let request = self
+                .last_request(chat_id)
+                .ok_or_else(|| EngineError::Other("missing live execution cwd".into()))?;
+            output
+                .set_cwd(&request.cwd)
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+        }
         // Accepted: the ledger entry and the mailbox send are atomic under
         // the ledger lock — the entry goes in BEFORE try_send, so the run
         // task can never observe an accepted mailbox message without its
@@ -717,10 +871,13 @@ impl SessionsEngine {
         // message, settled status]: the phantom "completed" flash,
         // 2026-07-31).
         let effective = agent_prompt.clone().unwrap_or_else(|| prompt.to_string());
+        self.doc_handle(chat_id)?
+            .write_user_message(&user_id, prompt, now_ms())?;
         let sent = {
             let mut ledger = lock(&ledger);
             ledger.push_back(RoutedSteer {
                 message_id: user_id.clone(),
+                publication: publication.take(),
             });
             let message = SteerMessage {
                 prompt: effective,
@@ -730,11 +887,29 @@ impl SessionsEngine {
             if !ok {
                 // Mailbox closed (runtime mid-teardown / non-steering
                 // harness): drop the exact entry we just added.
-                ledger.retain(|s| s.message_id != user_id);
+                if let Some(index) = ledger.iter().position(|s| s.message_id == user_id) {
+                    publication = ledger.remove(index).and_then(|s| s.publication);
+                }
             }
             ok
         };
         if !sent {
+            if let Some(mut output) = publication {
+                let note =
+                    "Steering mailbox refused delivery; this attempt caused no mailbox dispatch.";
+                output
+                    .observe(&AgentEvent::Error {
+                        message: note.into(),
+                    })
+                    .and_then(|_| {
+                        output.finish_with(
+                            cypher_proto::sync3::Outcome::Failed,
+                            cypher_proto::SessionCommandStatus::Rejected,
+                            Some(note.into()),
+                        )
+                    })
+                    .map_err(|e| EngineError::Other(e.to_string()))?;
+            }
             return Ok(SteerOutcome::NotSteerable);
         }
         let handle = self.doc_handle(chat_id)?;
@@ -818,10 +993,12 @@ impl SessionsEngine {
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
-        let _ = resolver.send(answers);
+        // Queue the resolution before waking the provider: it may emit the
+        // next steer boundary immediately on another executor thread.
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
         });
+        let _ = resolver.send(answers);
         Ok(true)
     }
 
@@ -902,6 +1079,11 @@ impl SessionsEngine {
     /// Preserve the harness reference for an explicit next request, but never
     /// automatically resend: a crash cannot prove tools caused no effects.
     pub fn recover_stale(&self) -> Result<usize, EngineError> {
+        // Native recovery is owned by committed v3 intents/observations. A
+        // retired JSONL file cannot open rooms or drive boot-time recovery.
+        if self.inner.replicas.get().is_some() {
+            return Ok(0);
+        }
         let stale = self.inner.journal.stale_sessions()?;
         let mut recovered = 0usize;
         for chat_id in stale {
@@ -940,6 +1122,9 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+        if let Some(replicas) = self.inner.replicas.get() {
+            replicas.shutdown().await;
+        }
     }
 
     fn is_live(&self, chat_id: &str, run_id: &str) -> bool {
@@ -962,7 +1147,11 @@ impl SessionsEngine {
 }
 
 impl Inner {
-    fn note_uncertain_delivery(&self, chat_id: &str, doc: &SessionDoc) -> Result<(), EngineError> {
+    fn note_uncertain_delivery(
+        &self,
+        chat_id: &str,
+        doc: &crate::ChatDocHandle,
+    ) -> Result<(), EngineError> {
         let note = "The agent process ended before confirming one or more delivered requests. External effects may already have occurred. Review the existing output and affected resources before explicitly continuing; nothing was automatically retried.";
         self.publish(
             chat_id,
@@ -1242,6 +1431,14 @@ impl Inner {
     /// never rides `--resume`. An empty stored id is the explicit tombstone —
     /// no resume, no falling through to staler sources.
     fn resume_for(&self, chat_id: &str, cwd: &str) -> Option<String> {
+        if !self.is_ephemeral(chat_id) {
+            if let Some(replicas) = self.replicas.get() {
+                let replica = replicas.get_for_owner(chat_id, &self.device_id).ok()?;
+                let id = replica.read(|j| j.harness_session(cwd)).ok().flatten()?;
+                self.remember_harness_session(chat_id, &id, cwd);
+                return Some(id);
+            }
+        }
         let cwd_ok = |session_cwd: &str| session_cwd.is_empty() || session_cwd == cwd;
         if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
             return (!known.session_id.is_empty() && cwd_ok(&known.cwd))
@@ -1426,6 +1623,7 @@ async fn drive_run(
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
     agent_prompt: Option<String>,
+    mut publication: Option<crate::session_replica::ExecutionPublication>,
 ) {
     let device_id = inner.device_id.clone();
     let plugin_epoch = inner.plugin_epoch.load(Ordering::SeqCst);
@@ -1438,10 +1636,51 @@ async fn drive_run(
     let effective = agent_prompt.unwrap_or_else(|| request.prompt.clone());
     let mut harness_request = request.clone();
     harness_request.prompt = effective;
+    let occupancy = if harness.supports_steering() {
+        if let Some(output) = publication.as_ref() {
+            match output.occupy().await {
+                Ok(id) => Some((output.replica().clone(), id)),
+                Err(error) => {
+                    tracing::error!(chat = %chat_id, %error, "v3 process occupancy not committed; refusing dispatch");
+                    if let Some(output) = publication.as_mut() {
+                        let note = format!("Process dispatch refused: {error}");
+                        let _ = output
+                            .observe(&AgentEvent::Error {
+                                message: note.clone(),
+                            })
+                            .and_then(|_| {
+                                output.finish_with(
+                                    cypher_proto::sync3::Outcome::Failed,
+                                    cypher_proto::SessionCommandStatus::Rejected,
+                                    Some(note),
+                                )
+                            });
+                    }
+                    inner.remove_run(&chat_id, &run_id);
+                    inner.set_status(&chat_id, SessionStatus::Errored, false);
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut stream = match harness.run(harness_request, controls).await {
-        Ok(stream) => stream,
+        Ok(stream) => stream.fuse(),
         Err(err) => {
             let message = err.to_string();
+            if let Some(output) = publication.as_mut() {
+                let retained = output
+                    .observe(&AgentEvent::Error {
+                        message: message.clone(),
+                    })
+                    .and_then(|_| output.finish(cypher_proto::sync3::Outcome::Failed));
+                if let Err(error) = retained {
+                    tracing::error!(chat = %chat_id, %error, "v3 failed-start record requires recovery");
+                }
+            }
             inner.publish(
                 &chat_id,
                 &AgentEvent::Error {
@@ -1474,7 +1713,10 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut entry_id = new_id();
+    let mut entry_id = publication
+        .as_ref()
+        .map(|p| p.entry_id().to_owned())
+        .unwrap_or_else(new_id);
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
     let mut dirty = false;
@@ -1543,6 +1785,7 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    let mut stream_ended = false;
 
     let final_status = loop {
         let event: AgentEvent = tokio::select! {
@@ -1609,7 +1852,10 @@ async fn drive_run(
                 // after its final Done — a clean end, not a crash (the turn
                 // was already finalized). Persistent adapters keep the
                 // stream open and never hit this.
-                None if idle_since.is_some() => break SessionStatus::Idle,
+                None if idle_since.is_some() => {
+                    stream_ended = true;
+                    break SessionStatus::Idle
+                },
                 None => AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
@@ -1618,6 +1864,11 @@ async fn drive_run(
                 },
             },
             _ = tokio::time::sleep_until(flush_at), if dirty => {
+                if let Some(output) = publication.as_mut().filter(|p| !p.is_complete()) {
+                    if let Err(error) = output.sync_parts(&folded) {
+                        tracing::error!(chat = %chat_id, %error, "v3 output publication requires recovery");
+                    }
+                }
                 // Coalesced STREAM_COMMIT_MS tick: one doc commit per window.
                 if let Err(err) = sync_segment(
                     doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
@@ -1674,9 +1925,15 @@ async fn drive_run(
                     }
                     inner.note_message(&chat_id, &folded_text(&folded));
                 }
+                entry_id = new_id();
+                if let Some(output) = publication.as_mut().filter(|p| !p.is_complete()) {
+                    if let Err(error) = output.sync_parts(&folded).and_then(|_| output.rotate(entry_id.clone())) {
+                        tracing::error!(chat = %chat_id, %error, "v3 quiescence segment requires recovery");
+                        break SessionStatus::Errored;
+                    }
+                }
                 folded.clear();
                 dirty = false;
-                entry_id = new_id();
                 segment_started = now_ms();
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
@@ -1684,6 +1941,19 @@ async fn drive_run(
                 continue;
             }
         };
+
+        // Full decoded source is retained before any display/privacy/filter
+        // decisions. In particular, post-turn and old-tool observations do
+        // not disappear just because they are not publishable in this turn.
+        if let Some(output) = publication.as_mut() {
+            if let Err(error) = output.retain(&event) {
+                tracing::error!(chat = %chat_id, %error, "v3 source retention failed; stopping execution");
+                if let Some(handle) = lock(&inner.runs).get(&chat_id) {
+                    handle.interrupt_token.cancel();
+                }
+                break SessionStatus::Errored;
+            }
+        }
 
         // SubagentStatus is a LIVE PROJECTION, not run activity: mirror it
         // onto the chat's session row and stop — no journal append, no doc
@@ -1750,17 +2020,43 @@ async fn drive_run(
         // non-boundary stays inert, exactly as before.
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {
-            let self_continued = idle_since
-                .is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
-                && (matches!(
-                    &event,
-                    AgentEvent::TextDelta { text } if !text.is_empty()
-                ) || matches!(
-                    &event,
-                    AgentEvent::ToolCall { id, .. }
-                        if id == cypher_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
-                ));
+            // Extensions can ask through the real bridge before their steer
+            // acknowledgement. This is observed process activity, NOT proof
+            // that the queued command was delivered. Keep the command pending
+            // and publish the question in its own observation run.
+            let early_question = matches!(&event, AgentEvent::InputRequested { .. })
+                && lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|h| !lock(&h.routed_steers).is_empty());
+            let self_continued = early_question
+                || (idle_since.is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
+                    && (matches!(
+                        &event,
+                        AgentEvent::TextDelta { text } if !text.is_empty()
+                    ) || matches!(
+                        &event,
+                        AgentEvent::ToolCall { id, .. }
+                            if id == cypher_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+                    )));
             if self_continued {
+                let next_entry = new_id();
+                if let Some(output) = publication.as_mut() {
+                    let Some((_, execution_id)) = occupancy.as_ref() else {
+                        tracing::error!(chat = %chat_id, "autonomous output lacks durable process occupancy");
+                        continue;
+                    };
+                    if let Err(error) = output
+                        .begin_observation(execution_id, next_entry.clone())
+                        .await
+                    {
+                        tracing::error!(chat = %chat_id, %error, "autonomous source retained; public run needs recovery");
+                        inner.set_status(&chat_id, SessionStatus::Errored, false);
+                        continue;
+                    }
+                    if let Some(handle) = lock(&inner.runs).get(&chat_id) {
+                        *lock(&handle.semantic_run) = Some(output.run_id().to_owned());
+                    }
+                }
                 tracing::info!(
                     chat = %chat_id,
                     "parked session resumed by self-continued agent output"
@@ -1769,7 +2065,7 @@ async fn drive_run(
                 self_continued_turn = true;
                 // The park cleared the fold; rotate to a fresh entry and
                 // fall through — this event is the new segment's first part.
-                entry_id = new_id();
+                entry_id = next_entry;
                 segment_started = now_ms();
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
@@ -1869,6 +2165,24 @@ async fn drive_run(
             ..
         } = &event
         {
+            let boundary_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
+            let admitted_boundary = lock(&inner.runs).get(&chat_id).is_some_and(|h| {
+                lock(&h.routed_steers)
+                    .front()
+                    .is_some_and(|s| s.publication.is_some())
+            });
+            if let Some(output) = publication.as_mut().filter(|p| !p.is_complete()) {
+                if let Err(error) = output.sync_parts(&folded).and_then(|_| {
+                    if admitted_boundary {
+                        output.finish(cypher_proto::sync3::Outcome::Completed)
+                    } else {
+                        output.rotate(boundary_id.clone())
+                    }
+                }) {
+                    tracing::error!(chat = %chat_id, %error, "v3 previous turn requires recovery");
+                    break SessionStatus::Errored;
+                }
+            }
             inner.publish(&chat_id, &event);
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
@@ -1887,7 +2201,7 @@ async fn drive_run(
             inner.note_message(&chat_id, &folded_text(&folded));
             folded.clear();
             dirty = false;
-            entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
+            entry_id = boundary_id;
             segment_started = now_ms();
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
@@ -1899,7 +2213,17 @@ async fn drive_run(
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
             {
-                lock(&h.routed_steers).pop_front();
+                if let Some(steer) = lock(&h.routed_steers).pop_front() {
+                    if let Some(mut next) = steer.publication {
+                        if let Err(error) = next.retain(&event) {
+                            tracing::error!(chat = %chat_id, %error, "v3 steer source retention failed");
+                            break SessionStatus::Errored;
+                        }
+                        entry_id = next.entry_id().to_owned();
+                        *lock(&h.semantic_run) = Some(next.run_id().to_owned());
+                        publication = Some(next);
+                    }
+                }
             }
             continue;
         }
@@ -1978,6 +2302,23 @@ async fn drive_run(
             // idle reaper's or an interrupt's own teardown) has no entry to
             // finalize — writing one would leave an empty aborted stub.
             let nothing_streamed = writer.is_none() && folded.is_empty();
+            if let Some(output) = publication.as_mut().filter(|p| !p.is_complete()) {
+                let outcome = match status {
+                    DoneStatus::Completed => cypher_proto::sync3::Outcome::Completed,
+                    DoneStatus::Interrupted => cypher_proto::sync3::Outcome::Interrupted,
+                    DoneStatus::Errored => cypher_proto::sync3::Outcome::Failed,
+                };
+                if let Err(error) = output
+                    .sync_parts(&folded)
+                    .and_then(|_| output.finish(outcome))
+                {
+                    tracing::error!(chat = %chat_id, %error, "v3 terminal publication requires recovery");
+                    break SessionStatus::Errored;
+                }
+                if let Some(h) = lock(&inner.runs).get(&chat_id) {
+                    *lock(&h.semantic_run) = None;
+                }
+            }
             if !nothing_streamed {
                 if let Err(err) = finish_segment(
                     doc_ref,
@@ -2035,15 +2376,67 @@ async fn drive_run(
                 tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
         }
     };
+    // A terminal event is not itself proof the process stream has closed.
+    // Await closure and retain trailing observations before releasing any
+    // durable occupancy. Timeout leaves occupancy for explicit recovery.
+    if occupancy.is_some() && !stream_ended {
+        stream_ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(event) => {
+                        if let Some(output) = publication.as_mut() {
+                            if output.retain(&event).is_err() {
+                                return false;
+                            }
+                        }
+                    }
+                    Err(_) => return false,
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false);
+    }
+    drop(stream);
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
     // its uncertainty note) or reclaims it and reports uncertainty itself.
-    let orphans: Vec<RoutedSteer> = lock(&inner.runs)
+    let mut orphans: Vec<RoutedSteer> = lock(&inner.runs)
         .get(&chat_id)
         .filter(|h| h.run_id == run_id)
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
+    if stream_ended {
+        for orphan in &mut orphans {
+            if let Some(output) = orphan.publication.as_mut() {
+                let note = "Delivery was not confirmed before the harness closed. External effects may have occurred; review before issuing a new request.";
+                if let Err(error) = output
+                    .observe(&AgentEvent::Error {
+                        message: note.into(),
+                    })
+                    .and_then(|_| {
+                        output.finish_with(
+                            cypher_proto::sync3::Outcome::Failed,
+                            cypher_proto::SessionCommandStatus::Rejected,
+                            Some(note.into()),
+                        )
+                    })
+                {
+                    tracing::error!(chat = %chat_id, %error, "v3 unconfirmed command requires reconciliation");
+                }
+            }
+        }
+        if let Some((replica, id)) = occupancy {
+            match replica.release_if_reconciled(&id) {
+                Ok(true) => {}
+                _ => {
+                    lock(&inner.closed_occupancies).insert(chat_id.clone(), (replica, id));
+                }
+            }
+        }
+    }
     // The harness owner for this chat has ended (stream EOF/error, interrupt,
     // idle reaper, or a final Done on a non-parked harness). Any subagent run
     // still projected Running can never settle on its own — terminalize it.
@@ -2059,8 +2452,12 @@ async fn drive_run(
     inner.fail_orphaned_subagents(&chat_id, owner_reason);
     inner.remove_run(&chat_id, &run_id);
     if !orphans.is_empty() {
-        if let Err(err) = inner.note_uncertain_delivery(&chat_id, doc_ref) {
-            tracing::error!(chat = %chat_id, error = %err, "could not persist delivery uncertainty");
+        if let Some(host) = inner.doc_host() {
+            if let Ok(handle) = host.open(&chat_id) {
+                if let Err(err) = inner.note_uncertain_delivery(&chat_id, &handle) {
+                    tracing::error!(chat = %chat_id, error = %err, "could not persist delivery uncertainty");
+                }
+            }
         }
         inner.set_status(&chat_id, SessionStatus::Errored, false);
     } else {

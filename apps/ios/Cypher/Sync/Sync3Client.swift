@@ -28,7 +28,7 @@ final class Sync3Client {
     let journal: Sync3Journal
     private(set) var status = Status()
     var onChange: (() -> Void)?
-    private let wake = WakeBox()
+    private let wakeBox = WakeBox()
     private var task: Task<Void, Never>?
 
     /// URL request resolves credentials before each connection, not once at
@@ -40,7 +40,7 @@ final class Sync3Client {
                      tuning.pingInterval > .zero && tuning.tickInterval > .zero &&
                      tuning.retryBase > 0 && tuning.retryCap >= tuning.retryBase)
         self.journal = journal
-        let wake = self.wake
+        let wake = self.wakeBox
         task = Task { [weak self, journal, wake] in
             var generation: UInt64 = 0
             var repairs: UInt64 = 0
@@ -67,7 +67,7 @@ final class Sync3Client {
                     publish("suspect", code)
                     // Never auto-reset state or regenerate commands on a
                     // semantic conflict. Keep the durable queue for recovery.
-                    if !["transport_unavailable", "business_timeout", "reauth_required"].contains(code) { return }
+                    if !["transport_unavailable", "business_timeout", "reauth_required", "not_initialized"].contains(code) { return }
                     if let repair, !Task.isCancelled {
                         repairs += 1; publish("repairing", nil)
                         do {
@@ -76,7 +76,7 @@ final class Sync3Client {
                         catch is CancellationError { break }
                         catch {
                             if case Sync3Error.protocolError(let problem) = error,
-                               !["transport_unavailable", "business_timeout", "reauth_required"].contains(problem) {
+                               !["transport_unavailable", "business_timeout", "reauth_required", "not_initialized"].contains(problem) {
                                 publish("suspect", problem); return
                             }
                         }
@@ -92,7 +92,12 @@ final class Sync3Client {
     deinit { task?.cancel() }
     func enqueue(_ operation: Sync3Operation) throws {
         try journal.enqueue(operation)
-        wake.send()
+        wakeBox.send()
+    }
+
+    /// Wake the transport after a caller durably changes the journal.
+    func wake() {
+        wakeBox.send()
     }
     func stop() async {
         task?.cancel()
@@ -106,7 +111,7 @@ final class Sync3Client {
     ) async throws {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
-        let session = URLSession(configuration: config)
+        let session = URLSession(configuration: config, delegate: V3NoRedirect(), delegateQueue: nil)
         let socket = session.webSocketTask(with: request)
         socket.maximumMessageSize = Sync3Wire.maxFrameBytes
         let (signals, continuation) = AsyncStream<Signal>.makeStream(bufferingPolicy: .bufferingOldest(64))

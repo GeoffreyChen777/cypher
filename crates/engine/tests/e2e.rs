@@ -10,8 +10,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use cypher_doc::{
-    MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
+    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus, SessionMessageEntry,
 };
 use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
 use cypher_harness::mock::MockHarness;
@@ -20,10 +20,8 @@ use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode, ToolCall,
 };
-use cypher_sync::DocsStore;
 
 const CHAT: &str = "chat-e2e";
-const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
@@ -150,7 +148,7 @@ fn assemble(dir: &std::path::Path, harness: Arc<dyn Harness>) -> EngineCore {
 
 /// Queue a command into the chat doc the way a REMOTE viewer device would: an immutable
 /// pending entry appended under the viewer's device id (ledger rule 1).
-fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
+fn queue_as_viewer(doc: &cypher_engine::ChatDocHandle, id: &str, payload: SessionCommandPayload) {
     let now = chrono::Utc::now().timestamp_millis();
     let based_on =
         doc.read_entries()
@@ -163,7 +161,11 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
     doc.queue_command(&SessionCommandEntry {
         id: id.into(),
         payload,
-        issued_by: VIEWER.into(),
+        issued_by: doc
+            .replica()
+            .unwrap()
+            .read(|j| Ok(j.actor().to_owned()))
+            .unwrap(),
         issued_at: now,
         based_on,
         expires_at: None,
@@ -188,11 +190,69 @@ where
     }
 }
 
+async fn seed_uncertain_v3(
+    dir: &std::path::Path,
+    id: &str,
+    payload: SessionCommandPayload,
+    streaming: bool,
+) {
+    let device_id = "dev-host-fixed";
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("device-id"), device_id).unwrap();
+    let profile = cypher_engine::EngineProfile::development(dir, "dev-org", "dev-user");
+    let replicas =
+        cypher_engine::session_replicas::SessionReplicas::new(&profile, device_id.into(), None)
+            .unwrap();
+    let replica = replicas.get_for_owner(CHAT, device_id).unwrap();
+    let command = SessionCommandEntry {
+        id: id.into(),
+        payload,
+        issued_by: device_id.into(),
+        issued_at: chrono::Utc::now().timestamp_millis(),
+        sent_at: None,
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Pending,
+        resolution: None,
+    };
+    replica
+        .enqueue(&cypher_proto::sync3::Operation {
+            id: format!("queue-{id}"),
+            actor: device_id.into(),
+            owner_epoch: 1,
+            event: cypher_proto::sync3::Event::CommandQueued {
+                command_id: id.into(),
+                command,
+            },
+        })
+        .unwrap();
+    if streaming {
+        let mut publication = replicas
+            .acquire(replica.clone(), id, "m-assist")
+            .await
+            .unwrap();
+        publication
+            .observe(&AgentEvent::TextDelta {
+                text: "doomed".into(),
+            })
+            .unwrap();
+        // Intentionally lose the permit/producer as a crashed process would.
+    } else {
+        replica
+            .prepare(id, cypher_sync::sync3::execution::Plan::Run)
+            .unwrap();
+        let _ = replica.advance(id).unwrap();
+        assert!(matches!(
+            replica.advance(id).unwrap(),
+            cypher_sync::sync3::execution::Progress::Dispatch(_)
+        ));
+    }
+}
+
 fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
     core.doc_host
         .open(CHAT)
         .expect("open chat")
-        .doc()
         .read_entries()
         .expect("read entries")
 }
@@ -204,7 +264,7 @@ fn entries_now(core: &EngineCore) -> Vec<SessionMessageEntry> {
     core.doc_host
         .open(CHAT)
         .ok()
-        .and_then(|h| h.doc().read_entries().ok())
+        .and_then(|h| h.read_entries().ok())
         .unwrap_or_default()
 }
 
@@ -212,7 +272,6 @@ fn command_status(core: &EngineCore, id: &str) -> Option<(SessionCommandStatus, 
     core.doc_host
         .open(CHAT)
         .expect("open chat")
-        .doc()
         .read_commands()
         .expect("read commands")
         .into_iter()
@@ -237,7 +296,7 @@ async fn queued_run_command_executes_end_to_end() {
 
     // A viewer device queues the run command into the doc.
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-1",
         SessionCommandPayload::Run {
             request: run_request("do the thing"),
@@ -300,6 +359,38 @@ async fn queued_run_command_executes_end_to_end() {
     }
 
     // Command outcome written by the host (sole outcome writer).
+    // Inspect the normal runtime's v3 storage, not a separately driven
+    // protocol fixture: dispatch went through its committed execution gate.
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    let projection = replica.read(|j| j.projection()).unwrap();
+    assert_eq!(projection.messages.len(), 2);
+    assert!(projection.messages.contains_key("msg-user-1"));
+    assert_eq!(
+        projection.messages[&assistant.id].entry.parts,
+        assistant.parts
+    );
+    assert!(
+        projection
+            .runs
+            .values()
+            .all(|r| r.outcome == Some(cypher_proto::sync3::Outcome::Completed))
+    );
+    let command = projection.commands.values().next().unwrap();
+    assert!(command.accepted_op_id.is_some());
+    assert_eq!(command.command.status, SessionCommandStatus::Applied);
+    let raw = replica
+        .read(|j| j.execution_events(&command.command.id, 0, 32))
+        .unwrap();
+    assert!(
+        raw.events
+            .iter()
+            .any(|e| serde_json::to_string(&e.event).unwrap().contains("SECRET"))
+    );
+    assert!(
+        !serde_json::to_string(&projection.messages)
+            .unwrap()
+            .contains("SECRET")
+    );
     assert_eq!(
         command_status(&core, "cmd-run-1"),
         Some((SessionCommandStatus::Applied, None))
@@ -349,7 +440,7 @@ async fn session_status_transitions_idle_working_idle() {
 
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-status",
         SessionCommandPayload::Run {
             request: run_request("go"),
@@ -394,7 +485,7 @@ async fn interrupt_stamps_streaming_entry_aborted() {
     );
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-hang",
         SessionCommandPayload::Run {
             request: run_request("hang"),
@@ -415,11 +506,7 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         "streaming entry",
     )
     .await;
-    queue_as_viewer(
-        handle.doc(),
-        "cmd-int-1",
-        SessionCommandPayload::Interrupt {},
-    );
+    queue_as_viewer(&handle, "cmd-int-1", SessionCommandPayload::Interrupt {});
 
     wait_for(
         || {
@@ -469,7 +556,7 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
     let handle = core.doc_host.open(CHAT).unwrap();
 
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-1",
         SessionCommandPayload::Run {
             request: run_request("first"),
@@ -497,7 +584,7 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
     // No live run anymore (mock finishes instantly): a steer command must fall back to
     // dispatch-as-next-turn, per zeron's executor.
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-steer-1",
         SessionCommandPayload::Steer {
             prompt: "also do this".into(),
@@ -510,7 +597,7 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
         || {
             matches!(
                 command_status(&core, "cmd-steer-1"),
-                Some((SessionCommandStatus::Applied, Some(_)))
+                Some((SessionCommandStatus::Applied, _))
             )
         },
         "steer fallback applied",
@@ -518,7 +605,14 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
     .await;
     let (status, resolution) = command_status(&core, "cmd-steer-1").unwrap();
     assert_eq!(status, SessionCommandStatus::Applied);
-    assert_eq!(resolution.as_deref(), Some("queued as new turn"));
+    assert!(resolution.is_none());
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    let projection = replica.read(|j| j.projection()).unwrap();
+    let run = projection.commands["cmd-steer-1"].run_id.as_ref().unwrap();
+    assert_eq!(
+        projection.runs[run].outcome,
+        Some(cypher_proto::sync3::Outcome::Completed)
+    );
 
     wait_for(
         || {
@@ -545,12 +639,17 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
 async fn dead_processed_commands_are_terminalized_on_redelivery() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Simulate a crash AFTER mark-processed but BEFORE execute/outcome: the ledger has
-    // the id, the doc still says pending.
-    {
-        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
-        assert!(store.mark_processed("cmd-crashed").unwrap());
-    }
+    seed_uncertain_v3(
+        dir.path(),
+        "cmd-crashed",
+        SessionCommandPayload::Run {
+            request: run_request("never again"),
+            message_id: "m-x".into(),
+            agent_prompt: None,
+        },
+        false,
+    )
+    .await;
 
     let core = assemble(
         dir.path(),
@@ -559,16 +658,6 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         }),
     );
     let handle = core.doc_host.open(CHAT).unwrap();
-    queue_as_viewer(
-        handle.doc(),
-        "cmd-crashed",
-        SessionCommandPayload::Run {
-            request: run_request("never again"),
-            message_id: "m-x".into(),
-
-            agent_prompt: None,
-        },
-    );
 
     // Give the drain a moment: the dead command must be terminalized — no
     // user entry or run can be recovered from the original consumed attempt.
@@ -578,11 +667,14 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         command_status(&core, "cmd-crashed"),
         Some((
             SessionCommandStatus::Rejected,
-            Some("interrupted before completion — execution outcome unknown; external effects may already have occurred. Review before explicitly retrying.".into())
+            Some("Execution outcome is uncertain after engine restart. External effects may have occurred; this request was not automatically retried. Review before explicitly continuing.".into())
         )),
         "dead command must have a durable terminal outcome"
     );
-    assert!(core.sessions.session_status(CHAT).is_none());
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Errored)
+    );
 
     // A retry mints a fresh command identity but keeps the logical user
     // message id, allowing the executor to dedupe the transcript entry.
@@ -604,11 +696,15 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         "retry preserves the logical user message id"
     );
 
-    // Direct ledger-evaluation check: re-evaluating a processed command = Skip.
-    let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
-    let commands = handle.doc().read_commands().unwrap();
+    // A quarantined v3 intent can never issue another dispatch permit.
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    assert!(matches!(
+        replica.advance("cmd-crashed").unwrap(),
+        cypher_sync::sync3::execution::Progress::Settled
+    ));
+    let commands = handle.read_commands().unwrap();
     let entry = commands.iter().find(|c| c.id == "cmd-crashed").unwrap();
-    let is_processed = |id: &str| store.is_processed(id).unwrap_or(false);
+    let is_processed = |id: &str| id == "cmd-crashed";
     let never_past = |_: &str| false;
     let verdict = cypher_doc::evaluate_command(
         entry,
@@ -631,46 +727,17 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
     std::fs::create_dir_all(dir.path()).unwrap();
     std::fs::write(dir.path().join("device-id"), device_id).unwrap();
 
-    // Craft the crash state: a journal without a terminal Done + a doc snapshot whose
-    // assistant entry is still `streaming`.
-    {
-        let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "doomed".into(),
-                },
-            )
-            .unwrap();
-
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "m-user".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "hi".into(),
-            }],
-            created_at: 1,
-            device_id: device_id.into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-        })
-        .unwrap();
-        let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
-        writer
-            .sync(&[MessagePart::Text {
-                id: "t0".into(),
-                text: "doomed".into(),
-            }])
-            .unwrap();
-        // No finish — the "process" dies here with the entry still streaming.
-        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-    }
+    seed_uncertain_v3(
+        dir.path(),
+        "crash-command",
+        SessionCommandPayload::Run {
+            request: run_request("hi"),
+            message_id: "m-user".into(),
+            agent_prompt: None,
+        },
+        true,
+    )
+    .await;
 
     // Boot: EngineCore::assemble runs recover_stale.
     let core = assemble(
@@ -680,6 +747,15 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
         }),
     );
     assert_eq!(core.device_id, device_id);
+    wait_for(
+        || {
+            entries(&core)
+                .iter()
+                .any(|e| e.id == "m-assist" && e.status == Some(MessageStatus::Aborted))
+        },
+        "v3 crash recovery closes incomplete output",
+    )
+    .await;
 
     let all = entries(&core);
     let assistant = all.iter().find(|e| e.id == "m-assist").unwrap();
@@ -689,16 +765,21 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
         other => panic!("unexpected part {other:?}"),
     }
 
-    // Journal closed with a synthetic Done{interrupted}; no longer stale.
-    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
-    assert!(journal.stale_sessions().unwrap().is_empty());
-    let (_, last) = journal.last_event(CHAT).unwrap().unwrap();
+    // Raw source is retained; recovery is a committed v3 lifecycle decision,
+    // not a forged harness Done observation.
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    let projection = replica.read(|j| j.projection()).unwrap();
+    assert_eq!(
+        projection.commands["crash-command"].command.status,
+        SessionCommandStatus::Rejected
+    );
+    let source = replica
+        .read(|j| j.execution_events("crash-command", 0, 32))
+        .unwrap();
+    let last = source.events.last().unwrap().event.clone();
     assert!(matches!(
         last,
-        AgentEvent::Done {
-            status: DoneStatus::Interrupted,
-            ..
-        }
+        AgentEvent::TextDelta { text } if text == "doomed"
     ));
     assert_eq!(
         core.sessions.session_status(CHAT).map(|s| s.status),
@@ -885,12 +966,17 @@ async fn watch_doc_commands_streams_initial_and_updates() {
 async fn retry_preserves_sent_at_and_message_identity() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Crash AFTER mark-processed but BEFORE execute: the ledger has the id,
-    // the doc still says pending — the drain terminalizes it Rejected.
-    {
-        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
-        assert!(store.mark_processed("cmd-retry-1").unwrap());
-    }
+    seed_uncertain_v3(
+        dir.path(),
+        "cmd-retry-1",
+        SessionCommandPayload::Run {
+            request: run_request("retry me"),
+            message_id: "m-retry-1".into(),
+            agent_prompt: None,
+        },
+        false,
+    )
+    .await;
 
     let core = assemble(
         dir.path(),
@@ -899,16 +985,6 @@ async fn retry_preserves_sent_at_and_message_identity() {
         }),
     );
     let handle = core.doc_host.open(CHAT).unwrap();
-    queue_as_viewer(
-        handle.doc(),
-        "cmd-retry-1",
-        SessionCommandPayload::Run {
-            request: run_request("retry me"),
-            message_id: "m-retry-1".into(),
-
-            agent_prompt: None,
-        },
-    );
 
     // Terminalized as a durable Rejected (no transcript entry is ever
     // written for a dead command).
@@ -920,7 +996,7 @@ async fn retry_preserves_sent_at_and_message_identity() {
         "dead command rejected",
     )
     .await;
-    let commands = handle.doc().read_commands().unwrap();
+    let commands = handle.read_commands().unwrap();
     let old = commands.iter().find(|c| c.id == "cmd-retry-1").unwrap();
     assert_eq!(
         old.sent_at, None,
@@ -964,7 +1040,7 @@ async fn retry_preserves_sent_at_and_message_identity() {
         "retried command applied",
     )
     .await;
-    let commands = handle.doc().read_commands().unwrap();
+    let commands = handle.read_commands().unwrap();
     let retry = commands.iter().find(|c| c.id == retry_id).unwrap();
     match &retry.payload {
         SessionCommandPayload::Run { message_id, .. } => {
@@ -1066,7 +1142,7 @@ async fn respond_input_resolves_pending_question() {
     let core = assemble(dir.path(), Arc::new(AskingHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-ask",
         SessionCommandPayload::Run {
             request: run_request("ask me"),
@@ -1114,7 +1190,7 @@ async fn respond_input_resolves_pending_question() {
         })
         .unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-answer-1",
         SessionCommandPayload::RespondInput {
             request_id,
@@ -1221,7 +1297,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
     let core = assemble(dir.path(), Arc::new(AskingHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-wrong",
         SessionCommandPayload::Run {
             request: run_request("ask me"),
@@ -1258,7 +1334,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
 
     // A wrong-id answer: rejected with a resolution, question still live.
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-answer-bogus",
         SessionCommandPayload::RespondInput {
             request_id: "bogus-id".into(),
@@ -1305,7 +1381,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
 
     // The correct answer still resumes and completes the run.
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-answer-right",
         SessionCommandPayload::RespondInput {
             request_id,
@@ -1406,7 +1482,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
     let core = assemble(dir.path(), Arc::new(BlockingHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-block",
         SessionCommandPayload::Run {
             request: run_request("ask and block"),
@@ -1473,7 +1549,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
 
     // And the session is usable: the next run completes.
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-second",
         SessionCommandPayload::Run {
             request: run_request("second run"),
@@ -1574,7 +1650,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
     let core = assemble(dir.path(), Arc::new(DoubleEmitHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-twin",
         SessionCommandPayload::Run {
             request: run_request("ask me twice"),
@@ -1639,7 +1715,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
         })
         .unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-answer-twin",
         SessionCommandPayload::RespondInput {
             request_id,
@@ -1780,7 +1856,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
     request.attachments = vec![path.clone()];
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-att-1",
         SessionCommandPayload::Run {
             request,
@@ -1832,7 +1908,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
         .await
         .expect("ReadAttachmentChunk");
     assert_eq!(chunk["mimeType"], "image/png");
-    assert_eq!(chunk["name"], "e2e-att-red.png");
+    assert_eq!(chunk["name"], "red.png");
 }
 
 /// Real-CLI proof of the image pipeline: upload a tiny solid-red PNG through
@@ -2001,7 +2077,7 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
     let core = assemble(dir.path(), Arc::new(MockHarness { script }));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-hb-1",
         SessionCommandPayload::Run {
             request: run_request("hb"),
@@ -2059,7 +2135,7 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
     let core = assemble(dir.path(), Arc::new(MockHarness { script }));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-parked",
         SessionCommandPayload::Run {
             request: run_request("go"),
@@ -2148,7 +2224,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
     let core = assemble(dir.path(), Arc::new(MockHarness { script }));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-echo",
         SessionCommandPayload::Run {
             request: run_request("go"),
@@ -2252,7 +2328,7 @@ async fn parked_steer_restamps_started_at_and_idle_clears_it() {
     let core = assemble(dir.path(), Arc::new(ParkingHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-run-park-timer",
         SessionCommandPayload::Run {
             request: run_request("first"),
@@ -2274,7 +2350,7 @@ async fn parked_steer_restamps_started_at_and_idle_clears_it() {
 
     let before_steer = chrono::Utc::now();
     queue_as_viewer(
-        handle.doc(),
+        &handle,
         "cmd-steer-park-timer",
         SessionCommandPayload::Steer {
             prompt: "next".into(),

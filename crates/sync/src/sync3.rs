@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 pub mod execution;
+pub mod local;
 mod projection_store;
 pub mod transport;
 pub mod writer;
@@ -122,8 +123,19 @@ impl Journal {
               command_id TEXT NOT NULL,seq INTEGER NOT NULL CHECK(seq>0),
               event TEXT NOT NULL,digest BLOB NOT NULL,
               after_completion INTEGER NOT NULL CHECK(after_completion IN (0,1)),
-              PRIMARY KEY(command_id,seq));",
+              PRIMARY KEY(command_id,seq));
+            CREATE TABLE IF NOT EXISTS sync3_execution_context(
+              command_id TEXT PRIMARY KEY,cwd TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync3_harness_sessions(
+              cwd TEXT PRIMARY KEY,session_id TEXT NOT NULL,command_id TEXT NOT NULL,source_seq INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync3_observations(
+              run_id TEXT PRIMARY KEY,command_id TEXT NOT NULL,body TEXT NOT NULL,
+              first_seq INTEGER NOT NULL,last_seq INTEGER,outcome TEXT);
+            CREATE INDEX IF NOT EXISTS sync3_observation_source ON sync3_observations(command_id,first_seq);
+            CREATE INDEX IF NOT EXISTS sync3_observation_open ON sync3_observations(run_id) WHERE last_seq IS NULL;",
         )?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS sync3_public_imports(id TEXT PRIMARY KEY,digest BLOB NOT NULL)")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS sync3_resume_imports(cwd TEXT PRIMARY KEY,origin TEXT NOT NULL,session_id TEXT NOT NULL)")?;
         let tx = db.transaction()?;
         tx.execute(
             "INSERT OR IGNORE INTO sync3_meta(singleton,account,room,actor) VALUES(1,?,?,?)",
@@ -156,6 +168,15 @@ impl Journal {
     pub fn actor(&self) -> &str {
         &self.actor
     }
+    pub fn path(&self) -> Option<&Path> {
+        self.db.path().map(Path::new)
+    }
+    pub fn is_local_authority(&self) -> Result<bool, Error> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync3_local_authority')",
+            [], |row| row.get(0),
+        )?)
+    }
     pub fn cursor(&self) -> Result<u64, Error> {
         Ok(self
             .db
@@ -170,6 +191,13 @@ impl Journal {
                 r.get(0)
             })?)
     }
+    pub fn owner(&self) -> Result<(String, u64), Error> {
+        Ok(self.db.query_row(
+            "SELECT owner,owner_epoch FROM sync3_meta WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
     pub fn projection(&self) -> Result<Projection, Error> {
         projection_store::read(&self.db)
     }
@@ -177,6 +205,17 @@ impl Journal {
         &self,
         before: Option<u64>,
         limit: usize,
+    ) -> Result<MessageWindow, Error> {
+        self.message_window_ordered(before, limit, false)
+    }
+    pub fn message_window_after(&self, after: u64, limit: usize) -> Result<MessageWindow, Error> {
+        self.message_window_ordered(Some(after), limit, true)
+    }
+    fn message_window_ordered(
+        &self,
+        before: Option<u64>,
+        limit: usize,
+        forward: bool,
     ) -> Result<MessageWindow, Error> {
         if limit == 0 || limit > 32 || before.is_some_and(|n| n > wire::MAX_SAFE_INTEGER) {
             return Err(invalid("invalid_window"));
@@ -189,8 +228,11 @@ impl Journal {
         })?;
         let mut messages = Vec::new();
         {
-            let mut query = tx.prepare(
-                "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?")?;
+            let mut query = tx.prepare(if forward {
+                "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq>? ORDER BY created_seq ASC LIMIT ?"
+            } else {
+                "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?"
+            })?;
             let mut rows =
                 query.query(params![before.unwrap_or(wire::MAX_SAFE_INTEGER + 1), limit])?;
             let mut used = 0;
@@ -218,9 +260,131 @@ impl Journal {
                 messages.push(message);
             }
         }
-        messages.reverse();
+        if !forward {
+            messages.reverse();
+        }
         tx.commit()?;
         Ok(MessageWindow { through, messages })
+    }
+    /// Explicit new-v3 profile import. Only public transcript content is
+    /// copied, never a command, dispatch intent, synthetic Done or raw log.
+    /// All bounded producer frames and an immutable receipt commit together.
+    pub fn import_public_entry(
+        &mut self,
+        key: &str,
+        entry: &cypher_proto::SessionMessageEntry,
+    ) -> Result<(), Error> {
+        use sha2::Digest;
+        let (owner, epoch) = self.owner()?;
+        if owner != self.actor || epoch == 0 {
+            return Err(invalid("not_owner"));
+        }
+        let digest: [u8; 32] = sha2::Sha256::digest(serde_json::to_vec(entry)?).into();
+        let mut writer = self.new_writer(epoch, None, entry)?;
+        let tx = self.db.transaction()?;
+        let old: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT digest FROM sync3_public_imports WHERE id=?",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old {
+            if old.as_slice() != digest {
+                return Err(invalid("import_content_changed"));
+            }
+            return Ok(());
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync3_entities WHERE kind='messages' AND id=?)",
+            [&entry.id],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Err(invalid("import_message_conflict"));
+        }
+        if entry.parts.is_empty() {
+            let nonce = uuid::Uuid::new_v4().to_string();
+            for (suffix, event) in [
+                (
+                    "create",
+                    wire::Event::MessageCreated {
+                        message_id: entry.id.clone(),
+                        run_id: None,
+                        role: entry.role,
+                        device_id: entry.device_id.clone(),
+                        created_at: entry
+                            .created_at
+                            .try_into()
+                            .map_err(|_| invalid("invalid_timestamp"))?,
+                        continuation_of: entry.continuation_of.clone(),
+                    },
+                ),
+                (
+                    "finish",
+                    wire::Event::MessageFinished {
+                        message_id: entry.id.clone(),
+                        status: entry.status,
+                    },
+                ),
+            ] {
+                let op = Operation {
+                    id: format!("import-{nonce}-{suffix}"),
+                    actor: self.actor.clone(),
+                    owner_epoch: epoch,
+                    event,
+                };
+                op.validate().map_err(invalid)?;
+                enqueue_into(&tx, &op)?;
+            }
+        } else {
+            while writer
+                .finish(&entry.parts, entry.status, |frame| {
+                    Self::write_writer_frame(&tx, &self.scope, &self.actor, frame)
+                })?
+                .more
+            {}
+        }
+        tx.execute(
+            "INSERT INTO sync3_public_imports VALUES(?,?)",
+            params![key, digest.as_slice()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Explicit local-profile continuity transfer. This is private metadata,
+    /// not a fabricated provider event, copied command or dispatch permission.
+    pub fn import_harness_session(
+        &mut self,
+        origin: &str,
+        cwd: &str,
+        session: &str,
+    ) -> Result<(), Error> {
+        if origin.is_empty() || cwd.is_empty() || session.is_empty() {
+            return Err(invalid("invalid_resume_import"));
+        }
+        let (owner, epoch) = self.owner()?;
+        if owner != self.actor || epoch == 0 {
+            return Err(invalid("not_owner"));
+        }
+        let tx = self.db.transaction()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT session_id FROM sync3_harness_sessions WHERE cwd=?",
+                [cwd],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref().is_some_and(|id| id != session) {
+            return Err(invalid("import_resume_conflict"));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO sync3_resume_imports VALUES(?,?,?)",
+            params![cwd, origin, session],
+        )?;
+        tx.execute("INSERT OR IGNORE INTO sync3_harness_sessions(cwd,session_id,command_id,source_seq) VALUES(?,?,'profile-import',0)", params![cwd,session])?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn hello(&self) -> Result<Request, Error> {
         Ok(Request::Hello {
@@ -677,6 +841,78 @@ impl Lifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_profile_import_is_idempotent_and_never_imports_dispatch_authority() {
+        let mut authority =
+            local::LocalAuthority::open(Path::new(":memory:"), "account", "room", "host").unwrap();
+        let entry = cypher_proto::SessionMessageEntry {
+            id: "empty".into(),
+            role: cypher_proto::MessageRole::User,
+            parts: vec![],
+            device_id: "host".into(),
+            created_at: 1,
+            status: None,
+            continuation_of: None,
+        };
+        authority
+            .journal_mut()
+            .import_public_entry("local/entry", &entry)
+            .unwrap();
+        while authority.commit_pending().unwrap() > 0 {}
+        let head = authority.journal().cursor().unwrap();
+        authority
+            .journal_mut()
+            .import_public_entry("local/entry", &entry)
+            .unwrap();
+        assert_eq!(authority.commit_pending().unwrap(), 0);
+        let p = authority.journal().projection().unwrap();
+        assert!(p.commands.is_empty() && p.runs.is_empty() && p.executions.is_empty());
+        assert_eq!(p.messages["empty"].entry, entry);
+        assert_eq!(
+            authority
+                .journal()
+                .message_window_after(0, 32)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(authority.journal().cursor().unwrap(), head);
+        let mut changed = entry.clone();
+        changed.created_at = 2;
+        assert!(
+            authority
+                .journal_mut()
+                .import_public_entry("local/entry", &changed)
+                .is_err()
+        );
+        authority
+            .journal_mut()
+            .import_harness_session("local/room", "/repo", "provider-session")
+            .unwrap();
+        assert_eq!(
+            authority
+                .journal()
+                .harness_session("/repo")
+                .unwrap()
+                .as_deref(),
+            Some("provider-session")
+        );
+        assert_eq!(
+            authority.journal().harness_session("/different").unwrap(),
+            None
+        );
+        assert!(
+            authority
+                .journal_mut()
+                .import_harness_session("local/room", "/repo", "other")
+                .is_err()
+        );
+        assert!(
+            authority.journal().pending().unwrap().is_empty(),
+            "private resume import never enters outbox"
+        );
+    }
     #[test]
     fn message_windows_use_immutable_commit_order_and_an_index() {
         let fixture: serde_json::Value =

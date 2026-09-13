@@ -311,6 +311,17 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
         "pending UI ref absent from every transcript part"
     );
 
+    // User publication precedes provider execution; it is not proof that the
+    // terminal command result has committed on the other executor thread.
+    wait_for(
+        || {
+            command_status(&core)
+                .first()
+                .is_some_and(|(_, status, _)| *status == SessionCommandStatus::Applied)
+        },
+        "command completes after dispatch",
+    )
+    .await;
     let statuses = command_status(&core);
     assert_eq!(statuses[0].1, SessionCommandStatus::Applied);
     core.shutdown().await;

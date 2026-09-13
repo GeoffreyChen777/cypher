@@ -2,10 +2,10 @@
 //! (feature-inventory §3.7 "Uploads"; port of zeron's `uploads.ts`).
 //!
 //! The UI streams a file as base64 chunks (~60KB, sized for the relay when the
-//! target device is remote); chunks stage on disk under `{uploads_root}/tmp/
-//! {uploadId}/{seq}.b64` (surviving an engine restart mid-upload, unlike zeron's
-//! in-memory buffers), and `commit` assembles them into
-//! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
+//! target device is remote); immutable encoded chunks and commit intents stage
+//! under `{uploads_root}/native-v3/staging/{uploadId}`. `commit` fsyncs the
+//! complete file and a content-verified receipt under the full upload ID,
+//! then returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
 //! Attachments live only on the host device — every read proxies through the
 //! owning device via `ReadAttachmentChunk`; nothing is mirrored to the edge.
@@ -24,6 +24,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 
 use crate::EngineError;
+mod native;
 
 /// A pending upload must finish within this window (covers slow mesh links).
 const STAGING_TTL: Duration = Duration::from_secs(10 * 60);
@@ -45,6 +46,8 @@ pub struct AttachmentChunk {
 }
 
 struct UploadsInner {
+    #[cfg(test)]
+    fail_receipt_once: std::sync::atomic::AtomicBool,
     /// Profile-scoped durable home for new committed attachments.
     dir: PathBuf,
     /// Chunk staging (`{uploads_root}/tmp/{uploadId}/`).
@@ -75,7 +78,9 @@ impl Uploads {
     pub fn from_root_with_fallback(dir: &Path, legacy_read_root: Option<&Path>) -> Self {
         Self {
             inner: Arc::new(UploadsInner {
-                tmp: dir.join("tmp"),
+                #[cfg(test)]
+                fail_receipt_once: std::sync::atomic::AtomicBool::new(false),
+                tmp: dir.join("native-v3/staging"),
                 dir: dir.to_path_buf(),
                 read_only_roots: std::sync::RwLock::new(
                     legacy_read_root
@@ -107,65 +112,16 @@ impl Uploads {
     }
 
     /// Stage one base64 chunk. Positional (`seq`) writes are IDEMPOTENT: a client
-    /// retrying a chunk whose ack was lost overwrites the same slot instead of
-    /// double-appending. Callers without `seq` get append-only behavior.
+    /// retrying a chunk whose ack was lost must match the same bytes. Changed
+    /// retries cannot overwrite a slot. Callers without `seq` append locally.
     pub fn append(&self, upload_id: &str, data: &str, seq: Option<u64>) -> Result<(), EngineError> {
-        let dir = self.staging_dir(upload_id)?;
-        self.sweep();
-        std::fs::create_dir_all(&dir)?;
-        let at = match seq {
-            Some(seq) => seq,
-            None => next_free_seq(&dir)?,
-        };
-        if at > 1_000_000 {
-            return Err(EngineError::Other("Invalid chunk index".into()));
-        }
-        // Base64 inflates by ~4/3; bound the staged payload against the file cap.
-        let staged: u64 = chunk_files(&dir)?
-            .iter()
-            .filter(|(seq, _)| *seq != at)
-            .map(|(_, path)| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
-            .sum();
-        if (staged + data.len() as u64) * 3 / 4 > MAX_BYTES {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(EngineError::Other("Upload too large".into()));
-        }
-        std::fs::write(dir.join(format!("{at:06}.b64")), data)?;
-        Ok(())
+        native::append(self, upload_id, data, seq)
     }
 
     /// Assemble the staged chunks into a durable file and return its absolute
     /// path.
     pub fn commit(&self, upload_id: &str, file_name: &str) -> Result<String, EngineError> {
-        let dir = self.staging_dir(upload_id)?;
-        let mut parts = chunk_files(&dir)?;
-        if parts.is_empty() {
-            return Err(EngineError::Other("Unknown or expired upload".into()));
-        }
-        parts.sort_by_key(|(seq, _)| *seq);
-        // Positional appends may leave holes if a chunk never arrived — joining
-        // around them would silently corrupt the file.
-        let mut joined = String::new();
-        for (i, (seq, path)) in parts.iter().enumerate() {
-            if *seq != i as u64 {
-                return Err(EngineError::Other("Upload is missing a chunk".into()));
-            }
-            joined.push_str(std::fs::read_to_string(path)?.trim());
-        }
-        let bytes = BASE64
-            .decode(joined.as_bytes())
-            .map_err(|e| EngineError::Other(format!("upload is not valid base64: {e}")))?;
-        if bytes.len() as u64 > MAX_BYTES {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(EngineError::Other("Upload too large".into()));
-        }
-        std::fs::create_dir_all(&self.inner.dir)?;
-        let name = sanitize(file_name);
-        let id8: String = upload_id.chars().take(8).collect();
-        let path = self.inner.dir.join(format!("{id8}-{name}"));
-        std::fs::write(&path, &bytes)?;
-        let _ = std::fs::remove_dir_all(&dir);
-        Ok(path.to_string_lossy().to_string())
+        native::commit(self, upload_id, file_name)
     }
 
     /// Read one 45KB chunk of an attachment. `extra_roots` are the workspace's
@@ -179,8 +135,22 @@ impl Uploads {
         use std::io::{Read, Seek};
         let file = self.inspect(path, extra_roots)?;
         let size = file.size;
-        let start = offset.min(size);
+        if offset > size {
+            return Err(EngineError::Other(
+                "Attachment offset is ahead of file".into(),
+            ));
+        }
+        let start = offset;
         let next_offset = (start + READ_CHUNK_BYTES).min(size);
+        if let Some(bytes) = native::read(self, &file.resolved, start, next_offset)? {
+            return Ok(AttachmentChunk {
+                name: file.name,
+                mime_type: file.mime_type,
+                data: BASE64.encode(bytes),
+                next_offset,
+                done: next_offset >= size,
+            });
+        }
         // Read ONLY this chunk's byte range — never the whole file per chunk.
         let mut buf = vec![0u8; (next_offset - start) as usize];
         let mut handle = std::fs::File::open(&file.resolved)?;
@@ -193,7 +163,11 @@ impl Uploads {
             }
             read += n;
         }
-        buf.truncate(read);
+        if read != buf.len() || handle.metadata()?.len() != size {
+            return Err(EngineError::Other(
+                "Attachment changed while reading".into(),
+            ));
+        }
         Ok(AttachmentChunk {
             name: file.name,
             mime_type: file.mime_type,
@@ -215,7 +189,7 @@ impl Uploads {
         if !ok {
             return Err(EngineError::Other("Invalid upload id".into()));
         }
-        Ok(self.inner.tmp.join(upload_id))
+        Ok(self.inner.tmp.join(native::key(upload_id)))
     }
 
     /// Reclaim staging dirs whose newest chunk is older than the TTL (an upload
@@ -293,34 +267,6 @@ struct InspectedFile {
     size: u64,
 }
 
-fn chunk_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>, EngineError> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(Vec::new());
-    };
-    let mut files = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let seq = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok());
-        if let Some(seq) = seq
-            && path.extension().and_then(|e| e.to_str()) == Some("b64")
-        {
-            files.push((seq, path));
-        }
-    }
-    Ok(files)
-}
-
-fn next_free_seq(dir: &Path) -> Result<u64, EngineError> {
-    Ok(chunk_files(dir)?
-        .iter()
-        .map(|(seq, _)| seq + 1)
-        .max()
-        .unwrap_or(0))
-}
-
 fn sanitize(file_name: &str) -> String {
     let base = Path::new(file_name)
         .file_name()
@@ -344,7 +290,7 @@ fn sanitize(file_name: &str) -> String {
         .into_iter()
         .rev()
         .collect();
-    if tail.is_empty() {
+    if tail.is_empty() || tail == "." || tail == ".." {
         "upload".into()
     } else {
         tail
@@ -381,7 +327,7 @@ mod tests {
     fn sweep_spares_fresh_empty_staging_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let uploads = Uploads::from_root(dir.path());
-        let racing = dir.path().join("tmp").join("upload-racing");
+        let racing = uploads.staging_dir("upload-racing").unwrap();
         std::fs::create_dir_all(&racing).unwrap();
 
         uploads

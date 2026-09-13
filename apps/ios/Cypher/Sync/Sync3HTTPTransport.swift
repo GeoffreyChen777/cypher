@@ -19,7 +19,7 @@ struct Sync3HTTPTransport {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 15
-        let session = URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
+        let session = URLSession(configuration: config, delegate: V3NoRedirect(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         return try await withTaskCancellationHandler {
             do {
@@ -28,7 +28,7 @@ struct Sync3HTTPTransport {
                 if response.statusCode == 401 { try Sync3Wire.fail("reauth_required") }
                 if response.statusCode == 403 { try Sync3Wire.fail("not_authorized") }
                 if response.statusCode == 429 || response.statusCode >= 500 { try Sync3Wire.fail("transport_unavailable") }
-                guard response.statusCode == 200 || response.statusCode == 400 else { try Sync3Wire.fail("unexpected_http_status") }
+                guard [200, 400, 409].contains(response.statusCode) else { try Sync3Wire.fail("unexpected_http_status") }
                 if response.expectedContentLength > Int64(Sync3Wire.maxFrameBytes) { try Sync3Wire.fail("frame_too_large") }
                 var data = Data()
                 for try await byte in bytes {
@@ -48,12 +48,4 @@ struct Sync3HTTPTransport {
         }
     }
 
-    private final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-        func urlSession(_ session: URLSession, task: URLSessionTask,
-                        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-                        completionHandler: @escaping (URLRequest?) -> Void) {
-            // Never forward account credentials or queued content elsewhere.
-            completionHandler(nil)
-        }
-    }
 }

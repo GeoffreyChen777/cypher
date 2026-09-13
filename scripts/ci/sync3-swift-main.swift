@@ -70,6 +70,7 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
             let client = Sync3Client(journal: liveJournal, request: {
                 var request = URLRequest(url: URL(string: path.replacingOccurrences(of: "http:", with: "ws:") + "ws")!)
                 request.setValue("Bearer sync3-user@sync3-org", forHTTPHeaderField: "Authorization")
+                request.setValue("sync3-user", forHTTPHeaderField: "x-cypher-expected-user")
                 return request
             })
             if CommandLine.arguments.count >= 6, CommandLine.arguments[4] == "--writer" {

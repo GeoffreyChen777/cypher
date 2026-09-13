@@ -18,11 +18,30 @@ const STREAM_QUEUE_CAP: usize = 256;
 
 enum Pending {
     Call(oneshot::Sender<Result<serde_json::Value, RpcError>>),
-    Stream(mpsc::Sender<serde_json::Value>),
+    Stream {
+        tx: mpsc::Sender<serde_json::Value>,
+        _stop: oneshot::Sender<()>,
+    },
 }
 
 struct Shared {
     pending: Mutex<HashMap<u64, Pending>>,
+}
+struct CancelCall {
+    shared: Arc<Shared>,
+    out: mpsc::Sender<String>,
+    id: u64,
+}
+impl Drop for CancelCall {
+    fn drop(&mut self) {
+        if self.shared.lock().remove(&self.id).is_some() {
+            // Best effort without spawning an unbounded number of teardown
+            // tasks. The remote adapter also owns a bounded business deadline.
+            let _ = self
+                .out
+                .try_send(serde_json::json!({"id":self.id,"cancel":true}).to_string());
+        }
+    }
 }
 
 impl Shared {
@@ -38,11 +57,20 @@ pub struct RpcClient {
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
+    stream_capacity: usize,
+    runtime: tokio::runtime::Handle,
 }
 
 impl RpcClient {
     /// Wrap an existing duplex: `out` carries client frames, `inbound` server frames.
-    pub fn new(out: mpsc::Sender<String>, mut inbound: mpsc::Receiver<String>) -> Self {
+    pub fn new(out: mpsc::Sender<String>, inbound: mpsc::Receiver<String>) -> Self {
+        Self::with_stream_capacity(out, inbound, STREAM_QUEUE_CAP)
+    }
+    pub fn with_stream_capacity(
+        out: mpsc::Sender<String>,
+        mut inbound: mpsc::Receiver<String>,
+        stream_capacity: usize,
+    ) -> Self {
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
         });
@@ -82,6 +110,8 @@ impl RpcClient {
             shared,
             next_id: AtomicU64::new(1),
             reader,
+            stream_capacity: stream_capacity.max(1),
+            runtime: tokio::runtime::Handle::current(),
         }
     }
 
@@ -94,6 +124,11 @@ impl RpcClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.shared.lock().insert(id, Pending::Call(tx));
+        let _cancel = CancelCall {
+            shared: self.shared.clone(),
+            out: self.out.clone(),
+            id,
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -126,8 +161,26 @@ impl RpcClient {
         params: serde_json::Value,
     ) -> Result<mpsc::Receiver<serde_json::Value>, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
-        self.shared.lock().insert(id, Pending::Stream(tx));
+        let (tx, rx) = mpsc::channel(self.stream_capacity);
+        let (stop, stopped) = oneshot::channel();
+        self.shared.lock().insert(
+            id,
+            Pending::Stream {
+                tx: tx.clone(),
+                _stop: stop,
+            },
+        );
+        let shared = Arc::downgrade(&self.shared);
+        let out = self.out.clone();
+        self.runtime.spawn(async move {
+            tokio::select! {
+                _ = stopped => {},
+                _ = tx.closed() => {
+                    if let Some(shared) = shared.upgrade() { shared.lock().remove(&id); }
+                    let _ = out.send(serde_json::json!({"id":id,"cancel":true}).to_string()).await;
+                }
+            }
+        });
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -161,7 +214,7 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
             Some(Pending::Call(tx)) => {
                 let _ = tx.send(Err(RpcError::Failed(err)));
             }
-            Some(Pending::Stream(_)) | None => {
+            Some(Pending::Stream { .. }) | None => {
                 // Stream errored: the sender drop closes the receiver.
                 tracing::debug!(id, %err, "rpc: stream ended with error");
             }
@@ -178,7 +231,7 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
         // Clone the sender out of the lock: the bounded send must await
         // (backpressure) without holding `shared`.
         let tx = match shared.lock().get(&id) {
-            Some(Pending::Stream(tx)) => Some(tx.clone()),
+            Some(Pending::Stream { tx, .. }) => Some(tx.clone()),
             _ => None,
         };
         let dead = match tx {
@@ -238,4 +291,67 @@ where
         }
     });
     RpcClient::new(out_tx, in_rx)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn subscription_can_be_polled_by_the_foreground_ui_executor() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (out, mut frames) = mpsc::channel(2);
+        let (_server, incoming) = mpsc::channel(2);
+        let client = {
+            let _entered = runtime.enter();
+            RpcClient::with_stream_capacity(out, incoming, 2)
+        };
+        // GPUI polls here without an entered Tokio runtime.
+        let receiver =
+            futures::executor::block_on(client.subscribe("Never", serde_json::json!({}))).unwrap();
+        drop(receiver);
+        runtime.block_on(async {
+            frames.recv().await.unwrap();
+            let cancel = tokio::time::timeout(std::time::Duration::from_secs(1), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(serde_json::from_str::<ClientFrame>(&cancel).unwrap().cancel);
+        });
+    }
+    #[tokio::test]
+    async fn dropping_an_idle_stream_sends_cancel_without_a_server_item() {
+        let (out, mut frames) = mpsc::channel(2);
+        let (_server, incoming) = mpsc::channel(2);
+        let client = RpcClient::with_stream_capacity(out, incoming, 2);
+        let response = client
+            .subscribe("Never", serde_json::json!({}))
+            .await
+            .unwrap();
+        let first: ClientFrame = serde_json::from_str(&frames.recv().await.unwrap()).unwrap();
+        drop(response);
+        let cancel = tokio::time::timeout(std::time::Duration::from_secs(1), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let cancel: ClientFrame = serde_json::from_str(&cancel).unwrap();
+        assert_eq!(first.id, cancel.id);
+        assert!(cancel.cancel);
+        assert!(client.shared.lock().is_empty());
+    }
+    #[tokio::test]
+    async fn dropping_a_pending_unary_cancels_and_releases_the_slot() {
+        let (out, mut frames) = mpsc::channel(2);
+        let (_server, incoming) = mpsc::channel(2);
+        let client = RpcClient::with_stream_capacity(out, incoming, 2);
+        let mut call = Box::pin(client.call("Slow", serde_json::json!({})));
+        let first = tokio::select! { _ = &mut call => panic!("must be pending"), frame = frames.recv() => frame.unwrap() };
+        drop(call);
+        let cancel: ClientFrame = serde_json::from_str(&frames.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientFrame>(&first).unwrap().id,
+            cancel.id
+        );
+        assert!(cancel.cancel);
+        assert!(client.shared.lock().is_empty());
+    }
 }

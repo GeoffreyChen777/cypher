@@ -1,6 +1,5 @@
 // Session-wide connection config: edge base URL, identity, token minting for
-// room sockets (WS auth rides the URL query — sockets can't set headers), and
-// the durable-nudge POST. Thread-safe (rooms call in from their actors).
+// native v3 header-authenticated sockets. Thread-safe across room actors.
 
 import Foundation
 
@@ -22,6 +21,20 @@ final class AppConfig: @unchecked Sendable {
     private var devBearer: String?
     private var invalidated = false
     private let refreshGate = RefreshGate()
+    @MainActor private var control: Workspace3Context?
+
+    var isActive: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !invalidated
+    }
+    @MainActor func workspaceContext() throws -> Workspace3Context {
+        guard isActive else { throw RelayError.notConnected }
+        if let control { return control }
+        let context = try Workspace3Context(config: self)
+        control = context
+        return context
+    }
+    @MainActor func cancelWorkspaceCalls(owner: String) { control?.rpc.cancel(owner: owner) }
 
     /// Injectable for tests: how a fresh AuthClient is built. The production
     /// default rides URLSession.shared; tests substitute a recording client
@@ -118,6 +131,7 @@ final class AppConfig: @unchecked Sendable {
         invalidated = true
         tokens = nil
         devBearer = nil
+        Task { @MainActor [weak self] in self?.control?.retire(); self?.control = nil }
     }
 
     private func persist(_ new: AuthTokens) -> Bool {
@@ -143,94 +157,39 @@ final class AppConfig: @unchecked Sendable {
         components.scheme = components.scheme == "http" ? "ws" : "wss"
         return components.url!
     }
-
-    /// The workspace registry room (docs/registry-sync.md) — the row-table
-    /// replacement for the old ws Loro workspace doc.
-    func registrySocketURL() async -> URL? {
-        guard let token = await currentToken() else { return nil }
-        var url = wsBase.appending(path: "registry/\(orgId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
-        return url
+    func workspace3Scope() throws -> Workspace3Scope {
+        let scope = Workspace3Scope(endpoint: edgeURL.absoluteString, org: orgId, user: userId, actor: deviceId)
+        try scope.validate()
+        return scope
     }
-
-    /// The chat2 log-relay room (docs/chat2-sync.md B) — replaces the s2
-    /// session rooms, which mobile no longer dials at all. `device` rides the
-    /// URL so the DO can attribute sockets and honor excludeOwn backfills.
-    func chat2SocketURL(chatId: String) async -> URL? {
-        guard let token = await currentToken() else { return nil }
-        var url = wsBase.appending(path: "chat2/\(chatId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
-        return url
-    }
-
-    /// GET /chat2/{chatId}/checkpoint — the Range-resumable doc snapshot
-    /// (auth via bearer header; the caller adds Range on resume).
-    func chat2CheckpointRequest(chatId: String) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var request = URLRequest(url: edgeURL.appending(path: "chat2/\(chatId)/checkpoint"))
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return request
-    }
-
-    /// GET /chat2/{chatId}/rows?after= — the HTTPS pull twin of the Chat2
-    /// backfill. Authentication stays in the Bearer header; unlike the
-    /// WebSocket URL, the token never enters the query string.
-    func chat2RowsRequest(chatId: String, after: UInt64) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
-        url.append(queryItems: [
-            URLQueryItem(name: "after", value: String(after)),
-            URLQueryItem(name: "device", value: deviceId)
-        ])
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return request
-    }
-
-    /// POST /chat2/{chatId}/rows?batchId= — raw update push with server-side
-    /// batch dedupe, used when the WebSocket upgrade is unavailable.
-    func chat2PushRequest(chatId: String, batchId: String) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
-        url.append(queryItems: [
-            URLQueryItem(name: "batchId", value: batchId),
-            URLQueryItem(name: "device", value: deviceId)
-        ])
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        return request
-    }
-
-    /// GET /registry/{orgId}/rows?since= — delta pull and HTTP presence beat.
-    func registryRowsRequest(since: UInt64?) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "registry/\(orgId)/rows")
-        var query = [
-            URLQueryItem(name: "device", value: deviceId),
-            URLQueryItem(name: "beat", value: "1")
-        ]
-        if let since {
-            query.append(URLQueryItem(name: "since", value: String(since)))
+    func workspace3Request() async throws -> URLRequest {
+        _ = try workspace3Scope()
+        guard let token = await currentToken() else { try Workspace3Wire.fail("reauth_required") }
+        let url = wsBase.appending(path: "workspace3/\(orgId)/ws")
+        guard url.scheme == "wss" || (url.scheme == "ws" && ["127.0.0.1", "localhost", "::1"].contains(url.host)) else {
+            try Workspace3Wire.fail("insecure_endpoint")
         }
-        url.append(queryItems: query)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
     }
 
-    /// POST /registry/{orgId}/push — JSON op batch push with LWW-safe retries.
-    func registryPushRequest() async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "registry/\(orgId)/push")
-        url.append(queryItems: [URLQueryItem(name: "device", value: deviceId)])
+    /// The v3 typed event room. v3 is the only session transport; the old
+    /// chat2/Loro relay is intentionally not used by new clients.
+    func sync3Request(chatId: String, socket: Bool) async throws -> URLRequest {
+        _ = try workspace3Scope()
+        _ = try Sync3Wire.identifier(.string(orgId))
+        _ = try Sync3Wire.identifier(.string(chatId))
+        guard let token = await currentToken() else { throw Sync3Error.protocolError("reauth_required") }
+        let base = socket ? wsBase : edgeURL
+        let url = base.appending(path: "sync3/\(orgId)/chats/\(chatId)/\(socket ? "ws" : "exchange")")
+        guard ["https", "wss"].contains(url.scheme) ||
+                (["http", "ws"].contains(url.scheme) && ["127.0.0.1", "localhost", "::1"].contains(url.host)) else {
+            throw Sync3Error.protocolError("insecure_endpoint")
+        }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(userId, forHTTPHeaderField: "x-cypher-expected-user")
         return request
     }
 
@@ -248,28 +207,6 @@ final class AppConfig: @unchecked Sendable {
         return Date().timeIntervalSince1970 > exp - 60
     }
 
-    /// GET /device/{deviceId}/status → whether the device's relay HOST socket
-    /// is currently attached (distinct from workspace presence).
-    func deviceStatus(deviceId: String) async -> String {
-        guard let token = await currentToken() else { return "no-token" }
-        var request = URLRequest(url: edgeURL.appending(path: "device/\(deviceId)/status"))
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse else { return "unreachable" }
-        return "http=\(http.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")"
-    }
-
-    /// POST /device/{deviceId}/nudge {chatId} — wake a cold host to drain the
-    /// command queue.
-    func nudge(deviceId: String, chatId: String) async {
-        guard let token = await currentToken() else { return }
-        var request = URLRequest(url: edgeURL.appending(path: "device/\(deviceId)/nudge"))
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["chatId": chatId])
-        _ = try? await URLSession.shared.data(for: request)
-    }
 }
 
 /// Single-flight refresh gate. Concurrent `currentToken` calls that all see

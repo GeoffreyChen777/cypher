@@ -8,13 +8,15 @@
 use super::{Error, Journal, enqueue_into, invalid};
 use cypher_proto::{
     SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
-    sync3::{CommandState, Event, Operation, Outcome, RunState},
+    sync3::{CommandState, Event, MessageState, Operation, Outcome, RunState},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod observation;
 mod source;
+pub use observation::ObservationPermit;
 pub use source::{SourceEvent, SourcePage};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,6 +123,61 @@ impl Intent {
 }
 
 impl Journal {
+    /// Recovery of a claim whose owning process no longer holds a permit.
+    /// The Engine must exclude its in-process claims before calling this.
+    /// Closes incomplete public messages and rejects the uncertain command;
+    /// it never returns or reconstructs a dispatch permit.
+    pub fn quarantine_execution(&mut self, command_id: &str, note: &str) -> Result<bool, Error> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(mut intent) = load(&tx, command_id, &self.scope, &self.actor)? else {
+            return Err(invalid("unknown_execution_intent"));
+        };
+        if intent.state == State::Settled {
+            return Ok(false);
+        }
+        if intent.state != State::Claimed {
+            return Err(invalid("execution_not_uncertain"));
+        }
+        check_fence(&tx, &intent)?;
+        let mut operations = recovery_messages(
+            &tx,
+            &intent.run_id,
+            &intent.actor,
+            &intent.nonce,
+            |suffix, event| intent.operation(suffix, event),
+            note,
+        )?;
+        if let Some(run) = entity::<RunState>(&tx, "runs", &intent.run_id)? {
+            if run.outcome.is_none() && matches!(intent.plan, Plan::Run) {
+                operations.push(intent.operation(
+                    "recovery-run",
+                    Event::RunFinished {
+                        run_id: intent.run_id.clone(),
+                        outcome: Outcome::Failed,
+                    },
+                ));
+            }
+        }
+        operations.push(intent.operation(
+            "recovery-command",
+            Event::CommandResolved {
+                command_id: command_id.into(),
+                status: SessionCommandStatus::Rejected,
+                resolution: Some(note.into()),
+            },
+        ));
+        for operation in &operations {
+            operation.validate().map_err(invalid)?;
+            enqueue_into(&tx, operation)?;
+        }
+        intent.state = State::Settled;
+        intent.terminal = Some(operations);
+        save(&tx, &intent)?;
+        tx.commit()?;
+        Ok(true)
+    }
     /// Persist the intent and ONLY its claim attempt together. A speculative
     /// run start must not accompany a claim that could lose server arbitration.
     pub fn prepare_execution(&mut self, command_id: &str, plan: Plan) -> Result<Info, Error> {
@@ -318,6 +375,78 @@ impl Journal {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn recovery_messages(
+    db: &Connection,
+    run: &str,
+    actor: &str,
+    nonce: &str,
+    operation: impl Fn(&str, Event) -> Operation,
+    note: &str,
+) -> Result<Vec<Operation>, Error> {
+    let mut operations = Vec::new();
+    let mut roots = std::collections::BTreeMap::new();
+    let mut query = db.prepare(
+        "SELECT body FROM sync3_entities WHERE kind='messages' AND run_id=?
+         AND json_extract(body,'$.entry.status')='streaming' ORDER BY created_seq,id",
+    )?;
+    for (index, body) in query
+        .query_map([run], |r| r.get::<_, String>(0))?
+        .enumerate()
+    {
+        let message: MessageState = serde_json::from_str(&body?)?;
+        roots.insert(
+            message
+                .entry
+                .continuation_of
+                .clone()
+                .unwrap_or_else(|| message.entry.id.clone()),
+            message.entry.created_at,
+        );
+        operations.push(operation(
+            &format!("recovery-message-{index}"),
+            Event::MessageFinished {
+                message_id: message.entry.id,
+                status: Some(cypher_proto::MessageStatus::Aborted),
+            },
+        ));
+    }
+    // A dedicated bounded continuation remains safe when the old chunk is
+    // full or has retained writer frames still awaiting acknowledgement.
+    for (index, (root, created_at)) in roots.into_iter().enumerate() {
+        let id = format!("recovery-{nonce}-{index}");
+        operations.push(operation(
+            &format!("recovery-note-{index}"),
+            Event::MessageCreated {
+                message_id: id.clone(),
+                run_id: Some(run.into()),
+                role: cypher_proto::MessageRole::Assistant,
+                device_id: actor.into(),
+                created_at: created_at as u64,
+                continuation_of: Some(root),
+            },
+        ));
+        operations.push(operation(
+            &format!("recovery-note-part-{index}"),
+            Event::PartPut {
+                message_id: id.clone(),
+                index: 0,
+                part: cypher_proto::MessagePart::Error {
+                    id: "engine-recovery".into(),
+                    message: note.into(),
+                },
+            },
+        ));
+        operations.push(operation(
+            &format!("recovery-note-end-{index}"),
+            Event::MessageFinished {
+                message_id: id,
+                status: Some(cypher_proto::MessageStatus::Aborted),
+            },
+        ));
+    }
+    Ok(operations)
 }
 
 fn validate_plan(payload: &SessionCommandPayload, plan: &Plan) -> Result<(), Error> {

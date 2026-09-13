@@ -25,8 +25,6 @@ use cypher_proto::{
 };
 use cypher_rpc::methods;
 
-const VIEWER: &str = "viewer-device";
-
 /// Scripted harness: emits SessionStarted + text + Done with a per-event delay (so
 /// `Working` is observable across the bridge).
 struct ScriptedHarness {
@@ -121,16 +119,6 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
 /// The in-process room: an in-memory registry server speaking the DO's JSON
 /// WS protocol (what the RegistryRoom DO does over the wire), with both
 /// engines' hosts wired to it via the test seam.
-async fn bridge(
-    a: &EngineCore,
-    b: &EngineCore,
-) -> cypher_sync::registry::mock_server::MockRegistryServer {
-    let server = cypher_sync::registry::mock_server::MockRegistryServer::start().await;
-    a.workspace.connect_registry_url(&server.url());
-    b.workspace.connect_registry_url(&server.url());
-    server
-}
-
 async fn wait_for<F>(mut predicate: F, what: &str)
 where
     F: FnMut() -> bool,
@@ -192,7 +180,7 @@ fn queue_run_with(
 
                 agent_prompt: None,
             },
-            issued_by: VIEWER.into(),
+            issued_by: core.device_id.clone(),
             issued_at: now,
             based_on: None::<CommandBasedOn>,
             expires_at: None,
@@ -204,35 +192,13 @@ fn queue_run_with(
 }
 
 #[tokio::test]
-async fn two_engines_share_a_workspace() {
+async fn native_workspace_survives_restart_without_a_legacy_snapshot() {
     let dir_a = tempfile::tempdir().unwrap();
-    let dir_b = tempfile::tempdir().unwrap();
     let a = assemble(dir_a.path(), "dev-a");
-    let b = assemble(dir_b.path(), "dev-b");
-    let link = bridge(&a, &b).await;
-
-    // Device rows from BOTH engines appear on both sides.
-    for core in [&a, &b] {
-        wait_for(
-            || {
-                let ids: Vec<String> = core
-                    .workspace
-                    .read_devices()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|d| d.id)
-                    .collect();
-                ids == ["dev-a", "dev-b"]
-            },
-            "both device rows",
-        )
-        .await;
-    }
 
     // CreateSpace + CreateChat on A (Mutate over the real RPC surface), hosted
     // by dev-a via the space.
     let client_a = cypher_rpc::memory_client(a.rpc_service());
-    let client_b = cypher_rpc::memory_client(b.rpc_service());
     client_a
         .call(
             methods::MUTATE,
@@ -251,43 +217,15 @@ async fn two_engines_share_a_workspace() {
         )
         .await
         .expect("create chat");
-    // The space row crosses to B alongside the chat row.
-    wait_for(
-        || {
-            b.workspace
-                .read_spaces()
-                .unwrap_or_default()
-                .iter()
-                .any(|s| s.id == "space-1" && s.device_id == "dev-a" && s.path == "/tmp")
-        },
-        "space row on B",
-    )
-    .await;
-    wait_for(
-        || b.workspace.chat("chat-1").ok().flatten().is_some(),
-        "chat row on B",
-    )
-    .await;
-
-    // Run on A: B's workspace view shows the session Working, then Idle.
+    // Cross-engine convergence now runs through actual WorkspaceHub in the
+    // normal_v3_smoke CI example, not by rebinding a local-authority registry.
     queue_run(&a, "chat-1", "cmd-run-1", "m-1");
-    let b_status = |wanted: SessionStatus| {
-        let ws = b.workspace.clone();
-        move || {
-            ws.read_sessions()
-                .unwrap_or_default()
-                .iter()
-                .any(|s| s.chat_id == "chat-1" && s.device_id == "dev-a" && s.status == wanted)
-        }
-    };
-    wait_for(b_status(SessionStatus::Working), "Working on B").await;
-    wait_for(b_status(SessionStatus::Idle), "Idle on B").await;
 
     // Sidebar freshness crossed too: the chat row's preview settles on the
     // assistant's final text (first-120-chars policy).
     wait_for(
         || {
-            b.workspace
+            a.workspace
                 .chat("chat-1")
                 .ok()
                 .flatten()
@@ -295,19 +233,19 @@ async fn two_engines_share_a_workspace() {
                 .as_deref()
                 == Some("Hello")
         },
-        "assistant preview on B",
+        "assistant preview",
     )
     .await;
 
     // Rename + archive from B (LWW from any device) become visible on A.
-    client_b
+    client_a
         .call(
             methods::MUTATE,
             serde_json::json!({ "op": "renameChat", "chatId": "chat-1", "title": "Renamed from B" }),
         )
         .await
         .expect("rename chat");
-    client_b
+    client_a
         .call(
             methods::MUTATE,
             serde_json::json!({ "op": "setChatArchived", "chatId": "chat-1", "archived": true }),
@@ -326,11 +264,10 @@ async fn two_engines_share_a_workspace() {
     )
     .await;
 
-    // Device rename from B visible on A.
-    client_b
+    client_a
         .call(
             methods::MUTATE,
-            serde_json::json!({ "op": "renameDevice", "deviceId": "dev-b", "name": "B's VPS" }),
+            serde_json::json!({ "op": "renameDevice", "deviceId": "dev-a", "name": "Local" }),
         )
         .await
         .expect("rename device");
@@ -340,42 +277,52 @@ async fn two_engines_share_a_workspace() {
                 .read_devices()
                 .unwrap_or_default()
                 .iter()
-                .any(|d| d.id == "dev-b" && d.name == "B's VPS")
+                .any(|d| d.id == "dev-a" && d.name == "Local")
         },
-        "device rename on A",
+        "device rename",
     )
     .await;
 
-    drop(link);
     a.shutdown().await;
+    drop(a);
+    let store = cypher_sync::DocsStore::open(dir_a.path().join("orgs/dev-org/dev-user")).unwrap();
+    assert!(
+        store
+            .load_snapshot(cypher_doc::REGISTRY_DOC_ID)
+            .unwrap()
+            .is_none()
+    );
+    let b = assemble(dir_a.path(), "dev-a");
+    assert!(
+        b.workspace
+            .chat("chat-1")
+            .unwrap()
+            .is_some_and(|c| c.archived && c.title.as_deref() == Some("Renamed from B"))
+    );
+    assert!(b.workspace.space("space-1").unwrap().is_some());
     b.shutdown().await;
 }
 
 #[tokio::test]
 async fn claim_on_first_command_creates_the_chat_row() {
     let dir_a = tempfile::tempdir().unwrap();
-    let dir_b = tempfile::tempdir().unwrap();
     let a = assemble(dir_a.path(), "dev-a");
-    let b = assemble(dir_b.path(), "dev-b");
-    let link = bridge(&a, &b).await;
 
     // No CreateChat: the first run command claims the chat under A's device id.
     queue_run(&a, "chat-claimed", "cmd-claim-1", "m-1");
     wait_for(
         || {
-            b.workspace
+            a.workspace
                 .chat("chat-claimed")
                 .ok()
                 .flatten()
                 .is_some_and(|c| c.device_id == "dev-a" && c.cwd.as_deref() == Some("/tmp"))
         },
-        "claimed chat row on B",
+        "claimed chat row",
     )
     .await;
 
-    drop(link);
     a.shutdown().await;
-    b.shutdown().await;
 }
 
 /// A first command whose cwd is a linked WORKTREE must attribute the chat to
@@ -619,7 +566,7 @@ async fn two_engines_converge_through_a_real_workspace_room() {
 }
 
 #[tokio::test]
-async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
+async fn legacy_workspace_snapshot_does_not_seed_native_v3() {
     use cypher_proto::{Chat, Device, Session, Space};
 
     let dir_a = tempfile::tempdir().unwrap();
@@ -688,73 +635,24 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .expect("save legacy snapshot");
     }
 
-    // Boot: migration is instant — the full sidebar state is readable before
-    // any server contact.
+    // Fresh v3 never imports retired metadata or provider resume references.
     let a = assemble(dir_a.path(), "dev-a");
     let chats = a.workspace.read_chats().expect("chats");
-    assert_eq!(chats.len(), 1);
-    assert_eq!(chats[0].title.as_deref(), Some("Migrated chat"));
-    assert_eq!(chats[0].harness_session_id.as_deref(), Some("hs-9"));
-    assert_eq!(chats[0].space_id.as_deref(), Some("space-legacy"));
+    assert!(chats.is_empty());
     let spaces = a.workspace.read_spaces().expect("spaces");
-    assert_eq!(spaces.len(), 1);
-    assert!(spaces[0].git_detected);
+    assert!(spaces.is_empty());
     // The boot-time device upsert kept the LEGACY user-set name (LWW row
     // exists), not the hostname.
     let devices = a.workspace.read_devices().expect("devices");
     assert_eq!(devices.len(), 1);
-    assert_eq!(devices[0].name, "old laptop");
-
-    // A second (fresh) device converges through the room from the migrated seed.
-    let dir_b = tempfile::tempdir().unwrap();
-    let b = assemble(dir_b.path(), "dev-b");
-    let link = bridge(&a, &b).await;
-    wait_for(
-        || {
-            b.workspace
-                .chat("chat-legacy")
-                .ok()
-                .flatten()
-                .is_some_and(|c| c.title.as_deref() == Some("Migrated chat"))
-        },
-        "migrated chat on B",
-    )
-    .await;
-
-    // A live rename beats the migrated (historical-HLC) title everywhere.
-    b.workspace
-        .rename_chat("chat-legacy", "renamed live")
-        .expect("rename");
-    wait_for(
-        || {
-            a.workspace
-                .chat("chat-legacy")
-                .ok()
-                .flatten()
-                .is_some_and(|c| c.title.as_deref() == Some("renamed live"))
-        },
-        "live rename beats migration on A",
-    )
-    .await;
-
-    drop(link);
+    assert_ne!(devices[0].name, "old laptop");
     a.shutdown().await;
-    b.shutdown().await;
-
-    // The registry snapshot now exists; the legacy snapshot is kept for rollback.
     let store = cypher_sync::DocsStore::open(&org_dir).expect("reopen store");
     assert!(
         store
             .load_snapshot(cypher_doc::REGISTRY_DOC_ID)
             .expect("load registry snapshot")
-            .is_some(),
-        "registry snapshot persisted"
-    );
-    assert!(
-        store
-            .load_snapshot("workspace2")
-            .expect("load legacy snapshot")
-            .is_some(),
-        "legacy snapshot retained for rollback"
+            .is_none(),
+        "no registry1 persistence in the normal path"
     );
 }

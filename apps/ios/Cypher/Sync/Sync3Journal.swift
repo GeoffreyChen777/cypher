@@ -3,6 +3,14 @@
 import Foundation
 import SQLite3
 
+/// Durable command echo, independent of UI frameworks.
+struct PendingSend {
+    var messageId: String
+    var text: String
+    var at: Int64
+    var isSteer = false
+}
+
 struct Sync3MessageWindow {
     let through: Int64
     /// Ascending immutable creation sequence; first.createdSeq is the next
@@ -69,6 +77,7 @@ final class Sync3Journal {
 
     var cursor: Int64 { get throws { try number("cursor") } }
     var epoch: Int64 { get throws { try number("epoch") } }
+    var ownerEpoch: Int64 { get throws { try number("owner_epoch") } }
     var projection: Sync3Projection {
         get throws {
             var projection = Sync3Projection()
@@ -101,6 +110,24 @@ final class Sync3Journal {
             }
         }
         return Sync3MessageWindow(through: through, messages: messages.reversed())
+    }
+    /// Reconstruct the transcript through bounded indexed windows. This keeps
+    /// each SQLite read bounded even when the conversation is large; callers
+    /// may still choose a smaller render window and request older pages later.
+    func allMessagesBounded() throws -> [[String: JSONValue]] {
+        var before: Int64?
+        var result: [[String: JSONValue]] = []
+        while true {
+            let page = try messageWindow(before: before, limit: 32)
+            guard !page.messages.isEmpty else { break }
+            result.insert(contentsOf: page.messages, at: 0)
+            guard let first = page.messages.first,
+                  let sequence = first["createdSeq"]?.int64Value, sequence > 0 else {
+                try Sync3Wire.fail("invalid_projection")
+            }
+            before = sequence
+        }
+        return result
     }
     func hello() throws -> [String: JSONValue] {
         ["type": .string("hello"), "version": .int(3), "actor": .string(actor),
@@ -152,6 +179,43 @@ final class Sync3Journal {
             result.append(operation)
         }
         return result
+    }
+
+    /// Local echoes survive network ACK and process restart. ACKed but
+    /// unapplied commands still live in the outbox, while accepted commands
+    /// live in the projection. Neither is evidence of a host-written message.
+    func pendingSends() throws -> [PendingSend] {
+        var commands: [String: [String: JSONValue]] = [:]
+        for row in try query("SELECT operation FROM sync3_outbox ORDER BY ordinal") {
+            let operation = try decodeOperation(row[0]!)
+            if operation.event["type"] == .string("commandQueued"),
+               let command = operation.event["command"]?.objectValue {
+                commands[operation.id] = command
+            }
+        }
+        for row in try query("""
+            SELECT body FROM sync3_entities WHERE kind='commands'
+            AND json_extract(body,'$.actor')=?
+            AND json_extract(body,'$.command.status') IN ('pending','applied')
+            """, [actor]) {
+            let record = try JSONDecoder().decode([String: JSONValue].self, from: Data(row[0]!.utf8))
+            if let command = record["command"]?.objectValue, let id = command["id"]?.stringValue {
+                commands[id] = command
+            }
+        }
+        var sends: [String: PendingSend] = [:]
+        for command in commands.values {
+            guard let payload = command["payload"]?.objectValue,
+                  let id = payload["messageId"]?.stringValue,
+                  ["run", "steer"].contains(payload["kind"]?.stringValue ?? "") else { continue }
+            guard try query("SELECT id FROM sync3_entities WHERE kind='messages' AND id=?", [id]).isEmpty else { continue }
+            let steer = payload["kind"] == .string("steer")
+            let text = steer ? payload["prompt"]?.stringValue : payload["request"]?.objectValue?["prompt"]?.stringValue
+            guard let text else { try Sync3Wire.fail("invalid_command") }
+            sends[id] = PendingSend(messageId: id, text: text,
+                at: try Sync3Wire.integer(command["issuedAt"]), isSteer: steer)
+        }
+        return sends.values.sorted { ($0.at, $0.messageId) < ($1.at, $1.messageId) }
     }
     func acknowledge(_ ack: [String: JSONValue]) throws {
         try Sync3Wire.shape(ack, ["type", "version", "epoch", "receipts"])
@@ -253,6 +317,9 @@ final class Sync3Journal {
             if let row = try query("SELECT id FROM sync3_entities WHERE kind='commands' AND run_id=? AND json_extract(body,'$.command.status') IN ('pending','applied') LIMIT 1", [run]).first {
                 try load("commands", row[0]!)
             }
+        case "runObserved":
+            try load("runs", e["runId"]!.stringValue!)
+            try load("executions", e["executionId"]!.stringValue!)
         case "runFinished":
             let run = e["runId"]!.stringValue!
             try load("runs", run)

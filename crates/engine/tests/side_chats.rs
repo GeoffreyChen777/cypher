@@ -618,14 +618,26 @@ async fn shutdown_reaps_unpromoted_side_chats() {
 
     // Shutdown reaps the unpromoted side chat: no row, no status, no doc.
     rig.core.shutdown().await;
-    assert!(
-        rig.core.workspace.chat(&side).unwrap().is_none(),
-        "reaped row"
-    );
+    let profile = cypher_engine::EngineProfile::development(rig._dir.path(), "dev-org", "dev-user");
+    let workspace = cypher_engine::workspace_host::WorkspaceHost::open(
+        Arc::new(cypher_sync::DocsStore::open(profile.store_root()).unwrap()),
+        cypher_engine::workspace_host::WorkspaceHostConfig {
+            device_id: rig.core.device_id.clone(),
+            device_name: "test".into(),
+            platform: "test".into(),
+            org_id: "dev-org".into(),
+            user_id: "dev-user".into(),
+            edge: None,
+            allow_device_rejoin: false,
+        },
+    )
+    .unwrap();
+    assert!(workspace.chat(&side).unwrap().is_none(), "reaped row");
     assert!(
         rig.core.sessions.session_status(&side).is_none(),
         "reaped status"
     );
+    workspace.shutdown_workers().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

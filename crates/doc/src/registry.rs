@@ -77,61 +77,7 @@ impl HlcClock {
 
 // ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegistryRow {
-    pub kind: String,
-    pub id: String,
-    /// Server seq of the batch that last touched this row (0 locally).
-    #[serde(default)]
-    pub seq: u64,
-    #[serde(default)]
-    pub deleted: bool,
-    /// Tombstone clock — an upsert newer than this revives the row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub del_hlc: Option<String>,
-    #[serde(default)]
-    pub fields: BTreeMap<String, Value>,
-    /// Per-field last-write clocks.
-    #[serde(default)]
-    pub clocks: BTreeMap<String, String>,
-}
-
-impl RegistryRow {
-    fn tombstone(kind: &str, id: &str, hlc: String) -> Self {
-        Self {
-            kind: kind.to_string(),
-            id: id.to_string(),
-            seq: 0,
-            deleted: true,
-            del_hlc: Some(hlc),
-            fields: BTreeMap::new(),
-            clocks: BTreeMap::new(),
-        }
-    }
-
-    /// The newest clock anywhere on the row (delete-vs-live comparison base).
-    fn max_clock(&self) -> Option<&str> {
-        let mut max = self.del_hlc.as_deref();
-        for clock in self.clocks.values() {
-            if max.is_none_or(|m| clock.as_str() > m) {
-                max = Some(clock);
-            }
-        }
-        max
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OpKind {
-    /// Creates, and revives tombstones when newer.
-    Upsert,
-    /// Never creates or revives ("never invent rows").
-    Update,
-    /// Tombstones when causally newer than the row.
-    Delete,
-}
+pub use cypher_proto::metadata::{MetadataRow as RegistryRow, OpKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,7 +114,15 @@ pub fn apply_op(row: Option<&RegistryRow>, op: &RowOp) -> (Option<RegistryRow>, 
         return match row {
             // Tombstone-on-missing guards against a late create racing the delete.
             None => (
-                Some(RegistryRow::tombstone(&op.kind, &op.id, op.hlc.clone())),
+                Some(RegistryRow {
+                    kind: op.kind.clone(),
+                    id: op.id.clone(),
+                    seq: 0,
+                    deleted: true,
+                    del_hlc: Some(op.hlc.clone()),
+                    fields: BTreeMap::new(),
+                    clocks: BTreeMap::new(),
+                }),
                 true,
             ),
             Some(row) => {
@@ -333,6 +287,7 @@ struct PersistedState {
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
 /// (`cypher_sync::RegistryClient`) and the engine host drive it under a lock.
+#[derive(Clone)]
 pub struct RegistryDoc {
     device_id: String,
     /// kind → id → row (server truth).
@@ -551,6 +506,18 @@ impl RegistryDoc {
     }
 
     fn put_authoritative(&mut self, row: RegistryRow) {
+        if let Some(clock) = row.max_clock()
+            && let (Some(ms), Some(counter)) = (
+                clock.get(..13).and_then(|v| v.parse::<i64>().ok()),
+                clock.get(14..20).and_then(|v| v.parse::<u32>().ok()),
+            )
+            && (0..10_000_000_000_000).contains(&ms)
+            && counter <= 999_999
+            && (ms, counter) > (self.clock.last_ms, self.clock.counter)
+        {
+            self.clock.last_ms = ms;
+            self.clock.counter = counter;
+        }
         self.authoritative
             .entry(row.kind.clone())
             .or_default()

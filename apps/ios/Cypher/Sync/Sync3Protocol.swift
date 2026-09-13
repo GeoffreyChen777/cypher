@@ -96,7 +96,7 @@ struct Sync3Operation: Codable, Equatable, Sendable {
             "commandQueued": ["commandId", "command"], "commandClaimAttempted": ["commandId", "runId"],
             "commandResolved": ["commandId", "status", "resolution"], "commandCancelAttempted": ["commandId"],
             "executionStarted": ["executionId", "commandId"], "executionFinished": ["executionId"],
-            "runStarted": ["runId"], "messageCreated": ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
+            "runStarted": ["runId"], "runObserved": ["runId", "executionId"], "messageCreated": ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
             "partPut": ["messageId", "index", "part"], "textAppended": ["messageId", "partId", "offset", "text"],
             "messageFinished": ["messageId", "status"], "attachmentSealed": ["uploadId", "path", "fileName"],
             "runFinished": ["runId", "outcome"],
@@ -309,6 +309,13 @@ struct Sync3Projection: Codable, Equatable, Sendable {
             guard commands.values.contains(where: {
                 $0["runId"] == e["runId"] && ["pending", "applied"].contains($0["command"]?.objectValue?["status"]?.stringValue ?? "")
             }) else { try Sync3Wire.fail("run_not_accepted") }
+            runs[run] = ["outcome": .null]
+        case "runObserved":
+            let run = e["runId"]!.stringValue!
+            guard runs[run] == nil else { try Sync3Wire.fail("run_exists") }
+            guard let execution = executions[e["executionId"]!.stringValue!] else { try Sync3Wire.fail("unknown_execution") }
+            guard execution["closed"] == .bool(false) else { try Sync3Wire.fail("execution_closed") }
+            guard execution["actor"] == .string(op.actor), execution["ownerEpoch"] == .int(op.ownerEpoch) else { try Sync3Wire.fail("execution_owner_mismatch") }
             runs[run] = ["outcome": .null]
         case "messageCreated":
             let id = e["messageId"]!.stringValue!

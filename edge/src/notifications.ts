@@ -1,5 +1,5 @@
 import type { Env } from "./env";
-import type { Row } from "./registry-core";
+import type { Row } from "./workspace3-model";
 import { notificationsAvailable } from "./apns";
 import type { BadgeSnapshot } from "./apns";
 import {
@@ -108,6 +108,7 @@ export class Notifications {
         return json({ settings: this.settings(), scope: this.scope(), ...this.badge() });
       }
       if (path === "activity" && request.method === "POST") {
+        return this.ctx.storage.transactionSync(() => {
         if (!notificationsAvailable(this.env)) return json({ ok: true, available: false });
         const now = Date.now(), id = identifier(body.clientId);
         const current = this.get<Activity[]>("activity") ?? [];
@@ -135,8 +136,10 @@ export class Notifications {
         }
         if (readEventIds.length) this.schedule();
         return json({ ok: true, available: true, scope: this.scope(), readEventIds, ...this.badge() });
+        });
       }
       if (path === "event" && request.method === "POST") {
+        return this.ctx.storage.transactionSync(() => {
         const chatId = identifier(body.chatId), deviceId = identifier(body.deviceId);
         const status = String(body.status);
         if (!["idle", "working", "awaitingInput", "errored"].includes(status) ||
@@ -206,6 +209,7 @@ export class Notifications {
         this.markUnread(notice);
         this.schedule();
         return json({ ok: true, queued: true });
+        });
       }
       if (path === "register" && request.method === "POST") {
         if (!notificationsAvailable(this.env)) return json({ error: "push_unavailable" }, 503);

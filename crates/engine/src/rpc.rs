@@ -62,7 +62,7 @@ use cypher_proto::{
     ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest,
     SideChatSource, SubagentRunMode, ToolCall, WorkspaceScope,
 };
-use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
+use cypher_rpc::{RemoteClients, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
@@ -276,8 +276,7 @@ struct UploadChunkParams {
     upload_id: String,
     /// Base64 payload chunk.
     data: String,
-    #[serde(default)]
-    seq: Option<u64>,
+    seq: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,7 +453,7 @@ pub struct EngineRpc {
     side_chats: SideChats,
     session_forks: SessionForks,
     auth: Option<Auth>,
-    links: Option<std::sync::Arc<LinkCache>>,
+    links: Option<std::sync::Arc<dyn RemoteClients>>,
     updater: Option<cypher_update::Updater>,
     pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
     local_import: Option<crate::local_import::LocalImporter>,
@@ -525,7 +524,7 @@ impl EngineRpc {
     }
 
     /// Attach the peer link cache — enables `targetDeviceId` relay forwarding.
-    pub fn with_links(mut self, links: std::sync::Arc<LinkCache>) -> Self {
+    pub fn with_links(mut self, links: std::sync::Arc<dyn RemoteClients>) -> Self {
         self.links = Some(links);
         self
     }
@@ -998,7 +997,7 @@ impl EngineRpc {
                 "Remote provider credentials require an HTTPS/WSS relay (loopback development is allowed).".into()
             }));
         }
-        let client = links.client(target).await?;
+        let client = links.clone().client(target).await?;
         if is_stream_method(method) {
             let rx = match client.subscribe(method, params).await {
                 Ok(rx) => rx,
@@ -1268,6 +1267,28 @@ fn forwardable(method: &str) -> bool {
             // Pi session store lives there).
             | methods::FORK_SESSION
     )
+}
+
+/// The authenticated remote control surface is narrower than private Unix
+/// IPC. Never relay login/logout, runtime lifecycle or child-agent authority.
+pub(crate) struct RemoteService {
+    pub rpc: std::sync::Arc<EngineRpc>,
+    pub device: String,
+}
+#[async_trait::async_trait]
+impl RpcService for RemoteService {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if !forwardable(method) {
+            return Err(RpcError::Failed("remote_method_forbidden".into()));
+        }
+        if params
+            .get("targetDeviceId")
+            .is_some_and(|target| target.as_str() != Some(self.device.as_str()))
+        {
+            return Err(RpcError::Failed("remote_target_mismatch".into()));
+        }
+        self.rpc.handle(method, params).await
+    }
 }
 
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
@@ -1926,13 +1947,13 @@ impl RpcService for EngineRpc {
                 // blocking (sqlite + fs) and must never wedge on a slow
                 // viewer; items are tiny and bounded by the chat count.
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-                tokio::task::spawn_blocking(move || {
+                tokio::spawn(async move {
                     let emit = |event: crate::local_import::ImportEvent| {
                         if let Ok(item) = serde_json::to_value(&event) {
                             let _ = tx.send(item);
                         }
                     };
-                    if let Err(err) = importer.run(emit) {
+                    if let Err(err) = importer.run(emit).await {
                         tracing::error!(error = %err, "local import failed");
                         let _ = tx.send(serde_json::json!({
                             "kind": "summary",
@@ -2511,7 +2532,7 @@ impl RpcService for EngineRpc {
             methods::UPLOAD_CHUNK => {
                 let p: UploadChunkParams = parse_params(params)?;
                 self.uploads
-                    .append(&p.upload_id, &p.data, p.seq)
+                    .append(&p.upload_id, &p.data, Some(p.seq))
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
@@ -2523,11 +2544,13 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 if let Some(chat_id) = &p.chat_id {
                     // Queue-first send: seal against the chat so its host's
-                    // drain releases the waiting Run. Best-effort — the
-                    // durable path is already committed; an unsealable chat
-                    // just leaves the Run's grace window to expire it.
+                    // drain releases the waiting Run. A failed seal is not a
+                    // successful upload-completion reply; the file receipt
+                    // makes a later explicit commit retry safe.
                     self.doc_host
-                        .seal_attachment(chat_id, &p.upload_id, &path, &p.file_name);
+                        .seal_attachment(chat_id, &p.upload_id, &path, &p.file_name)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }

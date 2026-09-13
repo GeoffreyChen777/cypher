@@ -21,15 +21,16 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use cypher_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
+    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
-use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
+use cypher_engine::{
+    EngineCore, EngineProfile, HarnessRegistry, session_replicas::SessionReplicas,
+};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
-use cypher_sync::DocsStore;
 
 const CHAT: &str = "chat-restart";
 
@@ -178,11 +179,13 @@ where
 
 /// Tolerant read for hot-polling predicates (mirrors e2e.rs `entries_now`).
 fn entries_now(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
+    cypher_doc::join_continuation_entries(
+        core.doc_host
+            .open(CHAT)
+            .ok()
+            .and_then(|h| h.doc().read_entries().ok())
+            .unwrap_or_default(),
+    )
 }
 
 fn complete_assistant_count(core: &EngineCore) -> usize {
@@ -320,6 +323,101 @@ async fn restart_roundtrip_restores_chats_transcript_and_resume() {
     core.shutdown().await;
 }
 
+/// Manufacture actual private v3 SQLite state at the boundary after source
+/// retention/publication but before a Done, with no engine/workspace row save.
+async fn seed_native_crash(dir: &std::path::Path, created_at: i64, observed: bool) {
+    let replicas = SessionReplicas::new(
+        &EngineProfile::development(dir, "dev-org", "dev-user"),
+        "dev-crash".into(),
+        None,
+    )
+    .unwrap();
+    let mut output = replicas
+        .prepare(
+            CHAT,
+            SessionCommandPayload::Run {
+                message_id: "msg-user-1".into(),
+                agent_prompt: None,
+                request: run_request("long task", "/tmp"),
+            },
+            "msg-assistant-1",
+        )
+        .await
+        .unwrap();
+    output.set_cwd("/tmp").unwrap();
+    let occupancy = if observed {
+        Some(output.occupy().await.unwrap())
+    } else {
+        None
+    };
+    let user = SessionMessageEntry {
+        id: "msg-user-1".into(),
+        role: MessageRole::User,
+        device_id: "dev-crash".into(),
+        created_at: created_at - 1,
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "long task".into(),
+        }],
+    };
+    let replica = output.replica();
+    let mut writer = replica.read(|j| j.new_writer(1, None, &user)).unwrap();
+    while writer
+        .finish(&user.parts, user.status, |frame| {
+            replica.write(|j| j.enqueue_writer_frame(frame))
+        })
+        .unwrap()
+        .more
+    {}
+    output
+        .observe(&AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-crash".into(),
+            assistant_message_id: "msg-assistant-1".into(),
+        })
+        .unwrap();
+    output
+        .observe(&AgentEvent::TextDelta {
+            text: "partial…".into(),
+        })
+        .unwrap();
+    if let Some(occupancy) = occupancy {
+        output
+            .observe(&AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            })
+            .unwrap();
+        output
+            .finish(cypher_proto::sync3::Outcome::Completed)
+            .unwrap();
+        output
+            .retain(&AgentEvent::TextDelta {
+                text: "background partial".into(),
+            })
+            .unwrap();
+        output
+            .begin_observation(&occupancy, "background-reply".into())
+            .await
+            .unwrap();
+        output
+            .sync_parts(&[MessagePart::Text {
+                id: "t0".into(),
+                text: "background partial".into(),
+            }])
+            .unwrap();
+    }
+    drop(output); // intentionally no completion, quarantine or synthetic Done
+    replicas.shutdown().await;
+}
+
 #[tokio::test]
 async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -328,67 +426,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     // Pin the device id so the manufactured streaming entry counts as OURS.
     std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
 
-    // Manufacture the on-disk state a kill -9 mid-run leaves behind:
-    // - a chat doc snapshot whose assistant entry is still `streaming`;
-    // - a journal whose last event is NOT `Done` (run died mid-stream), holding
-    //   the only copy of the harness session id (the debounced workspace-row
-    //   write never landed).
-    {
-        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-user-1".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "long task".into(),
-            }],
-            created_at: 1,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-        })
-        .unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-assistant-1".into(),
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "partial…".into(),
-            }],
-            created_at: 2,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Streaming),
-            continuation_of: None,
-        })
-        .unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-
-        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
-                    model: "mock-1".into(),
-                    tools: vec![],
-                    cwd: "/tmp".into(),
-                    session_id: "hs-crash".into(),
-                    assistant_message_id: "msg-assistant-1".into(),
-                },
-            )
-            .unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "partial…".into(),
-                },
-            )
-            .unwrap();
-    }
+    seed_native_crash(&dir, 2, false).await;
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(
@@ -401,19 +439,33 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     );
     assert_eq!(core.device_id, "dev-crash");
 
-    // Boot recovery stamped the abandoned streaming entry `aborted` …
+    wait_for(
+        || {
+            entries_now(&core)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Aborted))
+        },
+        "native crash quarantine",
+    )
+    .await;
+    // Recovery closes the public message without falsifying harness source.
     let entries = entries_now(&core);
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].status, Some(MessageStatus::Aborted));
-    // … and closed the stale journal with a synthetic Done.
-    let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    let command = replica
+        .read(|j| Ok(j.projection()?.commands.keys().next().unwrap().clone()))
+        .unwrap();
+    let raw = replica
+        .read(|j| j.execution_events(&command, 0, 32))
+        .unwrap();
     assert!(matches!(
-        journal.last_event(CHAT).unwrap(),
-        Some((_, AgentEvent::Done { .. }))
+        raw.events.last().unwrap().event,
+        AgentEvent::TextDelta { .. }
     ));
 
-    // The next run resumes the crashed conversation: the session id was
-    // recovered from the journal (its only surviving home).
+    // No workspace-row write existed: native source is the sole surviving
+    // home of the provider session reference.
     pre_title(&core);
     queue_run(&core, "keep going", "/tmp", "msg-user-2");
     wait_for(
@@ -426,6 +478,67 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
         Some("hs-crash"),
         "journal-recovered session id must ride the next dispatch"
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn orphaned_autonomous_run_is_quarantined_without_a_new_command_or_process_release() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-crash").unwrap();
+    seed_native_crash(dir.path(), 2, true).await;
+    let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(
+        dir.path(),
+        RecordingHarness {
+            requests: requests.clone(),
+            session_id: "must-not-run".into(),
+            fail_starts: Default::default(),
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core)
+                .iter()
+                .any(|e| e.id == "background-reply" && e.status == Some(MessageStatus::Aborted))
+        },
+        "autonomous crash quarantine",
+    )
+    .await;
+    assert!(requests.lock().unwrap().is_empty());
+    let replica = core.sessions.session_replica(CHAT).await.unwrap();
+    let p = replica.read(|j| j.projection()).unwrap();
+    assert_eq!(p.commands.len(), 1);
+    assert_eq!(
+        p.commands.values().next().unwrap().command.status,
+        cypher_proto::SessionCommandStatus::Applied
+    );
+    assert_eq!(p.runs.len(), 2);
+    assert_eq!(
+        p.runs
+            .values()
+            .filter(|r| r.outcome == Some(cypher_proto::sync3::Outcome::Failed))
+            .count(),
+        1
+    );
+    assert!(
+        !p.executions.values().next().unwrap().closed,
+        "unknown persistent-process closure must not be invented"
+    );
+    assert!(
+        replica
+            .read(|j| j.open_observations("", 32))
+            .unwrap()
+            .is_empty()
+    );
+    let raw = replica
+        .read(|j| j.execution_events(p.commands.keys().next().unwrap(), 0, 32))
+        .unwrap();
+    assert!(
+        matches!(&raw.events.last().unwrap().event, AgentEvent::TextDelta { text } if text == "background partial")
+    );
+    let joined = entries_now(&core);
+    assert!(joined.iter().find(|e| e.id == "background-reply").unwrap().parts.iter()
+        .any(|p| matches!(p, MessagePart::Error { message, .. } if message.contains("No new command was dispatched"))));
     core.shutdown().await;
 }
 
@@ -579,62 +692,7 @@ async fn fresh_crash_requires_review_and_preserves_explicit_resume() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    {
-        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-user-1".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "long task".into(),
-            }],
-            created_at: now - 60_000,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-        })
-        .unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-assistant-1".into(),
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "partial…".into(),
-            }],
-            created_at: now - 30_000,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Streaming),
-            continuation_of: None,
-        })
-        .unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-
-        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
-                    model: "mock-1".into(),
-                    tools: vec![],
-                    cwd: "/tmp".into(),
-                    session_id: "hs-crash".into(),
-                    assistant_message_id: "msg-assistant-1".into(),
-                },
-            )
-            .unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "partial…".into(),
-                },
-            )
-            .unwrap();
-    }
+    seed_native_crash(&dir, now - 30_000, false).await;
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(
@@ -646,11 +704,15 @@ async fn fresh_crash_requires_review_and_preserves_explicit_resume() {
         },
     );
 
-    assert_eq!(
-        core.sessions.recover_stale().unwrap(),
-        0,
-        "recovery already closed the journal"
-    );
+    wait_for(
+        || {
+            entries_now(&core)
+                .iter()
+                .any(|e| e.status == Some(MessageStatus::Aborted))
+        },
+        "native crash quarantine",
+    )
+    .await;
     assert_eq!(complete_assistant_count(&core), 0);
     assert!(
         requests.lock().unwrap().is_empty(),
@@ -793,7 +855,19 @@ async fn startup_crash_is_not_retried_but_explicit_continuation_keeps_resume() {
     );
     queue_run(&core, "reviewed; third turn", "/tmp", "msg-user-3");
     wait_for(
-        || complete_assistant_count(&core) == 3,
+        || {
+            entries_now(&core)
+                .iter()
+                .filter(|e| {
+                    e.role == MessageRole::Assistant
+                        && matches!(
+                            e.status,
+                            Some(MessageStatus::Complete | MessageStatus::Aborted)
+                        )
+                })
+                .count()
+                == 3
+        },
         "explicit continuation completes",
     )
     .await;

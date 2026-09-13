@@ -33,6 +33,8 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod session_forks;
+pub mod session_replica;
+pub mod session_replicas;
 pub mod sessions;
 pub mod side_chats;
 pub mod spaces;
@@ -76,6 +78,8 @@ pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("workspace: {0}")]
+    Workspace(#[from] cypher_proto::metadata::view::MetadataError),
     #[error("doc: {0}")]
     Doc(#[from] cypher_doc::DocError),
     #[error("journal: {0}")]
@@ -148,7 +152,7 @@ pub struct EngineCore {
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
-    links: std::sync::Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
+    links: std::sync::Mutex<Option<Arc<dyn cypher_rpc::RemoteClients>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<cypher_update::Updater>>,
@@ -223,9 +227,13 @@ impl EngineCore {
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
         let store = Arc::new(DocsStore::open(profile.store_root())?);
-        let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        let replicas = Arc::new(
+            session_replicas::SessionReplicas::new(&profile, device_id.clone(), edge.clone())
+                .map_err(|e| EngineError::Other(e.to_string()))?,
+        );
+        sessions.set_replicas(replicas.clone());
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -246,6 +254,7 @@ impl EngineCore {
                 allow_device_rejoin: crate::auth::consume_sync_rejoin(data_dir),
             },
         )?;
+        doc_host.set_replicas(replicas);
         let side_chats = SideChats::new(sessions.clone(), doc_host.clone(), workspace.clone());
         let session_forks = SessionForks::new(
             sessions.clone(),
@@ -254,9 +263,9 @@ impl EngineCore {
             registry.clone(),
             profile.store_root().join("agent-sessions"),
         );
-        doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        doc_host.set_workspace(workspace.clone());
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -293,8 +302,7 @@ impl EngineCore {
                 &device_id,
                 profile.org_id(),
                 profile.user_id(),
-                store_for_import.clone(),
-                profile.store_root().join("journals"),
+                doc_host.clone(),
                 workspace.clone(),
                 uploads.clone(),
             )
@@ -384,14 +392,14 @@ impl EngineCore {
     }
 
     /// Attach the peer link cache — enables `targetDeviceId` routing and [`Self::dial_device`].
-    pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
+    pub fn set_links(&self, links: Arc<dyn cypher_rpc::RemoteClients>) {
         *self
             .links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(links);
     }
 
-    pub fn links(&self) -> Option<Arc<cypher_rpc::LinkCache>> {
+    pub fn links(&self) -> Option<Arc<dyn cypher_rpc::RemoteClients>> {
         self.links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -501,6 +509,16 @@ impl EngineCore {
         }
         Arc::new(rpc)
     }
+    /// Keep the returned service alive for the lifetime of remote hosting.
+    /// WorkspaceHost stores only a weak service reference.
+    pub fn start_workspace_rpc(&self) -> Arc<dyn cypher_rpc::RpcService> {
+        let service: Arc<dyn cypher_rpc::RpcService> = Arc::new(rpc::RemoteService {
+            rpc: self.rpc_service(),
+            device: self.device_id.clone(),
+        });
+        self.workspace.attach_rpc_host(Arc::downgrade(&service));
+        service
+    }
 
     /// Revoke every account-scoped transport before any slower graceful
     /// draining. Connected sockets remain authorized by their handshake, so
@@ -558,6 +576,7 @@ impl EngineCore {
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.workspace.shutdown();
+        self.workspace.shutdown_workers().await;
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
         self.sessions.clear_doc_host();
@@ -573,7 +592,7 @@ pub struct Engine {
 /// in-process engine so their production authentication paths cannot diverge.
 pub struct EngineRuntime {
     core: EngineCore,
-    host_relay: std::sync::Mutex<Option<cypher_rpc::HostRelay>>,
+    workspace_rpc: std::sync::Mutex<Option<Arc<dyn cypher_rpc::RpcService>>>,
 }
 
 /// IPC-only lifecycle control owned by `cypher headless`. The regular
@@ -615,7 +634,7 @@ impl EngineRuntime {
         // Revoke remote reachability before graceful draining. Sessions may
         // need time to settle; no authenticated relay RPC may enter during
         // that window after sign-out.
-        self.host_relay
+        self.workspace_rpc
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
@@ -630,10 +649,7 @@ impl EngineRuntime {
 
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
-        self.host_relay
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        self.disconnect_edge();
     }
 }
 
@@ -900,23 +916,21 @@ impl Engine {
             });
         }
 
-        let host_relay = edge.as_ref().map(|edge| {
-            let links = cypher_rpc::LinkCache::new(cypher_rpc::LinkCacheConfig::new(
-                edge.url.clone(),
-                Arc::new(auth.clone()),
-            ));
+        if let Some(caller) = core.workspace.rpc_caller() {
+            let links = cypher_rpc::workspace3::Links::new(caller);
             let links_for_presence = links.clone();
             core.workspace
                 .set_peer_alive_hook(Arc::new(move |device_id: &str| {
                     links_for_presence.reset_cooldown(device_id);
                 }));
             core.set_links(links);
-            core.start_host_relay(&edge.url)
-        });
+        }
 
+        core.doc_host.activate_workspace_demand();
+        let workspace_rpc = edge.as_ref().map(|_| core.start_workspace_rpc());
         Ok(EngineRuntime {
             core,
-            host_relay: std::sync::Mutex::new(host_relay),
+            workspace_rpc: std::sync::Mutex::new(workspace_rpc),
         })
     }
 

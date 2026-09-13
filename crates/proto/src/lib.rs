@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod command;
 pub mod entities;
+pub mod metadata;
 pub mod motion;
 pub mod parts;
 pub mod session_fork;

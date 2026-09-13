@@ -204,16 +204,19 @@ Run these commands from the repository root.
 
 ```
 Sync/
-  LoroProtocol.swift    loro-protocol 0.3 wire codec (byte-compatible port of
-                        the crate's encoding.rs: magic/varBytes/type/payload)
-  RegistryClient.swift  registry snapshot/ops relay, cursor and reconnect
-  ChatRoomClient.swift  chat2 snapshot/row backfill, push/ack and reconnect
-  DeviceRelayClient.swift  explicit target-device RPC over Edge
-  WorkspaceStore.swift  devices/projects/chats/sessions registry mirror,
-                        presence and optimistic viewer writes; the phone
-                        publishes presence, not an engine-device row
-  SessionStore.swift    session doc mirror: entries/parts (continuations
-                        joined), command ledger appends (rule 1), host nudge
+  Workspace3Context.swift  one account control connection shared by sidebar,
+                          session read interest and attachment/RPC handles
+  Workspace3Journal.swift scoped SQLite rows, atomic offline edits and HLC,
+                          exact ACK receipts; no legacy snapshot import
+  Workspace3Client.swift  header-authenticated Hub connection, bounded queues,
+                         paging, presence/read leases and generation fences
+  Workspace3RPC.swift   bounded fragmented unary RPC, no automatic replay
+  WorkspaceRemote.swift device-addressed facade over the shared connection
+  WorkspaceStore.swift  current sidebar rows and lease-scoped session status;
+                        storage failures are visible, not successful creates
+  Sync3Client.swift     typed conversation WS/HTTP repair and durable outbox
+  SessionStore.swift    v3 transcript projection and command queue; owns a
+                        scoped read-interest handle, not an HTTP host nudge
 Markdown/
   MarkdownModel.swift   block model + incremental tail re-parser (re-parse
                         from the 2nd-to-last top-level block; link-defs force

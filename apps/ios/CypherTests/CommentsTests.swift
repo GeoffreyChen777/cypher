@@ -1,5 +1,4 @@
 import XCTest
-import Loro
 @testable import Cypher
 
 final class CommentsTests: XCTestCase {
@@ -132,7 +131,7 @@ final class CommentsTests: XCTestCase {
     func testRunAndSteerUseSiblingAgentPromptButKeepVisibleEchoClean() throws {
         let config = AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
             userId: "test", orgId: "test", deviceId: "ios-test", deviceName: "test")
-        let store = SessionStore(chatId: "test", config: config) // no start, no host/nudge
+        let store = SessionStore(chatId: UUID().uuidString, config: config) // no start, no host/nudge
         let chat = Chat(id: "test", deviceId: "host", title: nil, archived: false,
             cwd: "/project", branch: nil, checkoutId: nil,
             config: ChatConfig(harness: "pi", model: "provider/model", reasoning: nil, sandbox: nil),
@@ -142,16 +141,24 @@ final class CommentsTests: XCTestCase {
         XCTAssertTrue(store.sendSteer(prompt: "", agentPrompt: effective))
         XCTAssertTrue(store.sendRun(prompt: "plain", chat: chat))
         XCTAssertFalse(store.sendSteer(prompt: "/model", agentPrompt: effective))
-        let rows = try XCTUnwrap(store.doc.getDeepValue().mapValue?["commands"]?.listValue)
+        let rows = try XCTUnwrap(store.sync3Journal?.pending().compactMap { operation in
+            operation.event["type"] == .string("commandQueued")
+                ? operation.event["command"]?.objectValue : nil
+        })
         XCTAssertEqual(rows.count, 3)
-        let run = rows[0].mapValue?["payload"]?.mapValue
+        let run = rows[0]["payload"]?.objectValue
         XCTAssertEqual(run?["agentPrompt"]?.stringValue, effective)
-        XCTAssertEqual(run?["request"]?.mapValue?["prompt"]?.stringValue, "visible")
-        XCTAssertNil(run?["request"]?.mapValue?["agentPrompt"])
-        XCTAssertEqual(run?["request"]?.mapValue?["attachments"]?.listValue?.first?.stringValue, "/image.png")
-        XCTAssertEqual(rows[1].mapValue?["payload"]?.mapValue?["prompt"]?.stringValue, "")
-        XCTAssertEqual(rows[1].mapValue?["payload"]?.mapValue?["agentPrompt"]?.stringValue, effective)
-        XCTAssertNil(rows[2].mapValue?["payload"]?.mapValue?["agentPrompt"])
+        XCTAssertEqual(run?["request"]?.objectValue?["prompt"]?.stringValue, "visible")
+        XCTAssertNil(run?["request"]?.objectValue?["agentPrompt"])
+        let attachments = run?["request"]?.objectValue?["attachments"]
+        if case .array(let values) = attachments {
+            XCTAssertEqual(values.first?.stringValue, "/image.png")
+        } else {
+            XCTFail("v3 run should retain attachments")
+        }
+        XCTAssertEqual(rows[1]["payload"]?.objectValue?["prompt"]?.stringValue, "")
+        XCTAssertEqual(rows[1]["payload"]?.objectValue?["agentPrompt"]?.stringValue, effective)
+        XCTAssertNil(rows[2]["payload"]?.objectValue?["agentPrompt"])
         XCTAssertEqual(store.pendingSends.map(\.text), ["visible", "", "plain"])
     }
 }

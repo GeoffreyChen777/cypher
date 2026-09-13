@@ -4,11 +4,13 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
-  "alias": { "loro-crdt": "loro-crdt/base64" },
   "durable_objects": {
-    "bindings": [{ "name": "SYNC3_ROOMS", "class_name": "Sync3Room" }]
+    "bindings": [
+      { "name": "SYNC3_ROOMS", "class_name": "Sync3Room" },
+      { "name": "WORKSPACE3", "class_name": "WorkspaceHub" }
+    ]
   },
-  "migrations": [{ "tag": "sync3-local-v1", "new_sqlite_classes": ["Sync3Room"] }],
+  "migrations": [{ "tag": "sync3-local-v1", "new_sqlite_classes": ["Sync3Room", "WorkspaceHub"] }],
   "vars": { "AUTH_MODE": "dev", "SYNC3_ENABLED": "true" },
   "observability": { "enabled": false },
   "dev": { "ip": "127.0.0.1", "port": 27643 }

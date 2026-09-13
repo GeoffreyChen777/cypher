@@ -97,6 +97,7 @@ fn text(t: &str) -> AgentEvent {
 struct FeedHarness {
     main_prompt: String,
     feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+    question_before_steer: bool,
 }
 
 #[async_trait]
@@ -136,6 +137,7 @@ impl Harness for FeedHarness {
             .take()
             .expect("FeedHarness serves the main dispatch once per test");
         let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
+        let question_before_steer = self.question_before_steer;
         tokio::spawn(async move {
             let mut steering_open = true;
             loop {
@@ -145,6 +147,13 @@ impl Harness for FeedHarness {
                     biased;
                     steer = controls.steering.recv(), if steering_open => match steer {
                         Some(_) => {
+                            if question_before_steer {
+                                let answers = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                                    id: "early-question".into(), header: "Config".into(),
+                                    question: "Continue configuration?".into(), options: vec!["yes".into()], multi_select: false,
+                                }]).await.unwrap_or_default();
+                                assert_eq!(answers.first().map(|a| a.labels.as_slice()), Some(["yes".to_string()].as_slice()));
+                            }
                             let boundary = AgentEvent::Steered {
                                 assistant_message_id: None,
                                 next_assistant_message_id: None,
@@ -180,12 +189,17 @@ struct Rig {
 }
 
 fn assemble(main_prompt: &str) -> Rig {
+    assemble_with_question(main_prompt, false)
+}
+
+fn assemble_with_question(main_prompt: &str, question_before_steer: bool) -> Rig {
     init_quiesce_env();
     let (feed, rx) = mpsc::unbounded_channel();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(FeedHarness {
         main_prompt: main_prompt.into(),
         feed: Mutex::new(Some(rx)),
+        question_before_steer,
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
@@ -195,6 +209,114 @@ fn assemble(main_prompt: &str) -> Rig {
         feed,
         _dir: dir,
     }
+}
+
+#[tokio::test]
+async fn bridge_question_before_steer_confirmation_is_visible_and_answerable_in_v3() {
+    let rig = assemble_with_question("initial", true);
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("initial"), None)
+        .await
+        .unwrap();
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(text("Ready.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "initial park",
+    )
+    .await;
+    rig.core
+        .sessions
+        .steer(CHAT, "/configure", None)
+        .await
+        .unwrap();
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    wait_for(
+        || {
+            handle.read_entries().unwrap().iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "v3 question before steer confirmation",
+    )
+    .await;
+    let request_id = handle
+        .read_entries()
+        .unwrap()
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+    rig.core
+        .doc_host
+        .queue_command(
+            CHAT,
+            cypher_proto::SessionCommandPayload::RespondInput {
+                request_id,
+                answers: vec![cypher_proto::UserInputAnswer {
+                    question_id: "early-question".into(),
+                    labels: vec!["yes".into()],
+                }],
+            },
+        )
+        .unwrap();
+    wait_for(
+        || {
+            handle.read_entries().unwrap().iter().any(|e| {
+                e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+            })
+        },
+        "input resolution",
+    )
+    .await;
+    rig.feed.send(text("Configured.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            assistant_texts(&rig.core)
+                .iter()
+                .any(|(t, s)| t == "Configured." && *s == Some(MessageStatus::Complete))
+        },
+        "confirmed steer completes",
+    )
+    .await;
+    let p = handle.replica().unwrap().read(|j| j.projection()).unwrap();
+    assert_eq!(
+        p.commands.len(),
+        3,
+        "initial send, actual steer and actual answer; no synthetic prompt"
+    );
+    assert_eq!(
+        p.runs.len(),
+        3,
+        "initial run, pending steer run and observed pre-boundary question"
+    );
+    assert!(
+        p.commands
+            .values()
+            .all(|c| c.command.status == cypher_proto::SessionCommandStatus::Applied)
+    );
+    rig.core.shutdown().await;
 }
 
 fn status(core: &EngineCore) -> Option<SessionStatus> {

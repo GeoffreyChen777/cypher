@@ -24,6 +24,50 @@ pub struct SourcePage {
 }
 
 impl Journal {
+    /// Bind the resolved host cwd before dispatch without modifying the
+    /// immutable command or replicating private execution metadata.
+    pub fn set_execution_cwd(&mut self, permit: &DispatchPermit, cwd: &str) -> Result<(), Error> {
+        if cwd.is_empty() {
+            return Err(invalid("empty_execution_cwd"));
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let intent = match_permit(&tx, &self.scope, &self.actor, permit)?;
+        if intent.state != State::Claimed {
+            return Err(invalid("execution_not_running"));
+        }
+        check_fence(&tx, &intent)?;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT cwd FROM sync3_execution_context WHERE command_id=?",
+                [&intent.command_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if previous.as_deref().is_some_and(|old| old != cwd) {
+            return Err(invalid("execution_cwd_changed"));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO sync3_execution_context VALUES(?,?)",
+            params![intent.command_id, cwd],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Indexed native continuity state updated with retained source, not a
+    /// whole-chat JSONL scan or cross-cwd fallback.
+    pub fn harness_session(&self, cwd: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT session_id FROM sync3_harness_sessions WHERE cwd=?",
+                [cwd],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
     /// Build a producer for this exact dispatched run rather than accepting
     /// a caller-supplied owner epoch or run ID.
     pub fn new_execution_writer(
@@ -136,6 +180,41 @@ impl Journal {
                 tx.execute(
                     "INSERT INTO sync3_execution_source_events(command_id,seq,event,digest,after_completion) VALUES(?,?,?,?,?)",
                     params![intent.command_id, seq, body, digest.as_slice(), intent.state == State::Settled])?;
+                // Exact overlap and post-completion/fence-loss observations
+                // must not roll the current resume identity backwards.
+                let observed: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync3_observations WHERE command_id=? AND first_seq<=? AND last_seq IS NULL)",
+                    params![intent.command_id, seq], |r| r.get(0),
+                )?;
+                if (intent.state == State::Claimed || observed) && check_fence(&tx, &intent).is_ok()
+                {
+                    let session =
+                        match event {
+                            AgentEvent::SessionStarted {
+                                session_id, cwd, ..
+                            } => Some((session_id.clone(), cwd.clone())),
+                            AgentEvent::Done {
+                                session_id: Some(session_id),
+                                ..
+                            } => {
+                                let cwd: Option<String> = tx.query_row(
+                                "SELECT cwd FROM sync3_execution_context WHERE command_id=?",
+                                [&intent.command_id], |r| r.get(0),
+                            ).optional()?;
+                                cwd.map(|cwd| (session_id.clone(), cwd))
+                            }
+                            _ => None,
+                        };
+                    if let Some((session, cwd)) =
+                        session.filter(|(s, cwd)| !s.is_empty() && !cwd.is_empty())
+                    {
+                        tx.execute(
+                            "INSERT INTO sync3_harness_sessions(cwd,session_id,command_id,source_seq) VALUES(?,?,?,?)
+                             ON CONFLICT(cwd) DO UPDATE SET session_id=excluded.session_id,command_id=excluded.command_id,source_seq=excluded.source_seq",
+                            params![cwd, session, intent.command_id, seq],
+                        )?;
+                    }
+                }
             }
         }
         tx.commit()?;
@@ -224,7 +303,7 @@ fn head(db: &Connection, command_id: &str) -> Result<u64, Error> {
     )?)
 }
 
-fn match_permit(
+pub(super) fn match_permit(
     db: &Connection,
     scope: &[u8; 32],
     actor: &str,

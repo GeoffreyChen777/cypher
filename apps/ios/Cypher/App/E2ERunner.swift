@@ -65,8 +65,10 @@ enum E2ERunner {
         log(models != nil ? "OK relay ListModels: \(models!.map(\.id))" : "FAIL relay ListModels nil")
 
         // 3. Space + chat + first run through the command plane (mock harness).
-        let spaceId = await workspace.createSpace(deviceId: device.id,
-                                                  path: listing?.path ?? "/tmp", gitDetected: false)
+        guard let spaceId = await workspace.createSpace(deviceId: device.id,
+                                                  path: listing?.path ?? "/tmp", gitDetected: false) else {
+            log("FAIL space metadata: \(workspace.error ?? "unknown")"); return
+        }
         log("space created \(spaceId)")
         // Relay-created spaces land via doc sync — eventually consistent.
         let space = await poll(timeout: 10, label: "space row sync") {
@@ -76,9 +78,11 @@ enum E2ERunner {
             log("FAIL space row never synced")
             return
         }
-        let chatId = workspace.createChat(
+        guard let chatId = workspace.createChat(
             space: space,
-            config: ChatConfig(harness: "mock", model: nil, reasoning: nil, sandbox: "workspace-write"))
+            config: ChatConfig(harness: "mock", model: nil, reasoning: nil, sandbox: "workspace-write")) else {
+            log("FAIL chat metadata: \(workspace.error ?? "unknown")"); return
+        }
         guard let chat = workspace.chats.first(where: { $0.id == chatId }),
               let store = model.sessionStore(for: chat) else {
             log("FAIL chat/session store")
@@ -156,13 +160,8 @@ extension E2ERunner {
         log("devices: " + workspace.devices.map {
             "\($0.name)[\($0.platform)] id=\($0.id) presence=\(workspace.deviceOnline($0.id))"
         }.joined(separator: ", "))
-        guard let config = model.diagnosticsConfig else {
-            log("FAIL no config")
-            return
-        }
         for device in workspace.devices where device.platform != "ios" {
-            let status = await config.deviceStatus(deviceId: device.id)
-            log("\(device.name) /status → \(status)")
+            log("\(device.name) workspace lease → \(workspace.deviceOnline(device.id))")
             do {
                 let listing = try await workspace.listFoldersDetailed(deviceId: device.id, path: nil)
                 log("OK \(device.name) ListFolders → \(listing.path) (\(listing.entries.count) entries)")

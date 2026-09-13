@@ -137,7 +137,7 @@ struct StagedAttachment: Identifiable, Hashable {
 /// `UploadChunk {uploadId, seq, data}` per 60k-char slice (positional `seq`
 /// makes retries idempotent), then `UploadCommit {uploadId, fileName}` → the
 /// durable absolute path on the host.
-func uploadAttachmentChunked(relay: DeviceRelayClient, name: String, data: Data) async throws -> String {
+func uploadAttachmentChunked(relay: WorkspaceRemote, name: String, data: Data) async throws -> String {
     struct OkReply: Decodable { var ok: Bool? }
     struct CommitReply: Decodable { var path: String }
 
@@ -207,7 +207,7 @@ final class AttachmentImageCache {
     @ObservationIgnored private var tick: UInt64 = 0
     @ObservationIgnored private var loadedBytes = 0
     @ObservationIgnored private var config: AppConfig?
-    @ObservationIgnored private var relays: [String: DeviceRelayClient] = [:]
+    @ObservationIgnored private var relays: [String: WorkspaceRemote] = [:]
 
     func configure(config: AppConfig) {
         if self.config !== config {
@@ -247,7 +247,7 @@ final class AttachmentImageCache {
         guard let config else { return }
         entries[key] = .loading(attempts: attempts)
         let relay = relays[deviceId] ?? {
-            let client = DeviceRelayClient(deviceId: deviceId, config: config)
+            let client = WorkspaceRemote(deviceId: deviceId, config: config)
             relays[deviceId] = client
             return client
         }()
@@ -294,7 +294,7 @@ final class AttachmentImageCache {
 
     /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded,
     /// with a stuck-offset guard).
-    private static func readImage(relay: DeviceRelayClient, path: String)
+    private static func readImage(relay: WorkspaceRemote, path: String)
         async -> (name: String, image: UIImage, bytes: Int)? {
         struct Chunk: Decodable {
             var name: String

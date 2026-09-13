@@ -122,6 +122,13 @@ pub(super) fn apply(db: &Connection, operation: &Operation, seq: u64) -> Result<
                 load(db, &mut projection, "commands", &command)?;
             }
         }
+        Event::RunObserved {
+            run_id,
+            execution_id,
+        } => {
+            load(db, &mut projection, "runs", run_id)?;
+            load(db, &mut projection, "executions", execution_id)?;
+        }
         Event::RunFinished { run_id, .. } => {
             load(db, &mut projection, "runs", run_id)?;
             let open: Option<String> = db.query_row(

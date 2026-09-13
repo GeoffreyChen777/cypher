@@ -10,6 +10,12 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
 pub trait RepairTransport: Send + Sync + 'static {
+    /// Optional idempotent room initialization before the first WS dial.
+    /// It shares this actor's retry/semantic-failure policy, rather than
+    /// requiring a network request before a client can queue offline work.
+    fn initialize(&self) -> BoxFuture<'static, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
+    }
     /// A fresh credential must be resolved for every exchange. The actor
     /// serializes these calls; implementations must not independently retry.
     fn exchange(&self, request: Request) -> BoxFuture<'static, Result<Reply, Error>>;
@@ -46,7 +52,7 @@ fn lock(journal: &Mutex<Journal>) -> std::sync::MutexGuard<'_, Journal> {
 }
 fn recoverable(error: &Error) -> bool {
     matches!(error, Error::Protocol(code) if
-        matches!(code.as_str(), "transport_unavailable" | "business_timeout" | "reauth_required"))
+        matches!(code.as_str(), "transport_unavailable" | "business_timeout" | "reauth_required" | "not_initialized"))
 }
 fn check_reply(reply: &Reply) -> Result<(), Error> {
     if let Reply::Error { version, code } = reply {
@@ -174,6 +180,16 @@ impl Client {
     pub fn journal(&self) -> Arc<Mutex<Journal>> {
         self.journal.clone()
     }
+    /// Wake after a compound durable journal operation performed by the host.
+    /// Does not enter HTTP repair or reset connection state.
+    pub fn wake(&self) {
+        let _ = self.nudge.try_send(());
+    }
+    pub async fn stop(&self) {
+        let _ = self.shutdown.send(true);
+        let mut status = self.status.clone();
+        let _ = status.wait_for(|s| s.phase == Phase::Offline).await;
+    }
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         let _ = self.task.await;
@@ -200,7 +216,15 @@ impl Actor {
             self.status.send_modify(|s| s.generation += 1);
             self.publish(Phase::Connecting, None);
             let started = tokio::time::Instant::now();
-            let result = self.session(url.clone()).await;
+            let result = async {
+                if let Some(repair) = &repair {
+                    tokio::time::timeout(self.tuning.deadline, repair.initialize())
+                        .await
+                        .map_err(|_| invalid("business_timeout"))??;
+                }
+                self.session(url.clone()).await
+            }
+            .await;
             match result {
                 Ok(()) => return,
                 Err(error) => {
@@ -238,10 +262,14 @@ impl Actor {
         }
     }
     async fn session(&mut self, url: Arc<dyn UrlProvider>) -> Result<(), Error> {
-        let url = tokio::time::timeout(self.tuning.deadline, url.url())
+        let url = tokio::time::timeout(self.tuning.deadline, url.request())
             .await
             .map_err(|_| invalid("business_timeout"))?
-            .map_err(|_| invalid("transport_unavailable"))?;
+            .map_err(|e| match e {
+                crate::SyncError::Protocol(code) => Error::Protocol(code),
+                crate::SyncError::Auth(_) => invalid("reauth_required"),
+                _ => invalid("transport_unavailable"),
+            })?;
         let mut config = WebSocketConfig::default();
         config.max_message_size = Some(wire::MAX_FRAME_BYTES);
         config.max_frame_size = Some(wire::MAX_FRAME_BYTES);

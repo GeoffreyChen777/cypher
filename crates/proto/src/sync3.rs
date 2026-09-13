@@ -68,6 +68,12 @@ pub enum Event {
     RunStarted {
         run_id: String,
     },
+    /// Output produced autonomously by an already-admitted persistent process.
+    /// No command is created and this event never authorizes another dispatch.
+    RunObserved {
+        run_id: String,
+        execution_id: String,
+    },
     MessageCreated {
         #[serde(deserialize_with = "required_option")]
         run_id: Option<String>,
@@ -325,6 +331,13 @@ impl Operation {
             }
             Event::ExecutionFinished { execution_id } => id(execution_id)?,
             Event::RunStarted { run_id } | Event::RunFinished { run_id, .. } => id(run_id)?,
+            Event::RunObserved {
+                run_id,
+                execution_id,
+            } => {
+                id(run_id)?;
+                id(execution_id)?;
+            }
             Event::MessageCreated {
                 run_id,
                 message_id,
@@ -579,6 +592,25 @@ impl Projection {
                         )
                 }) {
                     return Err("run_not_accepted");
+                }
+                self.runs.insert(run_id.clone(), RunState::default());
+            }
+            Event::RunObserved {
+                run_id,
+                execution_id,
+            } => {
+                if self.runs.contains_key(run_id) {
+                    return Err("run_exists");
+                }
+                let execution = self
+                    .executions
+                    .get(execution_id)
+                    .ok_or("unknown_execution")?;
+                if execution.closed {
+                    return Err("execution_closed");
+                }
+                if execution.actor != op.actor || execution.owner_epoch != op.owner_epoch {
+                    return Err("execution_owner_mismatch");
                 }
                 self.runs.insert(run_id.clone(), RunState::default());
             }

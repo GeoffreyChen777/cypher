@@ -1,19 +1,8 @@
-// Session doc mirror — transcript entries + the durable command queue for one
-// chat (crates/doc/src/schema.rs), synced over the chat2 log relay
-// (docs/chat2-sync.md; s2 is dead on mobile). A viewer device never writes
-// message entries; it appends command ledger entries (rule 1) and lets the
-// host drain them. Optimistic echo: pending sends render locally under their
-// client-minted message id until the host writes the real entry with the
-// same id.
-//
-// The registry names the room generation (M2): the store connects only once
-// the chat row says roomGen 2. A gen-1 chat renders nothing and waits for
-// the host's migration sweep to flip it — the local doc is always the chat2
-// lineage; a cached pre-chat2 snapshot is never imported (unrelated Loro
-// histories would duplicate every message), only mined for our own pending
-// commands (M3) and left on disk as rollback.
+// v3 session replica. Commands are durable before local acknowledgement;
+// transcripts come only from committed host-authored events.
 
 import Foundation
+import CryptoKit
 import Loro
 import Observation
 
@@ -43,44 +32,58 @@ final class SessionStore {
     /// Client-minted ids of sends the host hasn't materialized yet.
     private(set) var pendingSends: [PendingSend] = []
 
-    let doc = LoroDoc()
-    /// The chat2 room cursor — the last server row seq folded into `doc`.
-    /// Persisted WITH the snapshot in one atomic file (DocDisk.saveChat2, the
-    /// C2 rule), so content and cursor can never diverge.
-    @ObservationIgnored private var cursor: UInt64 = 0
-    private var chatRoom: ChatRoomClient?
-    private var subscriptions: [Subscription] = []
+    @ObservationIgnored private(set) var sync3Journal: Sync3Journal?
+    @ObservationIgnored private var sync3Client: Sync3Client?
+    private(set) var error: String?
     private let config: AppConfig
-    /// Registry roomGen for this chat (M2): connect only at >= 2. One-way —
-    /// the registry never walks a chat back to s2.
-    @ObservationIgnored private var roomGen = 1
     @ObservationIgnored private var started = false
+    @ObservationIgnored private var transportGeneration: UInt64 = 0
+    @ObservationIgnored private var projectedCursor: Int64?
+    @ObservationIgnored private var readInterest: UUID?
+    @ObservationIgnored private weak var workspaceContext: Workspace3Context?
 
     /// Demo mode: no room, entries driven externally.
     private let offline: Bool
     /// Demo hook: invoked instead of the command plane when offline.
     @ObservationIgnored var demoResponder: ((String, Bool) -> Void)?
 
-    init(chatId: String, config: AppConfig, offline: Bool = false) {
+    init(chatId: String, config: AppConfig, offline: Bool = false, journalURL: URL? = nil) {
         self.chatId = chatId
         self.config = config
         self.offline = offline
+        if !offline {
+            do {
+                let account = String(data: try JSONEncoder().encode([config.orgId, config.userId]), encoding: .utf8)!
+                let key = SHA256.hash(data: try JSONEncoder().encode(
+                    [config.edgeURL.absoluteString, config.orgId, config.userId, config.deviceId, chatId]
+                )).map { String(format: "%02x", $0) }.joined()
+                let directory = FileManager.default.urls(for: .applicationSupportDirectory,
+                    in: .userDomainMask)[0].appendingPathComponent("CypherV3", isDirectory: true)
+                let url = journalURL ?? directory.appendingPathComponent("\(key).sqlite")
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                sync3Journal = try Sync3Journal(url: url, account: account, room: chatId, actor: config.deviceId)
+                pendingSends = try sync3Journal!.pendingSends()
+            } catch {
+                self.error = String(describing: error)
+            }
+        }
         AttachmentImageCache.shared.configure(config: config)
     }
 
     // MARK: Attachments (uploads target the chat's host device)
 
-    @ObservationIgnored private var hostRelay: (deviceId: String, client: DeviceRelayClient)?
+    @ObservationIgnored private var hostRelay: (deviceId: String, client: WorkspaceRemote)?
 
     /// Chunked upload of one staged image to the host device; returns the
     /// durable absolute path on that device (what the refs trailer carries).
     func uploadAttachment(name: String, data: Data) async throws -> String {
         guard let hostDeviceId else { throw RelayError.hostOffline }
-        let relay: DeviceRelayClient
+        let relay: WorkspaceRemote
         if let hostRelay, hostRelay.deviceId == hostDeviceId {
             relay = hostRelay.client
         } else {
-            relay = DeviceRelayClient(deviceId: hostDeviceId, config: config)
+            relay = WorkspaceRemote(deviceId: hostDeviceId, config: config)
             hostRelay = (hostDeviceId, relay)
         }
         return try await uploadAttachmentChunked(relay: relay, name: name, data: data)
@@ -93,246 +96,88 @@ final class SessionStore {
         transcriptCache.prewarm(entries: entries)
     }
 
-    @ObservationIgnored private var saver: DocSaver?
-
     func start() {
         guard !started, !offline else { return }
+        do {
+            let context = try config.workspaceContext()
+            readInterest = try context.want(chatId)
+            workspaceContext = context
+        } catch { self.error = error.localizedDescription; return }
         started = true
-        // Local-first: the last-synced chat2 snapshot renders instantly (even
-        // when the host device is offline); the join backfills incrementally
-        // from its cursor.
-        if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
-            cursor = saved
-            project()
-        } else if DocDisk.legacySnapshotExists(id: chatId) {
-            // M3 discard-and-adopt: this device's cached doc predates the
-            // chat2 lineage. Carry over OUR OWN unresolved commands as fresh
-            // entries; the chat2 catch-up repopulates the transcript.
-            adoptLegacyCommands()
-        }
-        saver = DocSaver { [weak self] in
-            guard let self else { return }
-            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
-        }
-        // Subscription BEFORE any connect: every local commit lands in the
-        // client when it exists; commits made earlier are covered by the
-        // first-contact full-log push below (cursor 0 whenever no client has
-        // ever acked — see connectIfReady).
-        let localSub = doc.subscribeLocalUpdate { [weak self] update in
-            let bytes = Data(update)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if let room = self.chatRoom {
-                    Task { await room.enqueue(update: bytes) }
-                }
-                self.saver?.poke()
-            }
-        }
-        subscriptions.append(localSub)
-        connectIfReady()
         project()
+        connect()
     }
 
-    /// Registry projection hook (AppModel forwards the chat row's roomGen).
-    /// A gen-1 store connects the moment the host's migration sweep flips
-    /// the row.
-    func updateRoomGen(_ gen: Int?) {
-        let gen = gen ?? 1
-        if gen > roomGen { roomGen = gen }
-        connectIfReady()
-    }
-
-    private func connectIfReady() {
-        guard started, !offline, chatRoom == nil, roomGen >= 2 else { return }
-        let delegate = ChatRoomClient.Delegate(
-            cursor: { [weak self] in self?.cursor ?? 0 },
-            containsFrontier: { [weak self] frontier in
-                // Empty or encoded-empty frontiers are not proof of
-                // containment. A present checkpoint may carry either form,
-                // and fresh readers must fetch it rather than skip history.
-                guard !frontier.isEmpty else { return false }
-                guard let self,
-                      let vv = try? VersionVector.decode(bytes: frontier) else { return false }
-                guard !vv.toHashmap().isEmpty else { return false }
-                return self.doc.oplogVv().includesVv(other: vv)
-            },
-            applyCheckpoint: { [weak self] bytes, seq in
-                guard let self,
-                      (try? self.doc.importWith(bytes: bytes, origin: "remote")) != nil else {
-                    return false
-                }
-                self.cursor = max(self.cursor, seq)
+    private func connect() {
+        if let journal = sync3Journal {
+            transportGeneration &+= 1
+            let generation = transportGeneration
+            let repair = Sync3HTTPTransport(request: { [config, chatId] in
+                try await config.sync3Request(chatId: chatId, socket: false)
+            })
+            let client = Sync3Client(
+                journal: journal,
+                request: { [config, chatId] in
+                    try await config.sync3Request(chatId: chatId, socket: true)
+                },
+                repair: { try await repair.exchange($0) })
+            client.onChange = { [weak self, weak client] in
+                guard let self, let client, self.transportGeneration == generation else { return }
+                self.connected = client.status.phase == "live"
+                self.error = client.status.error
                 self.project()
-                self.saver?.poke()
-                return true
-            },
-            applyRow: { [weak self] bytes, seq in
-                guard let self else { return }
-                // Malformed remote bytes cost the row, never the doc. The
-                // cursor still advances: replaying a poison row forever is
-                // the wedge class chat2 replaces.
-                if (try? self.doc.importWith(bytes: bytes, origin: "remote")) == nil {
-                    roomLog.warning("chat2 \(self.chatId, privacy: .public): row import failed; skipping row \(seq)")
-                }
-                self.cursor = max(self.cursor, seq)
-                self.project()
-                self.saver?.poke()
-            },
-            advanceCursor: { [weak self] seq in
-                guard let self else { return }
-                self.cursor = max(self.cursor, seq)
-                self.saver?.poke()
-            },
-            clampCursor: { [weak self] seq in
-                guard let self, self.cursor != seq else { return }
-                self.cursor = seq
-                self.saver?.poke()
-            },
-            setCursor: { [weak self] seq in
-                guard let self, self.cursor != seq else { return }
-                self.cursor = seq
-                self.saver?.poke()
-            },
-            event: { [weak self] event in self?.handle(event) }
-        )
-        let client = ChatRoomClient(
-            chatId: chatId, device: config.deviceId,
-            urlProvider: { [config, chatId] in await config.chat2SocketURL(chatId: chatId) },
-            checkpointRequest: { [config, chatId] in
-                await config.chat2CheckpointRequest(chatId: chatId)
-            },
-            rowsRequest: { [config, chatId] after in
-                await config.chat2RowsRequest(chatId: chatId, after: after)
-            },
-            pushRequest: { [config, chatId] batchId in
-                await config.chat2PushRequest(chatId: chatId, batchId: batchId)
-            },
-            delegate: delegate)
-        chatRoom = client
-        // First contact with the room (cursor 0): everything committed
-        // BEFORE the local-update subscription saw a client — an adopt's
-        // requeued commands, sends queued while waiting for the roomGen
-        // flip — is invisible to the push path, yet every later commit
-        // causally depends on it (doc_host.rs first-contact rule; rows built
-        // on unpushed deps sit in peers' pending-dep buffers forever). Push
-        // the doc's full update log as the join's first batch; once acked
-        // the cursor moves and this never re-arms.
-        if cursor == 0,
-           let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty {
-            Task { await client.enqueue(update: all) }
+            }
+            sync3Client = client
         }
-        Task { await client.start() }
     }
 
-    /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
-    /// re-queue them into the fresh lineage (doc_host.rs M3 requeue: same
-    /// command ids — the host's processed_commands ledger guards double
-    /// execution; basedOn is dropped, its turn ids don't exist here).
-    private func adoptLegacyCommands() {
-        let legacy = LoroDoc()
-        guard DocDisk.load(into: legacy, id: chatId),
-              let root = legacy.getDeepValue().mapValue,
-              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
-        let now = nowMs()
-        var carried = 0
-        let fresh = doc.getList(id: "commands")
-        for value in commands {
-            guard let m = value.mapValue,
-                  m["status"]?.stringValue == "pending",
-                  m["issuedBy"]?.stringValue == config.deviceId,
-                  let id = m["id"]?.stringValue,
-                  let kind = m["kind"]?.stringValue,
-                  let payload = m["payload"] else { continue }
-            if let expires = m["expiresAt"]?.i64Value, expires <= now { continue }
-            do {
-                let map = try fresh.pushContainer(child: LoroMap())
-                try map.insert(key: "id", v: id)
-                try map.insert(key: "kind", v: kind)
-                try map.insert(key: "payload", v: payload)
-                try map.insert(key: "issuedBy", v: config.deviceId)
-                try map.insert(key: "issuedAt", v: m["issuedAt"]?.i64Value ?? now)
-                try map.insert(key: "expiresAt", v: m["expiresAt"]?.i64Value ?? (now + commandDefaultTtlMs))
-                try map.insert(key: "status", v: "pending")
-                carried += 1
-            } catch {}
-        }
-        guard carried > 0 else { return }
-        doc.commit()
-        roomLog.info("chat2 \(self.chatId, privacy: .public): adopt carried \(carried) pending command(s) from the s2 lineage")
-    }
-
-    /// Backgrounding hook: persist immediately.
-    func flushToDisk() {
-        saver?.flush()
-    }
-
-    /// Foreground hook: revive the room after a suspension (see
-    /// ChatRoomClient.kick). Also the catch-all re-check for a roomGen flip
-    /// that landed while this store had no open view.
+    /// Foreground recovery cancels the old transport before replacing it.
     func kickRoom() {
-        connectIfReady()
-        guard let chatRoom else { return }
-        Task { await chatRoom.kick() }
+        guard started, !offline else { return }
+        transportGeneration &+= 1
+        let generation = transportGeneration
+        let old = sync3Client
+        sync3Client = nil
+        old?.onChange = nil
+        connected = false
+        Task { [weak self] in
+            await old?.stop()
+            guard let self, self.started, self.transportGeneration == generation else { return }
+            self.connect()
+        }
     }
 
     func stop() {
-        subscriptions.removeAll()
-        saver?.flush()
-        if let chatRoom {
-            Task { await chatRoom.stop() }
+        started = false
+        if let readInterest { workspaceContext?.release(readInterest) }
+        readInterest = nil
+        if let hostRelay { Task { await hostRelay.client.close() } }
+        hostRelay = nil
+        transportGeneration &+= 1
+        if let sync3Client {
+            sync3Client.onChange = nil
+            Task { await sync3Client.stop() }
         }
-        chatRoom = nil
+        sync3Client = nil
         connected = false
     }
 
-    private func handle(_ event: ChatRoomEvent) {
-        switch event {
-        case .connected:
-            connected = true
-            project()
-        case .disconnected:
-            connected = false
-        }
-    }
-
     // MARK: Projection
-
-    /// In-flight guard + trailing re-run for the off-main projection below.
-    @ObservationIgnored private var projecting = false
-    @ObservationIgnored private var projectPending = false
-
-    /// Re-derive `entries` from the doc, off the main thread.
-    ///
-    /// `getDeepValue()` materializes the WHOLE doc and the decode walks every
-    /// message and every part, so this is O(transcript) — tens of ms on a big
-    /// session, and it runs on every remote update. On the main actor that
-    /// stalled the first frame of a cached session and janked streaming.
-    /// Reading the doc from a background task is the access class the design
-    /// already has: `ChatRoomClient` applies through main-actor closures, but
-    /// the doc remains concurrently readable today regardless.
-    ///
-    /// Overlapping calls coalesce to a single trailing re-run — a streaming
-    /// burst must not queue one whole-doc projection per token.
     private func project() {
-        guard !projecting else {
-            projectPending = true
-            return
-        }
-        projecting = true
-        let doc = self.doc
-        Task { @MainActor [weak self] in
-            let decoded = await Task.detached(priority: .userInitiated) {
-                Self.decodeEntries(from: doc)
-            }.value
-            guard let self else { return }
-            self.projecting = false
-            if let decoded {
-                self.apply(decoded)
-            }
-            if self.projectPending {
-                self.projectPending = false
-                self.project()
-            }
+        guard let journal = sync3Journal else { return }
+        do {
+            let cursor = try journal.cursor
+            guard projectedCursor != cursor else { return }
+            pendingSends = try journal.pendingSends()
+            var bounded = try journal.projection
+            bounded.messages = Dictionary(uniqueKeysWithValues: try journal.allMessagesBounded().compactMap {
+                guard let id = $0["id"]?.stringValue else { return nil }
+                return (id, $0)
+            })
+            apply(try Self.decodeEntries(from: bounded))
+            projectedCursor = cursor
+        } catch {
+            self.error = String(describing: error)
         }
     }
 
@@ -370,6 +215,81 @@ final class SessionStore {
             return entry
         }
         return joinContinuations(raw)
+    }
+
+    /// Only committed creation position establishes order. Device clocks and
+    /// the order of dictionary iteration never participate in ordering.
+    nonisolated static func decodeEntries(from projection: Sync3Projection) throws -> [MessageEntry] {
+        let steerIDs = Set(projection.commands.values.compactMap { record -> String? in
+            let payload = record["command"]?.objectValue?["payload"]?.objectValue
+            return payload?["kind"] == .string("steer") ? payload?["messageId"]?.stringValue : nil
+        })
+        let records = projection.messages.values.sorted {
+            ($0["createdSeq"]?.int64Value ?? 0) < ($1["createdSeq"]?.int64Value ?? 0)
+        }
+        return try joinContinuations(records.map { record in
+            guard let entry = record["entry"]?.objectValue,
+                  let id = entry["id"]?.stringValue,
+                  let role = entry["role"]?.stringValue.flatMap(MessageRole.init(rawValue:)),
+                  let createdAt = entry["createdAt"]?.int64Value,
+                  let deviceId = entry["deviceId"]?.stringValue,
+                  case .array(let rawParts) = entry["parts"] else { throw Sync3Error.protocolError("invalid_message") }
+            let parts = try rawParts.map(decodePart)
+            let status = entry["status"]?.stringValue.flatMap(MessageStatus.init(rawValue:))
+            return MessageEntry(id: id, role: role, parts: parts, createdAt: createdAt,
+                                deviceId: deviceId, status: status,
+                                continuationOf: entry["continuationOf"]?.stringValue,
+                                isSteer: role == .user && steerIDs.contains(id))
+        })
+    }
+
+    nonisolated static func decodePart(_ value: JSONValue) throws -> MessagePart {
+        guard let part = value.objectValue, let id = part["id"]?.stringValue else {
+            throw Sync3Error.protocolError("invalid_part")
+        }
+        switch part["kind"]?.stringValue {
+        case "text":
+            guard let text = part["text"]?.stringValue else { throw Sync3Error.protocolError("invalid_part") }
+            return .text(id: id, text: text)
+        case "error":
+            guard let text = part["message"]?.stringValue else { throw Sync3Error.protocolError("invalid_part") }
+            return .error(id: id, message: text)
+        case "input":
+            guard let requestId = part["requestId"]?.stringValue,
+                  let resolved = part["resolved"]?.boolValue, let questions = part["questions"] else {
+                throw Sync3Error.protocolError("invalid_part")
+            }
+            return .input(id: id, requestId: requestId,
+                questions: try JSONDecoder().decode([UserInputQuestion].self, from: JSONEncoder().encode(questions)),
+                resolved: resolved)
+        case "tool":
+            guard let rawCall = part["call"]?.objectValue, let tag = rawCall["kind"]?.stringValue,
+                  let resolved = part["resolved"]?.boolValue, let isError = part["isError"]?.boolValue else {
+                throw Sync3Error.protocolError("invalid_part")
+            }
+            var fields: [String: AnyHashable] = [:]
+            for (key, value) in rawCall where key != "kind" {
+                switch value {
+                case .string(let v): fields[key] = v
+                case .bool(let v): fields[key] = v
+                case .int(let v): fields[key] = v
+                case .double(let v): fields[key] = v
+                default: fields[key] = value
+                }
+            }
+            var call = RenderToolCall(tag: tag, fields: fields)
+            if tag == "unknown", rawCall["name"] == .string("subagent"),
+               let input = rawCall["input"]?.objectValue, let agent = input["agent"]?.stringValue {
+                call.subagent = SubagentCallMetadata(agent: String(agent.prefix(120)),
+                    task: String((input["task"]?.stringValue ?? "").prefix(500)),
+                    isAsync: input["async"]?.boolValue ?? false)
+            }
+            call.progress = SubagentProjection.boundedProgress(part["progress"]?.stringValue)
+            call.details = part.filter { !["kind", "id", "call", "resolved", "isError"].contains($0.key) }
+            return .tool(id: id, call: call, isError: isError, resolved: resolved)
+        default:
+            throw Sync3Error.protocolError("invalid_part")
+        }
     }
 
     nonisolated private static func entryFrom(_ value: LoroValue) -> MessageEntry? {
@@ -488,7 +408,7 @@ final class SessionStore {
                                  model: chat.config?.model,
                                  reasoning: chat.config?.reasoning,
                                  modelOptions: chat.config?.modelOptions ?? [:],
-                                 cwd: chat.cwd ?? "",
+                                 cwd: chat.cwd ?? "~",
                                  sandbox: chat.config?.sandbox ?? "workspace-write",
                                  attachments: attachments)
         var payload: [String: Any] = [
@@ -539,36 +459,67 @@ final class SessionStore {
 
     /// schema.rs queue_command, field for field.
     private func queueCommand(kind: String, payload: [String: Any]) -> Bool {
-        let commands = doc.getList(id: "commands")
+        // v3 is the durable command authority. Keep command creation in one
+        // place so run/steer/interrupt/input responses cannot accidentally
+        // fall back to an old document relay.
+        guard let journal = sync3Journal else { return false }
         do {
-            let map = try commands.pushContainer(child: LoroMap())
-            try map.insert(key: "id", v: UUID().uuidString.lowercased())
-            try map.insert(key: "kind", v: kind)
-            try map.insert(key: "payload", v: LoroValue.fromJSON(payload))
-            try map.insert(key: "issuedBy", v: config.deviceId)
-            try map.insert(key: "issuedAt", v: nowMs())
-            if let turnId = lastEntryId {
-                try map.insert(key: "basedOn", v: LoroValue.map(value: [
-                    "turnId": .string(value: turnId),
-                    "frontier": .null,
-                ]))
+            let commandId = UUID().uuidString.lowercased()
+            var commandPayload = payload
+            commandPayload["kind"] = kind
+            if kind == "run", var request = commandPayload["request"] as? [String: Any] {
+                // The closed v3 descriptor distinguishes a nullable field
+                // from an omitted field. Swift Codable omits `resume` when it
+                // is nil, so restore the explicit null required by the wire
+                // contract before validation.
+                if request["resume"] == nil { request["resume"] = NSNull() }
+                if request["model"] == nil { request["model"] = NSNull() }
+                if request["reasoning"] == nil { request["reasoning"] = NSNull() }
+                if let attachments = request["attachments"] as? [String], attachments.isEmpty {
+                    request.removeValue(forKey: "attachments")
+                }
+                commandPayload["request"] = request
             }
-            try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
-            try map.insert(key: "status", v: "pending")
-            doc.commit()
-        } catch { return false }
-        nudgeHost()
-        return true
+            let now = nowMs()
+            var command: [String: JSONValue] = [
+                "id": .string(commandId),
+                "issuedBy": .string(config.deviceId),
+                "issuedAt": .int(now),
+                "expiresAt": .int(now + commandDefaultTtlMs),
+                "status": .string("pending"),
+                "resolution": .null,
+                "payload": try jsonValue(commandPayload),
+            ]
+            if let turnId = lastEntryId {
+                command["basedOn"] = .object(["turnId": .string(turnId), "frontier": .null])
+            } else {
+                command["basedOn"] = .null
+            }
+            let operation = try Sync3Operation(
+                    id: UUID().uuidString.lowercased(),
+                    actor: config.deviceId,
+                    ownerEpoch: max(1, (try journal.ownerEpoch)),
+                    event: [
+                        "type": .string("commandQueued"),
+                        "commandId": .string(commandId),
+                        "command": .object(command),
+                    ])
+            try journal.enqueue(operation)
+            sync3Client?.wake()
+            nudgeHost()
+            return true
+        } catch {
+            self.error = String(describing: error)
+            return false
+        }
     }
 
     /// Durable-nudge the host device so a cold host opens the doc and drains
     /// (doc_host.rs nudge_remote_host). Fire-and-forget; the command is
     /// durable in the doc regardless.
     private func nudgeHost() {
-        guard let hostDeviceId else { return }
-        Task { [config, chatId] in
-            await config.nudge(deviceId: hostDeviceId, chatId: chatId)
-        }
+        // Read interest wakes the owning host; no legacy HTTP nudge exists.
+        workspaceContext?.client.probe()
     }
 }
 
@@ -576,4 +527,20 @@ private func encodableJSON<T: Encodable>(_ value: T) -> Any {
     guard let data = try? JSONEncoder().encode(value),
           let obj = try? JSONSerialization.jsonObject(with: data) else { return [:] }
     return obj
+}
+
+private func jsonValue(_ value: Any) throws -> JSONValue {
+    try JSONDecoder().decode(JSONValue.self, from: JSONSerialization.data(withJSONObject: value))
+}
+
+private func jsonObject(_ value: JSONValue) -> Any {
+    switch value {
+    case .null: return NSNull()
+    case .bool(let value): return value
+    case .int(let value): return value
+    case .double(let value): return value
+    case .string(let value): return value
+    case .array(let values): return values.map(jsonObject)
+    case .object(let values): return values.mapValues(jsonObject)
+    }
 }

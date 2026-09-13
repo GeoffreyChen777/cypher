@@ -17,6 +17,7 @@ export type Event =
   | { type: "executionStarted"; executionId: string; commandId: string }
   | { type: "executionFinished"; executionId: string }
   | { type: "runStarted"; runId: string }
+  | { type: "runObserved"; runId: string; executionId: string }
   | { type: "messageCreated"; runId: string | null; messageId: string; role: Entry["role"]; deviceId: string; createdAt: number; continuationOf: string | null }
   | { type: "partPut"; messageId: string; index: number; part: Part }
   | { type: "textAppended"; messageId: string; partId: string; offset: number; text: string }
@@ -87,7 +88,7 @@ export function validateOperation(value: unknown): Operation {
     commandQueued: ["commandId", "command"], commandClaimAttempted: ["commandId", "runId"],
     commandResolved: ["commandId", "status", "resolution"], commandCancelAttempted: ["commandId"],
     executionStarted: ["executionId", "commandId"], executionFinished: ["executionId"],
-    runStarted: ["runId"], messageCreated: ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
+    runStarted: ["runId"], runObserved: ["runId", "executionId"], messageCreated: ["runId", "messageId", "role", "deviceId", "createdAt", "continuationOf"],
     partPut: ["messageId", "index", "part"], textAppended: ["messageId", "partId", "offset", "text"],
     messageFinished: ["messageId", "status"], attachmentSealed: ["uploadId", "path", "fileName"],
     runFinished: ["runId", "outcome"],
@@ -246,6 +247,14 @@ export function applyOperation(store: ProjectionStore, op: Operation, owner: str
       if (store.get("runs", ev.runId)) reject("run_exists");
       if (!store.hasAcceptedRun(ev.runId)) reject("run_not_accepted");
       store.set("runs", ev.runId, { outcome: null }); break;
+    case "runObserved": {
+      if (store.get("runs", ev.runId)) reject("run_exists");
+      const execution = store.get("executions", ev.executionId);
+      if (!execution) reject("unknown_execution");
+      if (execution.closed) reject("execution_closed");
+      if (execution.actor !== op.actor || execution.ownerEpoch !== op.ownerEpoch) reject("execution_owner_mismatch");
+      store.set("runs", ev.runId, { outcome: null }); break;
+    }
     case "messageCreated":
       if (ev.runId !== null) live(ev.runId);
       if (store.get("messages", ev.messageId)) reject("message_exists");

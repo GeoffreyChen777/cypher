@@ -825,7 +825,7 @@ async fn later_child_turn_has_no_messaging_channel() {
                     attachments: Vec::new(),
                     pending_attachments: Vec::new(),
                 },
-                message_id: String::new(),
+                message_id: "followup-user".into(),
 
                 agent_prompt: None,
             },

@@ -29,7 +29,7 @@ export class Sync3Room implements DurableObject {
         this.log.initialize(account, body.owner);
         return json(this.log.state());
       }
-      if (!m) return json({ error: "not_initialized" }, 404);
+      if (!m) return json(this.failure(new ProtocolError("not_initialized")), 409);
       if (url.pathname === "/ws") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return json({ error: "expected_websocket" }, 426);
         const expires = Number(request.headers.get(AUTH_DEADLINE_HEADER));

@@ -1,37 +1,18 @@
-//! One-time local→synced profile import.
-//!
-//! A device that worked locally (PR #30's `profiles/local`) and then signs in
-//! gets its chats, spaces, journals, and command-ledger claims carried into
-//! the synced profile — through the same write paths every live mutation
-//! uses, so nothing here invents a second persistence or sync mechanism:
-//!
-//!  - chat docs land via `save_snapshot_with_cursor(chat_id, bytes, 0, CHAT2_DOC_EPOCH)`,
-//!    which is exactly the "born chat2" shape: cursor 0 makes the first room
-//!    join push the doc's full update log from VV zero (doc_host first-contact
-//!    push), and epoch 2 keeps `DocHost::open` off the s2 discard-and-adopt
-//!    branch that would drop the transcript.
-//!  - registry rows go through `WorkspaceHost::import_chat_row` /
-//!    `import_space_row` (live upserts: persisted, pushed, watched).
-//!  - attachments are NOT copied or rewritten. Transcripts embed absolute
-//!    paths under the local profile's uploads root, so that root becomes a
-//!    read-only jail root of the synced profile — the exact mechanism the
-//!    legacy-uploads adoption already uses (`EngineProfile::claim_legacy_uploads_root`).
-//!    The marker file re-arms the root on every later synced boot.
-//!
-//! Idempotence is structural: a chat/space whose row already exists in the
-//! target is skipped, so re-running after a partial import (or after new
-//! local work from a later signed-out stretch) imports only what's missing.
+//! Explicit import of NEW v3 local work into an account-scoped profile.
+//! Metadata comes from native SQLite; public transcript windows are staged
+//! through the bounded v3 producer with atomic per-entry receipts. Legacy
+//! snapshots, JSONL, command ledgers and execution permits are never imported.
+//! Metadata rows land last so interrupted copies remain structurally retryable.
+//! Attachment paths retain an explicit read-only grant to local uploads.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cypher_doc::{REGISTRY_DOC_ID, RegistryDoc};
-use cypher_sync::DocsStore;
+use cypher_proto::metadata::view::MetadataView;
 use serde::{Deserialize, Serialize};
 
 use crate::EngineError;
-use crate::chat2_host::CHAT2_DOC_EPOCH;
-use crate::run_journal::journal_paths;
+use crate::doc_host::DocHost;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
@@ -121,8 +102,7 @@ struct ImporterInner {
     device_id: String,
     org_id: String,
     user_id: String,
-    target_store: Arc<DocsStore>,
-    target_journals: PathBuf,
+    doc_host: DocHost,
     workspace: WorkspaceHost,
     uploads: Uploads,
 }
@@ -134,8 +114,7 @@ impl LocalImporter {
         device_id: &str,
         org_id: &str,
         user_id: &str,
-        target_store: Arc<DocsStore>,
-        target_journals: PathBuf,
+        doc_host: DocHost,
         workspace: WorkspaceHost,
         uploads: Uploads,
     ) -> Self {
@@ -145,8 +124,7 @@ impl LocalImporter {
                 device_id: device_id.to_string(),
                 org_id: org_id.to_string(),
                 user_id: user_id.to_string(),
-                target_store,
-                target_journals,
+                doc_host,
                 workspace,
                 uploads,
             }),
@@ -241,23 +219,18 @@ impl LocalImporter {
 
     /// Open the local profile's stores read-only-ish. `None` when the device
     /// never ran a local profile (nothing to import).
-    fn open_source(&self) -> Result<Option<(DocsStore, RegistryDoc)>, EngineError> {
+    fn open_source(&self) -> Result<Option<MetadataView>, EngineError> {
         let root = self.source_root();
         if !root.join("docs.sqlite3").is_file() {
             return Ok(None);
         }
-        let store = DocsStore::open(&root)?;
-        let Some(bytes) = store.load_snapshot(REGISTRY_DOC_ID)? else {
-            return Ok(None); // store exists but no registry replica — nothing rowed
-        };
-        let registry = RegistryDoc::from_bytes(&bytes, &self.inner.device_id)?;
-        Ok(Some((store, registry)))
+        WorkspaceHost::read_local_profile(&self.inner.data_dir, &self.inner.device_id)
     }
 
     /// What's importable right now (target-dedup applied).
     pub fn status(&self) -> Result<LocalImportStatus, EngineError> {
         let imported_before = self.imported_before();
-        let Some((_, registry)) = self.open_source()? else {
+        let Some(registry) = self.open_source()? else {
             return Ok(LocalImportStatus {
                 available_chats: 0,
                 available_spaces: 0,
@@ -283,10 +256,10 @@ impl LocalImporter {
         })
     }
 
-    /// Run the import, emitting [`ImportEvent`]s (the last is always
-    /// `Summary`). Blocking (sqlite + fs) — callers run it off the async path.
-    pub fn run(&self, mut emit: impl FnMut(ImportEvent)) -> Result<(), EngineError> {
-        let Some((source_store, registry)) = self.open_source()? else {
+    /// Run the import, yielding between bounded windows and waiting for
+    /// authenticated target readiness. The last event is always Summary.
+    pub async fn run(&self, mut emit: impl FnMut(ImportEvent)) -> Result<(), EngineError> {
+        let Some(registry) = self.open_source()? else {
             emit(ImportEvent::Start {
                 chats: 0,
                 spaces: 0,
@@ -334,10 +307,8 @@ impl LocalImporter {
             }
         }
 
-        let source_journals = self.source_root().join("journals");
         let total = pending_chats.len();
         let mut imported_chats = 0;
-        let mut journals_copied = 0;
         for (index, chat) in pending_chats.iter().enumerate() {
             emit(ImportEvent::Chat {
                 index,
@@ -345,12 +316,9 @@ impl LocalImporter {
                 chat_id: chat.id.clone(),
                 title: chat.title.clone(),
             });
-            match self.import_chat(&source_store, chat, &source_journals) {
-                Ok(journal) => {
+            match self.import_chat(chat).await {
+                Ok(()) => {
                     imported_chats += 1;
-                    if journal {
-                        journals_copied += 1;
-                    }
                 }
                 Err(err) => errors.push(format!("chat {}: {err}", chat.id)),
             }
@@ -358,13 +326,9 @@ impl LocalImporter {
 
         // Merge the source's command ledger so imported pending commands can
         // never re-execute under this profile (mark-before-execute carries over).
-        let ledger_rows_merged = source_store
-            .processed_commands()
-            .and_then(|rows| self.inner.target_store.import_processed_commands(&rows))
-            .unwrap_or_else(|err| {
-                errors.push(format!("command ledger: {err}"));
-                0
-            });
+        // No command/claim or retired JSONL ledger crosses a profile boundary.
+        let ledger_rows_merged = 0;
+        let journals_copied = 0;
 
         // Transcripts embed absolute paths under the local uploads root; jail
         // it read-only now (and on future boots, via the marker). A marker
@@ -393,46 +357,91 @@ impl LocalImporter {
 
     /// Copy one chat: doc snapshot (born-chat2 shape), journal files, row.
     /// Returns whether a journal file was copied.
-    fn import_chat(
-        &self,
-        source_store: &DocsStore,
-        chat: &cypher_proto::Chat,
-        source_journals: &Path,
-    ) -> Result<bool, EngineError> {
-        // Doc bytes may be absent (a chat row created but never opened) — the
-        // row alone is still worth carrying; a doc materializes on first open.
-        if let Some(bytes) = source_store.load_snapshot(&chat.id)?
-            && !self.inner.target_store.has_snapshot(&chat.id)?
-        {
-            self.inner.target_store.save_snapshot_with_cursor(
-                &chat.id,
-                &bytes,
-                0,
-                CHAT2_DOC_EPOCH,
-            )?;
+    async fn import_chat(&self, chat: &cypher_proto::Chat) -> Result<(), EngineError> {
+        let map = |e: cypher_sync::sync3::Error| EngineError::Other(e.to_string());
+        let profile = crate::EngineProfile::local(&self.inner.data_dir)?;
+        let sources = crate::session_replicas::SessionReplicas::new(
+            &profile,
+            self.inner.device_id.clone(),
+            None,
+        )
+        .map_err(map)?;
+        let source = sources
+            .get_for_owner(&chat.id, &self.inner.device_id)
+            .map_err(map)?;
+        let through = source.read(|j| j.cursor()).map_err(map)?;
+        let target = self
+            .inner
+            .doc_host
+            .open(&chat.id)?
+            .replica()
+            .cloned()
+            .ok_or_else(|| EngineError::Other("native import target unavailable".into()))?;
+        let mut status = target.watch();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let current = status.borrow_and_update().clone();
+                if current.phase == cypher_sync::sync3::Phase::Live {
+                    return Ok::<_, EngineError>(());
+                }
+                if let Some(error) = current.error {
+                    return Err(EngineError::Other(error));
+                }
+                status
+                    .changed()
+                    .await
+                    .map_err(|_| EngineError::Other("import target closed".into()))?;
+            }
+        })
+        .await
+        .map_err(|_| EngineError::Other("import target unavailable".into()))??;
+        let mut after = 0;
+        loop {
+            let window = source
+                .read(|j| j.message_window_after(after, 32))
+                .map_err(map)?;
+            if window.through != through {
+                return Err(EngineError::Other(
+                    "local source changed during import".into(),
+                ));
+            }
+            if window.messages.is_empty() {
+                break;
+            }
+            for message in window.messages {
+                after = message.created_seq;
+                let mut entry = message.entry;
+                if entry.status == Some(cypher_proto::MessageStatus::Streaming) {
+                    entry.status = Some(cypher_proto::MessageStatus::Aborted);
+                }
+                let key = serde_json::to_string(&(
+                    profile.org_id(),
+                    profile.user_id(),
+                    &chat.id,
+                    &entry.id,
+                ))
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+                target
+                    .write(|j| j.import_public_entry(&key, &entry))
+                    .map_err(map)?;
+            }
+            tokio::task::yield_now().await;
         }
-
-        let mut copied = false;
-        let (src_journal, src_resume) = journal_paths(source_journals, &chat.id);
-        let (dst_journal, dst_resume) = journal_paths(&self.inner.target_journals, &chat.id);
-        if src_journal.is_file() && !dst_journal.exists() {
-            std::fs::create_dir_all(&self.inner.target_journals)?;
-            std::fs::copy(&src_journal, &dst_journal)?;
-            copied = true;
+        if let Some(cwd) = chat.harness_session_cwd.as_deref().or(chat.cwd.as_deref()) {
+            if let Some(session) = source.read(|j| j.harness_session(cwd)).map_err(map)? {
+                let origin =
+                    serde_json::to_string(&(profile.org_id(), profile.user_id(), &chat.id))
+                        .map_err(|e| EngineError::Other(e.to_string()))?;
+                target
+                    .write(|j| j.import_harness_session(&origin, cwd, &session))
+                    .map_err(map)?;
+            }
         }
-        if src_resume.is_file() && !dst_resume.exists() {
-            std::fs::create_dir_all(&self.inner.target_journals)?;
-            std::fs::copy(&src_resume, &dst_resume)?;
-        }
-
-        // Row last: once it appears in watchers the chat is clickable, and by
-        // then its doc + journal are already in place. Chat2 lineage is
-        // explicit so `DocHost::open` never routes the import down the legacy
-        // s2 adopt branch.
+        sources.shutdown().await;
         let mut row = chat.clone();
-        row.room_gen = Some(CHAT2_DOC_EPOCH);
+        row.room_gen = Some(3);
         self.inner.workspace.import_chat_row(&row)?;
-        Ok(copied)
+        Ok(())
     }
 }
 

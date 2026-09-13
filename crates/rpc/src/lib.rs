@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 mod client;
 pub mod device_room;
 mod server;
+pub mod workspace3;
 
 pub use client::RpcClient;
 mod local;
@@ -31,6 +32,53 @@ pub use device_room::{
 };
 pub use local::{LocalListener, connect_local, probe_local};
 pub use server::serve_connection;
+
+/// Device-addressed client surface. Normal runtimes use WorkspaceHub; the
+/// retiring device-room fixture implements this only until its tests move.
+#[async_trait]
+pub trait RemoteClients: Send + Sync {
+    async fn client(self: Arc<Self>, device: &str) -> Result<Arc<RpcClient>, RpcError>;
+    fn credential_transport_allowed(&self) -> bool;
+    fn invalidate(&self, device: &str);
+    fn reset_cooldown(&self, device: &str);
+    fn disconnect_all(&self);
+}
+#[async_trait]
+impl RemoteClients for workspace3::Links {
+    async fn client(self: Arc<Self>, device: &str) -> Result<Arc<RpcClient>, RpcError> {
+        workspace3::Links::client(&self, device).await
+    }
+    fn credential_transport_allowed(&self) -> bool {
+        self.credential_transport_allowed()
+    }
+    fn invalidate(&self, device: &str) {
+        self.invalidate(device);
+    }
+    fn reset_cooldown(&self, device: &str) {
+        self.reset_cooldown(device);
+    }
+    fn disconnect_all(&self) {
+        self.disconnect_all();
+    }
+}
+#[async_trait]
+impl RemoteClients for LinkCache {
+    async fn client(self: Arc<Self>, device: &str) -> Result<Arc<RpcClient>, RpcError> {
+        LinkCache::client(&self, device).await
+    }
+    fn credential_transport_allowed(&self) -> bool {
+        self.credential_transport_allowed()
+    }
+    fn invalidate(&self, device: &str) {
+        self.invalidate(device);
+    }
+    fn reset_cooldown(&self, device: &str) {
+        self.reset_cooldown(device);
+    }
+    fn disconnect_all(&self) {
+        self.disconnect_all();
+    }
+}
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -238,14 +286,27 @@ pub struct ClientFrame {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
     pub ok: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub err: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_value"
+    )]
     pub item: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+}
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// What a service returns for one invocation.
@@ -320,6 +381,10 @@ mod tests {
     #[tokio::test]
     async fn memory_call_stream_and_error() {
         let client = memory_client(Arc::new(TestService));
+        assert_eq!(
+            client.call("Echo", serde_json::Value::Null).await.unwrap(),
+            serde_json::Value::Null
+        );
 
         let echoed = client
             .call("Echo", serde_json::json!({"x": 1}))

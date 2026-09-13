@@ -3,7 +3,7 @@
 //! Run wrangler dev --local -c wrangler.sync3test.jsonc before this example.
 use cypher_proto::sync3::{Operation, Projection, Reply, Request};
 use cypher_sync::{
-    StaticUrl,
+    AuthenticatedUrl,
     sync3::{
         Error, Journal, Phase,
         transport::{Client, RepairTransport, Tuning},
@@ -28,6 +28,7 @@ impl RepairTransport for HttpRepair {
             let response = reqwest::Client::new()
                 .post(url)
                 .bearer_auth("sync3-user@sync3-org")
+                .header(cypher_sync::EXPECTED_USER_HEADER, "sync3-user")
                 .json(&request)
                 .send()
                 .await
@@ -165,10 +166,13 @@ async fn main() {
     }
     if std::env::args().nth(3).as_deref() == Some("--verify-swift") {
         let dir = tempfile::tempdir().unwrap();
-        let url = Arc::new(StaticUrl(format!(
-            "{}ws?token=sync3-user%40sync3-org",
-            path.replacen("http:", "ws:", 1)
-        )));
+        let url = Arc::new(
+            AuthenticatedUrl::new(
+                format!("{}ws", path.replacen("http:", "ws:", 1)),
+                "sync3-user@sync3-org",
+            )
+            .for_account("sync3-user"),
+        );
         let reader = Client::spawn(
             Journal::open(
                 &dir.path().join("reader.sqlite"),
@@ -196,6 +200,7 @@ async fn main() {
     let response = reqwest::Client::new()
         .post(format!("{path}init"))
         .bearer_auth("sync3-user@sync3-org")
+        .header(cypher_sync::EXPECTED_USER_HEADER, "sync3-user")
         .json(&serde_json::json!({"owner":"host"}))
         .send()
         .await
@@ -213,10 +218,13 @@ async fn main() {
         url: format!("{path}exchange"),
         requests: count.clone(),
     });
-    let url = Arc::new(StaticUrl(format!(
-        "{}ws?token=sync3-user%40sync3-org",
-        path.replacen("http:", "ws:", 1)
-    )));
+    let url = Arc::new(
+        AuthenticatedUrl::new(
+            format!("{}ws", path.replacen("http:", "ws:", 1)),
+            "sync3-user@sync3-org",
+        )
+        .for_account("sync3-user"),
+    );
     let host = Client::spawn(
         Journal::open(&dir.path().join("host.sqlite"), "account", &path, "host").unwrap(),
         url.clone(),
@@ -291,6 +299,7 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
     let response = reqwest::Client::new()
         .post(format!("{path}init"))
         .bearer_auth("sync3-user@sync3-org")
+        .header(cypher_sync::EXPECTED_USER_HEADER, "sync3-user")
         .json(&serde_json::json!({"owner":"host"}))
         .send()
         .await
@@ -298,10 +307,13 @@ async fn writer_smoke(path: &str, fixture: serde_json::Value, report_path: Strin
     assert!(response.status().is_success());
     let dir = tempfile::tempdir().unwrap();
     let repairs = Arc::new(AtomicUsize::new(0));
-    let url = Arc::new(StaticUrl(format!(
-        "{}ws?token=sync3-user%40sync3-org",
-        path.replacen("http:", "ws:", 1)
-    )));
+    let url = Arc::new(
+        AuthenticatedUrl::new(
+            format!("{}ws", path.replacen("http:", "ws:", 1)),
+            "sync3-user@sync3-org",
+        )
+        .for_account("sync3-user"),
+    );
     let repair: Arc<dyn RepairTransport> = Arc::new(HttpRepair {
         url: format!("{path}exchange"),
         requests: repairs.clone(),

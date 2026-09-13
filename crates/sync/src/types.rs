@@ -6,6 +6,43 @@
 //! vocabulary.
 
 use futures::future::BoxFuture;
+pub const EXPECTED_USER_HEADER: &str = "x-cypher-expected-user";
+
+/// Frozen expected identity, independent of the provider's refreshed token.
+/// The Worker checks this before selecting/creating any conversation object.
+pub struct AccountUrl {
+    inner: std::sync::Arc<dyn UrlProvider>,
+    user: String,
+}
+impl AccountUrl {
+    pub fn new(inner: std::sync::Arc<dyn UrlProvider>, user: impl Into<String>) -> Self {
+        Self {
+            inner,
+            user: user.into(),
+        }
+    }
+}
+impl UrlProvider for AccountUrl {
+    fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
+        self.inner.url()
+    }
+    fn request(&self) -> BoxFuture<'static, Result<crate::ConnectionRequest, SyncError>> {
+        let future = self.inner.request();
+        let user = self.user.clone();
+        Box::pin(async move {
+            if user.is_empty() || user.len() > 256 || user.chars().any(char::is_control) {
+                return Err(SyncError::Protocol("invalid_expected_user".into()));
+            }
+            let mut request = future.await?;
+            request.headers_mut().insert(
+                EXPECTED_USER_HEADER,
+                user.parse()
+                    .map_err(|_| SyncError::Protocol("invalid_expected_user".into()))?,
+            );
+            Ok(request)
+        })
+    }
+}
 
 /// Errors surfaced by the sync clients.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -31,6 +68,87 @@ pub enum SyncError {
 /// out); the reconnect loop backs off and retries.
 pub trait UrlProvider: Send + Sync + 'static {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>>;
+    /// v3 handshakes keep credentials in headers. The default is deliberately
+    /// credential-free; old query-token URLs are not a v3 fallback.
+    fn request(
+        &self,
+    ) -> BoxFuture<
+        'static,
+        Result<tokio_tungstenite::tungstenite::handshake::client::Request, SyncError>,
+    > {
+        let future = self.url();
+        Box::pin(async move {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let request = future
+                .await?
+                .into_client_request()
+                .map_err(|_| SyncError::Protocol("invalid_url".into()))?;
+            if request.uri().query().is_some()
+                || request
+                    .uri()
+                    .authority()
+                    .is_some_and(|a| a.as_str().contains('@'))
+            {
+                return Err(SyncError::Protocol("url_credentials_not_supported".into()));
+            }
+            Ok(request)
+        })
+    }
+}
+
+/// Fixed scoped test/dev connection. Intentionally has no Debug implementation.
+pub struct AuthenticatedUrl {
+    url: String,
+    bearer: String,
+}
+impl AuthenticatedUrl {
+    pub fn new(url: impl Into<String>, bearer: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            bearer: bearer.into(),
+        }
+    }
+    pub fn for_account(self, user: impl Into<String>) -> AccountUrl {
+        AccountUrl::new(std::sync::Arc::new(self), user)
+    }
+}
+impl UrlProvider for AuthenticatedUrl {
+    fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
+        let url = self.url.clone();
+        Box::pin(async move { Ok(url) })
+    }
+    fn request(
+        &self,
+    ) -> BoxFuture<
+        'static,
+        Result<tokio_tungstenite::tungstenite::handshake::client::Request, SyncError>,
+    > {
+        let url = self.url.clone();
+        let bearer = self.bearer.clone();
+        Box::pin(async move {
+            use tokio_tungstenite::tungstenite::{
+                client::IntoClientRequest,
+                http::{HeaderValue, header::AUTHORIZATION},
+            };
+            let mut request = url
+                .into_client_request()
+                .map_err(|_| SyncError::Protocol("invalid_url".into()))?;
+            if request.uri().query().is_some()
+                || request
+                    .uri()
+                    .authority()
+                    .is_some_and(|a| a.as_str().contains('@'))
+            {
+                return Err(SyncError::Protocol("url_credentials_not_supported".into()));
+            }
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {bearer}"))
+                    .map_err(|_| SyncError::Auth("invalid_bearer".into()))?,
+            );
+            Ok(request)
+        })
+    }
 }
 
 /// Fixed URL (dev bearers and tests — tokens that never expire).
@@ -40,6 +158,50 @@ impl UrlProvider for StaticUrl {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
         let url = self.0.clone();
         Box::pin(async move { Ok(url) })
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Rotating(AtomicUsize);
+    impl UrlProvider for Rotating {
+        fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(async { Ok("wss://edge.test/sync3/org/chats/chat/ws".into()) })
+        }
+        fn request(&self) -> BoxFuture<'static, Result<crate::ConnectionRequest, SyncError>> {
+            let bearer = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                "old-token"
+            } else {
+                "new-other-account-token"
+            };
+            AuthenticatedUrl::new("wss://edge.test/sync3/org/chats/chat/ws", bearer).request()
+        }
+    }
+    #[tokio::test]
+    async fn refreshed_credentials_cannot_change_captured_expected_identity() {
+        let url = AccountUrl::new(Arc::new(Rotating(AtomicUsize::new(0))), "captured-user");
+        let first = url.request().await.unwrap();
+        let second = url.request().await.unwrap();
+        assert_ne!(
+            first.headers()["authorization"],
+            second.headers()["authorization"]
+        );
+        assert_eq!(first.headers()[EXPECTED_USER_HEADER], "captured-user");
+        assert_eq!(second.headers()[EXPECTED_USER_HEADER], "captured-user");
+        assert!(second.uri().query().is_none());
+    }
+    #[tokio::test]
+    async fn invalid_captured_identity_never_becomes_a_request_header() {
+        let url = AccountUrl::new(
+            Arc::new(StaticUrl("wss://edge.test".into())),
+            "user\r\ninjected:true",
+        );
+        assert!(url.request().await.is_err());
     }
 }
 

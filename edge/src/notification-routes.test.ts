@@ -9,20 +9,22 @@ import { AUTH_USER_HEADER } from "./env";
 describe("notification route boundaries", () => {
   it("authenticates and isolates settings/activity/register by both organization and user", async () => {
     const names: string[] = [], requests: Request[] = [];
-    const env = { AUTH_MODE: "dev", REGISTRY_ROOMS: {
+    const env = { AUTH_MODE: "dev", WORKSPACE3: {
       idFromName(name: string) { names.push(name); return name; },
       get() { return { fetch(request: Request) { requests.push(request); return Response.json({ ok: true }); } }; }
     } } as unknown as Env;
-    const call = (token?: string, org = "org") => worker.fetch(new Request(
-      `https://edge.test/registry/${org}/notifications/settings`, { headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}), [AUTH_USER_HEADER]: "victim"
+    const call = (token?: string, org = "org", expected = token?.split("@")[0] ?? "") => worker.fetch(new Request(
+      `https://edge.test/workspace3/${org}/notifications/settings`, { headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}), [AUTH_USER_HEADER]: "victim",
+        "x-cypher-expected-user": expected
       } }), env);
     expect((await call()).status).toBe(401);
     expect((await call("alice@other")).status).toBe(403);
+    expect((await call("bob@org", "org", "alice")).status).toBe(403);
     expect(names).toHaveLength(0);
     expect((await call("alice@org")).status).toBe(200);
     expect((await call("bob@org")).status).toBe(200);
-    expect(names).toEqual(["reg1/org/alice", "reg1/org/bob"]);
+    expect(names).toEqual(['["workspace3","org","alice"]', '["workspace3","org","bob"]']);
     expect(requests.map(r => r.headers.get(AUTH_USER_HEADER))).toEqual(["alice", "bob"]);
     expect(new URL(requests[0].url).pathname).toBe("/notifications/settings");
   });

@@ -4,6 +4,46 @@ import SQLite3
 
 @MainActor
 final class Sync3Tests: XCTestCase {
+    func testSessionRenderingUsesCommittedOrderNotWallClock() throws {
+        let fixture = try sharedJSON("message-order").objectValue!
+        let operations = try JSONDecoder().decode([Sync3Operation].self, from: Sync3Wire.encode(fixture["operations"]!))
+        let journal = try Sync3Journal(url: directory().appendingPathComponent("render.sqlite"),
+                                      account: "account", room: "room", actor: "phone")
+        try journal.acceptState(state(head: 10))
+        try journal.applyPage(page(operations))
+        let entries = try SessionStore.decodeEntries(from: journal.projection)
+        XCTAssertEqual(entries.map(\.id), ["z", "a"], "Continuation folds into its root without reordering roots")
+        XCTAssertEqual(entries.first?.parts, [.text(id: "text", text: "first updated"), .text(id: "text", text: "third")])
+    }
+
+    func testNativeRendererKeepsToolResolutionQuestionIdentityAndArtifactMetadata() throws {
+        let tool: JSONValue = .object([
+            "kind": .string("tool"), "id": .string("tool"), "isError": .bool(false), "resolved": .bool(false),
+            "call": .object(["kind": .string("exec"), "command": .string("echo test")]),
+            "outputRef": .string("artifact-1"), "outputBytes": .int(234), "progress": .string("running")])
+        guard case .tool(_, let call, let isError, let resolved) = try SessionStore.decodePart(tool) else {
+            return XCTFail("tool missing")
+        }
+        XCTAssertFalse(resolved, "isError=false is NOT proof the tool has resolved")
+        XCTAssertFalse(isError)
+        XCTAssertEqual(call.details["outputRef"], .string("artifact-1"))
+        XCTAssertEqual(call.details["outputBytes"], .int(234))
+        XCTAssertEqual(call.progress, "running")
+        let input: JSONValue = .object([
+            "kind": .string("input"), "id": .string("part-1"), "requestId": .string("request-2"),
+            "resolved": .bool(false), "questions": .array([
+                .object(["id": .string("Question with spaces?"), "header": .string("Choose"),
+                         "question": .string("Proceed?"), "options": .array([.string("Yes")]), "multiSelect": .bool(false)])
+            ])])
+        guard case .input(let id, let request, let questions, let done) = try SessionStore.decodePart(input) else {
+            return XCTFail("input missing")
+        }
+        XCTAssertEqual(id, "part-1")
+        XCTAssertEqual(request, "request-2")
+        XCTAssertEqual(questions.first?.id, "Question with spaces?")
+        XCTAssertFalse(done)
+        XCTAssertThrowsError(try SessionStore.decodePart(.object(["id": .string("bad"), "kind": .string("future")])))
+    }
     func testEarlierPrototypeIsRejectedWithoutResettingData() throws {
         let url = try directory().appendingPathComponent("earlier.sqlite")
         var db: OpaquePointer?

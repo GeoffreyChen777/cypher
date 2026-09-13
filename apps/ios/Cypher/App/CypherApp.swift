@@ -53,6 +53,16 @@ struct RootView: View {
                 OrgPickerView(tokens: tokens, orgs: orgs)
             case .ready:
                 HomeView()
+                    .safeAreaInset(edge: .bottom) {
+                        if let problem = model.workspace?.error ?? model.workspace?.connectionError {
+                            Text("Sync unavailable: \(problem)")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .padding(8)
+                                .frame(maxWidth: .infinity)
+                                .background(Theme.bg)
+                        }
+                    }
             }
         }
         .task { model.restore() }

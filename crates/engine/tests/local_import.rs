@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use cypher_doc::{MessagePart, MessageRole, SessionDoc, SessionMessageEntry};
+use cypher_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use cypher_engine::local_import::{ImportEvent, marker_grants_read_root};
 use cypher_engine::run_journal::journal_paths;
@@ -51,7 +51,7 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         .expect("create bare chat");
 
     // A real transcript doc, saved the way the local runtime saves it.
-    let doc = SessionDoc::init("chat-doc").expect("init doc");
+    let doc = local.doc_host.open("chat-doc").expect("native doc");
     doc.push_message(&SessionMessageEntry {
         id: "m1".into(),
         role: MessageRole::User,
@@ -65,15 +65,8 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         continuation_of: None,
     })
     .expect("push message");
-    let bytes = doc.export_snapshot().expect("snapshot");
-    let store = cypher_sync::DocsStore::open(data_dir.join("profiles").join("local"))
-        .expect("open local store");
-    store
-        .save_snapshot_with_cursor("chat-doc", &bytes, 0, 2)
-        .expect("save doc");
-    drop(store);
-
-    // Journal + resume budget as a run leaves them.
+    // Retired journal files must NOT be imported even if present alongside
+    // new native data.
     let journals = data_dir.join("profiles").join("local").join("journals");
     std::fs::create_dir_all(&journals).expect("journals dir");
     let (journal, resume) = journal_paths(&journals, "chat-doc");
@@ -89,10 +82,13 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
     (device, "chat-doc".into(), "chat-bare".into())
 }
 
-fn run_import(core: &EngineCore) -> Vec<ImportEvent> {
+async fn run_import(core: &EngineCore) -> Vec<ImportEvent> {
     let importer = core.local_import.clone().expect("synced runtime importer");
     let mut events = Vec::new();
-    importer.run(|event| events.push(event)).expect("import");
+    importer
+        .run(|event| events.push(event))
+        .await
+        .expect("import");
     events
 }
 
@@ -135,7 +131,7 @@ async fn local_work_imports_into_synced_profile_once() {
     assert_eq!(status.available_spaces, 1);
     assert!(!status.imported_before);
 
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported_chats, imported_spaces, skipped_chats, skipped_spaces) = summary(&events);
     assert_eq!((imported_chats, imported_spaces), (2, 1));
     assert_eq!((skipped_chats, skipped_spaces), (0, 0));
@@ -147,7 +143,7 @@ async fn local_work_imports_into_synced_profile_once() {
         .expect("read chat")
         .expect("imported chat row");
     assert_eq!(row.title.as_deref(), Some("Fix the flaky test"));
-    assert_eq!(row.room_gen, Some(2), "imported chats must be chat2-born");
+    assert_eq!(row.room_gen, Some(3), "imported chats are native v3");
     assert_eq!(row.space_id.as_deref(), Some("space-1"));
     assert!(
         synced
@@ -165,26 +161,17 @@ async fn local_work_imports_into_synced_profile_once() {
             .is_some()
     );
 
-    // Doc bytes present in the synced store in born-chat2 shape (cursor 0,
-    // epoch 2) — the shape DocHost pushes from VV zero on first room join.
+    // Public content is native, not a copied snapshot or dispatch ledger.
     let store = cypher_sync::DocsStore::open(dir.path().join("orgs").join("org1").join("user1"))
         .expect("open synced store");
-    let (bytes, cursor, epoch) = store
-        .load_snapshot_with_cursor(&chat_doc)
-        .expect("load")
-        .expect("imported doc row");
-    assert_eq!((cursor, epoch), (0, 2));
-    let source_store = cypher_sync::DocsStore::open(dir.path().join("profiles").join("local"))
-        .expect("open source store");
-    assert_eq!(
-        source_store
-            .load_snapshot(&chat_doc)
-            .expect("source load")
-            .expect("source doc bytes"),
-        bytes,
-        "imported doc bytes are a verbatim copy of the local snapshot"
+    assert!(store.load_snapshot(&chat_doc).unwrap().is_none());
+    let handle = synced.doc_host.open(&chat_doc).unwrap();
+    let entries = handle.read_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        matches!(&entries[0].parts[0], MessagePart::Text { text, .. } if text == "hello from local mode")
     );
-    drop((store, source_store));
+    assert!(handle.read_commands().unwrap().is_empty());
 
     // Journal + resume budget carried over.
     let (journal, resume) = journal_paths(
@@ -195,8 +182,8 @@ async fn local_work_imports_into_synced_profile_once() {
             .join("journals"),
         &chat_doc,
     );
-    assert!(journal.is_file(), "journal copied");
-    assert!(resume.is_file(), "resume budget copied");
+    assert!(!journal.exists(), "retired journal not copied");
+    assert!(!resume.exists(), "retired resume budget not copied");
 
     // Marker recorded, and it grants the local uploads root read-only.
     let granted = marker_grants_read_root(dir.path(), "org1", "user1")
@@ -219,7 +206,7 @@ async fn local_work_imports_into_synced_profile_once() {
         .expect("status");
     assert_eq!(status.available_chats, 0);
     assert!(status.imported_before);
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported_chats, imported_spaces, skipped_chats, skipped_spaces) = summary(&events);
     assert_eq!((imported_chats, imported_spaces), (0, 0));
     assert_eq!((skipped_chats, skipped_spaces), (2, 1));
@@ -240,7 +227,7 @@ async fn import_without_local_profile_is_a_clean_no_op() {
         .expect("status");
     assert_eq!((status.available_chats, status.available_spaces), (0, 0));
 
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported_chats, imported_spaces, ..) = summary(&events);
     assert_eq!((imported_chats, imported_spaces), (0, 0));
 
@@ -268,19 +255,18 @@ async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() 
 
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
 
-    // Injected failure: the target journals DIRECTORY is replaced by a file,
-    // so the journal copy fails for the one chat that has a journal
-    // (chat-doc); the journal-less chat-bare is untouched.
-    let target_journals = dir
-        .path()
-        .join("orgs")
-        .join("org1")
-        .join("user1")
-        .join("journals");
-    std::fs::remove_dir_all(&target_journals).expect("clear journals dir");
-    std::fs::write(&target_journals, b"obstruction").expect("plant journals obstruction");
+    // Fail the durable import receipt AFTER frame staging. The complete
+    // transaction must roll back; the metadata row stays retryable.
+    let handle = synced.doc_host.open(&chat_doc).unwrap();
+    let path = handle
+        .replica()
+        .unwrap()
+        .read(|j| Ok(j.path().unwrap().to_path_buf()))
+        .unwrap();
+    let target = rusqlite::Connection::open(path).unwrap();
+    target.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON sync3_public_imports BEGIN SELECT RAISE(ABORT,'test import failure'); END;").unwrap();
 
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported, _skipped, errors) = raw_summary(&events);
     assert_eq!(imported, 1, "the healthy chat still imports");
     assert_eq!(
@@ -289,6 +275,10 @@ async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() 
         "the failure is reported, not swallowed: {errors:?}"
     );
     assert!(errors[0].contains(&chat_doc), "{errors:?}");
+    assert!(
+        handle.read_entries().unwrap().is_empty(),
+        "failed receipt rolls all public frames back"
+    );
 
     // The failed chat's ROW must not exist — structural idempotence makes the
     // retry pick it up again instead of skipping a half-imported chat.
@@ -309,8 +299,8 @@ async fn per_item_failures_surface_in_the_summary_and_leave_the_row_retryable() 
     );
 
     // Retry after clearing the obstruction: only the failed chat imports.
-    std::fs::remove_file(&target_journals).expect("clear obstruction");
-    let events = run_import(&synced);
+    target.execute_batch("DROP TRIGGER fail_import").unwrap();
+    let events = run_import(&synced).await;
     let (imported, skipped, errors) = raw_summary(&events);
     assert!(errors.is_empty(), "retry is clean: {errors:?}");
     assert_eq!((imported, skipped), (1, 1));
@@ -326,7 +316,7 @@ async fn corrupt_marker_is_moved_aside_not_clobbered() {
     std::fs::write(dir.path().join("local-import.json"), b"{ not json").expect("plant corrupt");
 
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (_, _, errors) = raw_summary(&events);
     assert!(
         errors.is_empty(),
@@ -356,7 +346,7 @@ async fn marker_persistence_failure_is_an_import_error() {
     std::fs::create_dir_all(dir.path().join("local-import.json")).expect("plant marker dir");
 
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported, _, errors) = raw_summary(&events);
     assert_eq!(imported, 2, "data still imports");
     assert!(
@@ -393,7 +383,7 @@ async fn spaces_only_profile_imports_its_spaces() {
         .expect("status");
     assert_eq!((status.available_chats, status.available_spaces), (0, 1));
 
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     match events.last().expect("summary") {
         ImportEvent::Summary {
             imported_spaces,
@@ -421,14 +411,14 @@ async fn marker_keeps_one_entry_per_account() {
     let (..) = seed_local(dir.path()).await;
 
     let first = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
-    run_import(&first);
+    run_import(&first).await;
     first.shutdown().await;
     drop(first);
 
     // A second account on the same device imports too; its marker entry must
     // not erase the first account's grant.
     let second = assemble(EngineProfile::synced(dir.path(), "org2", "user2"));
-    run_import(&second);
+    run_import(&second).await;
     second.shutdown().await;
 
     assert!(marker_grants_read_root(dir.path(), "org1", "user1").is_some());
@@ -441,7 +431,7 @@ async fn later_local_work_imports_as_a_delta() {
     let (device, ..) = seed_local(dir.path()).await;
 
     let synced = assemble(EngineProfile::synced(dir.path(), "org1", "user1"));
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     assert_eq!(summary(&events).0, 2);
     synced.shutdown().await;
     drop(synced);
@@ -465,7 +455,7 @@ async fn later_local_work_imports_as_a_delta() {
         .expect("status");
     assert_eq!(status.available_chats, 1);
     assert!(status.imported_before);
-    let events = run_import(&synced);
+    let events = run_import(&synced).await;
     let (imported_chats, _, skipped_chats, _) = summary(&events);
     assert_eq!(imported_chats, 1);
     assert_eq!(skipped_chats, 2);

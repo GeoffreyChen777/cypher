@@ -32,6 +32,7 @@ use cypher_doc::{
 };
 use cypher_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
 use cypher_sync::DocsStore;
+mod v3;
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
@@ -137,6 +138,23 @@ struct EdgeRoomUrl {
 }
 
 impl cypher_sync::UrlProvider for EdgeRoomUrl {
+    fn request(
+        &self,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<cypher_sync::ConnectionRequest, cypher_sync::SyncError>,
+    > {
+        let base = self.base.clone();
+        let token = self.token.clone();
+        Box::pin(async move {
+            let bearer = token
+                .token()
+                .await
+                .ok_or_else(|| cypher_sync::SyncError::Auth("signed_out".into()))?;
+            cypher_sync::UrlProvider::request(&cypher_sync::AuthenticatedUrl::new(base, bearer))
+                .await
+        })
+    }
     fn url(&self) -> futures::future::BoxFuture<'static, Result<String, cypher_sync::SyncError>> {
         let token = self.token.clone();
         let base = self.base.clone();
@@ -196,6 +214,7 @@ struct DocHostInner {
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
+    replicas: OnceLock<Arc<crate::session_replicas::SessionReplicas>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -286,15 +305,19 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+    v3: Option<Arc<crate::session_replica::SessionReplica>>,
 }
 
 impl ChatDocHandle {
+    pub fn replica(&self) -> Option<&Arc<crate::session_replica::SessionReplica>> {
+        self.v3.as_ref()
+    }
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
 
-    pub fn doc(&self) -> &SessionDoc {
-        &self.doc
+    pub fn doc(&self) -> &ChatDocHandle {
+        self
     }
 
     pub fn doc_arc(&self) -> Arc<SessionDoc> {
@@ -353,6 +376,9 @@ impl ChatDocHandle {
     }
 
     pub fn connected(&self) -> bool {
+        if let Some(replica) = &self.v3 {
+            return replica.watch().borrow().phase == cypher_sync::sync3::Phase::Live;
+        }
         lock(&self.chat2).is_some()
     }
 
@@ -364,10 +390,10 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
-        if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
+        if self.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
-        self.doc.push_message(&SessionMessageEntry {
+        self.push_message(&SessionMessageEntry {
             id: message_id.to_string(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -411,7 +437,7 @@ impl ChatDocHandle {
 
     fn publish_messages(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
-        match self.doc.read_entries() {
+        match self.read_entries() {
             Ok(entries) => {
                 let joined = join_continuation_entries(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
@@ -439,7 +465,7 @@ impl ChatDocHandle {
 
     fn publish_commands(&self) {
         self.commands_dirty.store(false, Ordering::Release);
-        match self.doc.read_commands() {
+        match self.read_commands() {
             Ok(commands) => {
                 self.commands_tx.send_replace(commands);
             }
@@ -475,6 +501,7 @@ impl DocHost {
             inner: Arc::new(DocHostInner {
                 store,
                 config,
+                replicas: OnceLock::new(),
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
@@ -579,13 +606,40 @@ impl DocHost {
     pub fn set_repos(&self, repos: crate::repos::Repos) {
         let _ = self.inner.repos.set(repos);
     }
+    pub fn set_replicas(&self, replicas: Arc<crate::session_replicas::SessionReplicas>) {
+        let _ = self.inner.replicas.set(replicas);
+    }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
+    pub(crate) fn activate_workspace_demand(&self) {
+        let Some(workspace) = self.inner.workspace.get() else {
+            return;
+        };
+        let weak = Arc::downgrade(&self.inner);
+        workspace.set_demand_hook(Arc::new(move |chats| {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            if inner.shutdown.is_cancelled() {
+                return;
+            }
+            let host = DocHost { inner };
+            for chat in chats {
+                if host.is_host(&chat) {
+                    if let Err(error) = host.open(&chat) {
+                        tracing::warn!(%chat, %error, "workspace demand open failed");
+                    }
+                }
+            }
+        }));
+    }
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
-            self.spawn_cutover_watcher(chats);
-            self.spawn_migration_sweep();
+            if self.inner.replicas.get().is_none() {
+                self.spawn_cutover_watcher(chats);
+                self.spawn_migration_sweep();
+            }
         }
     }
 
@@ -757,6 +811,9 @@ impl DocHost {
     /// Open (or return) the chat's doc handle: load the local snapshot (or init fresh),
     /// start the change-driven task, and join the edge room when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
+        if self.inner.replicas.get().is_some() {
+            return self.open_v3(chat_id);
+        }
         // The registry names the sync room generation (docs/chat2-sync.md
         // M2): absent row / absent field = legacy s2. Read it BEFORE the
         // cached-handle check — a cached s2-mode handle for a chat another
@@ -950,6 +1007,7 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
             _sub: sub,
+            v3: None,
         });
         {
             let mut handles = lock(&self.inner.handles);
@@ -1093,6 +1151,7 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
             _sub: sub,
+            v3: None,
         });
         {
             let mut handles = lock(&self.inner.handles);
@@ -1603,6 +1662,9 @@ impl DocHost {
     /// the normal room flow. Idempotent: a doc with any message entry is
     /// never touched, and the salvage only runs on the hosting device.
     pub fn spawn_transcript_salvage(&self, journals_dir: std::path::PathBuf) {
+        if self.inner.replicas.get().is_some() {
+            return;
+        }
         let host = self.clone();
         self.spawn_worker(async move {
             // Let boot settle (registry load, room joins) before sweeping.
@@ -1962,38 +2024,49 @@ impl DocHost {
     /// write the durable final path into the doc's `sealedAttachments` map.
     /// The doc commit re-triggers the chat's drain, releasing any Run whose
     /// `pending_attachments` names this upload id — the queue-first ordering's
-    /// release valve. Best-effort: a chat this device doesn't host isn't open
-    /// here (the uploader targeted the host, so this only happens when a chat
-    /// moved hosts mid-upload); the id simply stays unsealed and the Run's
-    /// grace window resolves it.
-    pub fn seal_attachment(&self, chat_id: &str, upload_id: &str, path: &str, file_name: &str) {
+    /// release valve. A changed host, unresolved ownership or failed native
+    /// outbox write fails the RPC. The immutable file receipt allows an
+    /// explicit commit retry without rewriting the already-persisted bytes.
+    pub async fn seal_attachment(
+        &self,
+        chat_id: &str,
+        upload_id: &str,
+        path: &str,
+        file_name: &str,
+    ) -> Result<(), EngineError> {
         if !self.is_host(chat_id) {
-            tracing::warn!(
-                chat = %chat_id,
-                upload_id,
-                "attachment seal skipped: chat not hosted here"
-            );
-            return;
+            return Err(EngineError::Other("Attachment host changed".into()));
         }
-        let handle = match self.open(chat_id) {
-            Ok(handle) => handle,
-            Err(err) => {
-                tracing::warn!(chat = %chat_id, upload_id, error = %err, "seal: open failed");
-                return;
+        let handle = self.open(chat_id)?;
+        if let Some(replica) = &handle.v3 {
+            let mut status = replica.watch();
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let state = status.borrow_and_update().clone();
+                    if state.phase == cypher_sync::sync3::Phase::Live {
+                        return Ok::<_, EngineError>(());
+                    }
+                    if let Some(error) = state.error {
+                        return Err(EngineError::Other(error));
+                    }
+                    status
+                        .changed()
+                        .await
+                        .map_err(|_| EngineError::Other("Attachment replica closed".into()))?;
+                }
+            })
+            .await
+            .map_err(|_| EngineError::Other("Attachment seal timed out".into()))??;
+            if !self.is_host(chat_id) {
+                return Err(EngineError::Other("Attachment host changed".into()));
             }
-        };
-        if let Err(err) = handle.doc.seal_attachment(upload_id, path, file_name) {
-            tracing::warn!(chat = %chat_id, upload_id, error = %err, "seal write failed");
-        } else {
-            // A newly-created top-level Loro map is not guaranteed to wake
-            // every root subscription on older runtimes. Explicitly kick the
-            // host drain as well as relying on the doc change notification so
-            // a queued Run cannot remain parked after its final upload seals.
-            let host = self.clone();
-            tokio::spawn(async move {
-                host.drain_commands(&handle).await;
-            });
         }
+        handle.seal_attachment(upload_id, path, file_name)?;
+        let host = self.clone();
+        tokio::spawn(async move {
+            host.drain_commands(&handle).await;
+        });
+        Ok(())
     }
 
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
@@ -2007,7 +2080,7 @@ impl DocHost {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let now = now_ms();
-        let based_on = handle.doc.read_entries()?.last().map(|m| CommandBasedOn {
+        let based_on = handle.read_entries()?.last().map(|m| CommandBasedOn {
             turn_id: Some(m.id.clone()),
             frontier: None,
         });
@@ -2015,7 +2088,7 @@ impl DocHost {
             payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
         );
-        handle.doc.queue_command(&SessionCommandEntry {
+        handle.queue_command(&SessionCommandEntry {
             id: id.clone(),
             payload,
             issued_by: self.inner.config.device_id.clone(),
@@ -2059,7 +2132,7 @@ impl DocHost {
     /// only `issued_at` moves forward.
     pub fn retry_command(&self, chat_id: &str, command_id: &str) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
-        let commands = handle.doc.read_commands()?;
+        let commands = handle.read_commands()?;
         let old = commands
             .iter()
             .find(|command| command.id == command_id)
@@ -2100,14 +2173,10 @@ impl DocHost {
             payload: old.payload,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now,
-            based_on: handle
-                .doc
-                .read_entries()?
-                .last()
-                .map(|message| CommandBasedOn {
-                    turn_id: Some(message.id.clone()),
-                    frontier: None,
-                }),
+            based_on: handle.read_entries()?.last().map(|message| CommandBasedOn {
+                turn_id: Some(message.id.clone()),
+                frontier: None,
+            }),
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
@@ -2116,7 +2185,7 @@ impl DocHost {
             sent_at: old.sent_at.or(Some(old.issued_at)),
         };
         let retry_id = retry.id.clone();
-        handle.doc.queue_command(&retry)?;
+        handle.queue_command(&retry)?;
         self.nudge_remote_host(chat_id);
         Ok(retry_id)
     }
@@ -2316,6 +2385,12 @@ impl DocHost {
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
     pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
+        if handle.v3.is_some() {
+            if let Err(error) = self.drain_v3(handle).await {
+                tracing::error!(chat = %handle.chat_id, %error, "v3 command drain requires recovery");
+            }
+            return;
+        }
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
@@ -2455,10 +2530,11 @@ impl DocHost {
                     skipped.insert(entry.id.clone());
                 }
                 CommandDisposition::Execute => {
-                    let (status, resolution) = match self.execute(&sessions, handle, &entry).await {
-                        Ok(outcome) => outcome,
-                        Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
-                    };
+                    let (status, resolution) =
+                        match self.execute(&sessions, handle, &entry, None).await {
+                            Ok(outcome) => outcome,
+                            Err(err) => (SessionCommandStatus::Rejected, Some(err.to_string())),
+                        };
                     self.resolve_command(handle, &entry.id, status, resolution.as_deref());
                 }
             }
@@ -2492,6 +2568,7 @@ impl DocHost {
         sessions: &SessionsEngine,
         handle: &Arc<ChatDocHandle>,
         entry: &SessionCommandEntry,
+        publication: Option<crate::session_replica::ExecutionPublication>,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         match &entry.payload {
@@ -2534,7 +2611,6 @@ impl DocHost {
                     let mut sealed_paths = Vec::with_capacity(pending_attachments.len());
                     for pending in &pending_attachments {
                         let (path, _file_name) = handle
-                            .doc
                             .sealed_attachment(&pending.upload_id)
                             .map_err(|err| {
                                 EngineError::Other(format!(
@@ -2608,12 +2684,13 @@ impl DocHost {
                     }
                 }
                 sessions
-                    .dispatch_augmented(
+                    .dispatch_admitted(
                         chat_id,
                         harness,
                         request,
                         effective_agent_prompt,
                         Some(message_id.clone()),
+                        publication,
                     )
                     .await?;
                 Ok((SessionCommandStatus::Applied, None))
@@ -2623,6 +2700,29 @@ impl DocHost {
                 message_id,
                 agent_prompt,
             } => {
+                // Already admitted v3 steer commands keep their original
+                // permit whether delivered to a warm mailbox or a new process.
+                if publication.is_some() {
+                    let mut request = sessions
+                        .last_request(chat_id)
+                        .or_else(|| self.request_from_chat_row(chat_id, prompt))
+                        .ok_or_else(|| EngineError::Other("no prior run config".into()))?;
+                    request.prompt = prompt.clone();
+                    request.resume = None;
+                    request.attachments.clear();
+                    let harness = self.harness_for_request(chat_id, &request);
+                    sessions
+                        .dispatch_admitted(
+                            chat_id,
+                            harness,
+                            request,
+                            agent_prompt.clone(),
+                            message_id.clone(),
+                            publication,
+                        )
+                        .await?;
+                    return Ok((SessionCommandStatus::Applied, None));
+                }
                 match sessions
                     .steer_augmented(chat_id, prompt, agent_prompt.clone(), message_id.clone())
                     .await?
@@ -2838,6 +2938,9 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        if handle.v3.is_some() {
+            return;
+        }
         // Temporary Side Chats never persist until promotion (host-memory
         // only by contract — dispose leaves no durable remnants).
         if handle.ephemeral.load(Ordering::Acquire) {

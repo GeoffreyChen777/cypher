@@ -21,6 +21,8 @@ tracing.workspace = true
 uuid.workspace = true
 url = "2"
 libc.workspace = true
+base64 = "0.22"
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 cypher-doc.workspace = true

@@ -186,6 +186,8 @@ struct RenderToolCall: Hashable {
     var fields: [String: AnyHashable]
     var subagent: SubagentCallMetadata? = nil
     var progress: String? = nil
+    /// Full public v3 render metadata, including artifact references and diffs.
+    var details: [String: JSONValue] = [:]
 
     var string: (String) -> String? { { key in self.fields[key] as? String } }
 }
@@ -214,13 +216,6 @@ struct MessageEntry: Identifiable, Hashable {
     var continuationOf: String?
     /// Explicit sender intent from the durable command ledger, not a claim
     /// that the agent has consumed the instruction (or a new wire field).
-    var isSteer = false
-}
-
-struct PendingSend {
-    var messageId: String
-    var text: String
-    var at: Int64
     var isSteer = false
 }
 

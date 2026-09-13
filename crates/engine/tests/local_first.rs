@@ -49,21 +49,46 @@ async fn duplicate_headless_start_cannot_touch_the_owned_auth_session() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
 }
 
-async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+#[derive(Default)]
+struct RequestCounter {
+    received: AtomicUsize,
+    connections: Mutex<Vec<std::time::Instant>>,
+}
+impl RequestCounter {
+    fn load(&self, ordering: Ordering) -> usize {
+        self.received.load(ordering)
+    }
+    fn started_after(&self, boundary: std::time::Instant) -> usize {
+        self.connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|started| **started > boundary)
+            .count()
+    }
+}
+
+async fn rejecting_edge() -> (String, Arc<RequestCounter>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let requests = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(RequestCounter::default());
     let seen = requests.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let accepted = std::time::Instant::now();
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                // A connection cancelled at shutdown can produce EOF without
+                // ever sending HTTP. Count requests, not these empty sockets.
+                if !matches!(stream.read(&mut request).await, Ok(n) if n > 0) {
+                    return;
+                }
+                seen.connections.lock().unwrap().push(accepted);
+                seen.received.fetch_add(1, Ordering::SeqCst);
                 // A permanent rejection: 401 with the stable `invalid_grant`
                 // machine code (the real edge's shape for a dead refresh token).
                 let body = r#"{"error":"revoked","code":"invalid_grant"}"#;
@@ -217,6 +242,25 @@ async fn serve_daemon_edge(
     let (mut sink, mut source) = ws.split();
     while let Some(frame) = source.next().await {
         let Ok(frame) = frame else { return };
+        if path.starts_with("/workspace3/") {
+            if let WsMessage::Text(text) = &frame {
+                let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
+                    continue;
+                };
+                if frame["type"] == "hello" {
+                    let reply = serde_json::json!({"version":3,"type":"welcome","user":frame["user"],"org":frame["org"],
+                        "connection":"fixture","leaseMs":45000,"through":0,"next":0,"done":true,"rows":[]});
+                    if sink
+                        .send(WsMessage::Text(reply.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            continue;
+        }
         if path.starts_with("/registry/")
             && let WsMessage::Text(text) = frame
         {
@@ -591,15 +635,15 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     .await
     .expect("headless IPC did not start");
     wait_until(
-        || edge.active_matching("/registry/") > 0,
-        "registry room did not connect",
+        || edge.active_matching("/workspace3/") > 0,
+        "workspace v3 did not connect",
     )
     .await;
-    wait_until(
-        || edge.active_matching("/device/") > 0,
-        "device relay did not connect",
-    )
-    .await;
+    assert_eq!(
+        edge.active_matching("/device/"),
+        0,
+        "normal v3 has no device relay socket"
+    );
 
     assert_eq!(
         client
@@ -659,7 +703,7 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     tokio::time::timeout(std::time::Duration::from_secs(30), runtime.shutdown())
         .await
         .expect("shutdown never returned — an Edge worker did not join");
-    let after = requests.load(Ordering::SeqCst);
+    let shutdown_returned = std::time::Instant::now();
     drop(runtime);
 
     wait_until(
@@ -670,10 +714,14 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     // Long enough to cover a couple of worker retry periods: a surviving
     // Edge worker loop would land another request in this window.
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    // A pre-existing connection's read task may only run after shutdown
+    // returns. Receipt time cannot establish when a request was initiated.
+    // This fixture serves exactly ONE request per TCP connection (no
+    // keepalive), so a new request requires a new accepted connection.
     assert_eq!(
-        requests.load(Ordering::SeqCst),
-        after,
-        "edge received requests after shutdown returned"
+        requests.started_after(shutdown_returned),
+        0,
+        "edge accepted a new request connection after shutdown returned"
     );
     edge_task.abort();
 }

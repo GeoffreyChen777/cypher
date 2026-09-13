@@ -175,27 +175,35 @@ final class SubagentsTests: XCTestCase {
 
     @MainActor
     func testWorkspaceProjectsChildrenAndSnapshotsWithoutPollutingRootLists() throws {
-        let doc = RegistryDoc(deviceId: "ios-test")
-        doc.write(kind: "spaces", id: "project", op: .upsert, set: [
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
+        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) } }
+        let journal = try Workspace3Journal(url: url, scope: Workspace3Scope(endpoint: "local", org: "test", user: "test", actor: "ios-test"))
+        func write(_ kind: String, _ id: String, _ fields: [String: JSONValue]) throws {
+            try journal.mutate([Workspace3Op(kind: kind, id: id, op: .upsert, set: fields, hlc: "")], now: now)
+        }
+        try write("spaces", "project", [
             "deviceId": .string("host"), "path": .string("/project")])
-        doc.write(kind: "chats", id: "parent", op: .upsert, set: [
+        try write("chats", "parent", [
             "deviceId": .string("host"), "spaceId": .string("project")])
         let relation: JSONValue = .object([
             "parentChatId": .string("parent"), "parentRunId": .string("run"),
             "agent": .string("planner"), "task": .string("Plan"), "mode": .string("async"),
             "toolCallId": .string("tool"), "profile": .object(["systemPrompt": .string("keep")])])
-        doc.write(kind: "chats", id: "child", op: .upsert, set: [
+        try write("chats", "child", [
             "deviceId": .string("host"), "spaceId": .string("project"), "child": relation])
-        doc.write(kind: "chats", id: "broken", op: .upsert, set: [
+        try write("chats", "broken", [
             "deviceId": .string("host"), "spaceId": .string("project"), "child": .object([:])])
         let runs = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode([makeRun()]))
-        doc.write(kind: "sessions", id: "parent", op: .upsert, set: [
-            "chatId": .string("parent"), "deviceId": .string("host"),
-            "status": .string("working"), "updatedAt": .int(now), "subagents": runs])
         let config = AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
             userId: "test", orgId: "test", deviceId: "ios-test", deviceName: "Test")
         // Never start the store: no network, no disk, no Runtime/LLM.
-        let store = WorkspaceStore(config: config, initialDocument: doc)
+        let store = WorkspaceStore(config: config, initialJournal: journal)
+        store.consume(.frame(1, ["type": .string("presence"), "role": .string("host"),
+            "actor": .string("host"), "connection": .string("connection"), "expiresAt": .int(nowMs() + 45000),
+            "state": .object(["sessions": .array([.object([
+                "chatId": .string("parent"), "deviceId": .string("host"), "status": .string("working"),
+                "updatedAt": .int(now), "subagents": runs
+            ])])])]))
         XCTAssertEqual(store.chats(in: "project").map(\.id), ["parent"])
         XCTAssertEqual(store.overviewChats.map(\.id), ["parent"])
         XCTAssertNotNil(store.chats.first { $0.id == "child" })
@@ -205,7 +213,7 @@ final class SubagentsTests: XCTestCase {
         XCTAssertTrue(store.archivedChats(in: "project").isEmpty)
         store.setChatConfig(chatId: "child", config: ChatConfig(
             harness: "pi", model: "provider/new", reasoning: "high", sandbox: nil))
-        XCTAssertEqual(doc.overlayRow(kind: "chats", id: "child")?.fields["child"], relation,
+        XCTAssertEqual(try journal.row(kind: "chats", id: "child")?.fields["child"], relation,
                        "Editing run config must never rewrite the persisted child profile")
     }
 

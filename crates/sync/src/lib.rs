@@ -18,6 +18,7 @@ mod store;
 pub mod sync3;
 mod types;
 pub mod wake;
+pub mod workspace3;
 
 pub use chat_client::{
     ChatClient, ChatDocSink, ChatEvent, ChatStatsSnapshot, ChatTransport, ChatTuning,
@@ -25,4 +26,8 @@ pub use chat_client::{
 };
 pub use registry::{RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning};
 pub use store::{DocsStore, StoreError};
-pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
+pub use types::{
+    AccountUrl, AuthenticatedUrl, EXPECTED_USER_HEADER, RoomStatsSnapshot, StaticUrl, SyncError,
+    UrlProvider,
+};
+pub type ConnectionRequest = tokio_tungstenite::tungstenite::handshake::client::Request;

@@ -59,7 +59,6 @@ final class AppModel {
 
     func restore() {
         if demo != nil { return }
-        DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments
         // Hard cutover: both prior production edge URLs (the old mvp-lab
         // default and the interim workers.dev default) are migrated to the
@@ -273,7 +272,8 @@ final class AppModel {
         demo = nil
         Keychain.delete(key: "accessToken")
         Keychain.delete(key: "refreshToken")
-        DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
+        // Native journals are bound to endpoint/account/device. Never import
+        // or prune retired snapshot formats during native startup/logout.
         storedUserId = ""
         storedOrgId = ""
         phase = .signedOut
@@ -527,7 +527,6 @@ final class AppModel {
     /// Persist every open doc now (app backgrounding).
     func flushDocs() {
         workspace?.flushToDisk()
-        sessionStores.values.forEach { $0.flushToDisk() }
     }
 
     /// Foreground hook: kick every room NOW (see ChatRoomClient.kick) — after
@@ -540,13 +539,6 @@ final class AppModel {
 
     private func kickAllRooms() {
         workspace?.kickRoom()
-        // Deliver any roomGen flips that landed while the store had no open
-        // view, then kick every room.
-        if let workspace {
-            for chat in workspace.chats {
-                sessionStores[chat.id]?.updateRoomGen(chat.roomGen)
-            }
-        }
         sessionStores.values.forEach { $0.kickRoom() }
     }
 
@@ -593,14 +585,12 @@ final class AppModel {
             // The registry flip to chat2 can land while the store is open —
             // views re-derive `chat` from the registry on every change, so
             // this accessor is the flip's delivery path.
-            existing.updateRoomGen(chat.roomGen)
             return existing
         }
         let store = SessionStore(chatId: chat.id, config: config)
         store.hostDeviceId = chat.deviceId
         sessionStores[chat.id] = store
         store.start()
-        store.updateRoomGen(chat.roomGen)
         return store
     }
 

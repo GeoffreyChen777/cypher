@@ -49,6 +49,18 @@ pub struct DocsStore {
 }
 
 impl DocsStore {
+    /// Transitional storage-root discovery; new stores use their own scoped
+    /// SQLite file and never read a legacy snapshot to initialize it.
+    pub fn directory(&self) -> Result<std::path::PathBuf, StoreError> {
+        let conn = self.conn();
+        let path = conn
+            .path()
+            .ok_or_else(|| std::io::Error::other("store has no file path"))?;
+        Ok(Path::new(path)
+            .parent()
+            .ok_or_else(|| std::io::Error::other("store has no directory"))?
+            .to_path_buf())
+    }
     /// Open (creating directory, database, and schema as needed).
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
         let data_dir = data_dir.as_ref();

@@ -28,6 +28,8 @@ final class NotificationController {
     private var deferredTap: PushPayload?
     private var settingsRevision = 0
     private var activityClientId = ""
+    // Activity is reported only on semantic foreground/chat changes. Presence
+    // leases ride WorkspaceHub; there is no standalone HTTP heartbeat.
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
     @ObservationIgnored private var revokeTask: Task<Void, Never>?
     @ObservationIgnored private var badgeTask: Task<Void, Never>?
@@ -39,7 +41,7 @@ final class NotificationController {
         return Keychain.load(key: NotificationController.storageKey) == $0
     }
     @ObservationIgnored var perform: (URLRequest) async throws -> (Data, URLResponse) = {
-        try await URLSession.shared.data(for: $0)
+        try await V3HTTP.notification($0)
     }
     @ObservationIgnored var authorization: () async -> UNAuthorizationStatus = {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
@@ -95,13 +97,7 @@ final class NotificationController {
         seenEvents = []
         completeDeferredTap()
         heartbeat?.cancel()
-        heartbeat = Task { [weak self] in
-            await self?.refresh()
-            while !Task.isCancelled {
-                self?.reportActivity()
-                try? await Task.sleep(for: .seconds(15))
-            }
-        }
+        heartbeat = Task { [weak self] in await self?.refresh() }
         drainRevocations()
     }
 
@@ -142,7 +138,8 @@ final class NotificationController {
         guard self.config === config, !Task.isCancelled else { throw RelayError.notConnected }
         guard let token = await config.currentToken() else { throw RelayError.notConnected }
         guard self.config === config, !Task.isCancelled else { throw RelayError.notConnected }
-        var req = URLRequest(url: config.edgeURL.appending(path: "registry/\(config.orgId)/notifications/\(action)"))
+        var req = URLRequest(url: config.edgeURL.appending(path: "workspace3/\(config.orgId)/notifications/\(action)"))
+        req.setValue(config.userId, forHTTPHeaderField: "x-cypher-expected-user")
         req.httpMethod = method
         req.httpBody = body
         req.timeoutInterval = 15
