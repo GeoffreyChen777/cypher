@@ -102,3 +102,8 @@ Uploading a build, enabling tester groups/public links, accepting agreements,
 and submitting for review are separate actions. Confirm them before execution.
 Never put Apple passwords, 2FA codes, certificate private keys, or API tokens
 in chat, argv, logs, or git.
+
+TestFlight upload is intentionally a **local-only release operation**. GitHub
+Actions validates source and platform artifacts; the authorized operator
+archives, exports, verifies, and uploads from a signed Xcode/App Store Connect
+session on the release Mac.
