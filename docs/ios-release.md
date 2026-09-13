@@ -27,6 +27,15 @@ distribution through a device-development signing setup.
   not proof of Apple processing completion or real-device acceptance.
   The new release includes unread-session icon badges, quiet reconnect status
   and distinct steer bubbles; see [notifications.md](notifications.md).
+- On 2026-09-13, the native-v3 client was archived locally as
+  **0.1.6 (4)**, manually signed with the existing `Apple Distribution:
+  Changrui Chen (999875MHT4)` identity and the local
+  `Cypher iOS App Store Distribution 2026` profile. The IPA passed strict
+  deep code-sign verification and was uploaded from Xcode 26.6 with
+  `destination=upload`; Xcode reported **Upload succeeded** and
+  **Uploaded package is processing**. This is upload acceptance only;
+  App Store Connect processing and physical-device acceptance remain separate
+  checks.
 - `ExportOptions-TestFlight.plist` requests **local export**, not upload.
   Version/build auto-management is disabled.
 - With explicit approval, `0.1.3 (1)` was uploaded on 2026-09-07 using a
