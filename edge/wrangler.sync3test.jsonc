@@ -3,6 +3,7 @@
   "name": "cypher-sync3-local-test",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  "alias": { "loro-crdt": "loro-crdt/base64" },
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
   "durable_objects": {
     "bindings": [

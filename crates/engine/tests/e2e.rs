@@ -1404,7 +1404,11 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
     )
     .await;
     wait_for(
-        || core.sessions.session_status(CHAT).is_some_and(|s| s.status == SessionStatus::Idle),
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
         "answered turn to settle idle",
     )
     .await;
