@@ -24,6 +24,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod mcp;
 mod native_watch;
+pub mod notification_outbox;
 pub mod pi_packages;
 pub mod pi_providers;
 pub mod pi_runtime;
@@ -145,6 +146,7 @@ pub struct EngineCore {
     /// Session Fork (v1): clone a settled transcript prefix into a NEW
     /// durable root Pi chat on the source chat's host device.
     pub session_forks: SessionForks,
+    notification_outbox: Arc<notification_outbox::NotificationOutbox>,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -165,6 +167,40 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
+    fn drain_notification_outbox(&self, auth: Auth) {
+        let queue = self.notification_outbox.clone();
+        if !queue.begin_drain() {
+            return;
+        }
+        let user = self.workspace.user_id().to_owned();
+        let org = self.workspace.org_id().to_owned();
+        tokio::spawn(async move {
+            loop {
+                let pending = queue.pending().unwrap_or_default();
+                if pending.is_empty() {
+                    queue.end_drain();
+                    break;
+                }
+                let mut delivered = 0;
+                for (id, session) in pending {
+                    match auth.report_notification_event(&user, &org, &session).await {
+                        Ok(_) => {
+                            let _ = queue.remove(&id);
+                            delivered += 1;
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "notification event delivery deferred");
+                            break;
+                        }
+                    }
+                }
+                if delivered == 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            }
+        });
+    }
+
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
     /// `$CYPHER_ORG_ID` / `$CYPHER_USER_ID` (dev defaults `dev-org` /
@@ -309,6 +345,10 @@ impl EngineCore {
         });
         let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
         let title_settings = title_settings::TitleSettingsStore::new(data_dir);
+        let notification_outbox = Arc::new(
+            notification_outbox::NotificationOutbox::open(profile.store_root())
+                .map_err(|e| EngineError::Other(format!("notification outbox: {e}")))?,
+        );
         sessions.set_titles(
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
                 .with_settings(title_settings.clone()),
@@ -334,6 +374,7 @@ impl EngineCore {
             title_settings,
             side_chats,
             session_forks,
+            notification_outbox,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -353,20 +394,18 @@ impl EngineCore {
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
         let workspace = self.workspace.clone();
-        let event_auth = auth.clone();
-        let expected_user = workspace.user_id().to_string();
-        let expected_org = workspace.org_id().to_string();
+        let outbox = self.notification_outbox.clone();
         workspace.set_notification_event_hook(std::sync::Arc::new(move |session| {
-            let auth = event_auth.clone();
-            let user = expected_user.clone();
-            let org = expected_org.clone();
             let session = session.clone();
+            let outbox = outbox.clone();
             tokio::spawn(async move {
-                if let Err(err) = auth.report_notification_event(&user, &org, &session).await {
-                    tracing::debug!(error = %err, "notification event unavailable");
+                if let Err(err) = outbox.enqueue(&session) {
+                    tracing::error!(error = %err, "notification event durability failed");
+                    return;
                 }
             });
         }));
+        self.drain_notification_outbox(auth.clone());
         *self
             .auth
             .lock()

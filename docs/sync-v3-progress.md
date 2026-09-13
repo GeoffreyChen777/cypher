@@ -734,6 +734,24 @@ notification durable handoff/APNs, remaining old source/dependency removal,
 full fault/cost/platform/release gates, production canary and TestFlight
 delivery require further implementation and verification.
 
+## Continuation 31 — durable notification handoff
+
+- Engine semantic session transitions are now written to a private SQLite
+  `notification-outbox.sqlite` before delivery is attempted. Stable SHA-256
+  event IDs deduplicate retries; successful coordinator responses remove only
+  their exact receipt. Failed delivery remains queued and a single bounded
+  drain loop retries it every 30 seconds, including after engine restart and
+  auth reattachment.
+- The previous fire-and-forget notification callback could lose an event
+  between process failure and HTTP submission; it now records the event first
+  and never converts a durability error into a successful state transition.
+- Engine notification outbox test passes: durable event round-trip and
+  duplicate suppression. Workspace/Engine check remains green.
+
+This does not yet prove APNs delivery or notification activity replacement:
+physical device delivery, coordinator handoff under process kill, and the
+remaining old SessionDoc/chat2 retirement are still release gates.
+
 ## Continuation 29 — notification activity is event-driven
 
 - iOS notification coordination no longer starts a periodic 15-second HTTP
