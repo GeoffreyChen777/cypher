@@ -10,6 +10,9 @@
   "compatibility_date": "2026-07-01",
   "account_id": "1489e726fc5baa8ecc7a6e1a8c8ed3f8",
   "workers_dev": true,
+  // loro-crdt's default entry loads WASM via URL; workerd needs the inlined
+  // base64 entry even though v3 runtime routes no longer open legacy docs.
+  "alias": { "loro-crdt": "loro-crdt/base64" },
   // Canonical production hostname: edge.letscypher.app (custom domain, auto-
   // provisions DNS + TLS on the letscypher.app zone). workers.dev stays
   // enabled as a fallback: cypher-edge.<account>.workers.dev keeps serving the
