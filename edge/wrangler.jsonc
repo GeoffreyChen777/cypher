@@ -31,24 +31,24 @@
   ],
   "migrations": [
     {
-      "tag": "v1-v3-fresh",
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionRoom", "DeviceRoom"]
+    },
+    {
+      "tag": "v2",
       "new_sqlite_classes": ["RegistryRoom"]
     },
     {
-      "tag": "v2-sync3",
-      "new_sqlite_classes": ["Sync3Room"]
+      "tag": "v3",
+      "new_sqlite_classes": ["ChatRoom"]
     },
     {
-      "tag": "v3-push-devices",
+      "tag": "v4",
       "new_sqlite_classes": ["PushDevice"]
     },
     {
-      "tag": "v4-workspace3",
-      "new_sqlite_classes": ["WorkspaceHub"]
-    },
-    {
-      "tag": "v5-retire-registry",
-      "deleted_classes": ["RegistryRoom"]
+      "tag": "v5-v3-native",
+      "new_sqlite_classes": ["Sync3Room", "WorkspaceHub"]
     }
   ],
   "r2_buckets": [

@@ -1403,6 +1403,11 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
         "answered turn to complete",
     )
     .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).is_some_and(|s| s.status == SessionStatus::Idle),
+        "answered turn to settle idle",
+    )
+    .await;
     assert_eq!(
         core.sessions.session_status(CHAT).map(|s| s.status),
         Some(SessionStatus::Idle)
