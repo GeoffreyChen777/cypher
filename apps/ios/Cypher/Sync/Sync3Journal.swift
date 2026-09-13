@@ -18,6 +18,12 @@ struct Sync3MessageWindow {
     let messages: [[String: JSONValue]]
 }
 
+struct Sync3RenderSnapshot {
+    let through: Int64
+    let messages: [[String: JSONValue]]
+    let steerIDs: Set<String>
+}
+
 @MainActor
 final class Sync3Journal {
     private var db: OpaquePointer?
@@ -92,9 +98,16 @@ final class Sync3Journal {
         guard (1...32).contains(limit), before.map({ $0 >= 0 && $0 <= Sync3Wire.maxSafeInteger }) ?? true else {
             try Sync3Wire.fail("invalid_window")
         }
-        var through: Int64 = 0, messages: [[String: JSONValue]] = []
+        var window: Sync3MessageWindow?
         try transaction(readOnly: true) {
-            through = try cursor
+            window = try readMessageWindow(before: before, limit: limit, through: cursor)
+        }
+        return window!
+    }
+    /// Caller holds the read transaction, so paging and the watermark refer
+    /// to the same SQLite snapshot even with a second database connection.
+    private func readMessageWindow(before: Int64?, limit: Int, through: Int64) throws -> Sync3MessageWindow {
+            var messages: [[String: JSONValue]] = []
             let rows = try query(
                 "SELECT id,body,created_seq FROM sync3_entities INDEXED BY sync3_message_order WHERE kind='messages' AND created_seq<? ORDER BY created_seq DESC LIMIT ?",
                 [String(before ?? (Sync3Wire.maxSafeInteger + 1)), String(limit)], byteBudget: (1, 1024 * 1024))
@@ -108,26 +121,62 @@ final class Sync3Journal {
                 try checked.install(kind: "messages", id: row[0]!, record: record)
                 messages.append(record)
             }
-        }
         return Sync3MessageWindow(through: through, messages: messages.reversed())
     }
     /// Reconstruct the transcript through bounded indexed windows. This keeps
     /// each SQLite read bounded even when the conversation is large; callers
     /// may still choose a smaller render window and request older pages later.
     func allMessagesBounded() throws -> [[String: JSONValue]] {
-        var before: Int64?
         var result: [[String: JSONValue]] = []
+        try transaction(readOnly: true) { result = try readAllMessages(through: cursor) }
+        return result
+    }
+    private func readAllMessages(through: Int64) throws -> [[String: JSONValue]] {
+        var before: Int64?
+        var pages: [[[String: JSONValue]]] = []
         while true {
-            let page = try messageWindow(before: before, limit: 32)
+            let page = try readMessageWindow(before: before, limit: 32, through: through)
             guard !page.messages.isEmpty else { break }
-            result.insert(contentsOf: page.messages, at: 0)
+            pages.append(page.messages)
             guard let first = page.messages.first,
                   let sequence = first["createdSeq"]?.int64Value, sequence > 0 else {
                 try Sync3Wire.fail("invalid_projection")
             }
             before = sequence
         }
-        return result
+        return pages.reversed().flatMap { $0 }
+    }
+    /// The normal renderer needs messages and steer identities, not execution,
+    /// run or attachment entities. Each SQL fetch is row/byte bounded and every
+    /// page shares one read transaction. This still materializes full history
+    /// for the current UI; it is NOT a bounded-residency viewport.
+    func renderSnapshot() throws -> Sync3RenderSnapshot {
+        var through: Int64 = 0
+        var messages: [[String: JSONValue]] = []
+        var steerIDs = Set<String>()
+        try transaction(readOnly: true) {
+            through = try cursor
+            messages = try readAllMessages(through: through)
+            var after = ""
+            while true {
+                let rows = try query("""
+                    SELECT id,body FROM sync3_entities
+                    WHERE kind='commands' AND id>? ORDER BY id LIMIT 32
+                    """, [after], byteBudget: (1, 1024 * 1024))
+                guard !rows.isEmpty else { break }
+                for row in rows {
+                    let record = try JSONDecoder().decode([String: JSONValue].self, from: Data(row[1]!.utf8))
+                    var checked = Sync3Projection()
+                    try checked.install(kind: "commands", id: row[0]!, record: record)
+                    let payload = record["command"]?.objectValue?["payload"]?.objectValue
+                    if payload?["kind"] == .string("steer"), let id = payload?["messageId"]?.stringValue {
+                        steerIDs.insert(id)
+                    }
+                }
+                after = rows.last![0]!
+            }
+        }
+        return Sync3RenderSnapshot(through: through, messages: messages, steerIDs: steerIDs)
     }
     func hello() throws -> [String: JSONValue] {
         ["type": .string("hello"), "version": .int(3), "actor": .string(actor),

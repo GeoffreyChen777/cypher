@@ -163,19 +163,15 @@ final class SessionStore {
     }
 
     // MARK: Projection
-    private func project() {
+    func project() {
         guard let journal = sync3Journal else { return }
         do {
             let cursor = try journal.cursor
             guard projectedCursor != cursor else { return }
             pendingSends = try journal.pendingSends()
-            var bounded = try journal.projection
-            bounded.messages = Dictionary(uniqueKeysWithValues: try journal.allMessagesBounded().compactMap {
-                guard let id = $0["id"]?.stringValue else { return nil }
-                return (id, $0)
-            })
-            apply(try Self.decodeEntries(from: bounded))
-            projectedCursor = cursor
+            let snapshot = try journal.renderSnapshot()
+            apply(try Self.decodeEntries(records: snapshot.messages, steerIDs: snapshot.steerIDs))
+            projectedCursor = snapshot.through
         } catch {
             self.error = String(describing: error)
         }
@@ -227,6 +223,10 @@ final class SessionStore {
         let records = projection.messages.values.sorted {
             ($0["createdSeq"]?.int64Value ?? 0) < ($1["createdSeq"]?.int64Value ?? 0)
         }
+        return try decodeEntries(records: records, steerIDs: steerIDs)
+    }
+
+    nonisolated static func decodeEntries(records: [[String: JSONValue]], steerIDs: Set<String>) throws -> [MessageEntry] {
         return try joinContinuations(records.map { record in
             guard let entry = record["entry"]?.objectValue,
                   let id = entry["id"]?.stringValue,
