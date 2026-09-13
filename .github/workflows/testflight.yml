@@ -34,9 +34,7 @@ jobs:
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$out/Cypher.xcarchive" \
             -allowProvisioningUpdates \
-            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGNING_ALLOWED=NO \
             MARKETING_VERSION=0.1.6 CURRENT_PROJECT_VERSION=4
       - name: export distribution IPA
         env:
