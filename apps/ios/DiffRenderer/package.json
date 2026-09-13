@@ -1,0 +1,15 @@
+{
+  "name": "cypher-ios-diff-renderer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.4.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

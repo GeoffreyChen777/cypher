@@ -1,0 +1,1061 @@
+//! cypher-update — release checking and self-update, shared by the engine (the
+//! background checker + `ApplyUpdate`), the CLI (`cypher update`), and the UI
+//! (the sidebar update strip + macOS bundle swap).
+//!
+//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
+//! artifacts live in the `cypher-releases` R2 bucket, served pre-auth at
+//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
+//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
+//! releases published before the manifest existed.
+//!
+//! Install kinds and their update paths:
+//! - **Managed** (`~/.cypher/app/<ver>` + `current` symlink — the curl|sh
+//!   installer): download the headless tarball into a new versioned dir, flip
+//!   the symlink, restart the service. Same flow the installer script performs,
+//!   natively.
+//! - **MacApp** (running out of a `Cypher.app` bundle): download the app
+//!   tarball, swap the bundle directory, relaunch. Driven by the UI.
+//! - **Unmanaged** (source builds, hand-copied binaries): report only.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context as _, bail};
+use futures::StreamExt as _;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::watch;
+
+/// The version compiled into this binary (the workspace version).
+pub const fn current_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Background check cadence.
+const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// Retry sooner after a failed check (offline boot, transient edge error).
+const CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// First check waits out engine boot (room joins, doc re-sync).
+const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
+/// While an auto-apply is deferred behind active sessions, re-probe idleness
+/// this often.
+const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+// ---------------------------------------------------------------------------
+// Release metadata
+// ---------------------------------------------------------------------------
+
+/// `{edge}/releases/manifest.json` — written by the release workflow.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: String,
+    /// Artifact file name → metadata. Empty for pre-manifest releases resolved
+    /// via `latest.txt` — downloads then require the artifact's .sha256 sidecar.
+    #[serde(default)]
+    pub files: BTreeMap<String, FileMeta>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileMeta {
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// Artifact-name platform pair — `uname`-style strings matching the packaging
+/// scripts: `linux-x86_64`, `linux-aarch64`, `macos-arm64`.
+pub fn platform_key() -> (&'static str, &'static str) {
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let arch = match (os, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "arm64",
+        (_, arch) => arch,
+    };
+    (os, arch)
+}
+
+/// `cypher-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+pub fn headless_artifact(version: &str) -> String {
+    let (os, arch) = platform_key();
+    format!("cypher-{version}-{os}-{arch}.tar.gz")
+}
+
+/// `cypher-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+pub fn mac_app_artifact(version: &str) -> String {
+    let (_, arch) = platform_key();
+    format!("cypher-{version}-macos-{arch}-app.tar.gz")
+}
+
+/// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
+/// Unparseable versions never count as newer — a garbage `latest.txt` must not
+/// trigger an update loop.
+pub fn version_newer(latest: &str, current: &str) -> bool {
+    fn parts(v: &str) -> Option<Vec<u64>> {
+        let nums: Vec<u64> = v
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect::<Option<_>>()?;
+        (!nums.is_empty()).then_some(nums)
+    }
+    match (parts(latest), parts(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    }
+}
+
+/// Fetch the newest release metadata: `manifest.json`, falling back to
+/// `latest.txt` (version only, no checksums) for pre-manifest releases.
+pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
+    let base = edge_url.trim_end_matches('/');
+    let client = http_client()?;
+    let manifest_url = format!("{base}/releases/manifest.json");
+    match client
+        .get(&manifest_url)
+        .send()
+        .await
+        .context("fetching manifest.json")?
+    {
+        resp if resp.status().is_success() => {
+            let manifest: Manifest =
+                serde_json::from_slice(&limited_body(resp, 1024 * 1024).await?)
+                    .context("parsing manifest.json")?;
+            validate_version(&manifest.version)?;
+            return Ok(manifest);
+        }
+        resp if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+            tracing::debug!(status = %resp.status(), "manifest.json unavailable; trying latest.txt")
+        }
+        resp => bail!("fetching manifest.json failed (HTTP {})", resp.status()),
+    }
+    let latest_url = format!("{base}/releases/latest.txt");
+    let response = client
+        .get(&latest_url)
+        .send()
+        .await
+        .context("fetching latest.txt")?
+        .error_for_status()
+        .context("fetching latest.txt")?;
+    let version = String::from_utf8(limited_body(response, 256).await?)?
+        .trim()
+        .to_string();
+    validate_version(&version)?;
+    Ok(Manifest {
+        version,
+        files: BTreeMap::new(),
+    })
+}
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("cypher/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building http client")
+}
+
+fn validate_version(version: &str) -> anyhow::Result<()> {
+    if version.is_empty()
+        || version.len() > 64
+        || version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        bail!("invalid release version");
+    }
+    Ok(())
+}
+
+async fn limited_body(response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len() + chunk.len() > limit {
+            bail!("release metadata exceeds size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// ---------------------------------------------------------------------------
+// Install-kind detection
+// ---------------------------------------------------------------------------
+
+/// How this binary was installed — decides the update path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallKind {
+    /// `~/.cypher/app/<ver>/cypher` behind the `current` symlink (curl|sh
+    /// installer / a previous `cypher update`).
+    Managed { app_root: PathBuf },
+    /// Running out of a macOS `.app` bundle.
+    MacApp { bundle: PathBuf },
+    /// Source build or hand-copied binary — updates are report-only.
+    Unmanaged,
+}
+
+pub fn detect_install() -> InstallKind {
+    let Ok(exe) = std::env::current_exe() else {
+        return InstallKind::Unmanaged;
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    detect_install_from(&exe, home.as_deref())
+}
+
+fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
+    if let Some(home) = home {
+        // `current_exe` resolves the `current` symlink to the versioned dir;
+        // installs live under `~/.cypher/app`.
+        let app_root = home.join(".cypher").join("app");
+        if exe.starts_with(&app_root) {
+            return InstallKind::Managed { app_root };
+        }
+    }
+    for ancestor in exe.ancestors() {
+        if ancestor.extension().is_some_and(|ext| ext == "app")
+            && exe.starts_with(ancestor.join("Contents").join("MacOS"))
+        {
+            return InstallKind::MacApp {
+                bundle: ancestor.to_path_buf(),
+            };
+        }
+    }
+    InstallKind::Unmanaged
+}
+
+// ---------------------------------------------------------------------------
+// Download + verify
+// ---------------------------------------------------------------------------
+
+/// Stream `{edge}/releases/<file>` to `dest`, requiring the manifest sha256 or
+/// a standalone checksum for legacy metadata. Writes through a private temp file so an interrupted download never
+/// leaves a plausible-looking artifact behind.
+pub async fn download_release_file(
+    edge_url: &str,
+    manifest: &Manifest,
+    file: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    validate_version(&manifest.version)?;
+    if file.is_empty()
+        || file == "."
+        || file == ".."
+        || file.len() > 255
+        || !file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        bail!("invalid release artifact name");
+    }
+    let url = format!("{}/releases/{file}", edge_url.trim_end_matches('/'));
+    let expected = match manifest.files.get(file).and_then(|m| m.sha256.as_deref()) {
+        Some(hash) => hash.to_owned(),
+        None if manifest.files.is_empty() => {
+            let response = http_client()?
+                .get(format!("{url}.sha256"))
+                .send()
+                .await?
+                .error_for_status()
+                .context("fetching required artifact checksum")?;
+            String::from_utf8(limited_body(response, 256).await?)?
+                .trim()
+                .to_owned()
+        }
+        None => bail!("release manifest is missing the checksum for {file}"),
+    };
+    if !valid_sha256(&expected) {
+        bail!("invalid SHA-256 for {file}");
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let partial = tempfile::Builder::new()
+        .prefix(".download-")
+        .tempfile_in(parent)?;
+    let resp = http_client()?
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(300))
+        .send()
+        .await
+        .with_context(|| format!("downloading {url}"))?
+        .error_for_status()
+        .with_context(|| format!("downloading {url}"))?;
+    let mut out = tokio::fs::File::from_std(partial.reopen()?);
+    let mut hasher = Sha256::new();
+    let mut stream = resp.bytes_stream();
+    let mut size = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading download stream")?;
+        size += chunk.len() as u64;
+        if size > 512 * 1024 * 1024 {
+            bail!("release artifact exceeds 512 MiB limit");
+        }
+        hasher.update(&chunk);
+        out.write_all(&chunk).await.context("writing download")?;
+    }
+    out.flush().await.context("flushing download")?;
+    out.sync_all().await.context("syncing download")?;
+    drop(out);
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(&expected) {
+        bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
+    }
+    partial
+        .persist(dest)
+        .with_context(|| format!("moving {} into place", dest.display()))?;
+    Ok(())
+}
+
+fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("running {program}"))?;
+    if !output.status.success() {
+        bail!(
+            "{program} {} failed ({}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Managed (symlink) installs — the daemon/VPS path
+// ---------------------------------------------------------------------------
+
+/// Download + unpack the headless tarball into `app_root/<ver>` (idempotent —
+/// an already-staged version is reused). Returns the versioned dir.
+pub async fn stage_headless(
+    edge_url: &str,
+    manifest: &Manifest,
+    app_root: &Path,
+) -> anyhow::Result<PathBuf> {
+    let version = &manifest.version;
+    validate_version(version)?;
+    let dest = app_root.join(version);
+    if headless_binary_ready(&dest) {
+        return Ok(dest);
+    }
+    if dest.exists() || dest.is_symlink() {
+        bail!(
+            "{} is an incomplete install; move it aside before retrying",
+            dest.display()
+        );
+    }
+    let file = headless_artifact(version);
+    std::fs::create_dir_all(app_root)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".stage-")
+        .tempdir_in(app_root)?;
+    let stage = staging.path();
+    let tarball = stage.join(&file);
+    download_release_file(edge_url, manifest, &file, &tarball).await?;
+    validate_headless_archive(&tarball, file.trim_end_matches(".tar.gz"))?;
+    let unpacked = stage.join("unpacked");
+    std::fs::create_dir_all(&unpacked)?;
+    // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
+    // strip it exactly as install.sh does.
+    run(
+        "tar",
+        &[
+            "-xzf",
+            &tarball.to_string_lossy(),
+            "-C",
+            &unpacked.to_string_lossy(),
+            "--strip-components=1",
+            "--no-same-owner",
+        ],
+    )?;
+    if !headless_binary_ready(&unpacked) {
+        bail!("tarball {file} did not contain a runnable cypher binary");
+    }
+    match std::fs::rename(&unpacked, &dest) {
+        Ok(()) => {}
+        // Lost a race with another stager — the staged copy is equivalent.
+        Err(err) => {
+            if headless_binary_ready(&dest) {
+                return Ok(dest);
+            }
+            return Err(err).with_context(|| format!("moving {} into place", dest.display()));
+        }
+    }
+    Ok(dest)
+}
+
+fn headless_binary_ready(dir: &Path) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let binary = dir.join("cypher");
+    if dir.is_symlink() || binary.is_symlink() || !binary.is_file() {
+        return false;
+    }
+    let Ok(mut child) = Command::new(binary)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn validate_headless_archive(tarball: &Path, root: &str) -> anyhow::Result<()> {
+    fn listing(tarball: &Path, flag: &str) -> anyhow::Result<String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("tar")
+            .arg(flag)
+            .arg(tarball)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut bytes = Vec::new();
+        let read = child
+            .stdout
+            .take()
+            .unwrap()
+            .take(65537)
+            .read_to_end(&mut bytes);
+        if read.is_err() || bytes.len() > 65536 {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("invalid or oversized archive listing");
+        }
+        if !child.wait()?.success() {
+            bail!("invalid release archive");
+        }
+        Ok(String::from_utf8(bytes)?)
+    }
+    let allowed = ["", "cypher", "install.sh", "cypher.desktop", "cypher.png"]
+        .map(|name| format!("{root}/{name}"));
+    for member in listing(tarball, "-tzf")?.lines() {
+        if !allowed.iter().any(|name| name == member) {
+            bail!("unexpected release archive member");
+        }
+    }
+    for member in listing(tarball, "-tvzf")?.lines() {
+        if !member.starts_with('-') && !member.starts_with('d') {
+            bail!("release archive links and special files are not allowed");
+        }
+    }
+    Ok(())
+}
+
+/// Atomically repoint `app_root/current` at `app_root/<ver>` (symlink to a temp
+/// name, then rename over — never a window with no `current`).
+pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
+    validate_version(version)?;
+    #[cfg(unix)]
+    {
+        let app_root = std::path::absolute(app_root)?;
+        let target = app_root.join(version);
+        if !headless_binary_ready(&target) {
+            bail!("{} is not a staged install", target.display());
+        }
+        let staging = tempfile::Builder::new()
+            .prefix(".current-")
+            .tempdir_in(&app_root)?;
+        let tmp = staging.path().join("link");
+        std::os::unix::fs::symlink(&target, &tmp).context("creating current symlink")?;
+        std::fs::rename(&tmp, app_root.join("current")).context("swapping current symlink")?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app_root, version);
+        bail!("managed installs are unix-only");
+    }
+}
+
+/// Restart the installed engine service (the same units `cypher daemon` and the
+/// curl|sh installer manage). Called after a symlink swap so the running daemon
+/// picks up the new binary.
+pub fn restart_service(data_dir: &Path) -> anyhow::Result<()> {
+    let (unit, label) = cypher_env::service_names(data_dir)?;
+    if cfg!(target_os = "macos") {
+        let output = std::process::Command::new("id").arg("-u").output()?;
+        let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        run(
+            "launchctl",
+            &["kickstart", "-k", &format!("gui/{uid}/{label}")],
+        )
+        .map_err(|_| anyhow::anyhow!("no cypher service is loaded to restart"))
+    } else {
+        run("systemctl", &["--user", "restart", &unit])
+    }
+}
+
+pub fn migrate_linux_service_to_current(data_dir: &Path) -> anyhow::Result<bool> {
+    if !cfg!(target_os = "linux") {
+        return Ok(false);
+    }
+    let unit = cypher_env::service_names(data_dir)?.0;
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            &unit,
+            "--property=FragmentPath",
+            "--value",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is unset")?;
+    let expected = home.join(".config/systemd/user/cypher.service");
+    if Path::new(&path) != expected || !expected.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(&expected)?;
+    let data = std::path::absolute(data_dir)?;
+    if !text
+        .lines()
+        .any(|line| line == format!("Environment=\"CYPHER_DATA_DIR={}\"", data.display()))
+    {
+        return Ok(false);
+    }
+    let Some(old) = text.lines().find(|line| {
+        line.starts_with("ExecStart=:\"%h/.cypher/app/") && line.ends_with("/cypher\" headless")
+    }) else {
+        return Ok(false);
+    };
+    let tmp = expected.with_extension("service.cypher-update");
+    std::fs::write(
+        &tmp,
+        text.replacen(
+            old,
+            "ExecStart=:\"%h/.cypher/app/current/cypher\" headless",
+            1,
+        ),
+    )?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, &expected)?;
+    run("systemctl", &["--user", "daemon-reload"])?;
+    Ok(true)
+}
+
+fn restart_service_from_engine(data_dir: &Path) -> anyhow::Result<()> {
+    if cfg!(target_os = "linux") {
+        // A synchronous restart waits for THIS service to exit, while runtime
+        // teardown waits for this worker to return: systemd eventually SIGKILLs
+        // it at TimeoutStopSec. Queue the restart instead of waiting on ourselves.
+        run(
+            "systemctl",
+            &[
+                "--user",
+                "--no-block",
+                "restart",
+                &cypher_env::service_names(data_dir)?.0,
+            ],
+        )
+    } else {
+        restart_service(data_dir)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// macOS app-bundle installs — the desktop path
+// ---------------------------------------------------------------------------
+
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Cypher.app`
+/// (idempotent). Returns the staged bundle path.
+pub async fn stage_mac_app(
+    edge_url: &str,
+    manifest: &Manifest,
+    data_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let version = &manifest.version;
+    validate_version(version)?;
+    let dir = data_dir.join("updates").join(version);
+    let staged = dir.join("Cypher.app");
+    if staged.join("Contents/MacOS/cypher").exists() {
+        return Ok(staged);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let file = mac_app_artifact(version);
+    let tarball = dir.join(&file);
+    download_release_file(edge_url, manifest, &file, &tarball).await?;
+    run(
+        "tar",
+        &[
+            "-xzf",
+            &tarball.to_string_lossy(),
+            "-C",
+            &dir.to_string_lossy(),
+        ],
+    )?;
+    std::fs::remove_file(&tarball).ok();
+    let binary = staged.join("Contents/MacOS/cypher");
+    if !binary.exists() {
+        bail!("app tarball {file} did not contain Cypher.app");
+    }
+    Ok(staged)
+}
+
+/// Swap the installed bundle for the staged one: `ditto` the staged copy next to
+/// the target (metadata-preserving, cross-volume safe), then two renames — the
+/// old bundle is restored if the second rename fails.
+pub fn apply_mac_app(staged: &Path, bundle: &Path) -> anyhow::Result<()> {
+    let parent = bundle
+        .parent()
+        .context("app bundle has no parent directory")?;
+    let name = bundle
+        .file_name()
+        .context("app bundle has no name")?
+        .to_string_lossy();
+    let pid = std::process::id();
+    let fresh = parent.join(format!(".{name}.new-{pid}"));
+    let old = parent.join(format!(".{name}.old-{pid}"));
+    let _ = std::fs::remove_dir_all(&fresh);
+    run(
+        "ditto",
+        &[&staged.to_string_lossy(), &fresh.to_string_lossy()],
+    )?;
+    std::fs::rename(bundle, &old).context("moving the current app aside")?;
+    if let Err(err) = std::fs::rename(&fresh, bundle) {
+        let _ = std::fs::rename(&old, bundle);
+        let _ = std::fs::remove_dir_all(&fresh);
+        return Err(err).context("installing the new app bundle");
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
+/// Detached relauncher: waits for THIS process to exit, then `open`s the bundle.
+/// (Opening before exit would race the single-instance engine lock and the IPC
+/// port.) The caller quits the app after this returns.
+pub fn relaunch_app_after_exit(bundle: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let pid = std::process::id();
+        let script = format!(
+            "while /bin/kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"{}\"",
+            bundle.display()
+        );
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        if let Err(err) = command.spawn() {
+            tracing::error!(error = %err, "failed to spawn the relauncher");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = bundle;
+}
+
+// ---------------------------------------------------------------------------
+// Engine-side checker
+// ---------------------------------------------------------------------------
+
+/// What the engine reports over the `UpdateStatus` stream. Version facts only —
+/// download/apply progress is owned by whoever drives the update (UI or CLI).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub current_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    #[serde(default)]
+    pub update_available: bool,
+    /// Epoch ms of the last successful check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl UpdateStatus {
+    fn initial() -> Self {
+        Self {
+            current_version: current_version().to_string(),
+            latest_version: None,
+            update_available: false,
+            checked_at: None,
+            error: None,
+        }
+    }
+}
+
+/// `CYPHER_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
+fn auto_update_enabled() -> bool {
+    cypher_env::var("AUTO_UPDATE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// "Nothing would be interrupted by a restart right now" — wired by the engine
+/// to its live-run and open-terminal registries. `None` = no gate.
+pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Background release checker: polls `{edge}/releases` on a 6h cadence and
+/// publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
+/// stream). Managed installs with `CYPHER_AUTO_UPDATE` set stage + apply +
+/// service restart on their own — but only in a quiet window: while
+/// `quiescent` reports activity, the apply defers and re-probes every
+/// [`IDLE_RECHECK`].
+#[derive(Clone)]
+pub struct Updater {
+    data_dir: PathBuf,
+    edge_url: String,
+    status_tx: Arc<watch::Sender<UpdateStatus>>,
+    check_tx: Arc<watch::Sender<u64>>,
+    quiescent: Option<QuiescentCheck>,
+    /// Flips to true exactly once; the check loop selects against it so
+    /// cancellation lands at any await point (no tokio-util in this crate).
+    shutdown_tx: Arc<watch::Sender<bool>>,
+    check_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Updater {
+    /// Spawn the check loop (must run on a tokio runtime).
+    pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>, data_dir: PathBuf) -> Self {
+        let (status_tx, _) = watch::channel(UpdateStatus::initial());
+        // Create the loop's receivers synchronously. If they were subscribed
+        // inside the spawned task, an immediate `check_now` could be lost and
+        // an immediate `shutdown` could fail while no receiver existed,
+        // leaving shutdown waiting forever for the 6h loop.
+        let (check_tx, checks) = watch::channel(0);
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let updater = Self {
+            data_dir,
+            edge_url,
+            status_tx: Arc::new(status_tx),
+            check_tx: Arc::new(check_tx),
+            quiescent,
+            shutdown_tx: Arc::new(shutdown_tx),
+            check_task: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let for_loop = updater.clone();
+        let task = tokio::spawn(async move { for_loop.check_loop(shutdown, checks).await });
+        *updater.check_task.lock().unwrap() = Some(task);
+        updater
+    }
+
+    /// Stop the check loop and wait for it to exit — a replaced runtime must
+    /// not keep polling `{edge}/releases` (or auto-applying) in the background.
+    /// Idempotent, and callable from any clone.
+    pub async fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+        let task = self
+            .check_task
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+
+    pub fn watch(&self) -> watch::Receiver<UpdateStatus> {
+        self.status_tx.subscribe()
+    }
+
+    /// Wake the release checker immediately, for example when authentication
+    /// recovers after the process started offline.
+    pub fn check_now(&self) {
+        self.check_tx
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    fn quiescent_now(&self) -> bool {
+        self.quiescent.as_ref().is_none_or(|check| check())
+    }
+
+    async fn check_loop(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+        mut checks: watch::Receiver<u64>,
+    ) {
+        // Shutdown must cut the loop at ANY await point — including mid
+        // `check_once()` / `auto_apply_when_idle()` HTTP — so the whole body
+        // races the flag rather than checking it between iterations.
+        tokio::select! {
+            _ = shutdown.wait_for(|stop| *stop) => {}
+            _ = async {
+                tokio::select! {
+                    _ = tokio::time::sleep(CHECK_INITIAL_DELAY) => {}
+                    _ = checks.changed() => {}
+                }
+                loop {
+                    let ok = self.check_once().await;
+                    if ok
+                        && self.status_tx.borrow().update_available
+                        && auto_update_enabled()
+                        && let InstallKind::Managed { .. } = detect_install()
+                    {
+                        self.auto_apply_when_idle().await;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(if ok { CHECK_INTERVAL } else { CHECK_RETRY }) => {}
+                        _ = checks.changed() => {}
+                    }
+                }
+            } => {}
+        }
+    }
+
+    /// Sessions must never die to an update: pre-stage the download now
+    /// (harmless while busy), wait for a quiet window (no live runs, no open
+    /// terminals), then apply — which re-fetches the manifest (so a long defer
+    /// lands on whatever is newest) and reuses the staged dir, keeping the
+    /// idle→restart gap to well under a second.
+    async fn auto_apply_when_idle(&self) {
+        if let InstallKind::Managed { app_root } = detect_install() {
+            match fetch_latest(&self.edge_url).await {
+                Ok(manifest) if version_newer(&manifest.version, current_version()) => {
+                    if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
+                        tracing::warn!(error = %err, "auto-update staging failed");
+                        return;
+                    }
+                }
+                Ok(_) => return,
+                Err(err) => {
+                    tracing::warn!(error = %err, "auto-update staging fetch failed");
+                    return;
+                }
+            }
+        }
+        let mut deferred = false;
+        while !self.quiescent_now() {
+            if !deferred {
+                deferred = true;
+                tracing::info!("auto-update deferred: sessions or terminals active");
+            }
+            tokio::time::sleep(IDLE_RECHECK).await;
+        }
+        match self.apply().await {
+            Ok(version) => {
+                tracing::info!(%version, "auto-update applied; service restarting")
+            }
+            Err(err) => tracing::warn!(error = %err, "auto-update failed"),
+        }
+    }
+
+    /// One check; returns false on fetch failure (retry sooner).
+    async fn check_once(&self) -> bool {
+        match fetch_latest(&self.edge_url).await {
+            Ok(manifest) => {
+                let status = UpdateStatus {
+                    current_version: current_version().to_string(),
+                    update_available: version_newer(&manifest.version, current_version()),
+                    latest_version: Some(manifest.version),
+                    checked_at: Some(now_ms()),
+                    error: None,
+                };
+                if status.update_available {
+                    tracing::info!(
+                        latest = status.latest_version.as_deref().unwrap_or(""),
+                        current = %status.current_version,
+                        "update available"
+                    );
+                }
+                self.status_tx.send_replace(status);
+                true
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "update check failed");
+                self.status_tx
+                    .send_modify(|s| s.error = Some(format!("{err:#}")));
+                false
+            }
+        }
+    }
+
+    /// Stage + apply the newest release on THIS device (managed installs only),
+    /// then restart the service after a short delay so the caller's RPC reply
+    /// flushes before systemd/launchd kills this process.
+    pub async fn apply(&self) -> anyhow::Result<String> {
+        let InstallKind::Managed { app_root } = detect_install() else {
+            bail!(
+                "this install is not update-managed — the desktop app updates from its UI; \
+                 source builds update via git"
+            );
+        };
+        let manifest = fetch_latest(&self.edge_url).await?;
+        if !version_newer(&manifest.version, current_version()) {
+            bail!("already up to date ({})", current_version());
+        }
+        stage_headless(&self.edge_url, &manifest, &app_root).await?;
+        apply_headless(&app_root, &manifest.version)?;
+        let data_dir = self.data_dir.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            if let Err(err) = restart_service_from_engine(&data_dir) {
+                tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+            }
+        });
+        Ok(manifest.version)
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod release_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_compare() {
+        assert!(version_newer("0.1.1", "0.1.0"));
+        assert!(version_newer("0.2.0", "0.1.9"));
+        assert!(version_newer("0.1.10", "0.1.9"));
+        assert!(version_newer("v0.1.1", "0.1.0"));
+        assert!(version_newer("0.1.0.1", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.1.0"));
+        assert!(!version_newer("0.1.0", "0.1.1"));
+        // Garbage never counts as newer.
+        assert!(!version_newer("", "0.1.0"));
+        assert!(!version_newer("nightly", "0.1.0"));
+    }
+
+    #[test]
+    fn install_kind_detection() {
+        // Cypher install layout.
+        assert_eq!(
+            detect_install_from(
+                Path::new("/home/u/.cypher/app/0.1.1/cypher"),
+                Some(Path::new("/home/u")),
+            ),
+            InstallKind::Managed {
+                app_root: PathBuf::from("/home/u/.cypher/app")
+            }
+        );
+        assert_eq!(
+            detect_install_from(
+                Path::new("/Applications/Cypher.app/Contents/MacOS/cypher"),
+                Some(Path::new("/Users/u")),
+            ),
+            InstallKind::MacApp {
+                bundle: PathBuf::from("/Applications/Cypher.app")
+            }
+        );
+        // A path merely containing `.app` without the bundle layout is not a bundle.
+        assert_eq!(
+            detect_install_from(Path::new("/tmp/foo.app/cypher"), None),
+            InstallKind::Unmanaged
+        );
+        assert_eq!(
+            detect_install_from(
+                Path::new("/src/target/release/cypher"),
+                Some(Path::new("/home/u"))
+            ),
+            InstallKind::Unmanaged
+        );
+    }
+
+    #[test]
+    fn artifact_names_match_packaging() {
+        let (os, arch) = platform_key();
+        assert!(headless_artifact("0.2.0").starts_with("cypher-0.2.0-"));
+        assert_eq!(
+            headless_artifact("0.2.0"),
+            format!("cypher-0.2.0-{os}-{arch}.tar.gz")
+        );
+        assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+    }
+
+    #[test]
+    fn manifest_parses_with_and_without_files() {
+        let full: Manifest = serde_json::from_str(
+            r#"{"version":"0.1.1","files":{"cypher-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(full.version, "0.1.1");
+        assert_eq!(
+            full.files["cypher-0.1.1-linux-x86_64.tar.gz"]
+                .sha256
+                .as_deref(),
+            Some("abc")
+        );
+        let bare: Manifest = serde_json::from_str(r#"{"version":"0.1.1"}"#).unwrap();
+        assert!(bare.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn immediate_shutdown_cannot_miss_the_loop_receiver() {
+        let updater = Updater::spawn(
+            "http://127.0.0.1:1".into(),
+            None,
+            std::env::temp_dir().join("cypher-update-test"),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), updater.shutdown())
+            .await
+            .expect("immediate updater shutdown must not hang");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_symlink_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("app");
+        for ver in ["0.1.0", "0.1.1"] {
+            std::fs::create_dir_all(app_root.join(ver)).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let binary = app_root.join(ver).join("cypher");
+            std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        apply_headless(&app_root, "0.1.0").unwrap();
+        assert_eq!(
+            std::fs::read_link(app_root.join("current")).unwrap(),
+            app_root.join("0.1.0")
+        );
+        // Swap over an existing symlink.
+        apply_headless(&app_root, "0.1.1").unwrap();
+        assert_eq!(
+            std::fs::read_link(app_root.join("current")).unwrap(),
+            app_root.join("0.1.1")
+        );
+        // Unstaged version refuses.
+        assert!(apply_headless(&app_root, "0.2.0").is_err());
+    }
+}

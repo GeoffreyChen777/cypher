@@ -1,0 +1,519 @@
+//! Chat auto-titling — after the first user+assistant exchange completes on an
+//! untitled chat, name it with the harness's cheapest model (port of zeron's
+//! `generateTitle` in `sessions.ts`).
+//!
+//! Flow (fire-and-forget from the run task; every failure is a silent skip with
+//! tracing — a title must never fail or delay a run):
+//! 1. skip when the chat already has a title (or has no workspace row);
+//! 2. use this device's selected Pi title model; otherwise pick the run
+//!    harness's cheapest model (small-tier name heuristic, else the last);
+//! 3. run a one-shot, non-streaming-collected titling prompt through the
+//!    [`Harness`] trait (read-only sandbox, minimal reasoning, auto-approve),
+//!    retrying on cypher's short backoff ladder; fall back to the prompt's first
+//!    words when every attempt produces nothing;
+//! 4. re-check the title (a user rename during generation wins);
+//! 5. when the chat sits in a cypher worktree (`cypher/<name>` branch), rename
+//!    the branch from the title and update the chat's branch row;
+//! 6. `rename_chat` in the workspace doc.
+
+use std::sync::Arc;
+
+use futures::StreamExt;
+
+use cypher_harness::{CancellationToken, RunControls, SteerMessage};
+use cypher_proto::{
+    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    UserInputAnswer, UserInputQuestion,
+};
+
+use crate::EngineError;
+use crate::registry::HarnessRegistry;
+use crate::repos::Repos;
+use crate::workspace_host::WorkspaceHost;
+
+/// Throwaway title runs are cheap but still cross a process boundary — retry a
+/// couple of times with a short backoff before falling back (zeron's ladder).
+const RETRY_DELAYS_MS: &[u64] = &[250, 1_000];
+
+struct Inner {
+    workspace: WorkspaceHost,
+    registry: Arc<HarnessRegistry>,
+    repos: Repos,
+    settings: Option<crate::title_settings::TitleSettingsStore>,
+}
+
+#[derive(Clone)]
+pub struct TitleGenerator {
+    inner: Arc<Inner>,
+}
+
+impl TitleGenerator {
+    pub fn new(workspace: WorkspaceHost, registry: Arc<HarnessRegistry>, repos: Repos) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                workspace,
+                registry,
+                repos,
+                settings: None,
+            }),
+        }
+    }
+
+    pub fn with_settings(mut self, settings: crate::title_settings::TitleSettingsStore) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("configure before sharing")
+            .settings = Some(settings);
+        self
+    }
+
+    /// Fire-and-forget: title `chat_id` if it's still untitled. Called by the run
+    /// task after a completed exchange; runs detached so it never delays anything.
+    pub fn maybe_generate(&self, chat_id: &str, harness: HarnessId, prompt: &str, cwd: &str) {
+        let this = self.clone();
+        let chat_id = chat_id.to_string();
+        let prompt = prompt.to_string();
+        let cwd = cwd.to_string();
+        tokio::spawn(async move {
+            if let Err(err) = this.generate(&chat_id, harness, &prompt, &cwd).await {
+                tracing::debug!(chat = %chat_id, error = %err, "chat auto-titling skipped");
+            }
+        });
+    }
+
+    async fn generate(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        prompt: &str,
+        cwd: &str,
+    ) -> Result<(), EngineError> {
+        let chat = self
+            .inner
+            .workspace
+            .chat(chat_id)?
+            .ok_or_else(|| EngineError::Other("chat has no workspace row".into()))?;
+        if chat.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            return Ok(()); // already named
+        }
+
+        let generated = self.run_title_model(harness_id, prompt, cwd).await;
+        // Fallback so a chat is always named even if the model run produced nothing.
+        let fallback: String = prompt
+            .split_whitespace()
+            .take(7)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(48)
+            .collect();
+        let title = generated.unwrap_or(fallback);
+        if title.is_empty() {
+            return Ok(());
+        }
+
+        // Re-read after the model call: a user may have named the chat or checked
+        // out another branch while the throwaway generation was live.
+        let latest = self.inner.workspace.chat(chat_id)?.unwrap_or(chat);
+        if latest
+            .title
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty())
+        {
+            return Ok(());
+        }
+
+        // Rename the worktree branch when the chat still sits on its original
+        // cypher/<name> branch (guards live inside rename_worktree_branch).
+        if let (Some(chat_cwd), Some(branch)) = (&latest.cwd, &latest.branch)
+            && branch.starts_with("cypher/")
+        {
+            match self
+                .inner
+                .repos
+                .rename_worktree_branch(std::path::Path::new(chat_cwd), branch, &title)
+                .await
+            {
+                Ok(renamed) if &renamed != branch => {
+                    if let Err(err) = self.inner.workspace.set_chat_branch(chat_id, &renamed) {
+                        tracing::warn!(chat = %chat_id, error = %err, "chat branch update failed");
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "automatic worktree branch rename failed");
+                }
+            }
+        }
+
+        self.inner.workspace.rename_chat(chat_id, &title)?;
+        tracing::info!(chat = %chat_id, title = %title, "chat auto-titled");
+        Ok(())
+    }
+
+    /// One-shot titling run: collect TextDeltas until Done; retries on failure.
+    async fn run_title_model(
+        &self,
+        harness_id: HarnessId,
+        prompt: &str,
+        cwd: &str,
+    ) -> Option<String> {
+        let configured = match &self.inner.settings {
+            Some(store) => match store.load() {
+                Ok(settings) => settings.model,
+                Err(error) => {
+                    tracing::warn!(%error, "title preferences unavailable; using text fallback");
+                    return None;
+                }
+            },
+            None => None,
+        };
+        let harness_id = if configured.is_some() {
+            HarnessId::Pi
+        } else {
+            harness_id
+        };
+        let harness = match self.inner.registry.resolve(harness_id) {
+            Ok(harness) => harness,
+            Err(err) => {
+                tracing::debug!(error = %err, "titling harness unavailable");
+                return None;
+            }
+        };
+        let cheap = if configured.is_some() {
+            None // Explicit selection never relies on catalog order or defaults.
+        } else {
+            cheapest_model(&harness.models().await.unwrap_or_default())
+        };
+        let title_prompt = format!(
+            "Reply with ONLY a concise 3-5 word title in Title Case (no quotes, no punctuation) \
+             for a coding session that begins with this request:\n\n{prompt}"
+        );
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
+            // Only Automatic may use the default on its last retry. Explicit
+            // choices stay pinned even if unavailable or removed from catalog.
+            let model = title_model_for_attempt(configured.as_deref(), cheap.as_deref(), attempt);
+            let request = RunRequest {
+                prompt: title_prompt.clone(),
+                harness: Some(harness_id),
+                model: model.clone(),
+                reasoning: Some(ReasoningLevel::Minimal),
+                model_options: serde_json::Map::new(),
+                cwd: cwd.to_string(),
+                sandbox: SandboxLevel::ReadOnly,
+                auto_approve: true,
+                attachments: Vec::new(),
+                pending_attachments: Vec::new(),
+                resume: None,
+                worktree: None,
+            };
+            match collect_text(harness.as_ref(), request).await {
+                Ok(raw) => {
+                    let candidate = clean_title(&raw);
+                    if !candidate.is_empty() {
+                        return Some(candidate);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        model = model.as_deref().unwrap_or("default"),
+                        error = %err,
+                        "automatic chat title generation attempt failed"
+                    );
+                }
+            }
+            if let Some(delay) = RETRY_DELAYS_MS.get(attempt) {
+                tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+            }
+        }
+        None
+    }
+}
+
+fn title_model_for_attempt(
+    configured: Option<&str>,
+    cheap: Option<&str>,
+    attempt: usize,
+) -> Option<String> {
+    configured
+        .or_else(|| (attempt < RETRY_DELAYS_MS.len()).then_some(cheap).flatten())
+        .map(str::to_owned)
+}
+
+/// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
+/// prefer a small-tier name (haiku/mini/nano/flash/small/lite), else the last
+/// listed model; `None` when the catalog is empty (harness picks its default).
+fn cheapest_model(models: &[Model]) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    let small = models.iter().find(|m| is_callable_small_tier(m));
+    small.or(models.last()).map(|m| m.id.clone())
+}
+
+fn is_callable_small_tier(model: &Model) -> bool {
+    let haystack = format!("{} {}", model.id, model.label).to_lowercase();
+    // Catalog variants like `gpt-5.4-mini-openai-compact` match "mini" but
+    // are not callable as a standalone model.
+    if haystack.contains("compact") || haystack.contains("internal") {
+        return false;
+    }
+    ["haiku", "mini", "nano", "flash", "small", "lite"]
+        .iter()
+        .any(|tier| haystack.contains(tier))
+}
+
+/// First line, stripped of quote/heading dressing, capped at 60 chars.
+fn clean_title(raw: &str) -> String {
+    let first = raw.trim().lines().next().unwrap_or("");
+    first
+        .trim_start_matches(['"', '\'', '#', ' ', '\t'])
+        .trim_end_matches(['"', '\'', ' ', '\t'])
+        .chars()
+        .take(60)
+        .collect()
+}
+
+/// Drive one titling run through the harness: no steering, questions resolved
+/// empty immediately (a titling prompt must never block on input).
+async fn collect_text(
+    harness: &dyn cypher_harness::Harness,
+    request: RunRequest,
+) -> Result<String, EngineError> {
+    let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
+    let controls = RunControls {
+        request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
+            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<UserInputAnswer>>();
+            let _ = tx.send(Vec::new());
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+        host: cypher_harness::RunHostContext::default(),
+    };
+    let mut stream = harness.run(request, controls).await?;
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+            AgentEvent::Error { message } => {
+                return Err(EngineError::Other(format!("titling run error: {message}")));
+            }
+            AgentEvent::Done { status, error, .. } => {
+                if status == DoneStatus::Completed {
+                    break;
+                }
+                return Err(EngineError::Other(format!(
+                    "titling run ended {status:?}: {}",
+                    error.unwrap_or_default()
+                )));
+            }
+            _ => {}
+        }
+    }
+    drop(steer_tx); // keep the mailbox open for the run's whole lifetime
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cypher_proto::Model;
+
+    #[test]
+    fn explicit_title_model_is_pinned_for_every_retry() {
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
+            assert_eq!(
+                title_model_for_attempt(Some("provider/chosen"), Some("cheap"), attempt).as_deref(),
+                Some("provider/chosen")
+            );
+        }
+        assert_eq!(
+            title_model_for_attempt(None, Some("cheap"), 0).as_deref(),
+            Some("cheap")
+        );
+        assert_eq!(
+            title_model_for_attempt(None, Some("cheap"), RETRY_DELAYS_MS.len()),
+            None
+        );
+    }
+
+    struct RecordingTitleHarness {
+        requests: Arc<std::sync::Mutex<Vec<RunRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl cypher_harness::Harness for RecordingTitleHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Pi
+        }
+        fn display_name(&self) -> &str {
+            "Title fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> cypher_proto::SteeringMode {
+            cypher_proto::SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, cypher_harness::HarnessError> {
+            // A pinned model must work without discovery and must not fall back
+            // to another catalog model when the chosen model fails.
+            Err(cypher_harness::HarnessError::Protocol(
+                "catalog offline".into(),
+            ))
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            _: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, cypher_harness::HarnessError>>,
+            cypher_harness::HarnessError,
+        > {
+            let fail = request.model.as_deref() == Some("provider/failing");
+            self.requests.lock().unwrap().push(request);
+            if fail {
+                return Err(cypher_harness::HarnessError::Protocol(
+                    "fixture failure".into(),
+                ));
+            }
+            Ok(futures::stream::iter(vec![
+                Ok(AgentEvent::TextDelta {
+                    text: "Chosen Model Title".into(),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            ])
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn device_choice_updates_live_and_failure_never_changes_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(RecordingTitleHarness {
+            requests: requests.clone(),
+        }));
+        let core =
+            crate::EngineCore::assemble(dir.path(), registry.clone(), HarnessId::Pi, None).unwrap();
+        let generator = TitleGenerator::new(core.workspace.clone(), registry, core.repos.clone())
+            .with_settings(core.title_settings.clone());
+        for (id, model) in [
+            ("one", "provider/first"),
+            ("two", "provider/second"),
+            ("failure", "provider/failing"),
+        ] {
+            core.workspace
+                .create_chat(
+                    id,
+                    None,
+                    Some(&core.device_id),
+                    None,
+                    Some(dir.path().to_string_lossy().into()),
+                )
+                .unwrap();
+            core.title_settings
+                .save(&cypher_proto::TitleModelSettings {
+                    model: Some(model.into()),
+                })
+                .unwrap();
+            // Even a chat using another harness must use the configured Pi model.
+            generator
+                .generate(
+                    id,
+                    HarnessId::Mock,
+                    "Fix the title picker",
+                    dir.path().to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+            let expected = if id == "failure" {
+                "Fix the title picker"
+            } else {
+                "Chosen Model Title"
+            };
+            assert_eq!(
+                core.workspace.chat(id).unwrap().unwrap().title.as_deref(),
+                Some(expected)
+            );
+        }
+        let models: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                assert_eq!(r.harness, Some(HarnessId::Pi));
+                r.model.clone()
+            })
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                Some("provider/first".into()),
+                Some("provider/second".into()),
+                Some("provider/failing".into()),
+                Some("provider/failing".into()),
+                Some("provider/failing".into()),
+            ]
+        );
+        // Previously named chats must not be renamed by a changed preference.
+        generator
+            .generate("one", HarnessId::Mock, "different prompt", "")
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 5);
+        core.shutdown().await;
+    }
+
+    fn model(id: &str, label: &str) -> Model {
+        Model {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        }
+    }
+
+    #[test]
+    fn cheapest_prefers_small_tier_then_last() {
+        let models = vec![
+            model("opus-4", "Opus"),
+            model("haiku-3", "Haiku"),
+            model("sonnet-4", "Sonnet"),
+        ];
+        assert_eq!(cheapest_model(&models).as_deref(), Some("haiku-3"));
+        let no_small = vec![model("opus-4", "Opus"), model("sonnet-4", "Sonnet")];
+        assert_eq!(cheapest_model(&no_small).as_deref(), Some("sonnet-4"));
+        assert_eq!(cheapest_model(&[]), None);
+        let with_compact = vec![
+            model(
+                "mvp-lab/gpt-5.4-mini-openai-compact",
+                "GPT 5.4 Mini Compact",
+            ),
+            model("mvp-lab/deepseek-v4-flash-0731", "DeepSeek Flash"),
+            model("mvp-lab/grok-4.6", "Grok"),
+        ];
+        assert_eq!(
+            cheapest_model(&with_compact).as_deref(),
+            Some("mvp-lab/deepseek-v4-flash-0731")
+        );
+    }
+
+    #[test]
+    fn titles_are_cleaned() {
+        assert_eq!(clean_title("\"Fix Login Flow\"\nextra"), "Fix Login Flow");
+        assert_eq!(clean_title("# Add Dark Mode  "), "Add Dark Mode");
+        assert_eq!(clean_title("   "), "");
+    }
+}

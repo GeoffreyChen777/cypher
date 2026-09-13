@@ -1,0 +1,14 @@
+{
+  // www.letscypher.app → letscypher.app canonicalization (301, preserving
+  // path/query). The letscypher.app zone is delegated to Cloudflare; a custom
+  // domain on the www hostname rides the proxied DNS record Cloudflare
+  // auto-provisions for it, and this worker emits the 301. workers_dev is off
+  // — this redirect is only ever served on its custom domain.
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "cypher-www-redirect",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "account_id": "1489e726fc5baa8ecc7a6e1a8c8ed3f8",
+  "workers_dev": false,
+  "routes": [{ "pattern": "www.letscypher.app", "custom_domain": true }]
+}

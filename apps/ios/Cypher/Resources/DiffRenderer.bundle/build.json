@@ -1,0 +1,6 @@
+{
+  "renderer": "@pierre/diffs",
+  "version": "1.4.1",
+  "lockSHA256": "949d82be692e53a657190fd6d025346f9b2c72948732fc625e8264e7fa539ee4",
+  "scriptSHA256": "fc15284d9216dc4f7829c9f629f369330c46f21aa2ea75f7fe243cd28cd3fffb"
+}

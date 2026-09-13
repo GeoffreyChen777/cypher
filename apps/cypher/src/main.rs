@@ -1,0 +1,663 @@
+//! cypher — headed by default; `cypher headless` runs the engine alone. Both start
+//! local-only without credentials. `cypher login` and `cypher logout` select the
+//! profile used by the next engine start without mutating a live runtime.
+
+mod auth_cli;
+mod daemon;
+mod setup_cli;
+mod update_cli;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "cypher",
+    version,
+    about = "Multi-device controller for coding agents"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Connect a Linux device to desktop, install Runtime, and start its service.
+    Setup(setup_cli::SetupOptions),
+    /// Show recent engine logs (use --follow to stream).
+    Logs {
+        #[arg(long, short)]
+        follow: bool,
+    },
+    /// Run the engine without a UI (local-only unless a saved session enables sync).
+    Headless,
+    /// Sign in and enable sync on the next engine start.
+    Login,
+    /// Remove the saved session and return to local-only on the next start.
+    Logout,
+    /// Show workspace mode, optional auth, and engine status.
+    Status {
+        /// Include account, data directory and IPC diagnostics.
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Live sync introspection from the running engine: per-room connection
+    /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
+    Sync,
+    /// Manage `cypher headless` as a background service (launchd / systemd --user).
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    /// Check for a newer release and apply it (download → verify → swap →
+    /// service restart). `--check` only reports (exits 1 when one is available).
+    Update {
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommand {
+    /// Install, enable, and start the service (captures CYPHER_* env).
+    Install,
+    /// Stop and remove the service.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the service.
+    Stop,
+    /// Restart the service.
+    Restart,
+    /// Show the service manager's view of the daemon.
+    Status,
+}
+
+/// Production edge (Cloudflare Worker + Durable Objects on the
+/// edge.letscypher.app custom domain; workers.dev stays as fallback).
+/// `CYPHER_EDGE_URL` overrides (local dev / self-hosting).
+const DEFAULT_EDGE_URL: &str = "https://edge.letscypher.app";
+
+/// Production WorkOS AuthKit client id — public knowledge (it appears in every
+/// authorize URL), so baking it in is safe. Overridden by `CYPHER_WORKOS_CLIENT_ID`;
+/// set it to the empty string — or set a dev bearer via `CYPHER_EDGE_TOKEN` — to
+/// force dev-mode auth instead.
+const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01M0JTKFKB6QZWHZDGYW7AN8QH";
+
+fn edge_url_from_env() -> String {
+    cypher_env::var("EDGE_URL")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
+}
+
+/// The ONLY edge the baked production client id may target. A custom
+/// `CYPHER_EDGE_URL` (local wrangler, self-hosted) has no production WorkOS
+/// credentials and must never mint real authorize URLs.
+const PRODUCTION_EDGE_URL: &str = "https://edge.letscypher.app";
+
+/// WorkOS client id resolution:
+///  - an explicit `CYPHER_WORKOS_CLIENT_ID` always wins (empty string = dev
+///    mode, disabling WorkOS entirely);
+///  - otherwise a `CYPHER_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
+///    local wrangler) — a bare production client id plus a dev bearer would
+///    authorize against the real WorkOS tenant;
+///  - otherwise the baked production client id applies ONLY when the resolved
+///    edge is exactly [`PRODUCTION_EDGE_URL`]; any custom `CYPHER_EDGE_URL`
+///    without an explicit client id disables WorkOS.
+fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Option<String> {
+    match std::env::var("CYPHER_WORKOS_CLIENT_ID") {
+        Ok(v) if v.trim().is_empty() => None,
+        Ok(v) => Some(v),
+        Err(_) if edge_token.is_some() => None,
+        Err(_) if edge_url != PRODUCTION_EDGE_URL => None,
+        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
+    }
+}
+
+/// mimalloc: system malloc (macOS libmalloc especially) never returns the
+/// streaming churn's high-water pages, so transient allocation became
+/// permanent RSS (docs/memory-plan.md §1).
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    anyhow::ensure!(
+        std::env::var_os("CYPHER_IPC_PORT").is_none(),
+        "CYPHER_IPC_PORT has been removed. Unset it; local IPC uses a private Unix socket selected by CYPHER_DATA_DIR."
+    );
+    // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
+    // overrides either).
+    // loro's internal block-encode diagnostics log at info and flood
+    // journald on every snapshot export — enough to fill a disk on a
+    // long-running headless host. Quiet them by default (RUST_LOG still
+    // overrides the whole filter).
+    let long_running = matches!(&cli.command, Some(Command::Headless))
+        || (cfg!(feature = "ui") && cli.command.is_none());
+    let default_filter = if long_running {
+        "info,loro_internal=warn,loro=warn"
+    } else {
+        "warn"
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| default_filter.into());
+    // Long-running modes mirror stdout logging to {data_dir}/logs — a headed
+    // app launched from Finder has no visible stdout, which left every sync
+    // wedge report ("stale until restart") with zero diagnostics even though
+    // the engine logs the exact failure line. One file per launch, previous
+    // launch kept as `.old`.
+    let log_file = if long_running {
+        let mode = if cli.command.is_some() {
+            "headless"
+        } else {
+            "headed"
+        };
+        open_log_file(mode)
+    } else {
+        None
+    };
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let registry = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer());
+        match log_file {
+            Some(file) => registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Arc::new(file)),
+                )
+                .init(),
+            None => registry.init(),
+        }
+    }
+
+    match cli.command {
+        Some(Command::Setup(options)) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let result = runtime.block_on(setup_cli::run(engine_config_from_env()?, options));
+            // A canceled terminal read may still own a blocking stdin thread.
+            // Auth tasks are drained by the wizard; do not wait for a new
+            // keystroke just to let this short-lived CLI process exit.
+            runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+            result
+        }
+        Some(Command::Logs { follow }) => setup_cli::logs(engine_config_from_env()?, follow),
+        Some(Command::Headless) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                let engine = cypher_engine::Engine::new(engine_config_from_env()?);
+                engine.run().await
+            })
+        }
+        Some(Command::Login) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(auth_cli::login(engine_config_from_env()?))
+        }
+        Some(Command::Logout) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(auth_cli::logout(engine_config_from_env()?))
+        }
+        Some(Command::Status { verbose }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            if verbose || !cfg!(target_os = "linux") {
+                runtime.block_on(auth_cli::status(engine_config_from_env()?))
+            } else {
+                runtime.block_on(setup_cli::status(engine_config_from_env()?))
+            }
+        }
+        Some(Command::Sync) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    sync_cli(engine_config_from_env()?),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("engine sync diagnostics timed out"))?
+            })
+        }
+        Some(Command::Update { check }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+        }
+        Some(Command::Daemon { command }) => match command {
+            DaemonCommand::Install => daemon::install(&engine_config_from_env()?.data_dir),
+            DaemonCommand::Uninstall => daemon::uninstall(),
+            DaemonCommand::Start => daemon::start(),
+            DaemonCommand::Stop => daemon::stop(),
+            DaemonCommand::Restart => daemon::restart(),
+            DaemonCommand::Status => daemon::status(),
+        },
+        #[cfg(feature = "ui")]
+        None => {
+            let edge_token = cypher_env::var("EDGE_TOKEN");
+            // Headed: the UI resolves the selected Engine data directory and connects to a running
+            // daemon, or embeds the engine in-process (ARCHITECTURE §1).
+            cypher_ui::run_app(cypher_ui::UiConfig {
+                data_dir: cypher_env::data_dir(),
+                engine_data_dir: std::path::absolute(engine_data_dir())?,
+                ipc_socket: cypher_env::ipc_socket(&engine_data_dir())?,
+                edge_url: edge_url_from_env(),
+                workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
+                edge_token,
+                org_id: cypher_env::var("ORG_ID"),
+                default_harness: cypher_ui::HarnessId::Pi,
+            });
+            Ok(())
+        }
+        // Headless build (`--no-default-features`): there is no desktop UI to
+        // launch. Point at the headless entrypoint instead of a cryptic gpui
+        // link failure.
+        #[cfg(not(feature = "ui"))]
+        None => {
+            if cfg!(target_os = "linux") {
+                let runtime = tokio::runtime::Runtime::new()?;
+                let result = runtime.block_on(setup_cli::default_entry(engine_config_from_env()?));
+                runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+                result
+            } else {
+                Err(anyhow::anyhow!(
+                    "this build has no desktop UI — run `cypher headless` or `cypher status`"
+                ))
+            }
+        }
+    }
+}
+
+/// The env-resolved engine configuration shared by `headless`, `login`,
+/// `logout`, and `status` — one resolution so the CLI auth commands always
+/// operate on the exact session the daemon will load.
+fn engine_config_from_env() -> anyhow::Result<cypher_engine::EngineConfig> {
+    // Dev-mode bearer (no WorkOS): an explicit token enables sync.
+    let edge_token = cypher_env::var("EDGE_TOKEN");
+    Ok(cypher_engine::EngineConfig {
+        data_dir: std::path::absolute(cypher_env::data_dir())?,
+        edge_url: edge_url_from_env(),
+        ipc_socket: cypher_env::ipc_socket(&cypher_env::data_dir())?,
+        default_harness: harness_from_env(),
+        // WorkOS mode: the signed-in session's org wins; CYPHER_ORG_ID (dev
+        // default "dev-org") scopes the workspace room otherwise.
+        org_id: cypher_env::var("ORG_ID"),
+        // Real auth against production by default; see
+        // `workos_client_id_from_env` for the dev-mode escape hatches.
+        workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
+        edge_token,
+    })
+}
+
+#[cfg(feature = "ui")]
+fn engine_data_dir() -> std::path::PathBuf {
+    cypher_env::var_os("ENGINE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(cypher_env::data_dir)
+}
+
+/// `CYPHER_HARNESS` picks the default harness for chats without a config row.
+/// Production supports Pi; `mock` remains available for e2e/dev smoke tests.
+fn harness_from_env() -> cypher_engine::HarnessId {
+    match cypher_env::var("HARNESS").as_deref().map(str::trim) {
+        Some("mock") => cypher_engine::HarnessId::Mock,
+        Some("pi") => cypher_engine::HarnessId::Pi,
+        _ => cypher_engine::HarnessId::Pi,
+    }
+}
+
+fn dirs_data_dir() -> std::path::PathBuf {
+    cypher_env::data_dir()
+}
+
+/// `cypher sync`: dial the running engine's IPC and print per-room sync state.
+/// The introspection surface every 2026-08 incident was missing — "is this
+/// device's workspace room actually receiving?" as a one-liner.
+async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
+    let ipc_socket = config.ipc_socket;
+    let client = cypher_rpc::connect_local(&ipc_socket).await.map_err(|e| {
+        anyhow::anyhow!(
+            "no engine listening on {} ({e}) — is cypher running?",
+            ipc_socket.display()
+        )
+    })?;
+    let status = client
+        .call(cypher_rpc::methods::SYNC_STATUS, serde_json::json!({}))
+        .await
+        .map_err(|e| anyhow::anyhow!("SyncStatus failed: {e}"))?;
+    let expected = std::fs::read_to_string(config.data_dir.join("device-id")).unwrap_or_default();
+    if expected.trim().is_empty()
+        || status.get("deviceId").and_then(|v| v.as_str()) != Some(expected.trim())
+    {
+        anyhow::bail!("the engine does not match this data directory; check CYPHER_DATA_DIR");
+    }
+    let now = status.get("nowMs").and_then(|v| v.as_i64()).unwrap_or(0);
+    let age = |ms: i64| -> String {
+        if ms <= 0 {
+            return "never".into();
+        }
+        let s = (now - ms).max(0) / 1000;
+        if s >= 3600 {
+            format!("{}h{}m ago", s / 3600, (s % 3600) / 60)
+        } else if s >= 60 {
+            format!("{}m{}s ago", s / 60, s % 60)
+        } else {
+            format!("{s}s ago")
+        }
+    };
+    let room_line = |room: Option<&serde_json::Value>| -> String {
+        let Some(room) = room else {
+            return "no room (dialing or edge-less)".into();
+        };
+        let get = |k: &str| room.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        // REJECTED is loud and only shown when nonzero: rejected writes with
+        // a fresh-looking room is exactly the latched-session wedge
+        // (2026-08-04) this readout previously masked.
+        let rejected = get("rejected");
+        format!(
+            "{} pushed {} · acked {} · rejoins {} probes {} resyncs {} drops {}{}",
+            if room.get("connected").and_then(|v| v.as_bool()) == Some(true) {
+                "connected ·"
+            } else {
+                "DISCONNECTED ·"
+            },
+            age(get("lastPushedMs")),
+            age(get("lastAckMs")),
+            get("rejoins"),
+            get("probes"),
+            get("fullResyncs"),
+            get("disconnects"),
+            if rejected > 0 {
+                format!(" REJECTED {rejected}")
+            } else {
+                String::new()
+            },
+        )
+    };
+    println!(
+        "Device:    {}",
+        status
+            .get("deviceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+    );
+    println!(
+        "Workspace: {}",
+        room_line(status.get("workspace").filter(|v| !v.is_null()))
+    );
+    let chats = status
+        .get("chats")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if chats.is_empty() {
+        println!("Chats:     none open");
+    }
+    // Chat rooms speak chat2: cursor/head tell "am I caught up?", pending
+    // tells "did my writes leave?", resets/rejected are the loud tells.
+    let chat_line = |room: Option<&serde_json::Value>| -> String {
+        let Some(room) = room else {
+            return "no room (dialing or edge-less)".into();
+        };
+        let get = |k: &str| room.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let resets = get("serverResets");
+        let rejected = get("rejected");
+        format!(
+            "{} cursor {}/{} · pending {} · rows {} ({}KB) · rejoins {} drops {}{}{}",
+            if room.get("connected").and_then(|v| v.as_bool()) == Some(true) {
+                "connected ·"
+            } else {
+                "DISCONNECTED ·"
+            },
+            get("cursor"),
+            get("headSeq"),
+            get("pendingPushes"),
+            get("rowCount"),
+            get("rowBytes") / 1024,
+            get("rejoins"),
+            get("disconnects"),
+            if resets > 0 {
+                format!(" RESETS {resets}")
+            } else {
+                String::new()
+            },
+            if rejected > 0 {
+                format!(" REJECTED {rejected}")
+            } else {
+                String::new()
+            },
+        )
+    };
+    for chat in &chats {
+        println!(
+            "Chat {}: {}",
+            chat.get("chatId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "?".into()),
+            chat_line(chat.get("room").filter(|v| !v.is_null()))
+        );
+    }
+    Ok(())
+}
+
+/// `{data_dir}/logs/cypher-{mode}.log`, previous launch preserved as `.old`.
+/// Headed and headless are separate files so an embedded-engine app and a
+/// daemon on the same machine never interleave writes.
+///
+/// The returned file holds an exclusive `flock` for the process lifetime:
+/// rotate-on-launch is only safe when nothing is still WRITING the current
+/// file. On 2026-08-04 a dev build launched twice next to the running
+/// installed app — the first rename put the daemon's live log at `.old`, the
+/// second unlinked it entirely, and the daemon spent the rest of the incident
+/// logging to an orphaned inode (an entire day of sync diagnostics gone at
+/// the exact moment they were needed). A launch that finds the canonical file
+/// locked logs to `cypher-{mode}.{pid}.log` instead; the next lock-holding
+/// launch sweeps pid-suffixed files older than a week.
+fn open_log_file(mode: &str) -> Option<std::fs::File> {
+    let dir = cypher_env::data_dir().join("logs");
+    open_log_file_in(&dir, mode)
+}
+
+/// Dir-parameterized body of [`open_log_file`] (unit-testable without env).
+fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("cypher-{mode}.log"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Probe the CURRENT inode for a live writer before touching it.
+        let preexisting = path.exists();
+        let existing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .ok()?;
+        let rc = unsafe { libc::flock(existing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            // A live process owns the canonical log — leave it alone.
+            return std::fs::File::create(
+                dir.join(format!("cypher-{mode}.{}.log", std::process::id())),
+            )
+            .ok();
+        }
+        // No live writer: rotate, create fresh, and lock it as ours. (The
+        // probe's flock dies with `existing`; a first-ever launch has nothing
+        // to rotate — the probe itself created the empty file.)
+        drop(existing);
+        if preexisting {
+            let _ = std::fs::rename(&path, dir.join(format!("cypher-{mode}.log.old")));
+        }
+        let file = std::fs::File::create(&path).ok()?;
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        sweep_stale_pid_logs(dir, mode);
+        Some(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::rename(&path, dir.join(format!("cypher-{mode}.log.old")));
+        std::fs::File::create(&path).ok()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod log_file_tests {
+    use super::open_log_file_in;
+
+    #[test]
+    fn second_launch_never_rotates_a_live_processes_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        // First launch owns the canonical file and keeps writing.
+        let first = open_log_file_in(dir, "headed").expect("first log");
+        assert!(dir.join("cypher-headed.log").is_file());
+        // Second launch while the first is alive: canonical file untouched,
+        // pid-suffixed overflow file instead (the 2026-08-04 clobber).
+        let second = open_log_file_in(dir, "headed").expect("second log");
+        let pid_path = dir.join(format!("cypher-headed.{}.log", std::process::id()));
+        assert!(pid_path.is_file(), "expected pid-suffixed overflow log");
+        assert!(
+            !dir.join("cypher-headed.log.old").exists(),
+            "live canonical log must not be rotated away"
+        );
+        drop(second);
+        // After the owner exits, a fresh launch rotates normally.
+        drop(first);
+        let third = open_log_file_in(dir, "headed").expect("third log");
+        assert!(
+            dir.join("cypher-headed.log.old").is_file(),
+            "rotation resumes"
+        );
+        drop(third);
+    }
+}
+
+#[cfg(test)]
+mod workos_resolver_tests {
+    use super::{DEFAULT_WORKOS_CLIENT_ID, PRODUCTION_EDGE_URL, workos_client_id_from_env};
+    use std::sync::Mutex;
+
+    /// Env vars are process-global and cargo runs tests in parallel — serialize
+    /// the resolver cases so one cannot observe another's vars.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    fn resolve(edge_url: &str, token: Option<&str>) -> Option<String> {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+        set("CYPHER_EDGE_TOKEN", token);
+        let result = workos_client_id_from_env(edge_url, &token.map(str::to_string));
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+        set("CYPHER_EDGE_TOKEN", None);
+        result
+    }
+
+    #[test]
+    fn explicit_client_id_always_wins() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Wins over a dev bearer...
+        set("CYPHER_WORKOS_CLIENT_ID", Some("client_custom"));
+        set("CYPHER_EDGE_TOKEN", Some("dev-token"));
+        assert_eq!(
+            workos_client_id_from_env(PRODUCTION_EDGE_URL, &Some("dev-token".into())),
+            Some("client_custom".into())
+        );
+        // ...and over a custom edge URL.
+        set("CYPHER_EDGE_TOKEN", None);
+        assert_eq!(
+            workos_client_id_from_env("http://localhost:27640", &None),
+            Some("client_custom".into())
+        );
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+    }
+
+    #[test]
+    fn explicit_empty_client_id_disables_even_on_production() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set("CYPHER_WORKOS_CLIENT_ID", Some("  ")); // whitespace = empty
+        set("CYPHER_EDGE_TOKEN", None);
+        assert_eq!(workos_client_id_from_env(PRODUCTION_EDGE_URL, &None), None);
+        set("CYPHER_WORKOS_CLIENT_ID", None);
+    }
+
+    #[test]
+    fn dev_token_implies_dev_mode_without_explicit_id() {
+        assert_eq!(
+            resolve(PRODUCTION_EDGE_URL, Some("dev-token")),
+            None,
+            "a dev bearer must not pair with the production client id"
+        );
+    }
+
+    #[test]
+    fn production_edge_without_overrides_gets_baked_id() {
+        assert_eq!(
+            resolve(PRODUCTION_EDGE_URL, None),
+            Some(DEFAULT_WORKOS_CLIENT_ID.into())
+        );
+        // Exact match only: a trailing slash is a different (custom) edge.
+        assert_eq!(
+            resolve("https://edge.letscypher.app/", None),
+            None,
+            "the URL must match exactly"
+        );
+    }
+
+    #[test]
+    fn custom_edge_without_explicit_id_disables_workos() {
+        for edge in [
+            "http://localhost:27640",
+            "https://edge.example.dev",
+            "https://edge.letscypher.app.evil.example",
+        ] {
+            assert_eq!(resolve(edge, None), None, "custom edge {edge}");
+            assert_eq!(resolve(edge, Some("dev-token")), None, "custom edge {edge}");
+        }
+    }
+}
+
+/// Delete `cypher-{mode}.{pid}.log` overflow files older than a week — they
+/// only exist when a second instance raced a live one for the canonical log.
+#[cfg(unix)]
+fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("cypher-{mode}.");
+    let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(middle) = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        if !middle.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > week);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}

@@ -1,0 +1,108 @@
+{
+  // Cypher edge: per-session + per-workspace Loro sync DOs, per-device
+  // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
+  // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
+  // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
+  // backups); ARCHITECTURE.md §6.
+  // NOTE: Durable Object storage is bound to the worker's script name, so the
+  // worker identity (`cypher-edge`) must never be renamed without a data
+  // migration — that would orphan every session/registry/chat room.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Deployed by .github/workflows/deploy.yml on pushes to main that touch
+  // edge/ (CLOUDFLARE_API_TOKEN repo secret).
+  "name": "cypher-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "account_id": "1489e726fc5baa8ecc7a6e1a8c8ed3f8",
+  "workers_dev": true,
+  // Canonical production hostname: edge.letscypher.app (custom domain, auto-
+  // provisions DNS + TLS on the letscypher.app zone). workers.dev stays
+  // enabled as a fallback: cypher-edge.<account>.workers.dev keeps serving the
+  // install surface (`/install.sh`) and release artifacts (`/releases/*`)
+  // alongside sync/auth traffic. The landing page stays on its own
+  // letscypher.app apex custom domain (apps/landing/wrangler.jsonc).
+  "routes": [{ "pattern": "edge.letscypher.app", "custom_domain": true }],
+  // Serve src/install.sh as a string (the /install.sh route).
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  // loro-crdt's default entry loads its WASM via URL fetch, which workerd
+  // cannot do at runtime; the base64 entry inlines the module instead.
+  "alias": {
+    "loro-crdt": "loro-crdt/base64"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "PUSH_DEVICES", "class_name": "PushDevice" }
+    ]
+  },
+  "services": [
+    { "binding": "APNS_SENDER", "service": "cypher-edge", "entrypoint": "APNsSender" }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionRoom", "DeviceRoom"]
+    },
+    {
+      // Workspace registry (docs/registry-sync.md) — the row-table sidebar
+      // sync that replaces the Loro workspace doc rooms.
+      "tag": "v2",
+      "new_sqlite_classes": ["RegistryRoom"]
+    },
+    {
+      // chat2 session rooms (docs/chat2-sync.md) — dumb log relays that
+      // replace SessionRoom's loro-aware s2 rooms.
+      "tag": "v3",
+      "new_sqlite_classes": ["ChatRoom"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["PushDevice"]
+    },
+    {
+      // Already applied in production. Keep the migration history intact
+      // when restoring the pre-v3 Worker; never recreate the legacy rooms.
+      "tag": "v5-v3-native",
+      "new_sqlite_classes": ["Sync3Room", "WorkspaceHub"]
+    },
+    {
+      // Authorized v3 cleanup: permanently remove only these two namespaces.
+      // SessionRoom, DeviceRoom, RegistryRoom, ChatRoom and PushDevice survive.
+      "tag": "v6-remove-sync-v3",
+      "deleted_classes": ["Sync3Room", "WorkspaceHub"]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "cypher-blobs"
+    },
+    {
+      // Release artifacts for /releases/* (curl-install + dmg downloads).
+      "binding": "RELEASES",
+      "bucket_name": "cypher-releases"
+    }
+  ],
+  "vars": {
+    // Cypher Production WorkOS AuthKit client id — JWTs are verified against
+    // its issuer/JWKS. Set AUTH_MODE=dev locally to accept bearer==userId.
+    // WORKOS_API_KEY is a wrangler secret
+    // (`wrangler secret put WORKOS_API_KEY`) powering the /auth/* routes.
+    "WORKOS_CLIENT_ID": "client_01M0JTKFKB6QZWHZDGYW7AN8QH",
+    "AUTH_MODE": "workos",
+    "APNS_KEY_ID": "8WP4N48QXB",
+    "APNS_TEAM_ID": "999875MHT4",
+    // Enable only after configuring APNS_PRIVATE_KEY (Worker secret),
+    // APNS_TEAM_ID and APNS_KEY_ID and completing real-device validation.
+    "NOTIFICATIONS_ENABLED": "true"
+  },
+  "observability": {
+    "enabled": true,
+    // APNs device addresses are embedded in outbound URLs; do not persist
+    // outbound request tracing. Incoming routes contain no token/lease.
+    "traces": { "enabled": false }
+  }
+}

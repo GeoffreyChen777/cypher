@@ -1,0 +1,567 @@
+//! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
+//! the activity sidebar IS the session list, and the titlebar names the
+//! selected session (harness brand icon + title). When the sidebar is
+//! collapsed, a `+` new-session button fades into the titlebar's left end
+//! (riding the sidebar width tween). `UiSettings.open_tabs` is legacy — no
+//! longer read or written.
+
+use super::*;
+
+const CHAT_TITLEBAR_TOP_PAD: f32 = Theme::TITLEBAR_TOP_PAD + PANEL_EDGE_INSET;
+
+/// The titlebar is window-relative; the card begins PANEL_EDGE_INSET lower.
+/// Use explicit height/start alignment instead of centering a full-height
+/// strip: the first tab's top-left arc must be concentric with the card's.
+fn right_tab_header_frame() -> gpui::Div {
+    div()
+        .flex_none()
+        .self_start()
+        .mt(px(
+            PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD
+        ))
+        .h(px(RIGHT_TAB_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .overflow_hidden()
+        .pl(px(RIGHT_TAB_INSET))
+}
+
+#[cfg(test)]
+mod header_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn surface_tabs_and_panel_have_concentric_top_left_corners() {
+        let mut frame = right_tab_header_frame();
+        let style = frame.style();
+        let margin_top = PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD;
+        assert_eq!(style.margin.top, Some(px(margin_top).into()));
+        assert_eq!(style.padding.left, Some(px(RIGHT_TAB_INSET).into()));
+        assert_eq!(style.size.height, Some(px(RIGHT_TAB_HEIGHT).into()));
+        assert_eq!(style.align_self, Some(gpui::AlignSelf::Start));
+        assert_eq!(RIGHT_TAB_INSET + RIGHT_TAB_RADIUS, PANEL_CORNER_RADIUS);
+        assert_eq!(
+            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_RADIUS,
+            PANEL_EDGE_INSET + PANEL_CORNER_RADIUS,
+        );
+        assert!(
+            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_HEIGHT <= Theme::TITLEBAR_HEIGHT,
+            "tab hit targets must remain inside the titlebar",
+        );
+    }
+
+    #[test]
+    fn surface_header_retains_native_caption_clearance_and_panel_anchor() {
+        for windows in [false, true] {
+            let padding = titlebar_right_padding(windows, PANEL_EDGE_INSET + RIGHT_TAB_INSET);
+            for panel_width in [RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT, 960.0] {
+                let viewport = 1320.0;
+                let header_width = panel_width - padding;
+                let first_tab_left = viewport - padding - header_width + RIGHT_TAB_INSET;
+                assert_eq!(
+                    first_tab_left + RIGHT_TAB_RADIUS,
+                    viewport - panel_width + PANEL_CORNER_RADIUS,
+                );
+            }
+            assert_eq!(
+                padding,
+                PANEL_EDGE_INSET
+                    + RIGHT_TAB_INSET
+                    + if windows { WINDOWS_CAPTION_WIDTH } else { 0.0 },
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_header_accounts_for_collapsed_conversation_margins() {
+        let viewport = 1320.0;
+        let sidebar = 256.0;
+        let padding = PANEL_EDGE_INSET + RIGHT_TAB_INSET;
+        let row_gap = 8.0;
+        let available = viewport - sidebar - padding - row_gap;
+        let strip_left = viewport - padding - available;
+        let panel_left = sidebar + 4.0 + 4.0;
+        assert_eq!(
+            strip_left + RIGHT_TAB_INSET + RIGHT_TAB_RADIUS,
+            panel_left + PANEL_CORNER_RADIUS,
+        );
+    }
+}
+
+/// The chat one step from `selected` in the sidebar `order`, wrapping at both
+/// ends. Pure.
+///
+/// `order` is the sidebar's own row order ([`AppState::overview_chats`] — the
+/// flat recency list the grouped cards are built from), which already hides
+/// archived and child chats and restricts to live spaces.
+///
+/// With nothing selected — the new-session canvas — cycling enters the list at
+/// the end it would have wrapped to: the first row going forward, the last
+/// going back. A selection that has since left the list (archived from another
+/// device mid-cycle) is treated the same way rather than dead-ending.
+pub(super) fn cycle_target(
+    order: &[String],
+    selected: Option<&str>,
+    forward: bool,
+) -> Option<String> {
+    if order.is_empty() {
+        return None;
+    }
+    let at = selected.and_then(|id| order.iter().position(|c| c == id));
+    let next = match (at, forward) {
+        (Some(at), true) => (at + 1) % order.len(),
+        (Some(at), false) => (at + order.len() - 1) % order.len(),
+        (None, true) => 0,
+        (None, false) => order.len() - 1,
+    };
+    Some(order[next].clone())
+}
+
+impl Shell {
+    /// Boot landing: the most recently active visible chat once the first
+    /// chats frame has synced (manual selection wins; no chats → the
+    /// new-session canvas shows).
+    pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
+        let first = {
+            let state = self.state.read(cx);
+            if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
+                return;
+            }
+            state
+                .overview_chats(Utc::now())
+                .first()
+                .map(|(_, c)| c.id.clone())
+        };
+        if let Some(first) = first {
+            self.state
+                .update(cx, |s, cx| s.select_chat(Some(first), cx));
+        }
+    }
+
+    /// Open a session from the sidebar: select it, the main area follows.
+    pub(super) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.state
+            .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
+        cx.notify();
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's session rows in
+    /// the order they are drawn ([`AppState::overview_chats`]). Selection is
+    /// immediate (no MRU overlay held open on the modifier) — one press, one
+    /// session.
+    ///
+    /// Chat-scoped chrome, like the panel toggles: gpui dispatches a matched
+    /// binding before any `on_key_down`, so an unscoped cycle would fire
+    /// underneath Settings (yanking the user off the page mid-record, since
+    /// these are the very keys the shortcuts table invites them to press) or
+    /// underneath the add-space palette, stranding the overlay over a session
+    /// they never picked.
+    pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) || self.add_space.is_some() {
+            return;
+        }
+        let (order, selected) = {
+            let state = self.state.read(cx);
+            let order = state
+                .overview_chats(Utc::now())
+                .into_iter()
+                .map(|(_, chat)| chat.id.clone())
+                .collect::<Vec<_>>();
+            (order, state.selected_chat.clone())
+        };
+        if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
+            self.open_chat(target, cx);
+        }
+    }
+
+    /// The global new-session action (shortcut, or the titlebar `+` while the
+    /// sidebar is collapsed): open the new-session canvas. A live project pick
+    /// stands — the sidebar never filters, so there is no filter to re-home
+    /// onto. A missing,
+    /// project-less, or dangling selection is replaced by the last remembered
+    /// live project, else the deterministic live-space fallback
+    /// (`AppState::first_space_on_picked_device`). With no spaces at all the
+    /// selection is left alone — the onboarding canvas blocks here anyway.
+    pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.state.update(cx, |s, cx| {
+            // A LIVE project pick stands: `selected_space_row` also reads
+            // `None` for the explicit no-project opt-out and dangling ids, so
+            // a project-less selection is repaired to the last remembered live
+            // project (else the deterministic live-space fallback).
+            let has_live_selection = s.selected_space_row().is_some();
+            if !has_live_selection && !s.spaces.is_empty() {
+                let target = self
+                    .settings
+                    .last_space_id
+                    .clone()
+                    .filter(|id| s.space_row(id).is_some())
+                    .or_else(|| s.first_space_on_picked_device());
+                if let Some(id) = target {
+                    s.select_space(Some(id), cx);
+                }
+            }
+            s.select_chat(None, cx);
+        });
+        // The generic `+` is not a targeted checkout: clear any programmatic
+        // pin (sidebar hover add) so an already-pinned canvas reads generically
+        // again — the canvas falls back to its ordinary project defaults.
+        self.composer.update(cx, |composer, cx| {
+            composer.clear_checkout_target(cx);
+        });
+        // Routing to the canvas is a navigation (the titlebar Back returns
+        // to the session just left). `NavHistory::push` dedups against the
+        // current entry, so a `+` pressed while already on the canvas is a
+        // no-op and the `on_state_changed` canvas push after `select_chat`
+        // never double-stacks.
+        self.nav.push(NavEntry::Chat(String::new()));
+        cx.notify();
+    }
+
+    /// The sidebar's hover add buttons: open the new-session canvas explicitly
+    /// targeted at `space_id`'s checkout (`plan` — a worktree path or the
+    /// ordinary/current checkout). The pin rides the composer's pickers so the
+    /// target is authoritative without a ListRefs round-trip; the global
+    /// [`Self::open_new_session`] behavior is unchanged.
+    pub(super) fn open_new_session_for(
+        &mut self,
+        space_id: String,
+        plan: crate::pickers::CheckoutPlan,
+        cx: &mut Context<Self>,
+    ) {
+        self.route = Route::Chat;
+        self.settings.last_space_id = Some(space_id.clone());
+        self.composer.update(cx, |composer, cx| {
+            composer.target_checkout(space_id, plan, cx);
+        });
+        // Same deduped canvas navigation as `open_new_session` (see above).
+        self.nav.push(NavEntry::Chat(String::new()));
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// The unified titlebar in chat mode:
+    /// `[fading +] [harness icon + session title] … [toggle-changes]`.
+    /// Replaces the tab strip; inherits its titlebar duties (drag region,
+    /// animated left inset, the toggle-changes button on git projects).
+    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        // The canvas titles as NOTHING (user request — a "New session"
+        // header over the empty canvas was noise); the bar keeps its height,
+        // drag region, and buttons. A session appends its target as a muted
+        // "project @ device" tag right of the title (the composer footer no
+        // longer carries it).
+        let (title, target, harness, on_canvas): (
+            SharedString,
+            Option<SharedString>,
+            Option<cypher_proto::HarnessId>,
+            bool,
+        ) = {
+            let state = self.state.read(cx);
+            match state.selected_chat_row() {
+                Some(chat) => {
+                    let folder = chat
+                        .space_id
+                        .as_deref()
+                        .and_then(|id| state.space_row(id))
+                        .map(|s| s.display_name().to_string())
+                        .unwrap_or_else(|| "~".to_string());
+                    let device = state
+                        .device_name(&chat.device_id)
+                        .unwrap_or("Unknown device");
+                    (
+                        SharedString::from(transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        )),
+                        Some(SharedString::from(format!("{folder} @ {device}"))),
+                        chat.config.as_ref().map(|c| c.harness),
+                        false,
+                    )
+                }
+                None => (SharedString::from(""), None, None, true),
+            }
+        };
+
+        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER while the
+        // sidebar is collapsed (`render_titlebar_cluster`) — this row only
+        // budgets for it: the title's left inset grows by one button slot as
+        // the + fades in, so the text never sits under it.
+        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let plus_inset = 26.0 * self.titlebar_plus_alpha();
+
+        // Same glide as the old strip: content starts at the inset card's
+        // left edge while the sidebar is open, and slides toward the control
+        // cluster as it collapses.
+        let content_left =
+            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
+
+        // Trailing titlebar section. With the changes pane open this is the
+        // PANE'S HEADER — a strip exactly as wide as the pane carrying its
+        // controls (scope dropdown, ref selector, fold-all from the Changes
+        // entity; expand + close shell-side). It lives up here because the
+        // titlebar overlay owns this band's hit-testing: controls mounted in
+        // the pane itself would sit under the drag region and never see a
+        // click. Closed, it is just the stable open/close toggle. Hidden on
+        // the new-session canvas (user request) — nothing to diff yet.
+        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let right_padding = titlebar_right_padding(
+            cfg!(target_os = "windows"),
+            if !on_canvas && self.right_pane_open(cx) {
+                PANEL_EDGE_INSET + RIGHT_TAB_INSET
+            } else {
+                Theme::SPACE_LG
+            },
+        );
+        // In takeover the title hides and the strip owns the whole band, so
+        // the row's left inset pulls back to the sidebar seam — the title
+        // inset would push the scope dropdown off the pane's own left gutter
+        // (user report: misaligned dead space). With the sidebar COLLAPSED
+        // the seam is the window edge, where the traffic lights + nav
+        // cluster overlay lives — the strip must still clear it, but only
+        // just: `title_bar_content_start` carries a 10px TEXT margin the
+        // strip doesn't want (it brings its own 8px pad), and doubling up
+        // read as a hole after the `+` (user report).
+        let row_left = if takeover {
+            // The collapsed conversation card still has two 4px margins,
+            // so the expanded panel begins 8px after the sidebar seam.
+            // The title row's 8px child gap supplies that same offset;
+            // cancelling it would put the first tab outside the panel's arc.
+            // Keep clearing native/window controls when the sidebar is hidden.
+            let cluster_end = self.title_bar_content_start() - 10.0 + plus_inset - 14.0;
+            sidebar_now.max(cluster_end)
+        } else {
+            content_left
+        };
+        let trailing: Option<gpui::AnyElement> = if on_canvas {
+            None
+        } else if self.right_pane_open(cx) {
+            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
+            let pr = right_padding;
+            // The row's own left padding is part of its content box: a strip
+            // wider than what's left after it overflows and clips at the right
+            // edge (flex_none never shrinks) — cap to the available width. The
+            // row's 8px child gaps sit OUTSIDE the strip's width (one before
+            // the strip in takeover, two with the title row present): without
+            // budgeting them the capped strip overflows by exactly one gap and
+            // the buttons slide right on expand (user report).
+            let gap_budget = if takeover { 8.0 } else { 16.0 };
+            let avail = self.viewport_width - row_left - pr - gap_budget;
+            // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
+            // options that used to live here moved into the pane's own
+            // second row; expand/close stay in this band (user request).
+            let controls = self.render_right_tab_strip(cx);
+            let header_theme = self.right_header_theme(cx);
+            Some(
+                right_tab_header_frame()
+                    // Right edge already sits at viewport − pr (the row's own
+                    // padding), so this width starts the strip exactly at the
+                    // pane's left border — and rides the open/close tween.
+                    .w(px((right_now - pr).min(avail).max(0.0)))
+                    // Clipped: a long base-ref name must truncate inside the
+                    // controls, never paint under the buttons to the right.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(controls),
+                    )
+                    .child(header_icon_button(
+                        "expand-changes",
+                        icons::EXPAND_ARROWS,
+                        &header_theme,
+                        cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
+                    ))
+                    .child(header_icon_button(
+                        "toggle-changes",
+                        icons::SIDEBAR_MINIMALISTIC,
+                        &header_theme,
+                        cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                    ))
+                    .into_any_element(),
+            )
+        } else {
+            Some(
+                header_icon_button(
+                    "toggle-changes",
+                    icons::SIDEBAR_MINIMALISTIC,
+                    &theme,
+                    cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                )
+                .into_any_element(),
+            )
+        };
+
+        let inner = div()
+            .size_full()
+            .flex()
+            .items_center()
+            // The conversation card starts 8px below the window edge. Give
+            // its title row matching internal air so the label and trailing
+            // controls do not hug the card's top hairline.
+            .pt(px(CHAT_TITLEBAR_TOP_PAD))
+            .gap(px(8.0))
+            .pl(px(row_left))
+            .pr(px(right_padding))
+            // In panel takeover the header strip spans the whole band — the
+            // title would sit UNDER it (both flex_none, the row overflows and
+            // paint order stacks them), so it hides for the duration.
+            .when(!takeover, |el| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when_some(
+                            harness.map(crate::pickers::harness_brand_icon),
+                            |el, (path, tint)| {
+                                el.child(
+                                    icon(path)
+                                        .size(px(14.0))
+                                        .flex_none()
+                                        .text_color(tint.unwrap_or(theme.text_muted)),
+                                )
+                            },
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if on_canvas {
+                                    theme.text_muted.opacity(0.7)
+                                } else {
+                                    theme.text.opacity(0.85)
+                                })
+                                .child(title),
+                        )
+                        .when_some(target, |el, target| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted.opacity(0.5))
+                                    .child(target),
+                            )
+                        }),
+                )
+            })
+            .child(div().flex_1())
+            .children(trailing);
+
+        // The unified window titlebar: full-width on the glass shell, ABOVE
+        // the inset card. No bottom border — the card's tone and shadow are
+        // enough separation, and the glass gutter shows between.
+        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+        self.titlebar_drag_region("chat-titlebar", bar, cx)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn order(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    fn chat(id: &str, space_id: Option<&str>) -> cypher_proto::Chat {
+        cypher_proto::Chat {
+            id: id.into(),
+            device_id: "dev".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: space_id.map(Into::into),
+            last_seen_at: None,
+            room_gen: None,
+            child: None,
+        }
+    }
+
+    #[test]
+    fn steps_forward_and_back_through_the_list() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, Some("a"), true).as_deref(), Some("b"));
+        assert_eq!(cycle_target(&list, Some("b"), true).as_deref(), Some("c"));
+        assert_eq!(cycle_target(&list, Some("c"), false).as_deref(), Some("b"));
+        assert_eq!(cycle_target(&list, Some("b"), false).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn wraps_at_both_ends() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, Some("c"), true).as_deref(), Some("a"));
+        assert_eq!(cycle_target(&list, Some("a"), false).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_single_session_cycles_to_itself() {
+        // Not a no-op by accident: with one row both directions must resolve,
+        // so the shortcut never looks broken by dead-ending on `None`.
+        let list = order(&["only"]);
+        assert_eq!(
+            cycle_target(&list, Some("only"), true).as_deref(),
+            Some("only")
+        );
+        assert_eq!(
+            cycle_target(&list, Some("only"), false).as_deref(),
+            Some("only")
+        );
+    }
+
+    #[test]
+    fn no_selection_enters_the_list_from_the_matching_end() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, None, true).as_deref(), Some("a"));
+        assert_eq!(cycle_target(&list, None, false).as_deref(), Some("c"));
+        assert_eq!(
+            cycle_target(&list, Some("gone"), true).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            cycle_target(&list, Some("gone"), false).as_deref(),
+            Some("c")
+        );
+    }
+
+    #[test]
+    fn an_empty_list_has_nothing_to_select() {
+        assert_eq!(cycle_target(&[], None, true), None);
+        assert_eq!(cycle_target(&[], Some("a"), true), None);
+    }
+
+    #[test]
+    fn the_order_comes_from_the_sidebar_overview() {
+        // `cycle_target` walks the ids in order; `overview_chats` is what the
+        // sidebar draws (and already hides archived/child chats). A selected
+        // row that is no longer in the list (e.g. archived from another
+        // device) is treated like no selection rather than dead-ending.
+        let list = order(&["mine", "theirs", "loose"]);
+        assert_eq!(
+            cycle_target(&list, Some("mine"), true).as_deref(),
+            Some("theirs")
+        );
+        // Archived/child exclusion lives in `overview_chats`, so the pure
+        // helper just receives the filtered order.
+        let filtered = [chat("mine", None), chat("theirs", None)];
+        let ids: Vec<String> = filtered.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(cycle_target(&ids, None, false).as_deref(), Some("theirs"));
+    }
+}
