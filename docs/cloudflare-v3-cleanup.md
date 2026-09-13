@@ -4,6 +4,10 @@ The user authorized removing withdrawn 0.3.10/0.3.11 release objects and
 permanently deleting the v3 `Sync3Room` and `WorkspaceHub` data. This operation
 does not publish the replacement 0.3.10 or upload a TestFlight build.
 
+This is the cleanup-time snapshot. The subsequent
+[0.3.10 release receipt](releases/0.3.10.md) records the current release
+channel, deployed versions, and automation state.
+
 ## Production state
 
 - Edge application code is restored from `0f0d0f9`. The only Edge source-tree

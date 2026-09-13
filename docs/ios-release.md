@@ -8,7 +8,27 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
-## Current validation boundary
+## Current release: 0.1.6 (5), 2026-09-13
+
+- Companion build for desktop **0.3.10**, source commit `cf499ad` on the
+  restored main branch; application code is the pre-v3 baseline.
+- **169 Release simulator tests passed** with `ENABLE_TESTABILITY=YES` for
+  the test invocation only. Distribution archives do not use that override.
+- An unsigned archive exported successfully but lost `aps-environment` in
+  the signed IPA. It was **not uploaded**. Re-archiving with the existing
+  Apple Distribution identity/profile preserved the production push entitlement.
+- The final IPA passed strict deep signature verification, arm64/version/build,
+  distribution profile, no-debug-entitlement, production APNs, icon and privacy
+  manifest checks. Xcode reported **Upload succeeded**.
+- App Store Connect build `93f7a3f1-4706-4cbe-8cd6-c7d43f98e7ca` is **VALID**.
+  With explicit user confirmation, `usesNonExemptEncryption=false` was submitted
+  for this build. Internal state: **READY_FOR_BETA_TESTING**; external state:
+  **READY_FOR_BETA_SUBMISSION**. No tester/group changes or review submission
+  were performed; these states do not establish physical-device acceptance.
+- Evidence is under `/tmp/cypher-restored-0310/` on the release Mac, with
+  `/tmp/cypher-restored-0310-ios-upload.log` containing the upload receipt.
+
+## Earlier validation
 
 - Release archiving for `generic/platform=iOS` and subsequent automatic
   App Store distribution export have both succeeded on Xcode 26.6 without
@@ -47,12 +67,14 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 umask 077
 OUT="$(mktemp -d /tmp/cypher-ios-distribution.XXXXXX)"
 
-# Build for iPhoneOS, not the simulator. Signing is handled at distribution.
+# Build for iPhoneOS with the verified, existing distribution profile.
+# An unsigned archive can export without preserving the app's push entitlement.
 xcodebuild -project apps/ios/Cypher.xcodeproj -scheme Cypher \
   -configuration Release -destination 'generic/platform=iOS' \
   -archivePath "$OUT/Cypher.xcarchive" \
   -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-  CODE_SIGNING_ALLOWED=NO archive
+  CODE_SIGN_STYLE=Manual 'CODE_SIGN_IDENTITY=Apple Distribution' \
+  'PROVISIONING_PROFILE_SPECIFIER=Cypher iOS App Store Distribution 2026' archive
 
 # Requires the approved team/account and distribution-signing permissions.
 # This may create/download Apple-managed signing assets; it does NOT upload.
@@ -61,8 +83,8 @@ xcodebuild -exportArchive -archivePath "$OUT/Cypher.xcarchive" \
   -exportPath "$OUT/export" -allowProvisioningUpdates
 ```
 
-The unsigned-archive/export path above has been verified with automatic
-distribution signing. If a different machine requires a local distribution
+The signed-archive/export path preserves the production APNs entitlement.
+If a different machine requires a local distribution
 certificate/profile, resolve that specific distribution requirement; do not
 ask for a physical phone merely to satisfy a Development profile.
 
@@ -93,8 +115,10 @@ Edge/WorkOS/remote-provider behavior before completing App Store Connect
 privacy answers.
 
 Networking uses Apple's URLSession/TLS; the PKCE helper uses CryptoKit SHA-256.
-No E2EE claim is made. `ITSAppUsesNonExemptEncryption` remains unset pending
-the export-compliance review; do not fill legal answers blindly.
+No E2EE claim is made. `ITSAppUsesNonExemptEncryption` remains unset in the
+binary. The user approved the non-exempt-encryption declaration for build
+0.1.6 (5) in App Store Connect; do not automatically extend that declaration
+to future builds with different encryption behavior.
 
 ## Publication boundary
 
