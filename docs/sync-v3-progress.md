@@ -785,6 +785,21 @@ boundaries; the source/outbox transaction merge remains an explicit blocker.
   `/tmp/cypher-v3-notification-activity-ios.xcresult`. This is simulator
   evidence; physical APNs delivery is still a release gate.
 
+## Continuation 33 — legacy Durable Object write fencing
+
+- Cloudflare still requires the historical `SessionRoom`, `DeviceRoom`,
+  `RegistryRoom` and `ChatRoom` exports while old objects exist. Those exports
+  now point to `retired-rooms.ts`, not the old protocol implementations.
+- Retired classes clear saved ping/pong behavior, close every already-accepted
+  WebSocket with `v3_required`, cancel alarms, and never read, parse, or ACK
+  payloads. Historical SQLite/KV data remains untouched.
+- Native v3 routes remain the only routes in the production entry point.
+  Legacy class identity is retained solely for Cloudflare's existing-object
+  migration invariant, not as a compatibility transport.
+- Unit and real workerd tests cover all four retired classes, retained
+  sockets, malformed/binary input, alarm cancellation and no-ACK behavior:
+  **125 unit + 74 workerd passed**.
+
 ## Continuation 30 — bounded normal transcript reads
 
 - `Sync3Journal.allMessagesBounded()` now reconstructs the normal iOS
