@@ -34,6 +34,9 @@ jobs:
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$out/Cypher.xcarchive" \
             -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             MARKETING_VERSION=0.1.6 CURRENT_PROJECT_VERSION=4
       - name: export distribution IPA
         env:
@@ -53,7 +56,10 @@ jobs:
           PLIST
           xcodebuild -exportArchive -archivePath "$out/Cypher.xcarchive" \
             -exportOptionsPlist "$out/ExportOptions.plist" -exportPath "$out/export" \
-            -allowProvisioningUpdates
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
           ipa="$(find "$out/export" -name '*.ipa' -print -quit)"
           test -n "$ipa"
           unzip -p "$ipa" Payload/*.app/Info.plist > "$out/Info.plist"
