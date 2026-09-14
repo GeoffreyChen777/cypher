@@ -37,6 +37,8 @@ else
   BIN="$ROOT/target/debug/cypher"
 fi
 
+python3 scripts/ci/check-production-profile.py "$BIN"
+
 # Fail the package immediately if the binary imports GLIBC newer than the
 # 2.31 / Ubuntu 20.04 baseline (that is what breaks older Linux hosts).
 scripts/check-linux-abi.sh "$BIN"

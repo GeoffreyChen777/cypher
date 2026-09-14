@@ -60,7 +60,7 @@ private final class NotificationFixture {
         }
     }
     func bind(_ user: String = "alice") {
-        controller.bind(AppConfig(edgeURL: URL(string: "https://edge.test")!, mode: .dev,
+        controller.bind(AppConfig(edgeURL: URL(string: "http://127.0.0.1:1")!, mode: .dev,
             userId: user, orgId: "org", deviceId: "phone", deviceName: "Test", devBearer: "\(user)@org"))
     }
 }

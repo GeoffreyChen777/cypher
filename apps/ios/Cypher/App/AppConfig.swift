@@ -52,8 +52,21 @@ final class AppConfig: @unchecked Sendable {
     func currentToken() async -> String? {
         switch mode {
         case .dev:
+            #if CYPHER_DEVELOPMENT
+            guard edgeURL == DevelopmentProfile.edge || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "") else { return nil }
+            #endif
+            #if !CYPHER_DEVELOPMENT
+            // Local test/demo support remains, but public distribution
+            // builds cannot authenticate with a cloud development token.
+            guard ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? "") else { return nil }
+            #endif
             return readDevBearer()
         case .workos:
+            #if CYPHER_DEVELOPMENT
+            // A Dev bundle must not consume a real user's WorkOS session.
+            // Pure AuthClient unit tests exercise refresh independently.
+            if edgeURL.host == "edge.letscypher.app" { return nil }
+            #endif
             // Fast path: a still-fresh token needs no refresh.
             if let current = readTokens(), !Self.isExpired(jwt: current.accessToken) {
                 return current.accessToken

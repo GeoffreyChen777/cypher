@@ -114,6 +114,63 @@ fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Opt
     }
 }
 
+const DEVELOPMENT_EDGE_URL: &str = "https://cypher-edge-development.geoffreychen777.workers.dev";
+
+fn validate_development_environment() -> anyhow::Result<()> {
+    let profile = cypher_env::var("PROFILE").unwrap_or_else(|| "production".into());
+    anyhow::ensure!(
+        matches!(profile.as_str(), "production" | "local" | "development"),
+        "Unknown CYPHER_PROFILE"
+    );
+    if profile == "local" {
+        anyhow::ensure!(
+            !cypher_env::data_dir().join("session.json").exists(),
+            "Local profile cannot load a saved cloud login; choose an isolated local data directory"
+        );
+    }
+    if profile == "development"
+        || cypher_env::var("EDGE_URL").is_some_and(|url| {
+            url.trim_end_matches('/')
+                .eq_ignore_ascii_case(DEVELOPMENT_EDGE_URL)
+        })
+    {
+        anyhow::ensure!(
+            cfg!(feature = "development"),
+            "This build does not support development Edge authentication"
+        );
+        anyhow::ensure!(
+            profile == "development",
+            "Development Edge requires CYPHER_PROFILE=development"
+        );
+        anyhow::ensure!(
+            cypher_env::var("DEV_EDGE_URL").as_deref() == Some(DEVELOPMENT_EDGE_URL),
+            "Unexpected development Edge URL"
+        );
+        let token = cypher_env::var("DEV_ACCESS_TOKEN").unwrap_or_default();
+        anyhow::ensure!(
+            token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Missing or invalid development credential"
+        );
+        let data = cypher_env::canonical_data_dir(&cypher_env::data_dir())?;
+        let root =
+            cypher_env::canonical_data_dir(&cypher_env::home_dir().join(".cypher-development"))?;
+        anyhow::ensure!(
+            data.starts_with(&root) && data != root,
+            "Development profiles require a private instance under ~/.cypher-development/"
+        );
+        anyhow::ensure!(
+            cypher_env::var("EDGE_TOKEN").is_none(),
+            "Do not use the legacy EDGE_TOKEN with locked development auth"
+        );
+    } else {
+        anyhow::ensure!(
+            cypher_env::var("DEV_ACCESS_TOKEN").is_none(),
+            "Development credentials require the development profile"
+        );
+    }
+    Ok(())
+}
+
 /// mimalloc: system malloc (macOS libmalloc especially) never returns the
 /// streaming churn's high-water pages, so transient allocation became
 /// permanent RSS (docs/memory-plan.md §1).
@@ -121,7 +178,11 @@ fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Opt
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    // Headless and UI builds share the same WSS transport. UI initialization
+    // alone is too late for headless engines linked with both TLS providers.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
+    validate_development_environment()?;
     anyhow::ensure!(
         std::env::var_os("CYPHER_IPC_PORT").is_none(),
         "CYPHER_IPC_PORT has been removed. Unset it; local IPC uses a private Unix socket selected by CYPHER_DATA_DIR."
@@ -272,18 +333,40 @@ fn main() -> anyhow::Result<()> {
 /// operate on the exact session the daemon will load.
 fn engine_config_from_env() -> anyhow::Result<cypher_engine::EngineConfig> {
     // Dev-mode bearer (no WorkOS): an explicit token enables sync.
-    let edge_token = cypher_env::var("EDGE_TOKEN");
+    let development = cypher_env::var("PROFILE").as_deref() == Some("development");
+    let local = cypher_env::var("PROFILE").as_deref() == Some("local");
+    let edge_token = if development {
+        cypher_env::var("DEV_ACCESS_TOKEN")
+    } else if local {
+        None
+    } else {
+        cypher_env::var("EDGE_TOKEN")
+    };
     Ok(cypher_engine::EngineConfig {
         data_dir: std::path::absolute(cypher_env::data_dir())?,
-        edge_url: edge_url_from_env(),
+        edge_url: if development {
+            DEVELOPMENT_EDGE_URL.into()
+        } else {
+            edge_url_from_env()
+        },
         ipc_socket: cypher_env::ipc_socket(&cypher_env::data_dir())?,
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; CYPHER_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
-        org_id: cypher_env::var("ORG_ID"),
+        org_id: if development {
+            Some("dev-org".into())
+        } else {
+            cypher_env::var("ORG_ID")
+        },
         // Real auth against production by default; see
         // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_url_from_env(), &edge_token),
+        workos_client_id: if development {
+            None
+        } else if local {
+            Some(DEFAULT_WORKOS_CLIENT_ID.into())
+        } else {
+            workos_client_id_from_env(&edge_url_from_env(), &edge_token)
+        },
         edge_token,
     })
 }

@@ -12,8 +12,10 @@ export interface Env {
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
   WORKOS_CLIENT_ID: string;
-  /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
+  /** "workos" (JWT), "dev" (local tests only), or "dev-locked" (secret development bearer). */
   AUTH_MODE: string;
+  /** Required bearer for the data-isolated development deployment. */
+  DEV_ACCESS_TOKEN?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;

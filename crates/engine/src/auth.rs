@@ -136,7 +136,7 @@ impl Serialize for AuthState {
 // Config + construction
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthConfig {
     /// Edge base URL (`/auth/*` routes).
     pub edge_url: String,
@@ -148,8 +148,20 @@ pub struct AuthConfig {
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
+    /// A secret bearer is not a user ID. Only compiled into explicit Dev builds.
+    #[cfg(feature = "development")]
+    pub dev_access_token: Option<String>,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("edge_url", &self.edge_url)
+            .field("data_dir", &self.data_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AuthConfig {
@@ -160,6 +172,8 @@ impl AuthConfig {
             workos_client_id: None,
             workos_api_base: "https://api.workos.com".into(),
             dev_user_id: "dev-user".into(),
+            #[cfg(feature = "development")]
+            dev_access_token: None,
             callback_port: None,
         }
     }
@@ -416,6 +430,10 @@ impl Auth {
     /// it has under 30s left.
     pub async fn access_token(&self) -> Option<String> {
         if self.inner.workos.is_none() {
+            #[cfg(feature = "development")]
+            if let Some(token) = &self.inner.config.dev_access_token {
+                return Some(token.clone());
+            }
             return Some(self.inner.config.dev_user_id.clone());
         }
         if let Some(entry) = &*lock(&self.inner.access)

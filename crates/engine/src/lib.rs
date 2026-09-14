@@ -99,7 +99,7 @@ pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EngineConfig {
     /// Data directory (default `~/.cypher`).
     pub data_dir: PathBuf,
@@ -117,6 +117,47 @@ pub struct EngineConfig {
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
+}
+
+impl std::fmt::Debug for EngineConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineConfig")
+            .field("data_dir", &self.data_dir)
+            .field("edge_url", &self.edge_url)
+            .field("org_id", &self.org_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, feature = "development"))]
+mod development_auth_tests {
+    use super::*;
+    #[tokio::test]
+    async fn secret_never_becomes_user_identity_or_debug_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = EngineConfig {
+            data_dir: dir.path().into(),
+            edge_url: String::new(),
+            edge_token: None,
+            ipc_socket: cypher_env::ipc_socket(dir.path()).unwrap(),
+            default_harness: HarnessId::Mock,
+            org_id: Some("dev-org".into()),
+            workos_client_id: None,
+        };
+        config.edge_url = "https://cypher-edge-development.geoffreychen777.workers.dev".into();
+        let secret = "a".repeat(64);
+        config.edge_token = Some(secret.clone());
+        config.workos_client_id = None;
+        let auth = Engine::build_auth(&config).await;
+        assert_eq!(auth.access_token().await.as_deref(), Some(secret.as_str()));
+        assert_eq!(auth.user_id().as_deref(), Some("dev-user"));
+        assert_eq!(auth.state().user().unwrap().id, "dev-user");
+        assert!(!format!("{config:?}").contains(&secret));
+        let profile = Engine::resolve_profile(&config, &auth, WorkspaceScope::Development)
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{:?}", profile.store_root()).contains(&secret));
+    }
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -653,6 +694,11 @@ impl Engine {
         auth_config.callback_port = cypher_env::var("CALLBACK_PORT").and_then(|p| p.parse().ok());
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
+            #[cfg(feature = "development")]
+            if config.edge_url == "https://cypher-edge-development.geoffreychen777.workers.dev" {
+                auth_config.dev_user_id = "dev-user".into();
+                auth_config.dev_access_token = Some(token.clone());
+            }
         }
         Auth::new(auth_config)
     }

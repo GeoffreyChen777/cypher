@@ -48,6 +48,9 @@ struct SignInView: View {
     @State private var verification: PendingEmailVerification?
     @State private var verificationCode = ""
     @State private var authSession = AuthSessionCoordinator()
+    #if CYPHER_DEVELOPMENT
+    @State private var developmentToken = ""
+    #endif
 
     var body: some View {
         ZStack {
@@ -75,6 +78,15 @@ struct SignInView: View {
                 }
 
                 VStack(spacing: 12) {
+                    #if CYPHER_DEVELOPMENT
+                    Text("Cypher Dev — isolated test workspace")
+                    SecureField("Development token", text: $developmentToken)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button("Connect to Dev Edge") {
+                        model.connectDevelopment(token: developmentToken)
+                        developmentToken = ""
+                    }.disabled(!DevelopmentProfile.validToken(developmentToken))
+                    #else
                     if let verification {
                         verificationForm(verification)
                     } else {
@@ -99,6 +111,7 @@ struct SignInView: View {
                         .disabled(busy)
                         .opacity(busy ? 0.6 : 1)
                     }
+                    #endif
 
                     if let error {
                         Text(error)

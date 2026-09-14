@@ -61,6 +61,7 @@ fi
 
 # Default features (desktop UI): macOS always ships the headed build.
 cargo build --release --locked -p cypher
+python3 scripts/ci/check-production-profile.py "$ROOT/target/release/cypher"
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

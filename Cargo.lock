@@ -1555,6 +1555,7 @@ dependencies = [
  "cypher-update",
  "libc",
  "mimalloc",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",

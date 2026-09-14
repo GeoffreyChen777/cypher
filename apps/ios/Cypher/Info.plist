@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Cypher</string>
+	<string>$(CYPHER_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -22,6 +22,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CypherAPNSEnvironment</key>
 	<string>$(CYPHER_APNS_ENVIRONMENT)</string>
+	<key>CypherBuildEnvironment</key>
+	<string>$(CYPHER_BUILD_ENVIRONMENT)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -29,7 +31,7 @@
 			<string>ai.mvp-lab.cypher.ios.auth</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>cypher</string>
+				<string>$(CYPHER_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>

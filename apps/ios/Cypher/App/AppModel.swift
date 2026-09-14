@@ -61,6 +61,22 @@ final class AppModel {
         if demo != nil { return }
         DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments
+        #if CYPHER_DEVELOPMENT
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
+        // A separate bundle owns preferences, document cache and Keychain.
+        // Ignore production saved state and legacy credential launch arguments.
+        if !args.contains("-demo") {
+            if let token = ProcessInfo.processInfo.environment["CYPHER_DEV_ACCESS_TOKEN"],
+               DevelopmentProfile.validToken(token) {
+                Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
+            }
+            if let token = Keychain.load(key: "developmentToken"), DevelopmentProfile.validToken(token) {
+                connectDevelopment(token: token)
+                if args.contains("-dev-interop") { Task { await DevelopmentInterop.run(model: self) } }
+            }
+            return
+        }
+        #endif
         // Hard cutover: both prior production edge URLs (the old mvp-lab
         // default and the interim workers.dev default) are migrated to the
         // new canonical endpoint. Only the exact old production values
@@ -191,6 +207,20 @@ final class AppModel {
 
     // MARK: Sign-in flows
 
+    #if CYPHER_DEVELOPMENT
+    func connectDevelopment(token: String) {
+        guard DevelopmentProfile.validToken(token) else { return }
+        Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
+        edgeURLString = DevelopmentProfile.edge.absoluteString
+        authModeRaw = AppConfig.Mode.dev.rawValue
+        storedUserId = DevelopmentProfile.user
+        storedOrgId = DevelopmentProfile.org
+        startPathMonitor()
+        connect(url: DevelopmentProfile.edge, mode: .dev, userId: DevelopmentProfile.user,
+                orgId: DevelopmentProfile.org, tokens: nil, devBearer: token)
+    }
+    #endif
+
     /// WorkOS paste-code exchange. Multiple organizations use the picker,
     /// exactly one is selected automatically, and a first personal
     /// organization is provisioned automatically when none exists.
@@ -273,6 +303,9 @@ final class AppModel {
         demo = nil
         Keychain.delete(key: "accessToken")
         Keychain.delete(key: "refreshToken")
+        #if CYPHER_DEVELOPMENT
+        Keychain.delete(key: "developmentToken")
+        #endif
         DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
         storedUserId = ""
         storedOrgId = ""
@@ -290,7 +323,7 @@ final class AppModel {
                                deviceId: deviceId, deviceName: deviceName,
                                tokens: tokens, devBearer: devBearer)
         self.config = config
-        notifications.bind(config)
+        if !DevelopmentProfile.enabled { notifications.bind(config) }
         let store = WorkspaceStore(config: config)
         workspace = store
         store.start()

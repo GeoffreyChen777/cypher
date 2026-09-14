@@ -189,7 +189,11 @@ struct AuthClient {
 // MARK: - Keychain storage
 
 enum Keychain {
+    #if CYPHER_DEVELOPMENT
+    private static let service = "ai.mvp-lab.cypher.ios.dev"
+    #else
     private static let service = "ai.mvp-lab.cypher.ios"
+    #endif
 
     @discardableResult
     static func save(_ value: String, key: String, thisDeviceOnly: Bool = false) -> OSStatus {

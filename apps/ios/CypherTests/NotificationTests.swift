@@ -48,7 +48,7 @@ final class NotificationTests: XCTestCase {
         XCTAssertEqual(restored.revocations.first?.binding.account, "account-a")
     }
     func testAPNsEnvironmentMatchesBuildConfiguration() {
-        #if DEBUG
+        #if DEBUG || CYPHER_DEVELOPMENT
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "development")
         #else
         XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CypherAPNSEnvironment") as? String, "production")
