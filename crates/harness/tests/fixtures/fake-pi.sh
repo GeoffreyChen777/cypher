@@ -204,6 +204,18 @@ while read -r line; do
     pid=$(rid "$line")
     case "$line" in
 
+    *scenario:mcp-login*)
+      emit '{"type":"extension_ui_request","id":"oauth-dialog","method":"input","title":"Complete OAuth\nhttps://auth.example/authorize?state=attempt&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback\nPaste callback"}'
+      read -r answer
+      if has "$answer" '"id":"oauth-dialog"' && has "$answer" '"value":"http://localhost:8976/callback?state=attempt&code=fixture"'; then
+        emit '{"type":"extension_ui_request","id":"oauth-done","method":"notify","message":"OAuth authentication successful","notifyType":"info"}'
+        emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      else
+        emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"callback not forwarded\"}"
+      fi
+      exit 0
+      ;;
+
     *scenario:happy*)
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       # Thinking + text deltas; a non-text delta maps to nothing.

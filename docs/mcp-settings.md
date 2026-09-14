@@ -40,6 +40,31 @@ OAuth options support clientId, clientSecret, scope, redirectUri and grantType.
 Switching input mode clears the draft. JSON, token, headers, argument and
 environment inputs are masked because they may contain credentials.
 
+## OAuth sign-in on a remote runtime
+
+Select the target device, then click **Sign in**. In the sign-in card, click
+**Open authorization page** to open the provider in this computer's browser.
+Approve access, then paste the **full callback URL** into the masked field and
+click **Complete sign-in**. For a remote runtime, the browser may show a
+localhost connection error: copy that address anyway. The callback listener
+belongs to the remote runtime, not this computer. Local callbacks still
+complete automatically when the browser can reach the listener.
+
+Cypher binds the callback to the original attempt, OAuth state and redirect
+URI. Credentials remain on the target runtime. The callback is not stored in
+chat history. Remote handoff uses the existing authorized HTTPS/WSS relay
+(TLS, **not E2EE**); the relay can see RPC contents.
+
+Only one sign-in is active per runtime. **Cancel sign-in** stops its child;
+closing the page cancels best-effort, and abandoned attempts expire after ten
+minutes. Both the viewer's engine and the target engine must support interactive
+MCP login; update older engines rather than falling back to a local login.
+
+For servers without dynamic client registration, import the provider's
+pre-registered `oauth.clientId`, `scope` and `redirectUri` alongside the URL.
+Starting sign-in preserves existing registration/refresh credentials instead
+of implicitly signing out first.
+
 ## Saving and safety
 
 - Add up to 32 servers / 64 KiB in one operation. Existing names cause the whole

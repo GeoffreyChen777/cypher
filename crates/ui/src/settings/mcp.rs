@@ -16,6 +16,7 @@ use crate::state::AppState;
 use crate::theme::Theme;
 
 mod add;
+mod login;
 
 struct DeleteConfirmation {
     name: String,
@@ -34,6 +35,7 @@ pub struct McpPage {
     form: Option<add::AddForm>,
     notice: Option<String>,
     delete: Option<DeleteConfirmation>,
+    login: Option<login::LoginForm>,
 }
 
 impl McpPage {
@@ -54,6 +56,7 @@ impl McpPage {
                 page.form = None;
                 page.notice = None;
                 page.delete = None;
+                page.login = None;
                 page.load(cx);
             }
             cx.notify();
@@ -70,6 +73,7 @@ impl McpPage {
             form: None,
             notice: None,
             delete: None,
+            login: None,
         };
         page.load(cx);
         page
@@ -375,7 +379,7 @@ impl McpPage {
                     .when(blocked && !busy, |el| el.opacity(0.5))
                     .when(!blocked, |el| {
                         el.on_click(cx.listener(move |page, _, _, cx| {
-                            page.call(methods::START_MCP_AUTH, auth_name.clone(), cx);
+                            page.start_mcp_login(auth_name.clone(), cx);
                         }))
                     })
                     .child(SharedString::from(label)),
@@ -501,6 +505,7 @@ impl Render for McpPage {
             .delete
             .as_ref()
             .map(|_| self.render_delete_confirmation(&theme, cx));
+        let login = self.login.as_ref().map(|_| self.render_mcp_login(&theme, cx));
         div()
             .id("mcp-page")
             .size_full()
@@ -530,7 +535,7 @@ impl Render for McpPage {
                         .line_height(px(20.0)),
                     )
                     .when(!self.target.read(cx).is_local(), |el| el.child(widgets::page_subtitle(
-                        &theme, "OAuth sign-in runs on the selected host and may open a browser there.")))
+                        &theme, "Open the authorization link here, then paste the full callback URL. Credentials stay on the selected host.")))
                     .when_some(self.target.read(cx).unavailable(cx), |el, error|
                         el.child(widgets::warning_strip(&theme, error)))
                     .children(
@@ -541,6 +546,7 @@ impl Render for McpPage {
                     .children(self.notice.clone().map(|notice| widgets::page_subtitle(&theme, notice)))
                     .children(form)
                     .children(delete)
+                    .children(login)
                     .child(body),
             )
     }
