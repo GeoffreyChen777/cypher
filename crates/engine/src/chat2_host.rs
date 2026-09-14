@@ -28,6 +28,7 @@ pub const CHAT2_DOC_EPOCH: u32 = 2;
 /// the existing change plumbing — this type only owns import + same-tx
 /// persistence.
 pub struct EngineChatSink {
+    preview: Option<Arc<cypher_sync::preview_link::PreviewLink>>,
     /// WEAK: the sink lives inside the handle's `ChatClient` for the
     /// client's whole life — a strong ref here kept
     /// `Arc::strong_count(&handle.doc) > 1` permanently, which reads as
@@ -42,10 +43,19 @@ pub struct EngineChatSink {
 impl EngineChatSink {
     pub fn new(doc: &Arc<SessionDoc>, store: Arc<DocsStore>, chat_id: impl Into<String>) -> Self {
         Self {
+            preview: None,
             doc: Arc::downgrade(doc),
             store,
             chat_id: chat_id.into(),
         }
+    }
+
+    pub fn with_preview(
+        mut self,
+        preview: Option<Arc<cypher_sync::preview_link::PreviewLink>>,
+    ) -> Self {
+        self.preview = preview;
+        self
     }
 
     /// Export the CURRENT doc and persist it with `cursor` in one tx.
@@ -74,6 +84,24 @@ impl EngineChatSink {
 }
 
 impl ChatDocSink for EngineChatSink {
+    fn load_outbox(&self) -> Vec<(String, Vec<u8>)> {
+        self.store.load_outbox(&self.chat_id).unwrap_or_default()
+    }
+
+    fn enqueue_outbox(&self, batch_id: &str, bytes: &[u8]) {
+        if let Err(err) = self.store.enqueue_outbox(&self.chat_id, batch_id, bytes) {
+            tracing::error!(chat = %self.chat_id, batch = %batch_id, error = %err, "chat2 outbox persist failed");
+        }
+    }
+
+    fn retire_outbox(&self, batch_id: &str) {
+        if let Err(err) = self.store.retire_outbox(batch_id) {
+            tracing::warn!(chat = %self.chat_id, batch = %batch_id, error = %err, "chat2 outbox retire failed");
+        }
+    }
+    fn preview(&self) -> Option<Arc<cypher_sync::preview_link::PreviewLink>> {
+        self.preview.clone()
+    }
     fn apply_row(&self, bytes: &[u8], cursor: u64) {
         let Some(doc) = self.doc.upgrade() else {
             return;

@@ -32,6 +32,7 @@
   "vars": {
     "WORKOS_CLIENT_ID": "client_development_disabled",
     "AUTH_MODE": "dev-locked",
+    "DEV_PREVIEW_ENABLED": "true",
     "NOTIFICATIONS_ENABLED": "false"
   },
   "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false }, "traces": { "enabled": false } }

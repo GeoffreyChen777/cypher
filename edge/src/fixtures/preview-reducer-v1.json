@@ -1,0 +1,15 @@
+[
+  {"kind":37,"header":{"chatId":"c","mode":"preview","runId":"r","segmentId":"s","epoch":"e"},"text":"","display":"","interrupted":false,"replies":[]},
+  {"kind":33,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":1,"baseSeq":0},"text":"你","display":"你","interrupted":false,"replies":[38]},
+  {"kind":32,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":2,"baseSeq":0,"prevRevision":1},"text":"好 👋","display":"你好 👋","interrupted":false,"replies":[38]},
+  {"kind":32,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":2,"baseSeq":0,"prevRevision":1},"text":"好 👋","display":"你好 👋","interrupted":false,"replies":[38]},
+  {"kind":32,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":4,"baseSeq":0,"prevRevision":3},"text":"gap","display":"你好 👋","interrupted":false,"replies":[34,38]},
+  {"kind":32,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":5,"baseSeq":0,"prevRevision":4},"text":"gap2","display":"你好 👋","interrupted":false,"replies":[38]},
+  {"kind":35,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":5,"baseSeq":0,"batchId":"b"},"text":"","display":"你好 👋","interrupted":false,"replies":[38]},
+  {"kind":33,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":5,"baseSeq":0},"text":"你好 👋 final","display":"你好 👋 final","interrupted":false,"replies":[38]},
+  {"kind":33,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"old","revision":100,"baseSeq":0},"text":"forged","display":"你好 👋 final","interrupted":false,"replies":[]},
+  {"kind":37,"header":{"chatId":"c","mode":"legacy"},"text":"","display":"你好 👋 final","interrupted":true,"replies":[]},
+  {"kind":33,"header":{"chatId":"c","runId":"r","segmentId":"s","epoch":"e","revision":6,"baseSeq":0},"text":"late","display":"你好 👋 final","interrupted":true,"replies":[]},
+  {"kind":37,"header":{"chatId":"c","mode":"preview","runId":"r2","segmentId":"s2","epoch":"e2"},"text":"","display":"","interrupted":false,"replies":[]},
+  {"kind":33,"header":{"chatId":"c","runId":"r2","segmentId":"s2","epoch":"e2","revision":0,"baseSeq":7},"text":"new","display":"new","interrupted":false,"replies":[38]}
+]

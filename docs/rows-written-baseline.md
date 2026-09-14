@@ -117,6 +117,16 @@ Registry 样本禁用了通知策略，避免与下面单独测量的 notificati
 fsync 策略及宿主磁盘永久丢失时的尾部恢复窗口，需要明确契约后再实施。
 P1 可以继续做关闭状态的无落盘预览，但 **不能提前降低持久提交频率**。
 
+## P2 第一刀：durable outbox
+
+已实现 `DocsStore` migration v3 的 `chat_outbox`（`doc_id`、`batch_id`、payload、
+queued_at），并接入 `ChatDocSink`/`ChatClient`：创建 batch 时先写本地 outbox，重建
+ChatClient 时恢复顺序队列，只有 batch ID 匹配 ACK 才删除。已有测试覆盖顺序、隔离
+chat、重开恢复、重连重发；此前的内存队列仍保留作为 actor 工作集。
+
+这不是完整 P2：写入失败的显式错误策略、批次覆盖范围/因果 frontier、ACK 丢失与
+并发新写入的全矩阵仍待补齐；上传频率保持 120ms，rows_written 尚未下降。
+
 ## 复现
 
 ```sh

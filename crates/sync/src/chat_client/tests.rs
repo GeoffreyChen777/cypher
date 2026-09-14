@@ -1074,6 +1074,7 @@ async fn https_timeout_releases_chat_single_flight_for_retry() {
     };
     let client = ChatClient::connect_with_transport(
         Arc::new(WsBinConnector {
+            preview: None,
             url: Arc::new(StaticUrl("ws://127.0.0.1:9/chat2/test/ws".into())),
         }),
         sink,

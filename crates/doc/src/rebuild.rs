@@ -79,6 +79,9 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     for (upload_id, path, file_name) in source.sealed_attachments()? {
         thin.seal_attachment(&upload_id, &path, &file_name)?;
     }
+    if let Some(coverage) = source.preview_coverage() {
+        thin.stage_preview_coverage(&coverage)?;
+    }
     thin.doc().commit();
 
     Ok(ThinRebuild {

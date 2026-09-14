@@ -1650,6 +1650,9 @@ async fn drive_run(
     };
 
     let doc_ref: &SessionDoc = &doc;
+    if let Some(host) = inner.doc_host() {
+        host.preview_run(&chat_id, &run_id);
+    }
     let mut folded: Vec<MessagePart> = Vec::new();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,

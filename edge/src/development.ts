@@ -8,8 +8,9 @@ import { PushDevice as BasePushDevice } from "./push-device";
 import { authenticate } from "./auth";
 import type { Env } from "./env";
 import { admit, type Budget } from "./development-budget";
+import { createDevelopmentPreview, type PreviewConfig } from "./development-preview";
 
-interface DevelopmentEnv extends Env { DEV_GUARD: DurableObjectNamespace }
+interface DevelopmentEnv extends Env, PreviewConfig { DEV_GUARD: DurableObjectNamespace }
 const response = (value: unknown, status = 200) => Response.json(value, { status });
 const gate = (env: DevelopmentEnv) => env.DEV_GUARD.get(env.DEV_GUARD.idFromName("budget"));
 const maxBytes = 64 * 1024;
@@ -78,7 +79,9 @@ function guarded(Base: RoomConstructor) {
         const value = Reflect.get(target, key, target);
         return typeof value === "function" ? value.bind(target) : value;
       } });
-      return this.inner = new Base(context, this.env);
+      return this.inner = Base === BaseChatRoom
+        ? new BaseChatRoom(context, this.env, createDevelopmentPreview(context, this.env))
+        : new Base(context, this.env);
     }
 
     private async run<T>(operation: (room: DurableObject) => Promise<T>, denied: () => T): Promise<T> {

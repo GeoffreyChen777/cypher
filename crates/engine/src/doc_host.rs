@@ -68,6 +68,7 @@ const EVICT_MIN_IDLE_MS: i64 = 30_000;
 /// (which never expire) ride the same seam as a [`cypher_rpc::StaticToken`].
 #[derive(Clone)]
 pub struct EdgeConfig {
+    pub preview: Option<cypher_sync::preview_link::PreviewOptions>,
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
     pub url: String,
     /// Fresh-bearer provider (the relay's `TokenSource`), consulted per
@@ -92,6 +93,7 @@ impl std::fmt::Debug for EdgeConfig {
 impl EdgeConfig {
     pub fn new(url: impl Into<String>, token: Arc<dyn cypher_rpc::TokenSource>) -> Self {
         Self {
+            preview: None,
             url: url.into(),
             token,
             device_id: String::new(),
@@ -234,6 +236,7 @@ pub struct DocHost {
 
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
 pub struct ChatDocHandle {
+    preview: OnceLock<Arc<cypher_sync::preview_link::PreviewLink>>,
     chat_id: String,
     device_id: String,
     doc: Arc<SessionDoc>,
@@ -417,8 +420,14 @@ impl ChatDocHandle {
 
     fn publish_messages(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
+        // Read coverage BEFORE the entries: a newer marker must never retire
+        // preview text against an older, asynchronously materialized transcript.
+        let coverage = self.preview.get().and_then(|_| self.doc.preview_coverage());
         match self.doc.read_entries() {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                if let Some(preview) = self.preview.get() {
+                    cypher_sync::preview_link::overlay(&mut entries, preview.view(), coverage);
+                }
                 let joined = join_continuation_entries(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
@@ -939,6 +948,7 @@ impl DocHost {
         let (commands_tx, _) = watch::channel(Vec::new());
 
         let handle = Arc::new(ChatDocHandle {
+            preview: OnceLock::new(),
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
@@ -1082,6 +1092,7 @@ impl DocHost {
         let (messages_tx, _) = watch::channel(Vec::new());
         let (commands_tx, _) = watch::channel(Vec::new());
         let handle = Arc::new(ChatDocHandle {
+            preview: OnceLock::new(),
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
@@ -1217,6 +1228,31 @@ impl DocHost {
     /// client is returned local-first while HTTPS/WS convergence continues;
     /// `server_known` remains the gate for any server-truth recovery action.
     fn spawn_chat2_join(&self, edge: EdgeConfig, handle: &Arc<ChatDocHandle>, cursor: u64) {
+        if let Some(mut options) = edge.preview.clone() {
+            if !self.preview_is_host(&handle.chat_id) {
+                options.publisher_token = None;
+            }
+            let preview = handle
+                .preview
+                .get_or_init(|| {
+                    cypher_sync::preview_link::PreviewLink::new(&handle.chat_id, options)
+                })
+                .clone();
+            let weak = Arc::downgrade(handle);
+            preview.on_change(Arc::new(move || {
+                if let Some(handle) = weak.upgrade() {
+                    handle.publish_messages_if_watched();
+                }
+            }));
+            if preview.options().publisher_token.is_some() {
+                handle
+                    .doc
+                    .set_preview_hook(Arc::new(move |entry, parts, complete| {
+                        preview.stage(entry, parts, complete)
+                    }));
+            }
+        }
+        let preview = handle.preview.get().cloned();
         let chat = handle.chat_id.clone();
         let doc = handle.doc.clone();
         let store = self.inner.store.clone();
@@ -1226,7 +1262,7 @@ impl DocHost {
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_worker(async move {
-            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone()));
+            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone()).with_preview(preview));
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.
@@ -2328,6 +2364,59 @@ impl DocHost {
     /// behavior, now the degenerate case.
     fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
+    }
+
+    pub(crate) fn preview_run(&self, chat: &str, run: &str) {
+        let Some(handle) = lock(&self.inner.handles).get(chat).cloned() else {
+            return;
+        };
+        let Some(preview) = handle.preview.get().cloned() else {
+            return;
+        };
+        preview.set_run(run);
+        if !self.preview_is_host(chat) {
+            if preview.options().publisher_token.is_some() {
+                preview.set_publisher(None);
+                if let Some(client) = lock(&handle.chat2).as_ref() {
+                    client.redial();
+                }
+            }
+            return;
+        }
+        // WatchDocMessages may open a newborn chat BEFORE CreateChat inserts
+        // its registry row. Upgrade only once local ownership is known, keeping
+        // the same ChatClient/outbox rather than discarding pending updates.
+        if preview.options().publisher_token.is_none()
+            && let Some(token) = self
+                .inner
+                .config
+                .edge
+                .as_ref()
+                .and_then(|e| e.preview.as_ref())
+                .and_then(|p| p.publisher_token.clone())
+        {
+            preview.set_publisher(Some(token));
+            let hook = preview.clone();
+            handle
+                .doc
+                .set_preview_hook(Arc::new(move |entry, parts, done| {
+                    hook.stage(entry, parts, done)
+                }));
+            if let Some(client) = lock(&handle.chat2).as_ref() {
+                client.redial();
+            }
+        }
+    }
+
+    fn preview_is_host(&self, chat: &str) -> bool {
+        // Unlike legacy command claim-on-first-use, preview publishing fails
+        // closed for missing/unreadable registry rows in a workspace runtime.
+        self.workspace().is_none_or(|ws| {
+            ws.chat(chat)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.device_id == self.inner.config.device_id)
+        })
     }
 
     /// Chat-config harness when the workspace row carries one, else the default.

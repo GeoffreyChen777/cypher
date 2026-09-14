@@ -24,6 +24,9 @@ final class SessionStore {
     /// The chat's host device — nudge target for cold-host command drains.
     var hostDeviceId: String?
     private(set) var entries: [MessageEntry] = []
+    @ObservationIgnored private var durableEntries: [MessageEntry] = []
+    @ObservationIgnored private var durablePreviewCoverage: PreviewCoverage?
+    @ObservationIgnored private var previewProjection = PreviewProjection()
     /// Bumped on every change to `entries` / `pendingSends`. The transcript's
     /// row builder memoizes on it, so a body re-eval that was triggered by
     /// something else (scrolling) costs O(1) instead of re-deriving every row.
@@ -86,8 +89,9 @@ final class SessionStore {
         return try await uploadAttachmentChunked(relay: relay, name: name, data: data)
     }
 
-    /// Demo-mode injection point (also used by previews).
+    /// Demo-mode injection point (also used by SwiftUI previews).
     func setEntries(_ new: [MessageEntry]) {
+        durableEntries = new
         entries = new
         revision &+= 1
         transcriptCache.prewarm(entries: entries)
@@ -193,7 +197,24 @@ final class SessionStore {
                 self.cursor = seq
                 self.saver?.poke()
             },
-            event: { [weak self] event in self?.handle(event) }
+            event: { [weak self] event in self?.handle(event) },
+            preview: { [weak self] data in
+                guard let self else { return [] }
+                let replies: [Data]
+                if let data { replies = self.previewProjection.receive(data, chatId: self.chatId) }
+                else { self.previewProjection.disconnect(); replies = [] }
+                self.entries = self.previewProjection.overlay(self.durableEntries, coverage: self.durablePreviewCoverage)
+                self.revision &+= 1
+                return replies // No saver, doc import, command, or status mutation.
+            },
+            previewRetry: { [weak self] in
+                guard let self else { return nil }
+                if self.previewProjection.expire() {
+                    self.entries = self.previewProjection.overlay(self.durableEntries, coverage: self.durablePreviewCoverage)
+                    self.revision &+= 1
+                }
+                return self.previewProjection.retry(chatId: self.chatId, cursor: self.cursor)
+            }
         )
         let client = ChatRoomClient(
             chatId: chatId, device: config.deviceId,
@@ -207,7 +228,7 @@ final class SessionStore {
             pushRequest: { [config, chatId] batchId in
                 await config.chat2PushRequest(chatId: chatId, batchId: batchId)
             },
-            delegate: delegate)
+            delegate: delegate, previewEnabled: config.streamPreviewEnabled)
         chatRoom = client
         // First contact with the room (cursor 0): everything committed
         // BEFORE the local-update subscription saw a client — an adopt's
@@ -283,6 +304,8 @@ final class SessionStore {
         }
         chatRoom = nil
         connected = false
+        previewProjection.disconnect()
+        entries = previewProjection.overlay(durableEntries, coverage: durablePreviewCoverage)
     }
 
     private func handle(_ event: ChatRoomEvent) {
@@ -321,13 +344,16 @@ final class SessionStore {
         projecting = true
         let doc = self.doc
         Task { @MainActor [weak self] in
-            let decoded = await Task.detached(priority: .userInitiated) {
-                Self.decodeEntries(from: doc)
+            let projection = await Task.detached(priority: .userInitiated) { () -> ([MessageEntry]?, PreviewCoverage?) in
+                guard let root = doc.getDeepValue().mapValue else { return (nil, nil) }
+                let marker = root["meta"]?.mapValue?["previewCoverage"]?.stringValue
+                let coverage = marker.flatMap { try? JSONDecoder().decode(PreviewCoverage.self, from: Data($0.utf8)) }
+                return (Self.decodeEntries(root: root), coverage)
             }.value
             guard let self else { return }
             self.projecting = false
-            if let decoded {
-                self.apply(decoded)
+            if let decoded = projection.0 {
+                self.apply(decoded, coverage: projection.1)
             }
             if self.projectPending {
                 self.projectPending = false
@@ -336,10 +362,11 @@ final class SessionStore {
         }
     }
 
-    private func apply(_ decoded: [MessageEntry]) {
-        entries = decoded
+    private func apply(_ decoded: [MessageEntry], coverage: PreviewCoverage? = nil) {
+        durableEntries = decoded; durablePreviewCoverage = coverage
+        entries = previewProjection.overlay(decoded, coverage: coverage)
         // Drop echoes the host has materialized.
-        let ids = Set(entries.map(\.id))
+        let ids = Set(decoded.map(\.id))
         pendingSends.removeAll { ids.contains($0.messageId) }
         revision &+= 1
         // If no transcript view is open, settle the parses now (off-main) so
@@ -351,6 +378,10 @@ final class SessionStore {
     /// previous projection standing rather than blanking a live transcript.
     nonisolated static func decodeEntries(from doc: LoroDoc) -> [MessageEntry]? {
         guard let root = doc.getDeepValue().mapValue else { return nil }
+        return decodeEntries(root: root)
+    }
+
+    nonisolated private static func decodeEntries(root: [String: LoroValue]) -> [MessageEntry] {
         // Commands are append-only and sync with the transcript. Join explicit
         // steer message IDs instead of guessing from timing/status, so the
         // optimistic echo and a reopened/cross-device transcript agree.
@@ -452,7 +483,7 @@ final class SessionStore {
 
     // MARK: Derived
 
-    var lastEntryId: String? { entries.last?.id }
+    var lastEntryId: String? { durableEntries.last?.id }
 
     var liveEntry: MessageEntry? {
         entries.last(where: { $0.status == .streaming })
@@ -460,7 +491,7 @@ final class SessionStore {
 
     /// The unresolved input request to surface in the question panel.
     var openInputRequest: (entryId: String, requestId: String, questions: [UserInputQuestion])? {
-        for entry in entries.reversed() {
+        for entry in durableEntries.reversed() {
             for part in entry.parts.reversed() {
                 // An empty question list can't be answered, so it must not take
                 // the composer's place — leaving the user with no way to type.

@@ -15,6 +15,8 @@ assert c['preview_urls'] is False
 assert c['vars']['AUTH_MODE'] == 'dev-locked'
 assert c['vars']['NOTIFICATIONS_ENABLED'] == 'false'
 assert 'DEV_ACCESS_TOKEN' not in c['vars']
+assert c['vars']['DEV_PREVIEW_ENABLED'] == 'true'
+assert 'DEV_PREVIEW_PUBLISH_TOKEN' not in c['vars']
 assert {b['binding']: b['bucket_name'] for b in c['r2_buckets']} == {
     'BLOBS': 'cypher-development-blobs', 'RELEASES': 'cypher-development-releases'}
 assert all('script_name' not in b for b in c['durable_objects']['bindings'])

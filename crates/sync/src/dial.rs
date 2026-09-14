@@ -38,6 +38,12 @@ pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// backoff redial immediately instead of sleeping through the recovery.
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
     let request = url.into_client_request()?;
+    connect_request(request).await
+}
+
+pub async fn connect_request(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+) -> Result<WsStream, WsError> {
     let uri = request.uri();
     let host = uri
         .host()

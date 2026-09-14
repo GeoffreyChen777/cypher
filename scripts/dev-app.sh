@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 mode="${1:-local}"
 case "$mode" in local|dev) ;; *) echo 'Usage: dev-app.sh [local|dev]' >&2; exit 2;; esac
 unset CYPHER_EDGE_TOKEN CYPHER_EDGE_URL CYPHER_WORKOS_CLIENT_ID CYPHER_DEV_ACCESS_TOKEN
+unset CYPHER_DEV_PREVIEW_PUBLISH_TOKEN CYPHER_DEV_STREAM_PREVIEW
 export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-ui"
 export CYPHER_ENGINE_DATA_DIR="$HOME/.cypher-development/$mode-engine"
 export CYPHER_PROFILE=local

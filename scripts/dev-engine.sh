@@ -13,7 +13,18 @@ umask 077
 mkdir -p "$CYPHER_DATA_DIR"
 if [[ "$mode" == dev ]]; then
   set -a; source "$HOME/Documents/cypher-development.env"; set +a
+  # The private file uses explicit CYPHER_DEV_* names; the binary's config
+  # loader intentionally reads the generic names below only inside this
+  # script, so they never leak into the headed UI launcher.
+  export EDGE_URL="${CYPHER_DEV_EDGE_URL:?Missing CYPHER_DEV_EDGE_URL}"
+  export DEV_ACCESS_TOKEN="${CYPHER_DEV_ACCESS_TOKEN:?Missing CYPHER_DEV_ACCESS_TOKEN}"
   export CYPHER_PROFILE=development
+  # The dev Edge preview path is the default only when its independent,
+  # private publisher credential is present. Never put this credential in git
+  # or pass it to the headed UI process.
+  if [[ -n "${CYPHER_DEV_PREVIEW_PUBLISH_TOKEN:-}" ]]; then
+    export CYPHER_DEV_STREAM_PREVIEW=1
+  fi
 else
   export CYPHER_PROFILE=local
 fi

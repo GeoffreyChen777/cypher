@@ -1,10 +1,10 @@
 # Durable Objects rows_written 优化实施计划
 
-状态：P0 进行中，协议改造未开始。分支：`feat/rows-written-optimization`。基线：`933d6db`。
+状态：P0 本地基线完成（云端指标待补），P1 原生发送/展示已接入并通过本地原生互通；dev 云端联调进行中。分支：`feat/rows-written-optimization`。基线：`933d6db`。
 
 进度（2026-09-14）：P0 本地 SQL 基线及 SIGKILL 恢复审计已落地，详见
 [`docs/rows-written-baseline.md`](docs/rows-written-baseline.md)。发现无 durable outbox、
-journal 不自动补齐未保存 transcript 的前置缺口。P1 尚未开始；P2 不得在恢复契约
+journal 不自动补齐未保存 transcript 的前置缺口。P1 已完成本地预览链路；P2 不得在恢复契约
 补齐前降低持久提交频率。云端 CPU/duration/延迟测量仍未完成。
 
 本计划只规划开发工作，不授权部署生产、新建生产命名空间、数据迁移或发布版本。
@@ -142,13 +142,32 @@ HTTP 请求下降比例替代 rows_written 下降比例，也不能假设固定 
 
 ### P1：协议与展示层（默认关闭）
 
-- [ ] 定义能力协商、epoch/revision、大小限制、作者权限和 durable 覆盖映射。
-- [ ] 实现 Edge 无落盘预览转发及 Engine 发送逻辑，保持现有 durable 同步频率。
-- [ ] Desktop/iOS 实现可丢弃预览层、去重、补快照和最终替换。
-- [ ] 验证老客户端行为未改变；本阶段是正确性搭建，不宣称已降低用量。
+- [x] 第一批：独立 Rust/TypeScript/Swift codec 与共享向量，保持旧分发器不变。
+  契约见 [`docs/ephemeral-stream-v1.md`](docs/ephemeral-stream-v1.md)。这是格式校验，
+  当时仅完成格式校验；开发授权见下一项，原生运行路径与覆盖标记仍待实现。
+- [x] 第二批：开发专用发布凭据、连接级授权、服务端 epoch、协商/撤销、受限转发。
+  workerd 真实 WS + SQLite 验证 1/3 观看端普通预览零 SQL；开发 Guard 开销不包含在内。
+  已部署 dev 默认路径；生产不注入实现。原生 Engine 发送、展示和 durable 覆盖标记已接入。
+- [x] 定义开发能力协商、epoch/revision、大小限制、开发发布权限和 durable 覆盖映射。
+- [x] 实现 Edge 无落盘预览转发及 Engine 发送逻辑，保持现有 durable 同步频率。
+- [x] Desktop/iOS 实现纯文本可丢弃预览层、去重、补快照和最终替换。
+  macOS 双 EngineCore + iOS Simulator 的 SessionStore/ChatRoomClient 经真实本地 workerd
+  互通通过；测试给观看端 durable rows 注入 180ms 延迟，两端均实际显示预览，最终文档
+  一致且只执行一个 Run。不是正式云端/真机/屏幕视觉验收。
+- [x] 默认关闭路径与 legacy 协议回归通过；P0 固定负载仍是 243 batch / 1,593 写入。
+  本阶段是正确性搭建，不宣称已降低用量；完整混合版本/故障矩阵仍属于 P3。
+
+第三批本地验收：Rust 489 通过（6 忽略）；Edge 166 单元 + 41 workerd 通过；
+iOS 177 项中 176 通过、1 项按预期跳过（该原生互通项已用隔离 fixture 单独运行通过）。
+共享 48 个 wire 向量与 13 个 Rust/Swift 状态转换。最新原生证据见协议文档。
+云端开发 Guard 的日操作预算已达 1,000/1,000，未扩大额度或部署。原 dev Engine
+还有 6 个未确认 batch，保留其进程，避免在补齐 P2 outbox 前丢掉内存重试队列。
 
 ### P2：Engine 累积持久更新
 
+- [x] 第一刀：将 Chat2 pending batch 写入本地 `chat_outbox`，启动时恢复，匹配 ACK
+  才删除；DocsStore migration v3 与重开/顺序/单 batch retirement 测试通过。当前只
+  补可靠恢复，仍保持 120ms durable 上传频率，尚未宣称降费。
 - [ ] 分离本地提交与云端导出节奏，按时间/大小/业务边界导出单个合并增量。
 - [ ] 在途 batch 与新累积区间隔离，补齐持久重试和重启补交。
 - [ ] 完成、失败、steer、输入请求、正常退出强制 flush；离线时本地可靠入队，

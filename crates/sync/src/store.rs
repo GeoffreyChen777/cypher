@@ -37,6 +37,14 @@ const MIGRATIONS: &[&str] = &[
     // (M1/M3): 2 = thin chat2 rebuild; NULL/0 = pre-migration s2 doc.
     "ALTER TABLE snapshots ADD COLUMN cursor INTEGER;
      ALTER TABLE snapshots ADD COLUMN epoch INTEGER;",
+    // v3 — durable chat2 outbox. A batch is retired only after its matching ACK.
+    "CREATE TABLE chat_outbox (
+        doc_id TEXT NOT NULL,
+        batch_id TEXT PRIMARY KEY,
+        bytes BLOB NOT NULL,
+        queued_at INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX chat_outbox_doc ON chat_outbox(doc_id, queued_at);",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -147,6 +155,22 @@ impl DocsStore {
             )
             .optional()?;
         Ok(hit.is_some())
+    }
+
+    pub fn load_outbox(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT batch_id, bytes FROM chat_outbox WHERE doc_id = ?1 ORDER BY queued_at, batch_id")?;
+        Ok(stmt.query_map(params![doc_id], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn enqueue_outbox(&self, doc_id: &str, batch_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.conn().execute("INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes,queued_at) VALUES(?1,?2,?3,?4)", params![doc_id, batch_id, bytes, now_ms()])?;
+        Ok(())
+    }
+
+    pub fn retire_outbox(&self, batch_id: &str) -> Result<(), StoreError> {
+        self.conn().execute("DELETE FROM chat_outbox WHERE batch_id = ?1", params![batch_id])?;
+        Ok(())
     }
 
     /// The full command ledger — profile-import reads the source's claims so
@@ -327,5 +351,20 @@ mod tests {
         );
         assert!(store.is_processed("cmd-1").unwrap());
         assert!(!store.mark_processed("cmd-1").unwrap());
+    }
+
+    #[test]
+    fn outbox_roundtrips_in_order_and_retires_only_matching_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.enqueue_outbox("chat-1", "b1", b"one").unwrap();
+        store.enqueue_outbox("chat-1", "b2", b"two").unwrap();
+        store.enqueue_outbox("chat-2", "other", b"x").unwrap();
+        assert_eq!(store.load_outbox("chat-1").unwrap(), vec![("b1".into(), b"one".to_vec()), ("b2".into(), b"two".to_vec())]);
+        store.retire_outbox("b1").unwrap();
+        assert_eq!(store.load_outbox("chat-1").unwrap(), vec![("b2".into(), b"two".to_vec())]);
+        drop(store);
+        let reopened = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(reopened.load_outbox("chat-1").unwrap(), vec![("b2".into(), b"two".to_vec())]);
     }
 }

@@ -64,6 +64,8 @@ actor ChatRoomClient {
         var clampCursor: @MainActor @Sendable (UInt64) -> Void
         var setCursor: @MainActor @Sendable (UInt64) -> Void
         var event: @MainActor @Sendable (ChatRoomEvent) -> Void
+        var preview: @MainActor @Sendable (Data?) -> [Data] = { _ in [] }
+        var previewRetry: @MainActor @Sendable () -> Data? = { nil }
     }
 
     private struct PendingPush {
@@ -81,6 +83,7 @@ actor ChatRoomClient {
     private let rowsRequest: @Sendable (UInt64) async -> URLRequest?
     private let pushRequest: @Sendable (String) async -> URLRequest?
     private let delegate: Delegate
+    private let previewEnabled: Bool
 
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -119,7 +122,7 @@ actor ChatRoomClient {
          checkpointRequest: @escaping @Sendable () async -> URLRequest?,
          rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
          pushRequest: @escaping @Sendable (String) async -> URLRequest?,
-         delegate: Delegate) {
+         delegate: Delegate, previewEnabled: Bool = false) {
         self.chatId = chatId
         self.device = device
         self.urlProvider = urlProvider
@@ -127,6 +130,7 @@ actor ChatRoomClient {
         self.rowsRequest = rowsRequest
         self.pushRequest = pushRequest
         self.delegate = delegate
+        self.previewEnabled = previewEnabled
     }
 
     // MARK: Lifecycle
@@ -336,6 +340,7 @@ actor ChatRoomClient {
         }
 
         Task {
+            if previewEnabled { _ = await delegate.previewRetry() }
             guard let url = await urlProvider() else {
                 // No URL = no token (refresh failed or signed out) — the most
                 // confusing silent failure: everything cached renders,
@@ -350,7 +355,9 @@ actor ChatRoomClient {
 
     private func openSocket(url: URL, gen: Int) async {
         guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        if previewEnabled { request.setValue(StreamPreviewWire.capability, forHTTPHeaderField: "x-cypher-preview-capability") }
+        let task = URLSession.shared.webSocketTask(with: request)
         socket = task
         task.resume()
         lastInbound = .now()
@@ -399,6 +406,7 @@ actor ChatRoomClient {
     }
 
     private func onSocketError(gen: Int) async {
+        if previewEnabled, gen == generation { _ = await delegate.preview(nil) }
         guard gen == generation, !closed else { return }
         roomLog.warning("chat2 \(self.chatId, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
         joined = false
@@ -438,6 +446,7 @@ actor ChatRoomClient {
     /// clock, so a draining backfill is never killed mid-stream.
     private func livenessTick(gen: Int) async {
         guard gen == generation, socket != nil, !closed else { return }
+        if previewEnabled, let frame = await delegate.previewRetry() { await send(frame) }
         let now = DispatchTime.now().uptimeNanoseconds
         if let sent = helloSentAt, now - sent.uptimeNanoseconds > ChatRoomClient.helloDeadlineNs {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): no state frame within deadline; room presumed wedged, redialing")
@@ -476,12 +485,20 @@ actor ChatRoomClient {
         guard gen == generation else { return }
         lastInbound = .now()
         guard case .data(let data) = message else { return }  // "pong" text
+        if previewEnabled, let first = data.first, (0x20...0x26).contains(first) {
+            for reply in await delegate.preview(data) { await send(reply) }
+            return // Preview must not satisfy the durable progress/probe deadline.
+        }
         guard let frame = ChatWire.decode(data) else {
             // Protocol breakdown — redial rather than run blind against a
             // server we can't parse.
             roomLog.error("chat2 \(self.chatId, privacy: .public): unparseable frame; redialing")
             await onSocketError(gen: gen)
             return
+        }
+        if previewEnabled, frame.kind == ChatFrameType.error, let code = frame.header["code"] as? String,
+           code.hasPrefix("preview_") || code.hasPrefix("bad_preview_") {
+            return // A late receipt/Resume error cannot revoke a newer grant or satisfy a durable probe.
         }
         lastProtocolRx = .now()
         probeSentAt = nil
