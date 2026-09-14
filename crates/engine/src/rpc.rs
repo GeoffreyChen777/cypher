@@ -457,6 +457,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
     pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
+    mcp_logins: std::sync::Arc<crate::mcp::login::Logins>,
     local_import: Option<crate::local_import::LocalImporter>,
     title_settings: Option<crate::title_settings::TitleSettingsStore>,
     engine_info: EngineInfo,
@@ -467,6 +468,10 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    pub fn with_mcp_logins(mut self, logins: std::sync::Arc<crate::mcp::login::Logins>) -> Self {
+        self.mcp_logins = logins;
+        self
+    }
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -502,6 +507,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             pi_runtime: None,
+            mcp_logins: Default::default(),
             local_import: None,
             title_settings: None,
             engine_info,
@@ -990,6 +996,8 @@ impl EngineRpc {
         if matches!(
             method,
             methods::SAVE_PI_PROVIDER | methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER
+                | methods::BEGIN_MCP_LOGIN | methods::MCP_LOGIN_STATUS
+                | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN
         ) && !links.credential_transport_allowed()
         {
             return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
@@ -1204,6 +1212,10 @@ fn forwardable(method: &str) -> bool {
             | methods::REMOVE_MCP_SERVER
             | methods::SET_MCP_SERVER_ENABLED
             | methods::START_MCP_AUTH
+            | methods::BEGIN_MCP_LOGIN
+            | methods::MCP_LOGIN_STATUS
+            | methods::COMPLETE_MCP_LOGIN
+            | methods::CANCEL_MCP_LOGIN
             | methods::LOGOUT_MCP_SERVER
             | methods::LIST_MODELS
             | methods::GET_TITLE_MODEL_SETTINGS
@@ -1579,6 +1591,11 @@ impl RpcService for EngineRpc {
                 .handle(method, params)
                 .await;
         }
+        if self.mcp_logins.active() && matches!(method,
+            methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER | methods::SET_MCP_SERVER_ENABLED
+                | methods::START_MCP_AUTH | methods::LOGOUT_MCP_SERVER) {
+            return Err(RpcError::Failed("Finish or cancel the active MCP sign-in before changing MCP configuration.".into()));
+        }
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -1705,6 +1722,30 @@ impl RpcService for EngineRpc {
                     crate::mcp::remove_server(&self.pi_runtime()?.paths().agent_dir, request);
                 self.registry.invalidate_discovery(HarnessId::Pi);
                 RpcReply::value(&result.map_err(RpcError::Failed)?)
+            }
+            methods::BEGIN_MCP_LOGIN => {
+                let p: crate::mcp::McpServerName = parse_params(params)?;
+                let harness = self.registry.resolve(HarnessId::Pi)
+                    .map_err(|_| RpcError::Failed("Pi runtime unavailable.".into()))?;
+                let status = self.mcp_logins.begin(self.pi_runtime()?.paths().agent_dir.clone(), p.name, harness)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&status)
+            }
+            methods::MCP_LOGIN_STATUS | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN => {
+                let id = params.get("attemptId").and_then(serde_json::Value::as_str)
+                    .filter(|id| id.len() <= 64)
+                    .ok_or_else(|| RpcError::BadParams("MCP sign-in attempt ID required.".into()))?;
+                let status = match method {
+                    methods::COMPLETE_MCP_LOGIN => {
+                        let callback = params.get("callbackUrl").and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| RpcError::BadParams("Callback URL required.".into()))?;
+                        self.mcp_logins.respond(id, callback)
+                    }
+                    methods::CANCEL_MCP_LOGIN => self.mcp_logins.cancel(id),
+                    _ => self.mcp_logins.status(id),
+                }.map_err(RpcError::Failed)?;
+                if status.phase == "succeeded" { self.reload_pi_runtime().await; }
+                RpcReply::value(&status)
             }
             methods::START_MCP_AUTH => {
                 let p: crate::mcp::McpServerName = parse_params(params)?;

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use cypher_harness::Harness;
 
 mod config;
+pub mod login;
 pub use config::{AddMcpServers, RemoveMcpServer, add_servers, remove_server};
 static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

@@ -48,6 +48,41 @@ fn harness() -> PiHarness {
         .with_executable(fixture_path())
 }
 
+#[tokio::test]
+async fn mcp_login_forwards_remote_callback_to_the_original_dialog() {
+    let (requests, mut incoming) = mpsc::channel(4);
+    let (responses, rx) = mpsc::channel(4);
+    let work = tokio::spawn(async move {
+        harness().run_slash_interactive("scenario:mcp-login", cypher_harness::SlashUi {
+            requests, responses: rx, cancel: CancellationToken::new(),
+        }).await
+    });
+    let (id, payload) = tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await.unwrap().unwrap();
+    assert_eq!(id, "oauth-dialog");
+    assert!(payload["title"].as_str().unwrap().contains("https://auth.example/authorize"));
+    assert!(!work.is_finished(), "must wait for the browser callback, not cancel input");
+    responses.send((id, serde_json::json!({"value":"http://localhost:8976/callback?state=attempt&code=fixture"}))).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), work).await.unwrap().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn mcp_login_cancellation_reaps_the_waiting_command() {
+    let (requests, mut incoming) = mpsc::channel(4);
+    let (_responses, rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let child_cancel = cancel.clone();
+    let work = tokio::spawn(async move {
+        harness().run_slash_interactive("scenario:mcp-login", cypher_harness::SlashUi {
+            requests, responses: rx, cancel: child_cancel,
+        }).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await.unwrap().unwrap();
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), work).await.unwrap().unwrap();
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+}
+
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
         prompt: prompt.into(),

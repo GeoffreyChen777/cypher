@@ -60,6 +60,10 @@ pub mod methods {
     pub const REMOVE_MCP_SERVER: &str = "RemoveMcpServer";
     pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
     pub const START_MCP_AUTH: &str = "StartMcpAuth";
+    pub const BEGIN_MCP_LOGIN: &str = "BeginMcpLogin";
+    pub const MCP_LOGIN_STATUS: &str = "McpLoginStatus";
+    pub const COMPLETE_MCP_LOGIN: &str = "CompleteMcpLogin";
+    pub const CANCEL_MCP_LOGIN: &str = "CancelMcpLogin";
     pub const LOGOUT_MCP_SERVER: &str = "LogoutMcpServer";
     pub const LIST_MODELS: &str = "ListModels";
     pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";

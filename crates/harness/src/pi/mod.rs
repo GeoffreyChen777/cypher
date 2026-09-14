@@ -962,6 +962,10 @@ impl PiHarness {
     /// Run `/command` through a short-lived `pi --mode rpc` child so extension
     /// handlers (MCP OAuth, etc.) execute inside Pi, the same path as the TUI.
     pub async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
+        self.run_slash_command_ui(prompt, None).await
+    }
+
+    async fn run_slash_command_ui(&self, prompt: &str, mut ui: Option<crate::SlashUi>) -> Result<String, HarnessError> {
         // Same plugin path as the TUI (`pi --mode rpc` + `/mcp-auth`).
         let mut cmd = self.spawn_command(None, &RunHostContext::default(), None)?;
         if let Some(agent_dir) = &self.agent_dir {
@@ -977,7 +981,7 @@ impl PiHarness {
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if ui.is_some() { Stdio::null() } else { Stdio::inherit() })
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -1001,9 +1005,25 @@ impl PiHarness {
         let mut output = String::new();
         let mut error: Option<String> = None;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        let cancel = ui.as_ref().map(|ui| ui.cancel.clone()).unwrap_or_default();
         loop {
             tokio::select! {
                 biased;
+                _ = cancel.cancelled() => {
+                    error = Some("MCP sign-in cancelled.".into());
+                    break;
+                }
+                response = async {
+                    match &mut ui {
+                        Some(ui) => ui.responses.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match response {
+                        Some((id, payload)) => client.respond_ui(&id, payload),
+                        None => { error = Some("MCP sign-in closed.".into()); break; }
+                    }
+                }
                 res = &mut prompt_fut, if !prompt_done => {
                     prompt_done = true;
                     match res {
@@ -1041,7 +1061,12 @@ impl PiHarness {
                             // wins that race and aborts sign-in. Leave the
                             // dialog unanswered; the callback completes it.
                             "select" | "input" | "editor" | "confirm" => {
-                                let _ = (id, payload);
+                                if let Some(ui) = &ui {
+                                    if method != "input" || ui.requests.try_send((id, payload)).is_err() {
+                                        error = Some("Unsupported MCP sign-in dialog.".into());
+                                        break;
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -1134,6 +1159,10 @@ impl Harness for PiHarness {
 
     async fn run_slash(&self, prompt: &str) -> Result<String, HarnessError> {
         self.run_slash_command(prompt).await
+    }
+
+    async fn run_slash_interactive(&self, prompt: &str, ui: crate::SlashUi) -> Result<String, HarnessError> {
+        self.run_slash_command_ui(prompt, Some(ui)).await
     }
 
     /// Session Fork (v1): Pi implements it natively (a separate

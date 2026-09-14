@@ -40,6 +40,14 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// Private, ephemeral UI channel for settings commands. Never journal these
+/// payloads: OAuth dialogs and responses may contain authorization codes.
+pub struct SlashUi {
+    pub requests: mpsc::Sender<(String, serde_json::Value)>,
+    pub responses: mpsc::Receiver<(String, serde_json::Value)>,
+    pub cancel: CancellationToken,
+}
+
 /// Host-side run context: which chat this run belongs to and whether the
 /// engine hosts it as a Cypher child subagent. A NON-SERIALIZED internal seam
 /// (never rides the wire — `RunRequest` stays clean); the engine builds it
@@ -121,6 +129,9 @@ pub trait Harness: Send + Sync {
         Err(HarnessError::Protocol(
             "slash execution is unsupported for this harness".into(),
         ))
+    }
+    async fn run_slash_interactive(&self, _prompt: &str, _ui: SlashUi) -> Result<String, HarnessError> {
+        Err(HarnessError::Protocol("Interactive MCP sign-in requires an updated Pi harness.".into()))
     }
     /// Drop cached model/command discovery so the next probe reflects a
     /// changed agent config (Pi package enablement). No-op for harnesses
