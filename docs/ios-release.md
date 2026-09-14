@@ -8,9 +8,9 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
-## Current release: 0.1.6 (5), 2026-09-13
+## Current release: 0.1.6 (6), 2026-09-14
 
-- Companion build for desktop **0.3.10**, source commit `cf499ad` on the
+- Companion build for desktop **0.3.11**, source commit `cf499ad` on the
   restored main branch; application code is the pre-v3 baseline.
 - **169 Release simulator tests passed** with `ENABLE_TESTABILITY=YES` for
   the test invocation only. Distribution archives do not use that override.
