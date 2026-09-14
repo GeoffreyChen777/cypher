@@ -8,9 +8,21 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
-## Current release: 0.1.6 (6), 2026-09-14
+## Prepared build: 0.1.6 (6), 2026-09-14
 
-- Companion build for desktop **0.3.11**, source commit `cf499ad` on the
+- Companion build for desktop **0.3.11**, source commit `b86f867`.
+- Only the iOS build number changed from build 5; the desktop/engine cost
+  optimizations are not compiled into this Swift client.
+- Signed archive and local export succeeded. Exported IPA verified as arm64,
+  `ai.mvp-lab.cypher.ios`, version 0.1.6/build 6, with production APNs,
+  `get-task-allow=false`, and a valid strict deep signature.
+- Upload and Apple processing verification are pending. No new export-compliance
+  declaration, tester/group modification or review submission has been made.
+- Evidence: `/tmp/cypher-ios-0311.PLiJcL/` and `/tmp/cypher-ios-0311-*.log`.
+
+## Previous release: 0.1.6 (5), 2026-09-13
+
+- Companion build for desktop **0.3.10**, source commit `cf499ad` on the
   restored main branch; application code is the pre-v3 baseline.
 - **169 Release simulator tests passed** with `ENABLE_TESTABILITY=YES` for
   the test invocation only. Distribution archives do not use that override.
