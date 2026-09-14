@@ -16,6 +16,7 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
@@ -263,6 +264,11 @@ pub struct ChatDocHandle {
     /// A threshold checkpoint POST is in flight (review H1: the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
+    /// Last successful tail content hash and one-flight guard. `updatedAt` is
+    /// excluded from the hash so repeated quiesce ticks do not upload bytes
+    /// that differ only by their local clock.
+    tail_hash: Arc<Mutex<Option<[u8; 32]>>>,
+    tail_uploading: Arc<AtomicBool>,
     /// Set when a chat2 seed replaced this handle's lineage on disk: every
     /// further snapshot save from this handle is a stale FAT doc that would
     /// clobber the thin one — retired handles never persist again (unless no
@@ -946,6 +952,8 @@ impl DocHost {
             retired: AtomicBool::new(false),
             ephemeral: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
+            tail_hash: Arc::new(Mutex::new(None)),
+            tail_uploading: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
@@ -1089,6 +1097,8 @@ impl DocHost {
             retired: AtomicBool::new(false),
             ephemeral: AtomicBool::new(true),
             checkpointing: Arc::new(AtomicBool::new(false)),
+            tail_hash: Arc::new(Mutex::new(None)),
+            tail_uploading: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
@@ -1702,16 +1712,38 @@ impl DocHost {
             return;
         };
         let chat_id = handle.chat_id.clone();
-        // Tail publish: cheap, every quiesce tick.
+        // Only the workspace owner can publish chat sidecars/checkpoints;
+        // non-host replicas would pay a guaranteed 403 and cannot change the
+        // authoritative document anyway.
+        if !self.is_host(&chat_id) {
+            return;
+        }
+        // Tail publish: only when message content changed. `updatedAt` is
+        // deliberately normalized before hashing; the wire payload retains
+        // the current timestamp for existing readers.
         if let Ok(tail) =
             cypher_doc::materialize_tail(&handle.doc, now_ms(), cypher_doc::TAIL_MESSAGE_COUNT)
             && let Ok(body) = serde_json::to_vec(&tail)
         {
+            let mut signature_tail = tail.clone();
+            signature_tail.updated_at = 0;
+            let Ok(signature_bytes) = serde_json::to_vec(&signature_tail) else {
+                return;
+            };
+            let hash: [u8; 32] = Sha256::digest(&signature_bytes).into();
+            if lock(&handle.tail_hash).as_ref() == Some(&hash)
+                || handle.tail_uploading.swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
             let http = self.inner.http.clone();
             let edge_tail = edge.clone();
             let chat = chat_id.clone();
+            let tail_hash = handle.tail_hash.clone();
+            let uploading = handle.tail_uploading.clone();
             self.spawn_worker(async move {
                 let Some(bearer) = edge_tail.bearer().await else {
+                    uploading.store(false, Ordering::Release);
                     return;
                 };
                 let url = format!(
@@ -1719,13 +1751,17 @@ impl DocHost {
                     edge_tail.url.trim_end_matches('/'),
                     chat
                 );
-                let _ = http
+                let result = http
                     .put(&url)
                     .bearer_auth(&bearer)
                     .header("content-type", "application/json")
                     .body(body)
                     .send()
                     .await;
+                if result.is_ok_and(|response| response.status().is_success()) {
+                    *lock(&tail_hash) = Some(hash);
+                }
+                uploading.store(false, Ordering::Release);
             });
         }
         // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in

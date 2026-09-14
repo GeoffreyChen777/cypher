@@ -55,9 +55,13 @@ impl DesktopActivity {
     }
     pub fn heartbeat_due(&self, now: Instant) -> bool {
         self.dirty
-            || self
-                .sent
-                .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(15))
+            || self.sent.is_none_or(|last| {
+                // The Worker lease is 45s. Background windows do not
+                // need the interactive 15s cadence; 30s keeps a safety
+                // margin while cutting idle activity traffic in half.
+                let cadence = if self.foreground { 15 } else { 30 };
+                now.saturating_duration_since(last) >= Duration::from_secs(cadence)
+            })
     }
     pub fn sample(
         &mut self,
@@ -142,5 +146,14 @@ mod tests {
                 .unwrap()["interactionAgeMs"],
             1000
         );
+    }
+
+    #[test]
+    fn background_heartbeat_uses_a_thirty_second_safety_cadence() {
+        let now = Instant::now();
+        let mut activity = DesktopActivity::default();
+        activity.sample(false, None, now);
+        assert!(!activity.heartbeat_due(now + Duration::from_secs(29)));
+        assert!(activity.heartbeat_due(now + Duration::from_secs(30)));
     }
 }

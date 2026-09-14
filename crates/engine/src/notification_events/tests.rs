@@ -55,7 +55,9 @@ async fn heartbeats_are_free_but_transitions_and_child_changes_are_preserved() {
     assert_eq!(sent[1].status, SessionStatus::Idle);
     assert_eq!(sent[1].subagents[0].status, SubagentRunStatus::Running);
     assert_eq!(sent[2].subagents[0].status, SubagentRunStatus::Error);
-    assert_ne!(sent[0].started_at, sent[3].started_at);
+    let first_started = sent[0].started_at;
+    let fourth_started = sent[3].started_at;
+    assert_ne!(first_started, fourth_started);
 }
 
 #[tokio::test(start_paused = true)]
