@@ -89,6 +89,27 @@ const PRESENCE_FRESH_MS: i64 = 45_000;
 const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
 /// Per-request timeout for a relay-status probe.
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const RELAY_PROBE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Only an explicit hostConnected=false earns negative-cache backoff. Network
+/// failures are not evidence that a device is offline. This is runtime-local;
+/// no presence rows or synchronization protocol change is needed.
+struct RelayProbeRetry {
+    delay: std::time::Duration,
+    retry_at: tokio::time::Instant,
+}
+
+impl RelayProbeRetry {
+    fn offline(previous: Option<&Self>, now: tokio::time::Instant) -> Self {
+        let delay = previous
+            .map(|retry| (retry.delay * 2).min(RELAY_PROBE_BACKOFF_CAP))
+            .unwrap_or(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
+        Self {
+            delay,
+            retry_at: now + delay,
+        }
+    }
+}
 /// Debounce window for local snapshot saves after a change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 /// Initial-join retry backoff (base, cap). A first registry-room join that
@@ -288,6 +309,8 @@ struct WorkspaceHostInner {
     /// device's overlay back to its boot-time row `lastSeenAt` — an instant
     /// (and false) "offline" badge for a host that beat 20s ago.
     presence_seen: Mutex<std::collections::HashMap<String, i64>>,
+    relay_probe_backoff: Mutex<std::collections::HashMap<String, RelayProbeRetry>>,
+    relay_probe_wake: Arc<tokio::sync::Notify>,
     /// Called with a device id whenever its presence heartbeat proves it alive —
     /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
@@ -397,6 +420,8 @@ impl WorkspaceHost {
                 announced: AtomicBool::new(announced),
                 evicted_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
+                relay_probe_backoff: Mutex::new(std::collections::HashMap::new()),
+                relay_probe_wake: Arc::new(tokio::sync::Notify::new()),
                 peer_alive: Mutex::new(None),
                 notification_event: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
@@ -529,9 +554,14 @@ impl WorkspaceHost {
                         loop {
                             tokio::select! {
                                 event = events.recv() => match event {
-                                    Ok(cypher_sync::RegistryEvent::Applied)
-                                    | Ok(cypher_sync::RegistryEvent::Connected) => {
+                                    Ok(event @ (cypher_sync::RegistryEvent::Applied
+                                    | cypher_sync::RegistryEvent::Connected)) => {
                                         let Some(inner) = weak.upgrade() else { return };
+                                        if event == cypher_sync::RegistryEvent::Connected
+                                            && !lock(&inner.relay_probe_backoff).is_empty()
+                                        {
+                                            inner.relay_probe_wake.notify_one();
+                                        }
                                         if lock(&inner.room)
                                             .as_ref()
                                             .is_some_and(|room| room.stats().server_known)
@@ -638,6 +668,12 @@ impl WorkspaceHost {
     /// down for a fresh socket, so a deaf-receiving room (2026-08-04 incident)
     /// heals within seconds of the user looking at the app.
     pub fn probe(&self) {
+        // Foreground/manual retry bypasses negative-cache delays. The task
+        // consumes this after any in-flight request, so a late false reply
+        // cannot swallow the user's reset.
+        if !lock(&self.inner.relay_probe_backoff).is_empty() {
+            self.inner.relay_probe_wake.notify_one();
+        }
         if let Some(room) = lock(&self.inner.room).as_ref() {
             room.probe();
         }
@@ -1489,6 +1525,12 @@ impl WorkspaceHostInner {
         if alive_peers.is_empty() {
             return;
         }
+        {
+            let mut backoff = lock(&self.relay_probe_backoff);
+            for id in &alive_peers {
+                backoff.remove(id);
+            }
+        }
         let hook = lock(&self.peer_alive).clone();
         if let Some(hook) = hook {
             for id in &alive_peers {
@@ -1616,35 +1658,32 @@ fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<S
 /// online. The DeviceRoom shares no machinery with the registry room, so a
 /// false "offline" now requires BOTH independent paths to be down — at which
 /// point the device is, for every purpose the app has, genuinely offline.
-/// Steady state (healthy room, fresh heartbeats) probes nothing.
+/// Steady state (healthy room, fresh heartbeats) probes nothing. Repeated
+/// negative answers back off up to five minutes (checked on the 30s sweep).
+/// Foreground retry, system wake, and a registry reconnect reset that backoff.
 async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
     let client = reqwest::Client::new();
+    let mut system_wake = cypher_sync::wake::subscribe();
+    let Some(probe_wake) = weak.upgrade().map(|inner| inner.relay_probe_wake.clone()) else {
+        return;
+    };
     loop {
-        tick.tick().await;
+        let reset = tokio::select! {
+            _ = tick.tick() => false,
+            _ = probe_wake.notified() => true,
+            _ = system_wake.recv() => true,
+        };
         let Some(inner) = weak.upgrade() else { return };
         let Some(edge) = inner.config.edge.clone() else {
             return;
         };
-        let self_id = inner.config.device_id.clone();
-        let now = now_ms();
-        let stale: Vec<String> = {
-            let Ok(devices) = lock(&inner.reg).read_devices() else {
-                continue;
-            };
-            let seen = lock(&inner.presence_seen);
-            devices
-                .into_iter()
-                .filter(|d| d.id != self_id)
-                .filter(|d| {
-                    seen.get(&d.id)
-                        .is_none_or(|ms| now.saturating_sub(*ms) >= PRESENCE_FRESH_MS)
-                })
-                .map(|d| d.id)
-                .collect()
-        };
+        if reset {
+            lock(&inner.relay_probe_backoff).clear();
+        }
+        let stale = inner.relay_probe_candidates(tokio::time::Instant::now());
         drop(inner);
         if stale.is_empty() {
             continue;
@@ -1659,6 +1698,7 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
                 edge.url.trim_end_matches('/'),
                 device_id
             );
+            let attempted_at = tokio::time::Instant::now();
             let response = client
                 .get(&url)
                 .bearer_auth(&bearer)
@@ -1672,20 +1712,77 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
             let Ok(body) = response.json::<serde_json::Value>().await else {
                 continue;
             };
-            if body
+            let connected = body
                 .get("hostConnected")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            {
-                let Some(inner) = weak.upgrade() else { return };
-                lock(&inner.presence_seen).insert(device_id.clone(), now_ms());
-                tracing::debug!(device = %device_id, "presence: relay-verified alive");
-                refreshed = true;
-            }
+                .and_then(serde_json::Value::as_bool);
+            let Some(inner) = weak.upgrade() else { return };
+            refreshed |= inner.record_relay_probe(&device_id, connected, attempted_at);
         }
         if refreshed && let Some(inner) = weak.upgrade() {
             inner.publish();
         }
+    }
+}
+
+impl WorkspaceHostInner {
+    fn relay_probe_candidates(&self, now: tokio::time::Instant) -> Vec<String> {
+        let Ok(devices) = lock(&self.reg).read_devices() else {
+            return Vec::new();
+        };
+        let seen = lock(&self.presence_seen);
+        let mut backoff = lock(&self.relay_probe_backoff);
+        let known: std::collections::HashSet<_> = devices.iter().map(|d| d.id.as_str()).collect();
+        backoff.retain(|id, _| known.contains(id.as_str()));
+        let wall_now = now_ms();
+        devices
+            .into_iter()
+            .filter_map(|device| {
+                if device.id == self.config.device_id {
+                    return None;
+                }
+                if seen
+                    .get(&device.id)
+                    .is_some_and(|at| wall_now.saturating_sub(*at) < PRESENCE_FRESH_MS)
+                {
+                    backoff.remove(&device.id);
+                    return None;
+                }
+                backoff
+                    .get(&device.id)
+                    .is_none_or(|retry| now >= retry.retry_at)
+                    .then_some(device.id)
+            })
+            .collect()
+    }
+
+    fn record_relay_probe(
+        &self,
+        device: &str,
+        connected: Option<bool>,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let Some(connected) = connected else {
+            return false;
+        };
+        let wall_now = now_ms();
+        let mut seen = lock(&self.presence_seen);
+        let mut backoff = lock(&self.relay_probe_backoff);
+        if connected {
+            seen.insert(device.to_string(), wall_now);
+            backoff.remove(device);
+            tracing::debug!(device, "presence: relay-verified alive");
+            return true;
+        }
+        // A fresh presence frame can race a negative HTTP response. Do not
+        // re-arm an offline delay for a peer we have just observed alive.
+        if !seen
+            .get(device)
+            .is_some_and(|at| wall_now.saturating_sub(*at) < PRESENCE_FRESH_MS)
+        {
+            let retry = RelayProbeRetry::offline(backoff.get(device), now);
+            backoff.insert(device.to_string(), retry);
+        }
+        false
     }
 }
 
@@ -1879,6 +1976,142 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn add_probe_peer(host: &WorkspaceHost) {
+        host.mutate(|doc| {
+            doc.upsert_device(&Device {
+                id: "peer".into(),
+                name: "Peer".into(),
+                platform: "linux".into(),
+                last_seen_at: None,
+                created_at: None,
+                version: None,
+            })
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_probe_negative_results_reduce_an_hour_to_fifteen_requests() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "self", false);
+        add_probe_peer(&host);
+        let start = tokio::time::Instant::now();
+        let mut requests = 0;
+        for tick in 0..120 {
+            let now = start + Duration::from_secs(tick * 30);
+            let due = host.inner.relay_probe_candidates(now);
+            assert!(!due.contains(&"self".to_string()));
+            for peer in due {
+                requests += 1;
+                host.inner.record_relay_probe(&peer, Some(false), now);
+            }
+        }
+        assert_eq!(requests, 15, "previous policy sent 120 requests per hour");
+        let backoff = super::lock(&host.inner.relay_probe_backoff);
+        assert_eq!(backoff["peer"].delay, super::RELAY_PROBE_BACKOFF_CAP);
+    }
+
+    #[tokio::test]
+    async fn relay_probe_errors_do_not_mean_offline_and_success_resets_backoff() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "self", false);
+        add_probe_peer(&host);
+        let now = tokio::time::Instant::now();
+        host.inner.record_relay_probe("peer", None, now);
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
+        host.inner.record_relay_probe("peer", Some(false), now);
+        assert!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(29))
+                .is_empty()
+        );
+        assert_eq!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(30)),
+            vec!["peer"]
+        );
+        host.inner
+            .record_relay_probe("peer", Some(false), now + Duration::from_secs(30));
+        assert!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(89))
+                .is_empty()
+        );
+        assert_eq!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(90)),
+            vec!["peer"]
+        );
+
+        assert!(host.inner.record_relay_probe("peer", Some(true), now));
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+        assert!(host.inner.relay_probe_candidates(now).is_empty());
+        super::lock(&host.inner.presence_seen)
+            .insert("peer".into(), crate::now_ms() - super::PRESENCE_FRESH_MS);
+        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
+    }
+
+    #[tokio::test]
+    async fn relay_probe_fresh_presence_wins_a_late_negative_and_deleted_peers_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "self", false);
+        add_probe_peer(&host);
+        let now = tokio::time::Instant::now();
+        host.inner.record_relay_probe("peer", Some(false), now);
+        super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms());
+        let mut devices = host.read_devices().unwrap();
+        host.inner.overlay_presence(&mut devices);
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+        host.inner.record_relay_probe("peer", Some(false), now);
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+
+        super::lock(&host.inner.presence_seen).clear();
+        host.inner.record_relay_probe("peer", Some(false), now);
+        host.delete_device("peer").unwrap();
+        assert!(host.inner.relay_probe_candidates(now).is_empty());
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+    }
+
+    #[tokio::test]
+    async fn foreground_probe_wakes_relay_sweep_and_coalesces_repeated_requests() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "self", false);
+        // Opening/focusing a window must not add a probe when no extended
+        // offline delay exists yet (in particular during initial join).
+        host.probe();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                host.inner.relay_probe_wake.notified()
+            )
+            .await
+            .is_err()
+        );
+        add_probe_peer(&host);
+        host.inner
+            .record_relay_probe("peer", Some(false), tokio::time::Instant::now());
+        host.probe();
+        host.probe();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            host.inner.relay_probe_wake.notified(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                host.inner.relay_probe_wake.notified()
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]

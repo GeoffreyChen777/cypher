@@ -797,6 +797,15 @@ impl Updater {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
+    /// Credentials changed, but the public release endpoint does not need
+    /// them. Only a new sign-in or recovery from a failed check merits an
+    /// early retry; ordinary token rotation must not bypass the 6h cadence.
+    pub fn check_after_auth_change(&self, signed_in: bool, recovered: bool) {
+        if signed_in && (recovered || self.status_tx.borrow().error.is_some()) {
+            self.check_now();
+        }
+    }
+
     fn quiescent_now(&self) -> bool {
         self.quiescent.as_ref().is_none_or(|check| check())
     }

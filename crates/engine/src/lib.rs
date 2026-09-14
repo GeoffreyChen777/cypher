@@ -853,8 +853,8 @@ impl Engine {
         // updates are device-local, so UpdateStatus must be served even by a
         // local-only runtime (0.1.0 gated this on `edge_enabled`, leaving local
         // runtimes without the UpdateStatus RPC — the UI's stream closed and
-        // resubscribed every 2s forever). Only the token-change wake stays
-        // edge-gated: it exists to re-check when auth recovers.
+        // resubscribed every 2s forever). Token changes only expedite a failed
+        // check or a new sign-in, not every healthy token rotation.
         let quiescent: cypher_update::QuiescentCheck = {
             let sessions = core.sessions.clone();
             let terminals = core.terminals.clone();
@@ -867,9 +867,14 @@ impl Engine {
         );
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();
+            let auth_for_updates = auth.clone();
+            let mut signed_in = auth.state().is_signed_in();
             let wake = tokio::spawn(async move {
                 while token_changes.changed().await.is_ok() {
-                    updater_for_tokens.check_now();
+                    let now_signed_in = auth_for_updates.state().is_signed_in();
+                    updater_for_tokens
+                        .check_after_auth_change(now_signed_in, !signed_in && now_signed_in);
+                    signed_in = now_signed_in;
                 }
             });
             core.set_updater_wake(wake);

@@ -1,10 +1,15 @@
 //! Loopback release fixtures; no real releases or user installation touched.
 use super::*;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+type Routes = BTreeMap<String, (u16, Vec<u8>)>;
 
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    routes: Arc<std::sync::Mutex<Routes>>,
 }
 
 impl Drop for Server {
@@ -14,12 +19,16 @@ impl Drop for Server {
 }
 
 async fn server(routes: Vec<(&str, u16, Vec<u8>)>) -> Server {
-    let routes: BTreeMap<String, (u16, Vec<u8>)> = routes
+    let routes: Routes = routes
         .into_iter()
         .map(|(path, status, body)| (path.into(), (status, body)))
         .collect();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let routes = Arc::new(std::sync::Mutex::new(routes));
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_routes = routes.clone();
+    let server_requests = requests.clone();
     let task = tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -27,7 +36,13 @@ async fn server(routes: Vec<(&str, u16, Vec<u8>)>) -> Server {
             let n = stream.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..n]);
             let path = request.split_whitespace().nth(1).unwrap_or("");
-            let (status, body) = routes.get(path).cloned().unwrap_or((404, vec![]));
+            server_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (status, body) = server_routes
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .unwrap_or((404, vec![]));
             let header = format!(
                 "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -36,7 +51,89 @@ async fn server(routes: Vec<(&str, u16, Vec<u8>)>) -> Server {
             let _ = stream.write_all(&body).await;
         }
     });
-    Server { url, task }
+    Server {
+        url,
+        task,
+        requests,
+        routes,
+    }
+}
+
+#[tokio::test]
+async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let body = br#"{"version":"0.0.0","files":{}}"#.to_vec();
+    let server = server(vec![("/releases/manifest.json", 200, body.clone())]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let updater = Updater::spawn(server.url.clone(), None, dir.path().into());
+    let mut status = updater.watch();
+
+    // Rotation during startup leaves the existing initial-check timer alone.
+    updater.check_after_auth_change(true, false);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(server.requests.load(SeqCst), 0);
+
+    updater.check_after_auth_change(true, true);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        status.wait_for(|s| s.checked_at.is_some()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server.requests.load(SeqCst), 1);
+    for _ in 0..100 {
+        updater.check_after_auth_change(true, false);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        server.requests.load(SeqCst),
+        1,
+        "healthy rotations must not fetch"
+    );
+
+    // A failed public check can recover early when fresh credentials indicate
+    // the network is back, even if AuthState stayed SignedIn during the outage.
+    server
+        .routes
+        .lock()
+        .unwrap()
+        .insert("/releases/manifest.json".into(), (503, vec![]));
+    updater.check_now();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        status.wait_for(|s| s.error.is_some()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server.requests.load(SeqCst), 2);
+    updater.check_after_auth_change(false, false);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        server.requests.load(SeqCst),
+        2,
+        "sign-out is not connectivity recovery"
+    );
+
+    server
+        .routes
+        .lock()
+        .unwrap()
+        .insert("/releases/manifest.json".into(), (200, body));
+    updater.check_after_auth_change(true, false);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        status.wait_for(|s| s.error.is_none()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(server.requests.load(SeqCst), 3);
+    updater.check_after_auth_change(true, false);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(server.requests.load(SeqCst), 3);
+    updater.shutdown().await;
 }
 
 fn manifest(file: &str, bytes: &[u8]) -> Manifest {

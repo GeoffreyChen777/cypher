@@ -291,7 +291,6 @@ pub struct RegistryClient {
     nudge: mpsc::Sender<()>,
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
-    sync_now: mpsc::Sender<()>,
     presence_out: mpsc::Sender<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     stats: Arc<Stats>,
@@ -403,7 +402,7 @@ impl RegistryClient {
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_again: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            sync_tx: sync_tx.clone(),
+            sync_tx,
             sync_rx,
         };
         let task = tokio::spawn(actor.run(ready_tx));
@@ -416,7 +415,6 @@ impl RegistryClient {
                 nudge: nudge_tx,
                 probe: probe_tx,
                 redial: redial_tx,
-                sync_now: sync_tx,
                 presence_out: presence_tx,
                 presence,
                 stats,
@@ -443,8 +441,10 @@ impl RegistryClient {
 
     /// Local writes were enqueued — push pending batches now.
     pub fn nudge(&self) {
+        // Every actor phase handles this wake, including offline/backoff.
+        // A second signal on sync_rx scheduled another HTTP pull for the same
+        // mutation. That channel is only for a genuinely overlapping HTTP cycle.
         let _ = self.nudge.try_send(());
-        let _ = self.sync_now.try_send(());
     }
 
     /// Publish this device's presence beat (epoch ms).

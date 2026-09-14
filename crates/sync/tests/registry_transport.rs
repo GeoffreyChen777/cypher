@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use cypher_proto::Chat;
+use cypher_sync::registry::mock_server::MockRegistryServer;
 use cypher_sync::{RegistryClient, RegistryTransport, RegistryTuning, StaticUrl, SyncError};
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
@@ -122,6 +123,32 @@ fn ws_url() -> StaticUrl {
     // Port 9 rejects immediately on this machine, while remaining a valid
     // WebSocket URL. The transport tests must not depend on a live WS.
     StaticUrl("ws://127.0.0.1:9/registry/offline/ws".into())
+}
+
+#[tokio::test]
+async fn one_nudge_on_a_connected_room_runs_one_http_cycle() {
+    let server = MockRegistryServer::start().await;
+    let transport = FakeTransport::gated();
+    let doc = Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-http")));
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(StaticUrl(server.url())),
+        doc,
+        "dev-http",
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    wait_until(|| client.stats().connected && transport.fetches.load(Ordering::SeqCst) == 1).await;
+    // Let the bootstrap cycle retire before measuring an ordinary wake.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for expected in 2..=4 {
+        client.nudge();
+        wait_until(|| transport.fetches.load(Ordering::SeqCst) >= expected).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(transport.fetches.load(Ordering::SeqCst), expected);
+        assert!(client.stats().connected);
+    }
+    client.shutdown().await;
 }
 
 #[tokio::test]
