@@ -1092,7 +1092,7 @@ mod tests {
     fn terminal_bg_tracks_the_appearance() {
         let dark = terminal_bg_for(Appearance::Dark);
         assert_eq!(dark.s, 0.0);
-        assert!((dark.l - 9.0 / 255.0).abs() < 1e-4);
+        assert!((dark.l - 25.0 / 255.0).abs() < 1e-4);
 
         let light = terminal_bg_for(Appearance::Light);
         assert_eq!(light.s, 0.0);

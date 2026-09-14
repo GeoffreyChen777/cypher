@@ -503,9 +503,9 @@ pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'st
             icons::KEY_MINIMALISTIC,
         ),
         (&["squad", "swarm", "multiagent"], icons::CHAT_ROUND_LINE),
-        (&["provider", "providers", "newapi"], icons::CLOUD),
         (&["goal", "goals", "todo", "todos"], icons::STAR),
         (&["fast", "turbo", "speed"], icons::TUNING),
+        (&["provider", "providers", "newapi"], icons::CLOUD),
         (
             &["ui", "theme", "themes", "sidebar"],
             icons::SIDEBAR_MINIMALISTIC,
