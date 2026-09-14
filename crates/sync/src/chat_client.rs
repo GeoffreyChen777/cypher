@@ -35,6 +35,8 @@ const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 /// post-strip rooms are KB-scale, so this is generous even at 1.2 Mbps.
 const BACKFILL_DEADLINE: Duration = Duration::from_secs(120);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// Transport pongs/presence do not prove a queued write reached the room.
+const PUSH_ACK_DEADLINE: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// Quiet-room probe cadence default (matches the registry's fleet math).
@@ -280,7 +282,7 @@ struct PendingPush {
 struct Shared {
     cursor: u64,
     pending: VecDeque<PendingPush>,
-    in_flight: Option<String>,
+    in_flight: Option<(String, tokio::time::Instant)>,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
     /// Set by a transient (`quota`) rejection: re-push at this instant
@@ -296,6 +298,27 @@ struct Shared {
     /// a claim that every row up to it is reflected in the local doc, so a
     /// gap must be repaired rather than skipped.
     gap_repair: bool,
+}
+
+impl Shared {
+    fn acknowledge(&mut self, batch_id: &str) {
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|(id, _)| id == batch_id)
+        {
+            self.in_flight = None;
+        }
+        self.pending.retain(|p| p.batch_id != batch_id);
+        if self.quota_blocked {
+            if self.pending.is_empty() {
+                self.quota_blocked = false;
+                self.retry_at = None;
+            } else {
+                self.retry_at = Some(tokio::time::Instant::now());
+            }
+        }
+    }
 }
 
 /// `cypher sync` surface (plan: cursor / headSeq / floorLag / pendingPushes).
@@ -653,7 +676,7 @@ struct Actor {
     /// Once per client instance, refetch rows from the checkpoint (or zero)
     /// when a restored cursor may have advanced over parked Loro operations.
     cursor_amnesty_done: std::sync::atomic::AtomicBool,
-    /// Optional plain-HTTPS fallback/parallel convergence path.
+    /// Optional plain-HTTPS bootstrap and recovery path.
     transport: Option<Arc<dyn ChatTransport>>,
     /// Prevent overlapping pull cycles from racing one another.
     http_sync_busy: Arc<std::sync::atomic::AtomicBool>,
@@ -815,11 +838,12 @@ impl Actor {
             .await
             .map_err(|_| SyncError::Protocol("chat HTTPS sync timed out".into()))
             .and_then(|result| result);
+            let more_pending = result.is_ok() && !lock(&shared).pending.is_empty();
             if let Err(err) = result {
                 tracing::debug!(error = %err, "chat2 HTTPS sync failed; WS/retry will continue");
             }
             busy.store(false, Relaxed);
-            if sync_again.swap(false, Relaxed) {
+            if sync_again.swap(false, Relaxed) || more_pending {
                 let _ = sync_tx.try_send(());
             }
         });
@@ -1031,6 +1055,10 @@ impl Actor {
             tracing::warn!("chat2: backfill did not complete");
             return SessionEnd::Reconnect;
         };
+        {
+            let mut shared = lock(&self.shared);
+            shared.gap_repair |= head_seq > shared.cursor;
+        }
         self.resumed = true;
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));
@@ -1044,16 +1072,27 @@ impl Actor {
         }
 
         // ── steady state ────────────────────────────────────────────────────
-        let mut last_frame = tokio::time::Instant::now();
+        let mut last_progress = tokio::time::Instant::now();
         let mut probe_deadline: Option<tokio::time::Instant> = None;
+        let mut repair_deadline: Option<tokio::time::Instant> = None;
         // A live row can outrun the backfill and expose a hole immediately
         // after joining. Repair it before waiting for ordinary traffic.
         let mut gap_repairs = 0u32;
-        if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
+        if !self
+            .maybe_repair_gap(&mut pipe, &mut gap_repairs, &mut repair_deadline)
+            .await
+        {
             return SessionEnd::Reconnect;
         }
         loop {
-            let quiet_probe_at = last_frame + self.tuning.probe_quiet;
+            let quiet_probe_at = last_progress + self.tuning.probe_quiet;
+            let distant = tokio::time::Instant::now() + Duration::from_secs(86_400);
+            let ack_at = lock(&self.shared)
+                .in_flight
+                .as_ref()
+                .map(|(_, at)| *at)
+                .unwrap_or(distant);
+            let repair_at = repair_deadline.unwrap_or(distant);
             let deadline_at = probe_deadline
                 .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
             let retry_at = lock(&self.shared)
@@ -1064,17 +1103,28 @@ impl Actor {
                     let Some(bytes) = frame else {
                         return SessionEnd::Reconnect;
                     };
-                    last_frame = tokio::time::Instant::now();
-                    probe_deadline = None;
                     let Some(frame) = wire::decode(&bytes) else {
                         tracing::warn!("chat2: unparseable frame");
                         return SessionEnd::Reconnect;
                     };
+                    let kind = frame.kind;
                     if !self.handle_frame(frame) {
                         return SessionEnd::Reconnect;
                     }
+                    if matches!(kind, frame_type::ROW | frame_type::ACK | frame_type::STATE | frame_type::ROWS_DONE | frame_type::PROBE_OK) {
+                        last_progress = tokio::time::Instant::now();
+                    }
+                    if kind == frame_type::PROBE_OK {
+                        probe_deadline = None;
+                    }
+                    if kind == frame_type::ROWS_DONE {
+                        repair_deadline = None;
+                        if !lock(&self.shared).gap_repair {
+                            gap_repairs = 0;
+                        }
+                    }
                     if !self
-                        .maybe_repair_gap(&mut pipe, &mut gap_repairs)
+                        .maybe_repair_gap(&mut pipe, &mut gap_repairs, &mut repair_deadline)
                         .await
                     {
                         return SessionEnd::Reconnect;
@@ -1084,10 +1134,13 @@ impl Actor {
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
-                    self.spawn_http_sync();
                 }
                 _ = self.http_sync_rx.recv() => {
-                    self.spawn_http_sync();
+                    // An overlapping bootstrap/recovery cycle finished.
+                    // Once joined, queued writes belong on WS, not both paths.
+                    if !self.push_pending(&mut pipe).await {
+                        return SessionEnd::Reconnect;
+                    }
                 }
                 beat = self.presence_rx.recv() => {
                     if let Some((at, payload)) = beat {
@@ -1123,7 +1176,18 @@ impl Actor {
                     if !self.send_probe(&mut pipe, &mut probe_deadline).await {
                         return SessionEnd::Reconnect;
                     }
-                    last_frame = tokio::time::Instant::now();
+                    last_progress = tokio::time::Instant::now();
+                }
+                _ = tokio::time::sleep_until(ack_at) => {
+                    // An HTTP ACK may have retired it while we were waiting.
+                    if lock(&self.shared).in_flight.as_ref().is_some_and(|(_, at)| *at <= tokio::time::Instant::now()) {
+                        tracing::warn!("chat2: push ACK overdue; recovering via HTTP and redial");
+                        return SessionEnd::Reconnect;
+                    }
+                }
+                _ = tokio::time::sleep_until(repair_at) => {
+                    tracing::warn!("chat2: row repair stalled; recovering via HTTP and redial");
+                    return SessionEnd::Reconnect;
                 }
                 _ = tokio::time::sleep_until(deadline_at) => {
                     tracing::warn!("chat2: probe unanswered past deadline; redialing");
@@ -1142,8 +1206,16 @@ impl Actor {
     /// bound prevents a malformed or permanently truncated server log from
     /// causing an infinite request loop; the next reconnect performs the
     /// stronger full catch-up path.
-    async fn maybe_repair_gap(&self, pipe: &mut BinPipe, repairs: &mut u32) -> bool {
+    async fn maybe_repair_gap(
+        &self,
+        pipe: &mut BinPipe,
+        repairs: &mut u32,
+        deadline: &mut Option<tokio::time::Instant>,
+    ) -> bool {
         const MAX_GAP_REPAIRS_PER_SESSION: u32 = 3;
+        if deadline.is_some() {
+            return true;
+        }
         let (repair, after) = {
             let mut shared = lock(&self.shared);
             (std::mem::take(&mut shared.gap_repair), shared.cursor)
@@ -1161,6 +1233,7 @@ impl Actor {
             attempt = *repairs,
             "chat2: backfilling over a row gap"
         );
+        *deadline = Some(tokio::time::Instant::now() + BACKFILL_DEADLINE);
         let req = wire::encode(
             frame_type::ROWS_REQ,
             &wire::RowsReqHeader {
@@ -1210,7 +1283,8 @@ impl Actor {
                 )
             });
             if let Some((id, _)) = &frame {
-                shared.in_flight = Some(id.clone());
+                shared.in_flight =
+                    Some((id.clone(), tokio::time::Instant::now() + PUSH_ACK_DEADLINE));
             }
             frame.map(|(_, frame)| frame)
         };
@@ -1268,10 +1342,7 @@ impl Actor {
                     return false;
                 };
                 let mut shared = lock(&self.shared);
-                if shared.in_flight.as_deref() == Some(&ack.batch_id) {
-                    shared.in_flight = None;
-                }
-                shared.pending.retain(|p| p.batch_id != ack.batch_id);
+                shared.acknowledge(&ack.batch_id);
                 // An ACK proves the server accepted our row at ack.seq; it
                 // does not prove that interleaved remote rows reached us.
                 if ack.seq > shared.cursor + 1 {
@@ -1285,15 +1356,6 @@ impl Actor {
                     shared.cursor = shared.cursor.max(ack.seq);
                 }
                 let cursor = shared.cursor;
-                // Quota drain: each grant immediately probes the next head
-                // batch (one-per-grant, never a full-queue burst).
-                if shared.quota_blocked {
-                    if shared.pending.is_empty() {
-                        shared.quota_blocked = false;
-                    } else {
-                        shared.retry_at = Some(tokio::time::Instant::now());
-                    }
-                }
                 drop(shared);
                 self.sink.advance_cursor(cursor);
                 let _ = self.events.send(ChatEvent::Applied);
@@ -1302,11 +1364,21 @@ impl Actor {
                 let _ = self.events.send(ChatEvent::Presence);
             }
             frame_type::PROBE_OK => {
-                if let Ok(probe) = serde_json::from_value::<wire::ProbeOkHeader>(frame.header) {
-                    if let Some(server) = &mut lock(&self.shared).server {
-                        server.head_seq = server.head_seq.max(probe.head_seq);
-                    }
+                let Ok(probe) = serde_json::from_value::<wire::ProbeOkHeader>(frame.header) else {
+                    return false;
+                };
+                let mut shared = lock(&self.shared);
+                if let Some(server) = &mut shared.server {
+                    server.head_seq = server.head_seq.max(probe.head_seq);
                 }
+                shared.gap_repair |= probe.head_seq > shared.cursor;
+            }
+            frame_type::ROWS_DONE => {
+                let Ok(done) = serde_json::from_value::<wire::RowsDoneHeader>(frame.header) else {
+                    return false;
+                };
+                let mut shared = lock(&self.shared);
+                shared.gap_repair = done.head_seq > shared.cursor;
             }
             frame_type::STATE => {
                 // Late duplicate of a hello answer — refresh the server view.
@@ -1330,6 +1402,9 @@ impl Actor {
                         let before = shared.pending.len();
                         shared.pending.retain(|p| p.batch_id != batch_id);
                         let dropped = before != shared.pending.len();
+                        if !shared.pending.is_empty() {
+                            shared.retry_at = Some(tokio::time::Instant::now());
+                        }
                         drop(shared);
                         if dropped {
                             tracing::error!(
@@ -1349,7 +1424,9 @@ impl Actor {
                         shared.quota_blocked = true;
                         shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
                     }
-                    _ => {}
+                    // An unclassified rejection must not leave an unarmed
+                    // queue stuck until the user happens to type again.
+                    _ => return false,
                 }
                 tracing::warn!(code, message, "chat2: server rejected a frame");
             }
@@ -1382,16 +1459,17 @@ async fn http_sync_once(
         .map(|push| (push.batch_id.clone(), push.bytes.clone()))
         .collect();
     for (batch_id, bytes) in pending {
-        let ack = transport.push(batch_id, bytes).await?;
+        let ack = transport.push(batch_id.clone(), bytes).await?;
         let value = serde_json::from_str::<serde_json::Value>(&ack)
             .map_err(|e| SyncError::Protocol(format!("chat push bad ack: {e}")))?;
         let ack_batch = value["batchId"]
             .as_str()
             .ok_or_else(|| SyncError::Protocol("chat push ack missing batchId".into()))?;
         if let Some(seq) = value["seq"].as_u64() {
-            lock(shared)
-                .pending
-                .retain(|push| push.batch_id != ack_batch);
+            if ack_batch != batch_id {
+                return Err(SyncError::Protocol("chat push ack batchId mismatch".into()));
+            }
+            lock(shared).acknowledge(ack_batch);
             // Only advance when the ACK is the next contiguous row. If it
             // outruns the cursor, the subsequent pull repairs the missing
             // rows first and then reaches the ACK's sequence.

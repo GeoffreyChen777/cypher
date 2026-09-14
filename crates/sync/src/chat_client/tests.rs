@@ -11,6 +11,8 @@ use super::*;
 use crate::chat_frames::{decode, encode, frame_type};
 use tokio::sync::Notify;
 
+mod recovery;
+
 // ── plumbing: linked pipes + scripted connector ─────────────────────────────
 
 struct ServerEnd {
