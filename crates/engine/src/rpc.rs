@@ -458,6 +458,7 @@ pub struct EngineRpc {
     updater: Option<cypher_update::Updater>,
     pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
     mcp_logins: std::sync::Arc<crate::mcp::login::Logins>,
+    provider_logins: std::sync::Arc<crate::pi_providers::Logins>,
     local_import: Option<crate::local_import::LocalImporter>,
     title_settings: Option<crate::title_settings::TitleSettingsStore>,
     engine_info: EngineInfo,
@@ -470,6 +471,13 @@ pub struct EngineRpc {
 impl EngineRpc {
     pub fn with_mcp_logins(mut self, logins: std::sync::Arc<crate::mcp::login::Logins>) -> Self {
         self.mcp_logins = logins;
+        self
+    }
+    pub fn with_provider_logins(
+        mut self,
+        logins: std::sync::Arc<crate::pi_providers::Logins>,
+    ) -> Self {
+        self.provider_logins = logins;
         self
     }
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
@@ -508,6 +516,7 @@ impl EngineRpc {
             updater: None,
             pi_runtime: None,
             mcp_logins: Default::default(),
+            provider_logins: Default::default(),
             local_import: None,
             title_settings: None,
             engine_info,
@@ -1002,6 +1011,10 @@ impl EngineRpc {
                 | methods::MCP_LOGIN_STATUS
                 | methods::COMPLETE_MCP_LOGIN
                 | methods::CANCEL_MCP_LOGIN
+                | methods::BEGIN_PI_PROVIDER_LOGIN
+                | methods::PI_PROVIDER_LOGIN_STATUS
+                | methods::COMPLETE_PI_PROVIDER_LOGIN
+                | methods::CANCEL_PI_PROVIDER_LOGIN
         ) && !links.credential_transport_allowed()
         {
             return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
@@ -1209,6 +1222,10 @@ fn forwardable(method: &str) -> bool {
             | methods::REFRESH_PI_PROVIDER
             | methods::LOGOUT_PI_PROVIDER
             | methods::REMOVE_PI_PROVIDER
+            | methods::BEGIN_PI_PROVIDER_LOGIN
+            | methods::PI_PROVIDER_LOGIN_STATUS
+            | methods::COMPLETE_PI_PROVIDER_LOGIN
+            | methods::CANCEL_PI_PROVIDER_LOGIN
             | methods::PI_UPDATE_STATUS
             | methods::APPLY_PI_UPDATES
             | methods::LIST_MCP_SERVERS
@@ -1609,6 +1626,19 @@ impl RpcService for EngineRpc {
                 "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
             ));
         }
+        if self.provider_logins.active()
+            && matches!(
+                method,
+                methods::SAVE_PI_PROVIDER
+                    | methods::LOGOUT_PI_PROVIDER
+                    | methods::REMOVE_PI_PROVIDER
+                    | methods::BEGIN_PI_PROVIDER_LOGIN
+            )
+        {
+            return Err(RpcError::Failed(
+                "Finish or cancel the active provider sign-in before changing providers.".into(),
+            ));
+        }
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -1693,6 +1723,44 @@ impl RpcService for EngineRpc {
                     self.reload_pi_runtime().await;
                 }
                 RpcReply::value(&result.map_err(RpcError::Failed)?)
+            }
+            methods::BEGIN_PI_PROVIDER_LOGIN => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RpcError::BadParams("Missing provider id.".into()))?;
+                let status = self
+                    .provider_logins
+                    .begin(self.pi_runtime()?.paths(), id)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&status)
+            }
+            methods::PI_PROVIDER_LOGIN_STATUS
+            | methods::COMPLETE_PI_PROVIDER_LOGIN
+            | methods::CANCEL_PI_PROVIDER_LOGIN => {
+                let id = params
+                    .get("attemptId")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| id.len() <= 64)
+                    .ok_or_else(|| {
+                        RpcError::BadParams("Provider sign-in attempt ID required.".into())
+                    })?;
+                let status = match method {
+                    methods::COMPLETE_PI_PROVIDER_LOGIN => {
+                        let callback = params
+                            .get("callbackUrl")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| RpcError::BadParams("Callback URL required.".into()))?;
+                        self.provider_logins.respond(id, callback)
+                    }
+                    methods::CANCEL_PI_PROVIDER_LOGIN => self.provider_logins.cancel(id),
+                    _ => self.provider_logins.status(id),
+                }
+                .map_err(RpcError::Failed)?;
+                if status.phase == "succeeded" {
+                    self.reload_pi_runtime().await;
+                }
+                RpcReply::value(&status)
             }
             methods::LIST_MCP_SERVERS => {
                 RpcReply::value(&crate::mcp::list(&self.pi_runtime()?.paths().agent_dir))

@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
+import { createInterface } from "node:readline";
 
 class ProviderError extends Error {}
 function safeError(error) {
@@ -31,6 +32,24 @@ export function validateId(id) {
   if (["constructor", "prototype", "__proto__"].includes(id))
     throw new ProviderError("This provider name is reserved.");
   return id;
+}
+
+export const OAUTH_PROVIDERS = Object.freeze([
+  { id: "anthropic", title: "Claude Pro/Max", baseUrl: "https://api.anthropic.com" },
+  { id: "openai-codex", title: "ChatGPT Plus/Pro (Codex)", baseUrl: "https://chatgpt.com" },
+]);
+
+export function isOauthProvider(id) {
+  return OAUTH_PROVIDERS.some((provider) => provider.id === id);
+}
+
+/** Headless Cypher cannot complete a Runtime-local browser callback. */
+export function pickOauthSelect(options) {
+  if (!Array.isArray(options) || options.length === 0)
+    throw new ProviderError("Login options missing.");
+  return options.find((option) => option.id === "device_code")?.id
+    || options.find((option) => option.id !== "browser")?.id
+    || options[0].id;
 }
 
 async function jsonFile(path, fallback) {
@@ -140,6 +159,8 @@ export async function providerRequest(request) {
     const id = validateId(request.id);
     const existing = Object.hasOwn(config.providers, id) ? config.providers[id] : undefined;
     if (action === "save") {
+      if (isOauthProvider(id))
+        throw new ProviderError("Use Sign in for Claude or ChatGPT. That name is reserved.");
       if (!request.edit && (existing || runtime.getProvider(id)))
         throw new ProviderError("That provider name is already in use.");
       if (request.edit && !existing) throw new ProviderError("Provider no longer exists. Reload the page.");
@@ -168,6 +189,32 @@ export async function providerRequest(request) {
         fingerprint: fingerprint(entry, await auth.read(id)),
       };
     } else {
+      if (isOauthProvider(id)) {
+        if (action === "remove")
+          throw new ProviderError("Subscription providers cannot be deleted. Sign out instead.");
+        if (action !== "logout" && action !== "refresh")
+          throw new ProviderError("Unsupported provider operation.");
+        if (action === "logout") {
+          await runtime.logout(id);
+          delete statuses[id];
+        } else {
+          const credential = await auth.read(id);
+          try {
+            const check = await runtime.checkAuth(id);
+            statuses[id] = {
+              state: credential && check ? "connected" : credential ? "unverified" : "signed_out",
+              checkedAt: Date.now(),
+              modelCount: runtime.getModels(id).length,
+              fingerprint: fingerprint({ baseUrl: id }, credential),
+            };
+          } catch (error) {
+            statuses[id] = {
+              state: "error", checkedAt: Date.now(), message: safeError(error),
+              fingerprint: fingerprint({ baseUrl: id }, credential),
+            };
+          }
+        }
+      } else {
       if (!existing) throw new ProviderError("Provider not found.");
       if (action === "refresh") {
         const credential = await auth.read(id);
@@ -197,11 +244,26 @@ export async function providerRequest(request) {
         }
       } else throw new ProviderError("Unsupported provider operation.");
     }
+    }
     await atomicJson(statusPath, statuses);
   }
   await runtime.refresh({ allowNetwork: false });
-  const providers = [];
+  const oauth = [];
+  const gateways = [];
+  for (const spec of OAUTH_PROVIDERS) {
+    const credential = await auth.read(spec.id);
+    const saved = statuses[spec.id];
+    const status = saved?.fingerprint === fingerprint({ baseUrl: spec.id }, credential) ? saved : undefined;
+    oauth.push({
+      id: spec.id, title: spec.title, baseUrl: spec.baseUrl, providerType: "oauth",
+      credentialSaved: !!credential,
+      state: credential ? (status?.state ?? "unverified") : "signed_out",
+      checkedAt: status?.checkedAt, message: status?.message,
+      modelCount: runtime.getModels(spec.id).length,
+    });
+  }
   for (const [id, entry] of Object.entries(config.providers)) {
+    if (isOauthProvider(id)) continue;
     const credential = await auth.read(id);
     const saved = statuses[id];
     const status = saved?.fingerprint === fingerprint(entry, credential) ? saved : undefined;
@@ -212,7 +274,7 @@ export async function providerRequest(request) {
       url.username = ""; url.password = ""; url.search = ""; url.hash = "";
       displayUrl = url.toString().replace(/\/+$/, "");
     } catch {}
-    providers.push({
+    gateways.push({
       id, baseUrl: displayUrl, providerType: "newapi",
       credentialSaved: !!credential,
       state: credential ? (status?.state ?? "unverified") : "signed_out",
@@ -220,13 +282,91 @@ export async function providerRequest(request) {
       modelCount: runtime.getModels(id).length,
     });
   }
-  return { providers: providers.sort((a, b) => a.id.localeCompare(b.id)) };
+  gateways.sort((a, b) => a.id.localeCompare(b.id));
+  return { providers: oauth.concat(gateways) };
+}
+
+async function runOauthLogin(id, remaining) {
+  const ac = new AbortController();
+  const pending = new Map();
+  const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+  const interaction = {
+    signal: ac.signal,
+    notify(event) {
+      send({ type: "event", event });
+    },
+    prompt(prompt) {
+      if (prompt.type === "select") return Promise.resolve(pickOauthSelect(prompt.options));
+      const promptId = `${pending.size + 1}.${Date.now()}`;
+      send({
+        type: "prompt",
+        id: promptId,
+        prompt: { type: prompt.type, message: prompt.message, placeholder: prompt.placeholder },
+      });
+      return new Promise((resolve, reject) => {
+        const finish = (error, value) => {
+          if (!pending.delete(promptId)) return;
+          error ? reject(error) : resolve(value);
+        };
+        pending.set(promptId, { resolve: (value) => finish(null, value), reject: (error) => finish(error) });
+        const onAbort = () => finish(new Error("Login cancelled"));
+        prompt.signal?.addEventListener("abort", onAbort, { once: true });
+        ac.signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  const reader = (async () => {
+    for await (const line of { [Symbol.asyncIterator]: () => remaining }) {
+      let message;
+      try { message = JSON.parse(line); } catch { continue; }
+      if (message?.type === "cancel") {
+        ac.abort();
+        return;
+      }
+      if (message?.type === "response" && pending.has(message.id)) {
+        const value = typeof message.value === "string" ? message.value : "";
+        if (value.length > 8192) pending.get(message.id).reject(new Error("Callback is too large."));
+        else pending.get(message.id).resolve(value);
+      }
+    }
+    ac.abort();
+  })();
+  try {
+    const agent = process.env.PI_CODING_AGENT_DIR;
+    const pkg = process.env.PI_PACKAGE_DIR;
+    const { ModelRuntime } = await import(pathToFileURL(join(pkg, "dist/core/model-runtime.js")));
+    const { AuthStorage } = await import(pathToFileURL(join(pkg, "dist/core/auth-storage.js")));
+    const auth = AuthStorage.create(join(agent, "auth.json"));
+    const runtime = serializeModelRefreshes(await ModelRuntime.create({
+      credentials: auth, modelsPath: join(agent, "models.json"),
+      modelsStorePath: join(agent, "models-store.json"), refreshOnCreate: false,
+    }));
+    await runtime.login(id, "oauth", interaction);
+    send({ type: "done", data: await providerRequest({ action: "list" }) });
+  } catch (error) {
+    send({ type: "error", error: ac.signal.aborted ? "Sign-in cancelled." : safeError(error) });
+    process.exitCode = 1;
+  } finally {
+    ac.abort();
+    await reader.catch(() => {});
+  }
 }
 
 // No raw exceptions: dependencies may put request headers/credentials in errors.
 if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
   let request;
   try {
+    if (process.argv.includes("--oauth")) {
+      const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+      const iter = lines[Symbol.asyncIterator]();
+      const first = await iter.next();
+      if (first.done) throw new ProviderError("Missing sign-in request.");
+      request = JSON.parse(first.value);
+      if (request.action !== "oauth_login" || !isOauthProvider(request.id))
+        throw new ProviderError("Unsupported subscription provider.");
+      console.log = console.warn = console.error = () => {};
+      await runOauthLogin(request.id, iter);
+    } else {
     let input = "";
     for await (const chunk of process.stdin) {
       input += chunk;
@@ -236,6 +376,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.
     console.log = console.warn = console.error = () => {};
     const result = await providerRequest(request);
     process.stdout.write(JSON.stringify({ ok: true, data: result }));
+    }
   } catch (error) {
     let message = safeError(error);
     if (request?.apiKey) message = message.replaceAll(request.apiKey, "[redacted]");

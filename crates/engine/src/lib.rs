@@ -175,6 +175,7 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub title_settings: title_settings::TitleSettingsStore,
     mcp_logins: Arc<mcp::login::Logins>,
+    provider_logins: Arc<pi_providers::Logins>,
     /// Temporary Side Chats (round 21): engine-hosted chats opened from a
     /// settled selection. Owned HERE (not by [`EngineRpc`]) so every RPC
     /// service built from this core shares one manager and shutdown reaps
@@ -367,6 +368,7 @@ impl EngineCore {
             agent_accounts,
             title_settings,
             mcp_logins: Arc::new(Default::default()),
+            provider_logins: Arc::new(Default::default()),
             side_chats,
             session_forks,
             device_id,
@@ -523,6 +525,7 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_mcp_logins(self.mcp_logins.clone())
+        .with_provider_logins(self.provider_logins.clone())
         .with_title_settings(self.title_settings.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -544,6 +547,7 @@ impl EngineCore {
     /// clearing credentials alone is not a security boundary.
     pub fn disconnect_edge(&self) {
         self.mcp_logins.cancel_all();
+        self.provider_logins.cancel_all();
         if let Some(links) = self.links() {
             links.disconnect_all();
         }
@@ -556,6 +560,7 @@ impl EngineCore {
     /// snapshot.
     pub async fn shutdown(&self) {
         self.mcp_logins.cancel_all();
+        self.provider_logins.cancel_all();
         // Reap temporary Side Chats FIRST: interrupt their live runs and drop
         // every ephemeral doc (host-memory only — dispose leaves no durable
         // remnants; a promoted chat is untouched) BEFORE the general session
