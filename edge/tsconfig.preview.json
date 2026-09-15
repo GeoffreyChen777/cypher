@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types", "node"] },
+  "include": ["test/workerd/preview.workerd.test.ts", "test/workerd/preview-fixture.ts", "test/workerd/env.d.ts", "test/preview-native-worker.ts"]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "cypher-preview-local-test",
+  "main": "test/preview-native-worker.ts",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": false,
+  "durable_objects": { "bindings": [{ "name": "CHAT_ROOMS", "class_name": "ChatRoom" }] },
+  "migrations": [{ "tag": "test-v1", "new_sqlite_classes": ["ChatRoom"] }]
+}

@@ -965,7 +965,11 @@ impl PiHarness {
         self.run_slash_command_ui(prompt, None).await
     }
 
-    async fn run_slash_command_ui(&self, prompt: &str, mut ui: Option<crate::SlashUi>) -> Result<String, HarnessError> {
+    async fn run_slash_command_ui(
+        &self,
+        prompt: &str,
+        mut ui: Option<crate::SlashUi>,
+    ) -> Result<String, HarnessError> {
         // Same plugin path as the TUI (`pi --mode rpc` + `/mcp-auth`).
         let mut cmd = self.spawn_command(None, &RunHostContext::default(), None)?;
         if let Some(agent_dir) = &self.agent_dir {
@@ -981,7 +985,11 @@ impl PiHarness {
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(if ui.is_some() { Stdio::null() } else { Stdio::inherit() })
+            .stderr(if ui.is_some() {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            })
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -1161,7 +1169,11 @@ impl Harness for PiHarness {
         self.run_slash_command(prompt).await
     }
 
-    async fn run_slash_interactive(&self, prompt: &str, ui: crate::SlashUi) -> Result<String, HarnessError> {
+    async fn run_slash_interactive(
+        &self,
+        prompt: &str,
+        ui: crate::SlashUi,
+    ) -> Result<String, HarnessError> {
         self.run_slash_command_ui(prompt, Some(ui)).await
     }
 

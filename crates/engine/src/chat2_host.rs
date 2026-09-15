@@ -28,6 +28,7 @@ pub const CHAT2_DOC_EPOCH: u32 = 2;
 /// the existing change plumbing — this type only owns import + same-tx
 /// persistence.
 pub struct EngineChatSink {
+    preview: Option<Arc<cypher_sync::preview_link::PreviewLink>>,
     /// WEAK: the sink lives inside the handle's `ChatClient` for the
     /// client's whole life — a strong ref here kept
     /// `Arc::strong_count(&handle.doc) > 1` permanently, which reads as
@@ -42,10 +43,19 @@ pub struct EngineChatSink {
 impl EngineChatSink {
     pub fn new(doc: &Arc<SessionDoc>, store: Arc<DocsStore>, chat_id: impl Into<String>) -> Self {
         Self {
+            preview: None,
             doc: Arc::downgrade(doc),
             store,
             chat_id: chat_id.into(),
         }
+    }
+
+    pub fn with_preview(
+        mut self,
+        preview: Option<Arc<cypher_sync::preview_link::PreviewLink>>,
+    ) -> Self {
+        self.preview = preview;
+        self
     }
 
     /// Export the CURRENT doc and persist it with `cursor` in one tx.
@@ -74,6 +84,42 @@ impl EngineChatSink {
 }
 
 impl ChatDocSink for EngineChatSink {
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let batches = self
+            .store
+            .load_outbox(&self.chat_id)
+            .map_err(|e| e.to_string())?;
+        let doc = self.doc.upgrade().ok_or("doc evicted")?;
+        // Recovery import is idempotent and is not a local commit, so the
+        // subscription will not create new batch IDs for the same updates.
+        for (_, bytes) in &batches {
+            doc.doc().import(bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(batches)
+    }
+
+    fn enqueue_outbox(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.store
+            .enqueue_outbox(&self.chat_id, batch_id, bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn update_outbox(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.store
+            .update_outbox(batch_id, bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn acknowledge_outbox(&self, batch_id: &str, cursor: u64) -> Result<(), String> {
+        let doc = self.doc.upgrade().ok_or("doc evicted")?;
+        let snapshot = doc.export_snapshot().map_err(|e| e.to_string())?;
+        self.store
+            .acknowledge_outbox(&self.chat_id, batch_id, &snapshot, cursor, CHAT2_DOC_EPOCH)
+            .map_err(|e| e.to_string())
+    }
+    fn preview(&self) -> Option<Arc<cypher_sync::preview_link::PreviewLink>> {
+        self.preview.clone()
+    }
     fn apply_row(&self, bytes: &[u8], cursor: u64) {
         let Some(doc) = self.doc.upgrade() else {
             return;

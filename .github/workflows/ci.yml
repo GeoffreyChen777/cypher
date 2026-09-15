@@ -89,6 +89,13 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo check --workspace --locked
+      - name: Preview protocol Rust and native Swift shared vectors
+        run: |
+          cargo test --locked -p cypher-sync --lib preview
+          out=$(mktemp -d)
+          trap 'rm -rf "$out"' EXIT
+          xcrun swiftc apps/ios/Cypher/Sync/ChatFrames.swift apps/ios/Cypher/Sync/StreamPreview.swift apps/ios/Cypher/Sync/PreviewProjection.swift scripts/tests/stream-preview-vectors.swift -o "$out/preview-vectors"
+          "$out/preview-vectors" edge/src/fixtures/stream-preview-v1.json edge/src/fixtures/preview-reducer-v1.json
       - name: Runtime and MCP settings UI regressions
         run: |
           cargo test --locked -p cypher-ui --lib settings::setup::tests

@@ -130,8 +130,14 @@ pub trait Harness: Send + Sync {
             "slash execution is unsupported for this harness".into(),
         ))
     }
-    async fn run_slash_interactive(&self, _prompt: &str, _ui: SlashUi) -> Result<String, HarnessError> {
-        Err(HarnessError::Protocol("Interactive MCP sign-in requires an updated Pi harness.".into()))
+    async fn run_slash_interactive(
+        &self,
+        _prompt: &str,
+        _ui: SlashUi,
+    ) -> Result<String, HarnessError> {
+        Err(HarnessError::Protocol(
+            "Interactive MCP sign-in requires an updated Pi harness.".into(),
+        ))
     }
     /// Drop cached model/command discovery so the next probe reflects a
     /// changed agent config (Pi package enablement). No-op for harnesses

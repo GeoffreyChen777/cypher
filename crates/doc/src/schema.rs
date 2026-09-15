@@ -199,12 +199,16 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    preview_hook: std::sync::RwLock<Option<crate::PreviewCommitHook>>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            preview_hook: Default::default(),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -214,11 +218,55 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
+    }
+
+    pub fn set_preview_hook(&self, hook: crate::PreviewCommitHook) {
+        *self.preview_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub fn preview_coverage(&self) -> Option<crate::PreviewCoverage> {
+        let value = self.doc.get_map("meta").get("previewCoverage")?;
+        let loro::ValueOrContainer::Value(LoroValue::String(json)) = value else {
+            return None;
+        };
+        serde_json::from_str(json.as_str()).ok()
+    }
+
+    /// Stage metadata in the same transaction as the writer's text/status.
+    /// No commit here: callers must not acknowledge a marker without its text.
+    pub fn stage_preview_coverage(
+        &self,
+        coverage: &crate::PreviewCoverage,
+    ) -> Result<bool, DocError> {
+        if self.preview_coverage().as_ref() == Some(coverage) {
+            return Ok(false);
+        }
+        self.doc
+            .get_map("meta")
+            .insert("previewCoverage", serde_json::to_string(coverage)?)?;
+        Ok(true)
+    }
+
+    fn preview_commit(
+        &self,
+        entry: &str,
+        parts: &[MessagePart],
+        complete: bool,
+    ) -> Result<bool, DocError> {
+        let hook = self
+            .preview_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(coverage) = hook.and_then(|h| h(entry, parts, complete)) else {
+            return Ok(false);
+        };
+        self.stage_preview_coverage(&coverage)
     }
 
     pub fn chat_id(&self) -> Option<String> {
@@ -832,6 +880,7 @@ pub struct SegmentWriter<'a> {
     entry_index: usize,
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
+    entry_id: String,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -863,6 +912,7 @@ impl<'a> SegmentWriter<'a> {
             doc,
             entry_index,
             written: Vec::new(),
+            entry_id: entry_id.to_owned(),
         })
     }
 
@@ -936,6 +986,7 @@ impl<'a> SegmentWriter<'a> {
             }
         }
 
+        dirty |= self.doc.preview_commit(&self.entry_id, folded, false)?;
         if dirty {
             self.doc.doc.commit();
         }
@@ -947,6 +998,7 @@ impl<'a> SegmentWriter<'a> {
         self.sync(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
+        self.doc.preview_commit(&self.entry_id, folded, true)?;
         self.doc.doc.commit();
         Ok(())
     }

@@ -112,6 +112,24 @@ pub enum ChatEvent {
 /// every method persists doc content AND the room cursor in one transaction
 /// (`DocsStore::save_snapshot_with_cursor`) so they can never diverge.
 pub trait ChatDocSink: Send + Sync + 'static {
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        Ok(Vec::new())
+    }
+    fn enqueue_outbox(&self, _batch_id: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn update_outbox(&self, _batch_id: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    /// Persist the current document/cursor BEFORE retiring this exact batch.
+    /// A failed commit leaves it pending for retry on either transport.
+    fn acknowledge_outbox(&self, _batch_id: &str, cursor: u64) -> Result<(), String> {
+        self.advance_cursor(cursor);
+        Ok(())
+    }
+    fn preview(&self) -> Option<Arc<crate::preview_link::PreviewLink>> {
+        None
+    }
     /// Import one remote update row; `cursor` is the row's seq.
     fn apply_row(&self, bytes: &[u8], cursor: u64);
     /// Replace/merge from a checkpoint blob; `cursor` is its checkpointSeq.
@@ -199,14 +217,36 @@ pub(crate) trait BinConnector: Send + Sync + 'static {
 
 struct WsBinConnector {
     url: Arc<dyn UrlProvider>,
+    preview: Option<Arc<crate::preview_link::PreviewLink>>,
 }
 
 impl BinConnector for WsBinConnector {
     fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
         let provider = self.url.clone();
+        let preview = self.preview.clone();
         Box::pin(async move {
             let url = provider.url().await?;
-            let ws = crate::dial::connect_ws(&url)
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            let mut request = url
+                .as_str()
+                .into_client_request()
+                .map_err(|_| SyncError::WebSocket("invalid socket request".into()))?;
+            if let Some(preview) = preview {
+                request.headers_mut().insert(
+                    "x-cypher-preview-capability",
+                    crate::stream_preview::CAPABILITY.parse().unwrap(),
+                );
+                if let Some(token) = &preview.options().publisher_token {
+                    let mut value: tokio_tungstenite::tungstenite::http::HeaderValue = token
+                        .parse()
+                        .map_err(|_| SyncError::Auth("invalid preview credential".into()))?;
+                    value.set_sensitive(true);
+                    request
+                        .headers_mut()
+                        .insert("x-cypher-preview-publisher", value);
+                }
+            }
+            let ws = crate::dial::connect_request(request)
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
@@ -276,6 +316,34 @@ async fn pump(
 struct PendingPush {
     batch_id: String,
     bytes: Vec<u8>,
+    persisted: bool,
+    sent: bool,
+}
+
+fn merge_loro_updates(updates: &[Vec<u8>]) -> Option<Vec<u8>> {
+    if updates.len() < 2 {
+        return None;
+    }
+    let doc = loro::LoroDoc::new();
+    for update in updates {
+        doc.import(update).ok()?;
+    }
+    // A successful import can park operations with missing causal history.
+    // Exporting that empty/partial document would silently discard them.
+    // Only coalesce when every input range is actually in the oplog.
+    let vv = doc.oplog_vv();
+    for (index, update) in updates.iter().enumerate() {
+        let meta = loro::LoroDoc::decode_import_blob_meta(update, true).ok()?;
+        if index == 0 && !meta.start_frontiers.is_empty() {
+            return None;
+        }
+        if !vv.includes_vv(&meta.partial_start_vv) || !vv.includes_vv(&meta.partial_end_vv) {
+            return None;
+        }
+    }
+    doc.export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .ok()
+        .filter(|bytes| bytes.len() <= MAX_PUSH_BYTES)
 }
 
 #[derive(Default)]
@@ -298,6 +366,8 @@ struct Shared {
     /// a claim that every row up to it is reflected in the local doc, so a
     /// gap must be repaired rather than skipped.
     gap_repair: bool,
+    flush_at: Option<tokio::time::Instant>,
+    force_flush: bool,
 }
 
 impl Shared {
@@ -310,6 +380,12 @@ impl Shared {
             self.in_flight = None;
         }
         self.pending.retain(|p| p.batch_id != batch_id);
+        if self.pending.is_empty() {
+            self.force_flush = false;
+            self.flush_at = None;
+        } else if self.force_flush {
+            self.retry_at = Some(tokio::time::Instant::now());
+        }
         if self.quota_blocked {
             if self.pending.is_empty() {
                 self.quota_blocked = false;
@@ -319,6 +395,33 @@ impl Shared {
             }
         }
     }
+}
+
+fn acknowledge_durable(
+    shared: &mut Shared,
+    sink: &dyn ChatDocSink,
+    batch_id: &str,
+    seq: u64,
+) -> Result<(), String> {
+    let Some(push) = shared.pending.iter().find(|p| p.batch_id == batch_id) else {
+        return Ok(());
+    };
+    if !push.persisted || !push.sent {
+        return Err("ACK for an unsent/unpersisted batch".into());
+    }
+    if seq == 0 {
+        return Err("invalid ACK sequence".into());
+    }
+    let cursor = if seq <= shared.cursor.saturating_add(1) {
+        shared.cursor.max(seq)
+    } else {
+        shared.cursor
+    };
+    sink.acknowledge_outbox(batch_id, cursor)?;
+    shared.gap_repair |= seq > shared.cursor.saturating_add(1);
+    shared.cursor = cursor;
+    shared.acknowledge(batch_id);
+    Ok(())
 }
 
 /// `cypher sync` surface (plan: cursor / headSeq / floorLag / pendingPushes).
@@ -356,6 +459,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// A live chat2-room membership for one chat doc.
 pub struct ChatClient {
+    sink: Arc<dyn ChatDocSink>,
     shared: Arc<Mutex<Shared>>,
     events: broadcast::Sender<ChatEvent>,
     shutdown: watch::Sender<bool>,
@@ -406,7 +510,10 @@ impl ChatClient {
         device_id: &str,
         initial_cursor: u64,
     ) -> Result<Self, SyncError> {
-        let connector = Arc::new(WsBinConnector { url: provider });
+        let connector = Arc::new(WsBinConnector {
+            url: provider,
+            preview: sink.preview(),
+        });
         Self::connect_with_tuned(
             connector,
             sink,
@@ -429,7 +536,10 @@ impl ChatClient {
         initial_cursor: u64,
         transport: Arc<dyn ChatTransport>,
     ) -> Result<Self, SyncError> {
-        let connector = Arc::new(WsBinConnector { url: provider });
+        let connector = Arc::new(WsBinConnector {
+            url: provider,
+            preview: sink.preview(),
+        });
         Self::connect_with_transport(
             connector,
             sink,
@@ -479,12 +589,27 @@ impl ChatClient {
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (sync_tx, sync_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
-        let shared = Arc::new(Mutex::new(Shared {
+        let mut restored = Shared {
             cursor: initial_cursor,
             ..Shared::default()
-        }));
+        };
+        restored.pending.extend(
+            sink.load_outbox()
+                .map_err(SyncError::Protocol)?
+                .into_iter()
+                .map(|(batch_id, bytes)| PendingPush {
+                    batch_id,
+                    bytes,
+                    persisted: true,
+                    // The server may have accepted this batch before a crash.
+                    // Never change its payload under the restored batch ID.
+                    sent: true,
+                }),
+        );
+        let shared = Arc::new(Mutex::new(restored));
         let flags = Arc::new(Flags::default());
 
+        let sink_for_client = sink.clone();
         let actor = Actor {
             shared: shared.clone(),
             sink,
@@ -511,6 +636,7 @@ impl ChatClient {
 
         match ready_rx.await {
             Ok(Ok(())) => Ok(Self {
+                sink: sink_for_client,
                 shared,
                 events,
                 shutdown: shutdown_tx,
@@ -557,10 +683,42 @@ impl ChatClient {
         }
         {
             let mut shared = lock(&self.shared);
+            // Once in-flight, the batch is immutable. Before that point we
+            // may replace its payload with a causal cumulative export.
+            if shared.in_flight.is_none()
+                && let Some(last) = shared.pending.back_mut()
+                && last.persisted
+                && !last.sent
+            {
+                let old = last.bytes.clone();
+                if let Some(merged) = merge_loro_updates(&[old, bytes.clone()]) {
+                    if self.sink.update_outbox(&last.batch_id, &merged).is_ok() {
+                        last.bytes = merged;
+                        shared.flush_at.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + Duration::from_secs(2)
+                        });
+                        drop(shared);
+                        let _ = self.nudge.try_send(());
+                        return;
+                    }
+                }
+            }
+            let batch_id = uuid::Uuid::new_v4().to_string();
+            let persisted = self.sink.enqueue_outbox(&batch_id, &bytes).is_ok();
+            if !persisted {
+                tracing::error!("chat2: local outbox write failed; holding update, not sending");
+                shared.retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(1));
+                let _ = self.events.send(ChatEvent::PushRejected);
+            }
             shared.pending.push_back(PendingPush {
-                batch_id: uuid::Uuid::new_v4().to_string(),
+                batch_id,
                 bytes,
+                persisted,
+                sent: false,
             });
+            shared
+                .flush_at
+                .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
         }
         let _ = self.nudge.try_send(());
     }
@@ -569,6 +727,13 @@ impl ChatClient {
     /// positions etc. — relayed verbatim, never stored).
     pub fn send_presence(&self, at: i64, payload: Vec<u8>) {
         let _ = self.presence_out.try_send((at, payload));
+    }
+
+    /// Force the currently queued durable batch now (Run/Steer/Interrupt/
+    /// completion boundaries will use this hook). Does not alter local docs.
+    pub fn flush_pending(&self) {
+        lock(&self.shared).force_flush = true;
+        let _ = self.nudge.try_send(());
     }
 
     /// Liveness hint: probe the room now (deadline-checked).
@@ -718,6 +883,10 @@ impl Actor {
         let mut wake = crate::wake::subscribe();
         let mut online = crate::wake::subscribe_online();
         loop {
+            if let Some(preview) = self.sink.preview() {
+                let cursor = lock(&self.shared).cursor;
+                preview.tick(cursor);
+            }
             if *self.shutdown.borrow() {
                 return;
             }
@@ -773,8 +942,16 @@ impl Actor {
             };
 
             match self.run_session(pipe, &mut ready).await {
-                SessionEnd::Stop => return,
+                SessionEnd::Stop => {
+                    if let Some(preview) = self.sink.preview() {
+                        preview.disconnected();
+                    }
+                    return;
+                }
                 SessionEnd::Reconnect => {
+                    if let Some(preview) = self.sink.preview() {
+                        preview.disconnected();
+                    }
                     use std::sync::atomic::Ordering::Relaxed;
                     // A session that had joined resets the backoff — without
                     // this, ~7 flaps pinned every future reconnect at the cap
@@ -1072,6 +1249,13 @@ impl Actor {
         }
 
         // ── steady state ────────────────────────────────────────────────────
+        let preview = self.sink.preview();
+        let preview_notify = preview
+            .as_ref()
+            .map(|p| p.notify.clone())
+            .unwrap_or_default();
+        let mut preview_tick = tokio::time::interval(Duration::from_secs(1));
+        preview_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_progress = tokio::time::Instant::now();
         let mut probe_deadline: Option<tokio::time::Instant> = None;
         let mut repair_deadline: Option<tokio::time::Instant> = None;
@@ -1098,7 +1282,21 @@ impl Actor {
             let retry_at = lock(&self.shared)
                 .retry_at
                 .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
+            let flush_at = lock(&self.shared)
+                .flush_at
+                .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
             tokio::select! {
+                _ = preview_tick.tick(), if preview.is_some() => {
+                    let cursor = lock(&self.shared).cursor;
+                    preview.as_ref().unwrap().tick(cursor);
+                }
+                _ = preview_notify.notified(), if preview.is_some() => {
+                    let p = preview.as_ref().unwrap();
+                    let cursor = lock(&self.shared).cursor;
+                    if let Some(bytes) = p.next_frame(cursor) {
+                        if pipe.tx.try_send(bytes).is_err() { p.send_failed(); }
+                    }
+                }
                 frame = pipe.rx.recv() => {
                     let Some(bytes) = frame else {
                         return SessionEnd::Reconnect;
@@ -1131,7 +1329,8 @@ impl Actor {
                     }
                 }
                 _ = self.nudge_rx.recv() => {
-                    if !self.push_pending(&mut pipe).await {
+                    let force_flush = lock(&self.shared).force_flush;
+                    if force_flush && !self.push_head(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -1171,6 +1370,14 @@ impl Actor {
                     if !self.push_head(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
+                }
+                _ = tokio::time::sleep_until(flush_at), if flush_at < distant => {
+                    {
+                        let mut shared = lock(&self.shared);
+                        shared.flush_at = None;
+                        shared.force_flush = true;
+                    }
+                    if !self.push_head(&mut pipe).await { return SessionEnd::Reconnect; }
                 }
                 _ = tokio::time::sleep_until(quiet_probe_at) => {
                     if !self.send_probe(&mut pipe, &mut probe_deadline).await {
@@ -1270,6 +1477,30 @@ impl Actor {
             if shared.in_flight.is_some() {
                 return true;
             }
+            if !shared.force_flush
+                && shared
+                    .flush_at
+                    .is_some_and(|at| at > tokio::time::Instant::now())
+            {
+                return true;
+            }
+            shared.force_flush = !shared.pending.is_empty();
+            shared.flush_at = None;
+            if let Some(push) = shared.pending.front_mut() {
+                if !push.persisted {
+                    if self
+                        .sink
+                        .enqueue_outbox(&push.batch_id, &push.bytes)
+                        .is_err()
+                    {
+                        shared.retry_at =
+                            Some(tokio::time::Instant::now() + Duration::from_secs(1));
+                        return true;
+                    }
+                    push.persisted = true;
+                }
+                push.sent = true;
+            }
             let frame = shared.pending.front().map(|push| {
                 (
                     push.batch_id.clone(),
@@ -1300,6 +1531,7 @@ impl Actor {
         // the server quota and prevents a quota error from becoming a replay
         // storm across reconnects.
         let has_pending = !lock(&self.shared).pending.is_empty();
+        lock(&self.shared).force_flush = true;
         if has_pending {
             lock(&self.shared).quota_blocked = true;
         }
@@ -1309,6 +1541,21 @@ impl Actor {
     /// Apply one inbound protocol frame. False = protocol breakdown, redial.
     fn handle_frame(&self, frame: wire::WireFrame) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
+        if frame.kind == frame_type::ERROR
+            && let Some(preview) = self.sink.preview()
+        {
+            let code = frame.header["code"].as_str().unwrap_or("");
+            if code.starts_with("preview_") || code.starts_with("bad_preview_") {
+                preview.rejected(code);
+                return true; // Never reject a durable batch or start HTTP recovery for preview errors.
+            }
+        }
+        if (0x20..=0x26).contains(&frame.kind) {
+            if let Some(preview) = self.sink.preview() {
+                preview.receive(&wire::encode(frame.kind, &frame.header, &frame.payload));
+            }
+            return true; // Preview does not count as durable business progress.
+        }
         match frame.kind {
             frame_type::ROW => {
                 let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header) else {
@@ -1342,22 +1589,13 @@ impl Actor {
                     return false;
                 };
                 let mut shared = lock(&self.shared);
-                shared.acknowledge(&ack.batch_id);
-                // An ACK proves the server accepted our row at ack.seq; it
-                // does not prove that interleaved remote rows reached us.
-                if ack.seq > shared.cursor + 1 {
-                    shared.gap_repair = true;
-                    tracing::warn!(
-                        seq = ack.seq,
-                        cursor = shared.cursor,
-                        "chat2: ack gap detected; holding cursor"
-                    );
-                } else {
-                    shared.cursor = shared.cursor.max(ack.seq);
+                if let Err(err) =
+                    acknowledge_durable(&mut shared, self.sink.as_ref(), &ack.batch_id, ack.seq)
+                {
+                    tracing::error!(error = %err, "chat2: ACK persistence failed; retaining batch");
+                    return false;
                 }
-                let cursor = shared.cursor;
                 drop(shared);
-                self.sink.advance_cursor(cursor);
                 let _ = self.events.send(ChatEvent::Applied);
             }
             frame_type::PRESENCE => {
@@ -1453,11 +1691,22 @@ async fn http_sync_once(
     // POST pending rows first. A successful ACK retires only that batch; its
     // sequence number is not allowed to jump the receive cursor over
     // interleaved remote rows (the Chat2 P0 invariant).
-    let pending: Vec<(String, Vec<u8>)> = lock(shared)
-        .pending
-        .iter()
-        .map(|push| (push.batch_id.clone(), push.bytes.clone()))
-        .collect();
+    let pending: Vec<(String, Vec<u8>)> = {
+        let mut shared = lock(shared);
+        for push in shared.pending.iter_mut() {
+            if !push.persisted {
+                sink.enqueue_outbox(&push.batch_id, &push.bytes)
+                    .map_err(SyncError::Protocol)?;
+                push.persisted = true;
+            }
+            push.sent = true;
+        }
+        shared
+            .pending
+            .iter()
+            .map(|push| (push.batch_id.clone(), push.bytes.clone()))
+            .collect()
+    };
     for (batch_id, bytes) in pending {
         let ack = transport.push(batch_id.clone(), bytes).await?;
         let value = serde_json::from_str::<serde_json::Value>(&ack)
@@ -1469,15 +1718,8 @@ async fn http_sync_once(
             if ack_batch != batch_id {
                 return Err(SyncError::Protocol("chat push ack batchId mismatch".into()));
             }
-            lock(shared).acknowledge(ack_batch);
-            // Only advance when the ACK is the next contiguous row. If it
-            // outruns the cursor, the subsequent pull repairs the missing
-            // rows first and then reaches the ACK's sequence.
-            let current = lock(shared).cursor;
-            if seq == current + 1 {
-                lock(shared).cursor = seq;
-                sink.advance_cursor(seq);
-            }
+            acknowledge_durable(&mut lock(shared), sink, ack_batch, seq)
+                .map_err(SyncError::Protocol)?;
         } else {
             return Err(SyncError::Protocol("chat push ack missing seq".into()));
         }

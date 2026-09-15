@@ -833,9 +833,37 @@ impl Engine {
                 .is_some_and(|token| !token.trim().is_empty()),
         };
         let device_id = load_or_create_device_id(profile.device_root())?;
-        let edge = edge_enabled.then(|| {
+        #[allow(unused_mut)]
+        let mut edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
+        #[cfg(feature = "development")]
+        if std::env::var("CYPHER_DEV_STREAM_PREVIEW").as_deref() == Ok("1") {
+            let url = reqwest::Url::parse(&config.edge_url)?;
+            let allowed = config.edge_url
+                == "https://cypher-edge-development.geoffreychen777.workers.dev"
+                || matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+            anyhow::ensure!(
+                allowed
+                    && matches!(url.scheme(), "http" | "https")
+                    && profile.scope() == WorkspaceScope::Development
+                    && config.edge_token.is_some(),
+                "Preview requires an isolated development Edge"
+            );
+            let token = std::env::var("CYPHER_DEV_PREVIEW_PUBLISH_TOKEN").ok();
+            anyhow::ensure!(
+                token.as_ref().is_none_or(|t| t.len() == 64
+                    && t.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && Some(t) != config.edge_token.as_ref()),
+                "Invalid independent preview publishing credential"
+            );
+            if let Some(edge) = edge.as_mut() {
+                edge.preview = Some(cypher_sync::preview_link::PreviewOptions {
+                    publisher_token: token,
+                });
+            }
+        }
 
         // The cypher-owned pi session store (`pi --mode rpc --session-dir`).
         let pi_sessions_root = profile.store_root().join("agent-sessions");

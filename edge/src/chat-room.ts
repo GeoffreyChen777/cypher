@@ -33,6 +33,7 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import type { DevelopmentPreviewRelay } from "./development-preview";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -78,7 +79,7 @@ export class ChatRoom implements DurableObject {
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Env, private readonly preview?: DevelopmentPreviewRelay) {
     this.ctx = ctx;
     this.env = env;
     ensureChatLog(ctx.storage.sql);
@@ -102,13 +103,16 @@ export class ChatRoom implements DurableObject {
       // Claim-on-first-join ownership, then owner-only forever (the s2
       // discipline: chat ids are client-minted, the first authed user to
       // dial one owns it).
+      if (owner && owner !== userId) return json({ error: "forbidden" }, 403);
+      const admission = this.preview?.admit(request);
+      if (admission instanceof Response) return admission;
       if (!owner) setMeta(sql, "owner", userId);
-      else if (owner !== userId) return json({ error: "forbidden" }, 403);
       const device = url.searchParams.get("device") ?? "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device };
       pair[1].serializeAttachment(state);
+      if (admission) this.preview!.joined(pair[1], admission);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
@@ -317,6 +321,7 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM rows");
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
+      this.preview?.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -341,6 +346,7 @@ export class ChatRoom implements DurableObject {
       ws.close(1009, "frame too large");
       return;
     }
+    if (this.preview?.message(ws, new Uint8Array(message))) return;
     const frame = decodeFrame(new Uint8Array(message));
     const state = ws.deserializeAttachment() as SocketState;
     if (!frame) {
@@ -350,6 +356,7 @@ export class ChatRoom implements DurableObject {
     switch (frame.type) {
       case FRAME.hello:
         this.handleHello(ws, state, frame.header);
+        this.preview?.hello(ws);
         return;
       case FRAME.rowsReq:
         this.handleRowsReq(ws, state, frame.header);
@@ -368,11 +375,13 @@ export class ChatRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(): Promise<void> {
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    this.preview?.left(ws);
     /* nothing buffered; rows are written synchronously on push */
   }
 
-  async webSocketError(): Promise<void> {
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.preview?.left(ws);
     /* ditto */
   }
 

@@ -13,8 +13,10 @@
 pub mod chat_client;
 pub mod chat_frames;
 pub mod dial;
+pub mod preview_link;
 pub mod registry;
 mod store;
+pub mod stream_preview;
 mod types;
 pub mod wake;
 

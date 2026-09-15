@@ -522,7 +522,11 @@ async fn remote_target_without_links_fails_clearly() {
 struct DeviceCatalog(&'static str);
 #[async_trait]
 impl Harness for DeviceCatalog {
-    async fn run_slash_interactive(&self, _: &str, mut ui: cypher_harness::SlashUi) -> Result<String, HarnessError> {
+    async fn run_slash_interactive(
+        &self,
+        _: &str,
+        mut ui: cypher_harness::SlashUi,
+    ) -> Result<String, HarnessError> {
         ui.requests.send(("dialog".into(), serde_json::json!({"title":"Complete OAuth\nhttps://auth.example/authorize?state=fixture&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback\nPaste callback"}))).await.unwrap();
         tokio::select! {
             _ = ui.cancel.cancelled() => {},
@@ -632,43 +636,110 @@ print(json.dumps({{"ok":True,"data":{{"providers":[{{
 async fn mcp_login_is_shared_across_services_and_expires_without_a_viewer() {
     let dir = tempfile::tempdir().unwrap();
     let core = settings_engine(dir.path(), "device-a");
-    std::fs::write(dir.path().join("pi-runtime/agent/mcp.json"), r#"{"mcpServers":{"wiki":{"url":"https://example.com/mcp","auth":"oauth"}}}"#).unwrap();
+    std::fs::write(
+        dir.path().join("pi-runtime/agent/mcp.json"),
+        r#"{"mcpServers":{"wiki":{"url":"https://example.com/mcp","auth":"oauth"}}}"#,
+    )
+    .unwrap();
     let first = cypher_rpc::memory_client(core.rpc_service());
     let second = cypher_rpc::memory_client(core.rpc_service());
-    let started = first.call(methods::BEGIN_MCP_LOGIN, serde_json::json!({"name":"wiki"})).await.unwrap();
+    let started = first
+        .call(methods::BEGIN_MCP_LOGIN, serde_json::json!({"name":"wiki"}))
+        .await
+        .unwrap();
     let params = serde_json::json!({"attemptId":started["attemptId"]});
     for _ in 0..100 {
-        let status = second.call(methods::MCP_LOGIN_STATUS,params.clone()).await.unwrap();
-        if status["phase"] == "awaiting_callback" { break; }
+        let status = second
+            .call(methods::MCP_LOGIN_STATUS, params.clone())
+            .await
+            .unwrap();
+        if status["phase"] == "awaiting_callback" {
+            break;
+        }
         tokio::task::yield_now().await;
     }
-    assert_eq!(second.call(methods::MCP_LOGIN_STATUS,params.clone()).await.unwrap()["phase"],"awaiting_callback");
-    assert!(first.call(methods::BEGIN_MCP_LOGIN,serde_json::json!({"name":"wiki"})).await.is_err());
+    assert_eq!(
+        second
+            .call(methods::MCP_LOGIN_STATUS, params.clone())
+            .await
+            .unwrap()["phase"],
+        "awaiting_callback"
+    );
+    assert!(
+        first
+            .call(methods::BEGIN_MCP_LOGIN, serde_json::json!({"name":"wiki"}))
+            .await
+            .is_err()
+    );
     let mut callback = params.clone();
     callback["callbackUrl"] = "http://localhost:8976/callback?state=wrong&code=fixture".into();
-    assert!(second.call(methods::COMPLETE_MCP_LOGIN,callback.clone()).await.is_err());
+    assert!(
+        second
+            .call(methods::COMPLETE_MCP_LOGIN, callback.clone())
+            .await
+            .is_err()
+    );
     callback["callbackUrl"] = "http://localhost:8976/callback?state=fixture&code=fixture".into();
-    assert_eq!(second.call(methods::COMPLETE_MCP_LOGIN,callback).await.unwrap()["phase"],"completing");
-    second.call(methods::CANCEL_MCP_LOGIN,params.clone()).await.unwrap();
+    assert_eq!(
+        second
+            .call(methods::COMPLETE_MCP_LOGIN, callback)
+            .await
+            .unwrap()["phase"],
+        "completing"
+    );
+    second
+        .call(methods::CANCEL_MCP_LOGIN, params.clone())
+        .await
+        .unwrap();
     for _ in 0..100 {
-        if first.call(methods::MCP_LOGIN_STATUS,params.clone()).await.unwrap()["phase"] == "cancelled" { break; }
+        if first
+            .call(methods::MCP_LOGIN_STATUS, params.clone())
+            .await
+            .unwrap()["phase"]
+            == "cancelled"
+        {
+            break;
+        }
         tokio::task::yield_now().await;
     }
-    assert_eq!(first.call(methods::MCP_LOGIN_STATUS,params).await.unwrap()["phase"],"cancelled");
-    let started = first.call(methods::BEGIN_MCP_LOGIN,serde_json::json!({"name":"wiki"})).await.unwrap();
+    assert_eq!(
+        first.call(methods::MCP_LOGIN_STATUS, params).await.unwrap()["phase"],
+        "cancelled"
+    );
+    let started = first
+        .call(methods::BEGIN_MCP_LOGIN, serde_json::json!({"name":"wiki"}))
+        .await
+        .unwrap();
     let params = serde_json::json!({"attemptId":started["attemptId"]});
     // Allow the worker to establish its deadline before advancing time.
     for _ in 0..100 {
-        if second.call(methods::MCP_LOGIN_STATUS,params.clone()).await.unwrap()["phase"] == "awaiting_callback" { break; }
+        if second
+            .call(methods::MCP_LOGIN_STATUS, params.clone())
+            .await
+            .unwrap()["phase"]
+            == "awaiting_callback"
+        {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     tokio::time::advance(Duration::from_secs(601)).await;
     for _ in 0..100 {
-        if second.call(methods::MCP_LOGIN_STATUS,params.clone()).await.unwrap()["phase"] == "failed" { break; }
+        if second
+            .call(methods::MCP_LOGIN_STATUS, params.clone())
+            .await
+            .unwrap()["phase"]
+            == "failed"
+        {
+            break;
+        }
         tokio::task::yield_now().await;
     }
-    let status = second.call(methods::MCP_LOGIN_STATUS,params).await.unwrap();
-    assert_eq!(status["phase"],"failed");
+    let status = second
+        .call(methods::MCP_LOGIN_STATUS, params)
+        .await
+        .unwrap();
+    assert_eq!(status["phase"], "failed");
     assert!(status["error"].as_str().unwrap().contains("timed out"));
     assert!(status["authorizationUrl"].is_null());
     core.shutdown().await;
@@ -827,11 +898,18 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
         .await
         .unwrap();
     assert_eq!(mcp["servers"][0]["name"], "device-b-mcp");
-    for method in [methods::MCP_LOGIN_STATUS, methods::COMPLETE_MCP_LOGIN, methods::CANCEL_MCP_LOGIN] {
+    for method in [
+        methods::MCP_LOGIN_STATUS,
+        methods::COMPLETE_MCP_LOGIN,
+        methods::CANCEL_MCP_LOGIN,
+    ] {
         let error = client.call(method, serde_json::json!({
             "targetDeviceId":"device-b", "attemptId":"unknown-attempt", "callbackUrl":"http://localhost:8976/callback?code=fixture-secret"
         })).await.unwrap_err();
-        assert!(error.to_string().contains("attempt not found"), "{method}: {error}");
+        assert!(
+            error.to_string().contains("attempt not found"),
+            "{method}: {error}"
+        );
         assert!(!error.to_string().contains("fixture-secret"));
     }
     assert!(
@@ -991,7 +1069,12 @@ async fn remote_provider_errors_never_fall_back_to_local_and_insecure_relays_are
     assert!(error.to_string().contains("HTTPS/WSS"));
     assert!(!dir.path().join("pi-runtime/agent/observed.json").exists());
     let before = std::fs::read(dir.path().join("pi-runtime/agent/mcp.json")).unwrap();
-    for method in [methods::BEGIN_MCP_LOGIN, methods::MCP_LOGIN_STATUS, methods::COMPLETE_MCP_LOGIN, methods::CANCEL_MCP_LOGIN] {
+    for method in [
+        methods::BEGIN_MCP_LOGIN,
+        methods::MCP_LOGIN_STATUS,
+        methods::COMPLETE_MCP_LOGIN,
+        methods::CANCEL_MCP_LOGIN,
+    ] {
         let error = client.call(method, serde_json::json!({
             "targetDeviceId":"device-b", "name":"wiki", "attemptId":"attempt", "callbackUrl":"http://localhost:8976/callback?code=fixture-secret"
         })).await.unwrap_err();

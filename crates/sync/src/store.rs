@@ -15,6 +15,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("outbox invariant: {0}")]
+    Outbox(String),
 }
 
 /// Ordered, append-only migrations. Each entry runs once inside a transaction;
@@ -37,6 +39,14 @@ const MIGRATIONS: &[&str] = &[
     // (M1/M3): 2 = thin chat2 rebuild; NULL/0 = pre-migration s2 doc.
     "ALTER TABLE snapshots ADD COLUMN cursor INTEGER;
      ALTER TABLE snapshots ADD COLUMN epoch INTEGER;",
+    // v3 — durable chat2 outbox. A batch is retired only after its matching ACK.
+    "CREATE TABLE chat_outbox (
+        doc_id TEXT NOT NULL,
+        batch_id TEXT PRIMARY KEY,
+        bytes BLOB NOT NULL,
+        queued_at INTEGER NOT NULL
+     ) STRICT;
+     CREATE INDEX chat_outbox_doc ON chat_outbox(doc_id, queued_at);",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -147,6 +157,105 @@ impl DocsStore {
             )
             .optional()?;
         Ok(hit.is_some())
+    }
+
+    pub fn load_outbox(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let conn = self.conn();
+        // rowid is insertion order even when clocks go backwards or several
+        // commits land in the same millisecond. UUID sorting is not causal order.
+        let mut stmt = conn
+            .prepare("SELECT batch_id, bytes FROM chat_outbox WHERE doc_id = ?1 ORDER BY rowid")?;
+        Ok(stmt
+            .query_map(params![doc_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn enqueue_outbox(
+        &self,
+        doc_id: &str,
+        batch_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let old: Option<(String, Vec<u8>)> = tx
+            .query_row(
+                "SELECT doc_id, bytes FROM chat_outbox WHERE batch_id=?1",
+                [batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((owner, payload)) = old {
+            if owner != doc_id || payload != bytes {
+                return Err(StoreError::Outbox(
+                    "batch ID reused with different content".into(),
+                ));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO chat_outbox(doc_id,batch_id,bytes,queued_at) VALUES(?1,?2,?3,?4)",
+                params![doc_id, batch_id, bytes, now_ms()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// ACK is one SQLite transaction: a snapshot covering this batch survives
+    /// before replay evidence is removed. Later batches are never deleted.
+    pub fn acknowledge_outbox(
+        &self,
+        doc_id: &str,
+        batch_id: &str,
+        snapshot: &[u8],
+        cursor: u64,
+        epoch: u32,
+    ) -> Result<(), StoreError> {
+        let cursor =
+            i64::try_from(cursor).map_err(|_| StoreError::Outbox("cursor overflow".into()))?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT doc_id FROM chat_outbox WHERE batch_id=?1",
+                [batch_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(doc_id) {
+            return Err(StoreError::Outbox(
+                "ACK does not name this document's queued batch".into(),
+            ));
+        }
+        tx.execute("INSERT INTO snapshots(doc_id,bytes,saved_at,cursor,epoch) VALUES(?1,?2,?3,?4,?5)
+            ON CONFLICT(doc_id) DO UPDATE SET bytes=excluded.bytes,saved_at=excluded.saved_at,cursor=excluded.cursor,epoch=excluded.epoch",
+            params![doc_id, snapshot, now_ms(), cursor, epoch])?;
+        tx.execute(
+            "DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2",
+            params![doc_id, batch_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_outbox(&self, batch_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        let changed = self.conn().execute(
+            "UPDATE chat_outbox SET bytes=?2 WHERE batch_id=?1",
+            params![batch_id, bytes],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Outbox("batch is not pending".into()));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn retire_outbox(&self, batch_id: &str) -> Result<(), StoreError> {
+        self.conn().execute(
+            "DELETE FROM chat_outbox WHERE batch_id = ?1",
+            params![batch_id],
+        )?;
+        Ok(())
     }
 
     /// The full command ledger — profile-import reads the source's claims so
@@ -327,5 +436,92 @@ mod tests {
         );
         assert!(store.is_processed("cmd-1").unwrap());
         assert!(!store.mark_processed("cmd-1").unwrap());
+    }
+
+    #[test]
+    fn outbox_roundtrips_in_order_and_retires_only_matching_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.enqueue_outbox("chat-1", "b1", b"one").unwrap();
+        store.enqueue_outbox("chat-1", "b2", b"two").unwrap();
+        store.enqueue_outbox("chat-2", "other", b"x").unwrap();
+        assert_eq!(
+            store.load_outbox("chat-1").unwrap(),
+            vec![
+                ("b1".into(), b"one".to_vec()),
+                ("b2".into(), b"two".to_vec())
+            ]
+        );
+        store.retire_outbox("b1").unwrap();
+        assert_eq!(
+            store.load_outbox("chat-1").unwrap(),
+            vec![("b2".into(), b"two".to_vec())]
+        );
+        drop(store);
+        let reopened = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.load_outbox("chat-1").unwrap(),
+            vec![("b2".into(), b"two".to_vec())]
+        );
+    }
+
+    #[test]
+    fn outbox_is_immutable_and_order_does_not_depend_on_uuid_or_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.enqueue_outbox("c", "z-first", b"a").unwrap();
+        store.enqueue_outbox("c", "a-second", b"b").unwrap();
+        store
+            .conn()
+            .execute("UPDATE chat_outbox SET queued_at=0", [])
+            .unwrap();
+        store.enqueue_outbox("c", "z-first", b"a").unwrap();
+        assert!(store.enqueue_outbox("c", "z-first", b"mutated").is_err());
+        assert!(
+            store
+                .enqueue_outbox("different-chat", "z-first", b"a")
+                .is_err()
+        );
+        assert_eq!(
+            store.load_outbox("c").unwrap(),
+            vec![
+                ("z-first".into(), b"a".to_vec()),
+                ("a-second".into(), b"b".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_ack_rolls_back_snapshot_and_keeps_all_pending_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.save_snapshot_with_cursor("c", b"old", 1, 2).unwrap();
+        store.enqueue_outbox("c", "b1", b"delta-1").unwrap();
+        store.enqueue_outbox("c", "b2", b"delta-2").unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_ack BEFORE DELETE ON chat_outbox BEGIN SELECT RAISE(ABORT,'injected disk failure'); END;").unwrap();
+        assert!(store.acknowledge_outbox("c", "b1", b"new", 2, 2).is_err());
+        assert_eq!(
+            store.load_snapshot_with_cursor("c").unwrap(),
+            Some((b"old".to_vec(), 1, 2))
+        );
+        assert_eq!(store.load_outbox("c").unwrap().len(), 2);
+        store.conn().execute_batch("DROP TRIGGER fail_ack").unwrap();
+        assert!(
+            store
+                .acknowledge_outbox("other", "b1", b"wrong", 99, 2)
+                .is_err()
+        );
+        assert!(store.load_snapshot("other").unwrap().is_none());
+        store.acknowledge_outbox("c", "b1", b"new", 2, 2).unwrap();
+        drop(store);
+        let reopened = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.load_snapshot_with_cursor("c").unwrap(),
+            Some((b"new".to_vec(), 2, 2))
+        );
+        assert_eq!(
+            reopened.load_outbox("c").unwrap(),
+            vec![("b2".into(), b"delta-2".to_vec())]
+        );
     }
 }

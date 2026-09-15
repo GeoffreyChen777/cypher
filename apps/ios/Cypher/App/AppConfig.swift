@@ -16,6 +16,16 @@ final class AppConfig: @unchecked Sendable {
     let orgId: String
     let deviceId: String
     let deviceName: String
+    private let previewRequested: Bool
+
+    var streamPreviewEnabled: Bool {
+        #if CYPHER_DEVELOPMENT
+        return mode == .dev && (edgeURL == DevelopmentProfile.edge || ["localhost", "127.0.0.1", "::1"].contains(edgeURL.host ?? ""))
+            && (previewRequested || ProcessInfo.processInfo.arguments.contains("-dev-stream-preview"))
+        #else
+        return false
+        #endif
+    }
 
     private let lock = NSLock()
     private var tokens: AuthTokens?
@@ -30,7 +40,7 @@ final class AppConfig: @unchecked Sendable {
 
     init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
          deviceId: String, deviceName: String,
-         tokens: AuthTokens? = nil, devBearer: String? = nil) {
+         tokens: AuthTokens? = nil, devBearer: String? = nil, developmentPreview: Bool = false) {
         self.edgeURL = edgeURL
         self.mode = mode
         self.userId = userId
@@ -39,6 +49,7 @@ final class AppConfig: @unchecked Sendable {
         self.deviceName = deviceName
         self.tokens = tokens
         self.devBearer = devBearer
+        self.previewRequested = developmentPreview
     }
 
     /// Current bearer, refreshing the WorkOS access token when needed.

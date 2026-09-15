@@ -1650,6 +1650,9 @@ async fn drive_run(
     };
 
     let doc_ref: &SessionDoc = &doc;
+    if let Some(host) = inner.doc_host() {
+        host.preview_run(&chat_id, &run_id);
+    }
     let mut folded: Vec<MessagePart> = Vec::new();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
@@ -1858,6 +1861,7 @@ async fn drive_run(
                         tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
                     }
                     inner.note_message(&chat_id, &folded_text(&folded));
+                    if let Some(host) = inner.doc_host() { host.flush_chat_sync(&chat_id); }
                 }
                 folded.clear();
                 dirty = false;
@@ -2127,6 +2131,9 @@ async fn drive_run(
             ) {
                 tracing::warn!(chat = %chat_id, error = %err, "segment finish failed");
             }
+            if let Some(host) = inner.doc_host() {
+                host.flush_chat_sync(&chat_id);
+            }
             inner.note_message(&chat_id, &folded_text(&folded));
             folded.clear();
             dirty = false;
@@ -2235,6 +2242,9 @@ async fn drive_run(
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
                 }
                 inner.note_message(&chat_id, &folded_text(&folded));
+                if let Some(host) = inner.doc_host() {
+                    host.flush_chat_sync(&chat_id);
+                }
             }
             if *status == DoneStatus::Completed {
                 // A cleanly completed turn resets the auto-resume revival

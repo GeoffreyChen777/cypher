@@ -1,5 +1,5 @@
-/** Conservative initial limits for tiny fixtures in the production account. */
-export const LIMITS = { events: 1000, perMinute: 120, rows: 10000, rooms: 8, concurrent: 4 } as const;
+/** Development-only ceilings. These are not production/account quotas. */
+export const LIMITS = { events: 10000, perMinute: 1200, rows: 20000, rooms: 16, concurrent: 8 } as const;
 export interface Budget { day: number; minute: number; events: number; minuteEvents: number; rows: number; rooms: string[]; leases: Record<string, number> }
 export function admit(old: Budget | undefined, room: string, now: number, lease = crypto.randomUUID()):
   { allowed: true; budget: Budget; lease: string } | { allowed: false; reason: string } {

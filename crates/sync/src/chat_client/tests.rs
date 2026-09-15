@@ -13,6 +13,208 @@ use tokio::sync::Notify;
 
 mod recovery;
 
+fn queued(id: &str, persisted: bool) -> PendingPush {
+    PendingPush {
+        batch_id: id.into(),
+        bytes: id.as_bytes().to_vec(),
+        persisted,
+        sent: false,
+    }
+}
+
+#[test]
+fn failed_or_unrelated_ack_cannot_retire_new_updates_or_advance_cursor() {
+    let sink = RecordingSink::default();
+    let mut shared = Shared {
+        cursor: 5,
+        ..Shared::default()
+    };
+    let mut first = queued("first", true);
+    first.sent = true;
+    sink.enqueue_outbox(&first.batch_id, &first.bytes).unwrap();
+    sink.enqueue_outbox("second", b"second").unwrap();
+    shared.pending.extend([first, queued("second", true)]);
+    acknowledge_durable(&mut shared, &sink, "unknown", 999).unwrap();
+    assert_eq!(shared.cursor, 5);
+    assert!(acknowledge_durable(&mut shared, &sink, "second", 6).is_err());
+    sink.ack_fails.store(true, Ordering::SeqCst);
+    assert!(acknowledge_durable(&mut shared, &sink, "first", 6).is_err());
+    assert_eq!(shared.cursor, 5);
+    assert_eq!(shared.pending.len(), 2);
+    sink.ack_fails.store(false, Ordering::SeqCst);
+    acknowledge_durable(&mut shared, &sink, "first", 7).unwrap();
+    assert_eq!(shared.cursor, 5);
+    assert!(shared.gap_repair);
+    assert_eq!(shared.pending.front().unwrap().batch_id, "second");
+    assert_eq!(
+        sink.load_outbox().unwrap(),
+        vec![("second".into(), b"second".to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn http_persist_failure_blocks_send_and_ack_failure_retries_identical_payload() {
+    let sink = RecordingSink::default();
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    lock(&shared).pending.push_back(queued("b", false));
+    let transport = FixedChatTransport {
+        body: empty_chat_pull(1),
+        pushes: Mutex::new(vec![]),
+    };
+    let (fetcher, _) = fetcher(b"");
+    let (events, _) = broadcast::channel(10);
+    sink.write_fails.store(true, Ordering::SeqCst);
+    assert!(
+        http_sync_once(&transport, &shared, &sink, fetcher.as_ref(), &events)
+            .await
+            .is_err()
+    );
+    assert!(lock(&transport.pushes).is_empty());
+    sink.write_fails.store(false, Ordering::SeqCst);
+    sink.ack_fails.store(true, Ordering::SeqCst);
+    assert!(
+        http_sync_once(&transport, &shared, &sink, fetcher.as_ref(), &events)
+            .await
+            .is_err()
+    );
+    assert_eq!(lock(&shared).cursor, 0);
+    assert_eq!(lock(&shared).pending.len(), 1);
+    sink.ack_fails.store(false, Ordering::SeqCst);
+    http_sync_once(&transport, &shared, &sink, fetcher.as_ref(), &events)
+        .await
+        .unwrap();
+    assert!(lock(&shared).pending.is_empty());
+    assert!(sink.load_outbox().unwrap().is_empty());
+    assert_eq!(
+        *lock(&transport.pushes),
+        vec![("b".into(), b"b".to_vec()); 2]
+    );
+}
+
+#[tokio::test]
+async fn outbox_load_failure_does_not_start_an_empty_client() {
+    let sink = Arc::new(RecordingSink::default());
+    sink.load_fails.store(true, Ordering::SeqCst);
+    let (fetcher, _) = fetcher(b"");
+    assert!(
+        ChatClient::connect_with_tuned(
+            connector(vec![]),
+            sink,
+            fetcher,
+            "d",
+            0,
+            ChatTuning::default()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_client_restores_same_batch_ids_and_appends_new_work_after_them() {
+    let sink = Arc::new(RecordingSink::default());
+    sink.enqueue_outbox("saved-first", b"old").unwrap();
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}), &[], vec![], false).await;
+        let old = expect_kind(&mut end, frame_type::PUSH).await;
+        assert_eq!(old.header["batchId"], "saved-first");
+        assert_eq!(old.payload, b"old");
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":"saved-first","seq":1,"dup":true}),
+            &[],
+        )
+        .await;
+        let new = expect_kind(&mut end, frame_type::PUSH).await;
+        assert_eq!(new.payload, b"new");
+        assert_ne!(new.header["batchId"], "saved-first");
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":new.header["batchId"],"seq":2,"dup":false}),
+            &[],
+        )
+        .await;
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "d",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    client.enqueue_update(b"new".to_vec());
+    let _keep_alive = server.await.unwrap();
+    for _ in 0..100 {
+        if client.stats().pending_pushes == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(sink.load_outbox().unwrap().is_empty());
+    assert_eq!(client.stats().pending_pushes, 0);
+    client.shutdown().await;
+}
+
+#[test]
+fn cumulative_export_uses_source_frontier_not_an_empty_document() {
+    let first = loro::LoroDoc::new();
+    let text = first.get_text("text");
+    text.insert(0, "one").unwrap();
+    first.commit();
+    let baseline = first
+        .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .unwrap();
+    let base = first.oplog_vv();
+    text.insert(3, " two").unwrap();
+    first.commit();
+    let partial = first.export(loro::ExportMode::updates(&base)).unwrap();
+    let empty = loro::LoroDoc::new();
+    empty.import(&partial).unwrap();
+    assert_ne!(
+        empty.get_text("text").to_string(),
+        "one two",
+        "missing causal prefix must not be treated as a complete merge source"
+    );
+    let merged = first.export(loro::ExportMode::updates(&base)).unwrap();
+    let restored = loro::LoroDoc::new();
+    restored.import(&baseline).unwrap();
+    restored.import(&merged).unwrap();
+    assert_eq!(restored.get_text("text").to_string(), "one two");
+}
+
+#[test]
+fn coalescing_never_exports_an_update_with_unresolved_causal_history() {
+    let source = loro::LoroDoc::new();
+    let text = source.get_text("text");
+    text.insert(0, "one").unwrap();
+    source.commit();
+    let first = source
+        .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .unwrap();
+    let base = source.oplog_vv();
+    text.insert(3, " two").unwrap();
+    source.commit();
+    let second = source.export(loro::ExportMode::updates(&base)).unwrap();
+
+    let merged = merge_loro_updates(&[first.clone(), second.clone()]).unwrap();
+    let restored = loro::LoroDoc::new();
+    restored.import(&merged).unwrap();
+    assert_eq!(restored.get_text("text").to_string(), "one two");
+
+    // A fresh temporary doc cannot safely turn a dependent delta into a
+    // cumulative export. Falling back to separate durable batches is safer
+    // than sending a payload that appears valid but drops the prefix.
+    assert!(merge_loro_updates(&[second]).is_none());
+}
+
 // ── plumbing: linked pipes + scripted connector ─────────────────────────────
 
 struct ServerEnd {
@@ -50,6 +252,10 @@ impl BinConnector for ChanConnector {
 
 #[derive(Default)]
 struct RecordingSink {
+    outbox: Mutex<Vec<(String, Vec<u8>)>>,
+    write_fails: std::sync::atomic::AtomicBool,
+    ack_fails: std::sync::atomic::AtomicBool,
+    load_fails: std::sync::atomic::AtomicBool,
     rows: Mutex<Vec<(Vec<u8>, u64)>>,
     checkpoints: Mutex<Vec<(Vec<u8>, u64)>>,
     cursor_advances: Mutex<Vec<u64>>,
@@ -57,6 +263,32 @@ struct RecordingSink {
 }
 
 impl ChatDocSink for RecordingSink {
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if self.load_fails.load(Ordering::SeqCst) {
+            return Err("injected load failure".into());
+        }
+        Ok(lock(&self.outbox).clone())
+    }
+    fn enqueue_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.write_fails.load(Ordering::SeqCst) {
+            return Err("injected write failure".into());
+        }
+        let mut rows = lock(&self.outbox);
+        if let Some((_, old)) = rows.iter().find(|(key, _)| key == id) {
+            assert_eq!(old, bytes);
+        } else {
+            rows.push((id.into(), bytes.into()));
+        }
+        Ok(())
+    }
+    fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
+        if self.ack_fails.load(Ordering::SeqCst) {
+            return Err("injected ACK persistence failure".into());
+        }
+        self.advance_cursor(cursor);
+        lock(&self.outbox).retain(|(key, _)| key != id);
+        Ok(())
+    }
     fn apply_row(&self, bytes: &[u8], cursor: u64) {
         lock(&self.rows).push((bytes.to_vec(), cursor));
     }
@@ -1074,6 +1306,7 @@ async fn https_timeout_releases_chat_single_flight_for_retry() {
     };
     let client = ChatClient::connect_with_transport(
         Arc::new(WsBinConnector {
+            preview: None,
             url: Arc::new(StaticUrl("ws://127.0.0.1:9/chat2/test/ws".into())),
         }),
         sink,
