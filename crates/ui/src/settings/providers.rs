@@ -1,7 +1,7 @@
 //! Settings → Providers: scan-friendly connections, focused modal forms.
 //! The presentation shares the existing device-scoped provider RPCs. Secrets
 //! stay in ephemeral masked inputs and never enter a chat or synced document.
-use cypher_engine::pi_providers::{PiProviderInfo, PiProvidersSnapshot};
+use cypher_engine::pi_providers::{LoginStatus, PiProviderInfo, PiProvidersSnapshot};
 use cypher_rpc::methods;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString,
@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use super::device_target::DeviceTarget;
+use super::device_target::DeviceTicket;
 use super::widgets;
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
@@ -130,9 +131,22 @@ fn status_label(provider: &PiProviderInfo) -> &'static str {
     match provider.state.as_str() {
         "connected" => "Verified",
         "error" => "Connection failed",
+        "signed_out" if provider.provider_type == "oauth" => "Needs sign-in",
         "signed_out" => "Needs API key",
         _ => "Not verified",
     }
+}
+
+fn is_oauth(provider: &PiProviderInfo) -> bool {
+    provider.provider_type == "oauth"
+}
+
+fn provider_title(provider: &PiProviderInfo) -> String {
+    provider
+        .title
+        .clone()
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| provider.id.clone())
 }
 
 fn status_color(theme: &Theme, state: &str) -> gpui::Hsla {
@@ -187,6 +201,14 @@ impl Form {
 struct Busy {
     method: &'static str,
     provider: Option<String>,
+}
+
+struct OauthLogin {
+    ticket: DeviceTicket,
+    status: Option<LoginStatus>,
+    callback: Entity<ComposerInput>,
+    submitting: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -319,6 +341,7 @@ pub struct ProvidersPage {
     confirm_focus: bool,
     intent: Option<ProviderIntent>,
     busy: Option<Busy>,
+    oauth: Option<OauthLogin>,
     error: Option<String>,
     notice: Option<String>,
     menu: popover::Popup<ProviderMenu>,
@@ -384,6 +407,7 @@ impl ProvidersPage {
             confirm_focus: false,
             intent: Some(intent),
             busy: None,
+            oauth: None,
             error: None,
             notice: None,
             menu: popover::Popup::default(),
@@ -405,6 +429,7 @@ impl ProvidersPage {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         let changed = self.form.take().is_some()
             | self.confirm.take().is_some()
+            | self.oauth.take().is_some()
             | self.intent.take().is_some()
             | self.menu.get().is_some();
         self.menu = popover::Popup::default();
@@ -416,11 +441,12 @@ impl ProvidersPage {
     }
 
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        if self.busy.is_some() && self.oauth.is_none() {
             return;
         }
         self.form = None;
         self.confirm = None;
+        self.oauth = None;
         self.error = None;
         self.restore_focus = false;
         self.return_focus
@@ -440,7 +466,11 @@ impl ProvidersPage {
                     .and_then(|s| s.providers.iter().find(|p| p.id == id))
                     .cloned();
                 if let Some(provider) = provider {
-                    self.edit(Some(provider), cx);
+                    if is_oauth(&provider) {
+                        self.start_oauth(&provider.id, cx);
+                    } else {
+                        self.edit(Some(provider), cx);
+                    }
                 } else {
                     self.error = Some(format!(
                         "Provider \"{id}\" is not configured. Add it first."
@@ -636,6 +666,203 @@ impl ProvidersPage {
         self.call(methods::SAVE_PI_PROVIDER, params, cx);
     }
 
+    fn start_oauth(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.busy.is_some() || !self.target.read(cx).can_write(cx) {
+            return;
+        }
+        let Ok(ticket) = self.target.read(cx).ticket(cx) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.form = None;
+        self.confirm = None;
+        self.error = None;
+        self.notice = None;
+        self.busy = Some(Busy {
+            method: methods::BEGIN_PI_PROVIDER_LOGIN,
+            provider: Some(id.to_string()),
+        });
+        self.oauth = Some(OauthLogin {
+            ticket: ticket.clone(),
+            status: None,
+            callback: cx.new(|cx| {
+                ComposerInput::settings_field("Paste callback URL or authorization code", true, cx)
+            }),
+            submitting: false,
+            error: None,
+        });
+        let target = self.target.clone();
+        let lease = target.update(cx, |target, cx| target.lock(cx));
+        let params = ticket.params(serde_json::json!({ "id": id }));
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::BEGIN_PI_PROVIDER_LOGIN, params)
+                .await;
+            let mut status = match result.and_then(|value| {
+                serde_json::from_value::<LoginStatus>(value)
+                    .map_err(|_| cypher_rpc::RpcError::Failed("Invalid sign-in response.".into()))
+            }) {
+                Ok(status) => status,
+                Err(_) => {
+                    this.update(cx, |page, cx| {
+                        if page.target.read(cx).matches(&ticket) {
+                            page.oauth = None;
+                            page.busy = None;
+                            page.error = Some(format!(
+                                "Could not start sign-in on {}. Update Cypher on that device and try again.",
+                                ticket.label
+                            ));
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    drop(lease);
+                    target.update(cx, |_, cx| cx.notify());
+                    return;
+                }
+            };
+            let attempt = status.attempt_id.clone();
+            loop {
+                let terminal = matches!(status.phase.as_str(), "succeeded" | "failed" | "cancelled");
+                let live = this
+                    .update(cx, |page, cx| {
+                        let Some(form) = page.oauth.as_mut() else {
+                            return false;
+                        };
+                        if !page.target.read(cx).matches(&ticket)
+                            || form.status.as_ref().is_some_and(|s| s.attempt_id != attempt)
+                                && form.status.is_some()
+                        {
+                            return false;
+                        }
+                        form.status = Some(status.clone());
+                        if terminal {
+                            page.busy = None;
+                            if status.phase == "succeeded" {
+                                page.oauth = None;
+                                page.notice = Some(format!("Signed in on {}.", ticket.label));
+                                page.call(methods::LIST_PI_PROVIDERS, serde_json::json!({}), cx);
+                            } else if let Some(error) = &status.error {
+                                form.error = Some(error.clone());
+                            }
+                        }
+                        cx.notify();
+                        page.oauth.is_some() && !terminal
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(750))
+                    .await;
+                match engine
+                    .client()
+                    .call(
+                        methods::PI_PROVIDER_LOGIN_STATUS,
+                        ticket.params(serde_json::json!({ "attemptId": attempt })),
+                    )
+                    .await
+                    .and_then(|value| {
+                        serde_json::from_value::<LoginStatus>(value)
+                            .map_err(|_| cypher_rpc::RpcError::Failed("Invalid sign-in status.".into()))
+                    }) {
+                    Ok(next) => status = next,
+                    Err(_) => {
+                        this.update(cx, |page, cx| {
+                            if page.target.read(cx).matches(&ticket) {
+                                page.oauth = None;
+                                page.busy = None;
+                                page.error = Some(
+                                    "Lost connection during sign-in. The attempt expires after 10 minutes.".into(),
+                                );
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                        break;
+                    }
+                }
+            }
+            let _ = engine
+                .client()
+                .call(
+                    methods::CANCEL_PI_PROVIDER_LOGIN,
+                    ticket.params(serde_json::json!({ "attemptId": attempt })),
+                )
+                .await;
+            drop(lease);
+            target.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn submit_oauth(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.oauth.as_mut() else {
+            return;
+        };
+        if form.submitting {
+            return;
+        }
+        let Some(status) = &form.status else {
+            return;
+        };
+        if status.phase != "awaiting_callback" {
+            return;
+        }
+        let callback = form.callback.read(cx).text().trim().to_owned();
+        if callback.is_empty() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let id = status.attempt_id.clone();
+        let ticket = form.ticket.clone();
+        form.callback.update(cx, |input, cx| input.set_text("", cx));
+        form.submitting = true;
+        form.error = None;
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::COMPLETE_PI_PROVIDER_LOGIN,
+                    ticket.params(serde_json::json!({ "attemptId": id, "callbackUrl": callback })),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                if let Some(form) = page.oauth.as_mut() {
+                    if form.ticket != ticket
+                        || form.status.as_ref().is_none_or(|s| s.attempt_id != id)
+                    {
+                        return;
+                    }
+                    form.submitting = false;
+                    match result {
+                        Ok(value) => {
+                            if let Ok(status) = serde_json::from_value(value) {
+                                form.status = Some(status);
+                            }
+                        }
+                        Err(_) => {
+                            form.error = Some(
+                                "Callback rejected or connection lost. Paste the full URL or code for this attempt.".into(),
+                            );
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn ask_remove(&mut self, id: String, remove: bool, cx: &mut Context<Self>) {
         if self.busy.is_some() || !self.target.read(cx).can_write(cx) {
             return;
@@ -675,7 +902,7 @@ impl ProvidersPage {
                 );
             }
             1 if provider.credential_saved => self.ask_remove(provider.id, false, cx),
-            2 => self.ask_remove(provider.id, true, cx),
+            2 if !is_oauth(&provider) => self.ask_remove(provider.id, true, cx),
             _ => {}
         }
     }
@@ -1021,14 +1248,22 @@ impl ProvidersPage {
     ) -> AnyElement {
         let (id, remove) = self.confirm.clone().unwrap();
         let busy = self.busy.is_some();
+        let oauth = matches!(id.as_str(), "anthropic" | "openai-codex");
         let title = if remove {
             "Delete provider?"
+        } else if oauth {
+            "Sign out?"
         } else {
             "Remove saved API key?"
         };
         let copy = if remove {
             format!(
                 "“{id}” and its saved API key will be removed from {}.",
+                self.target.read(cx).label(cx)
+            )
+        } else if oauth {
+            format!(
+                "You'll need to sign in again to use {id} models on {}.",
                 self.target.read(cx).label(cx)
             )
         } else {
@@ -1092,6 +1327,8 @@ impl ProvidersPage {
                                 "Removing…"
                             } else if remove {
                                 "Delete provider"
+                            } else if oauth {
+                                "Sign out"
                             } else {
                                 "Remove API key"
                             },
@@ -1139,7 +1376,7 @@ impl ProvidersPage {
                             menu.active =
                                 popover::menu_step(Some(menu.active), 3, delta).unwrap_or(0);
                             if !menu.provider.credential_saved {
-                                menu.active = 2;
+                                menu.active = if is_oauth(&menu.provider) { 0 } else { 2 };
                             }
                         }
                     }
@@ -1155,12 +1392,22 @@ impl ProvidersPage {
             }));
         for (index, (label, glyph)) in [
             ("Refresh models", icons::REFRESH),
-            ("Remove API key", icons::KEY_MINIMALISTIC),
+            (
+                if is_oauth(&menu.provider) {
+                    "Sign out"
+                } else {
+                    "Remove API key"
+                },
+                icons::KEY_MINIMALISTIC,
+            ),
             ("Delete provider…", icons::TRASH_BIN_MINIMALISTIC),
         ]
         .into_iter()
         .enumerate()
         {
+            if index == 2 && is_oauth(&menu.provider) {
+                continue;
+            }
             let enabled = self.busy.is_none()
                 && (index == 2 || menu.provider.credential_saved)
                 && closing.is_none();
@@ -1275,7 +1522,13 @@ impl ProvidersPage {
                 } else {
                     page.menu.open(ProviderMenu {
                         provider: menu_provider.clone(),
-                        active: if menu_provider.credential_saved { 0 } else { 2 },
+                        active: if menu_provider.credential_saved {
+                            0
+                        } else if is_oauth(&menu_provider) {
+                            0
+                        } else {
+                            2
+                        },
                     });
                     page.menu_focus.focus(window, cx);
                 }
@@ -1285,6 +1538,12 @@ impl ProvidersPage {
         if menu_open {
             more = more.child(self.render_menu(theme, cx));
         }
+        let oauth = is_oauth(&provider);
+        let (mark, tint) = match provider.id.as_str() {
+            "anthropic" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
+            "openai-codex" => (icons::OPENAI_MARK, None),
+            _ => (icons::GLOBAL, Some(theme.accent)),
+        };
         div()
             .px(px(20.0))
             .py(px(16.0))
@@ -1293,9 +1552,10 @@ impl ProvidersPage {
             .items_start()
             .gap(px(12.0))
             .child(
-                widgets::row_tile(theme, icons::GLOBAL)
+                widgets::row_tile(theme, mark)
                     .size(px(36.0))
-                    .bg(theme.accent.opacity(0.06)),
+                    .bg(tint.unwrap_or(theme.accent).opacity(0.06))
+                    .when_some(tint, |el, color| el.text_color(color)),
             )
             .child(
                 div()
@@ -1311,19 +1571,32 @@ impl ProvidersPage {
                             .items_center()
                             .gap(px(8.0))
                             .child(
-                                widgets::row_title(theme, provider.id.clone()).text_size(px(14.0)),
+                                widgets::row_title(theme, provider_title(&provider))
+                                    .text_size(px(14.0)),
                             )
                             .child(status)
                             .when_some(selected, |el, _| el.child(widgets::badge(theme, "In use"))),
                     )
-                    .child(caption(theme, provider.base_url.clone()).truncate())
+                    .when(!oauth, |el| {
+                        el.child(caption(theme, provider.base_url.clone()).truncate())
+                    })
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
                             .items_center()
                             .gap(px(6.0))
-                            .child(caption(theme, "OpenAI-compatible").text_size(px(11.5)))
+                            .child(
+                                caption(
+                                    theme,
+                                    if oauth {
+                                        "Pi subscription"
+                                    } else {
+                                        "OpenAI-compatible"
+                                    },
+                                )
+                                .text_size(px(11.5)),
+                            )
                             .child(caption(theme, "·"))
                             .child(caption(theme, model_label).text_size(px(11.5)))
                             .child(caption(theme, "·"))
@@ -1360,7 +1633,11 @@ impl ProvidersPage {
                         button(
                             theme,
                             ("provider-manage", index),
-                            if provider.credential_saved {
+                            if oauth && provider.credential_saved {
+                                "Sign in again"
+                            } else if oauth {
+                                "Sign in"
+                            } else if provider.credential_saved {
                                 "Manage"
                             } else {
                                 "Connect"
@@ -1369,14 +1646,128 @@ impl ProvidersPage {
                             !busy,
                         )
                         .when(!busy, |el| {
-                            el.on_click(
-                                cx.listener(move |page, _, _, cx| {
-                                    page.edit(Some(edit.clone()), cx)
-                                }),
-                            )
+                            el.on_click(cx.listener(move |page, _, _, cx| {
+                                if is_oauth(&edit) {
+                                    page.start_oauth(&edit.id, cx);
+                                } else {
+                                    page.edit(Some(edit.clone()), cx);
+                                }
+                            }))
                         }),
                     )
                     .child(more),
+            )
+            .into_any_element()
+    }
+
+    fn render_oauth(
+        &mut self,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let form = self.oauth.as_ref().unwrap();
+        let status = form.status.as_ref();
+        let waiting = status.is_some_and(|s| s.phase == "awaiting_callback");
+        let code = status.and_then(|s| s.user_code.clone());
+        let url = status.and_then(|s| s.authorization_url.clone());
+        let title = status
+            .map(|s| match s.provider_id.as_str() {
+                "anthropic" => "Claude Pro/Max",
+                "openai-codex" => "ChatGPT Plus/Pro",
+                other => other,
+            })
+            .unwrap_or("Sign in");
+        let heading = format!("Sign in · {title}");
+        let description = status
+            .and_then(|s| s.instructions.clone())
+            .unwrap_or_else(|| {
+                "Open the authorization page on this computer. Paste the callback if the browser cannot reach the selected device.".into()
+            });
+        let width = (f32::from(window.viewport_size().width) - 40.0).clamp(280.0, 464.0);
+        let card = popover::dialog_card(theme)
+            .id("provider-oauth-dialog")
+            .role(gpui::Role::Dialog)
+            .aria_label(title)
+            .track_focus(&self.dialog_focus)
+            .key_context("ProviderDialog")
+            .tab_group()
+            .w(px(width))
+            .p_0()
+            .on_key_down(cx.listener(Self::on_dialog_key))
+            .child(self.dialog_heading(theme, &heading, &description, cx));
+        let mut body = div()
+            .px(px(24.0))
+            .py(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0));
+        if let Some(url) = url.clone() {
+            body = body.child(
+                button(
+                    theme,
+                    "provider-oauth-open",
+                    "Open authorization page",
+                    ButtonStyle::Secondary,
+                    true,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+            );
+        }
+        if let Some(code) = code {
+            body = body.child(caption(theme, format!("Code: {code}")).text_size(px(16.0)));
+        }
+        if waiting {
+            body = body
+                .child(
+                    div()
+                        .p(px(10.0))
+                        .rounded(px(8.0))
+                        .bg(theme.input_glass_bg())
+                        .child(form.callback.clone()),
+                )
+                .child(
+                    button(
+                        theme,
+                        "provider-oauth-submit",
+                        if form.submitting {
+                            "Submitting…"
+                        } else {
+                            "Complete sign-in"
+                        },
+                        ButtonStyle::Primary,
+                        !form.submitting,
+                    )
+                    .when(!form.submitting, |el| {
+                        el.on_click(cx.listener(|page, _, _, cx| page.submit_oauth(cx)))
+                    }),
+                );
+        }
+        if let Some(error) = &form.error {
+            body = body.child(widgets::error_strip(theme, error.clone()));
+        }
+        card.child(body)
+            .child(
+                div()
+                    .px(px(24.0))
+                    .pb(px(20.0))
+                    .child(
+                        button(
+                            theme,
+                            "provider-oauth-cancel",
+                            "Cancel",
+                            ButtonStyle::Ghost,
+                            true,
+                        )
+                        .on_click(cx.listener(|page, _, window, cx| {
+                            page.oauth = None;
+                            page.busy = None;
+                            page.notice =
+                                Some("Cancelling sign-in on the selected runtime…".into());
+                            page.close_dialog(window, cx);
+                        })),
+                    )
+                    .into_any_element(),
             )
             .into_any_element()
     }
@@ -1401,7 +1792,7 @@ impl ProvidersPage {
 impl Render for ProvidersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let dialog_open = self.form.is_some() || self.confirm.is_some();
+        let dialog_open = self.form.is_some() || self.confirm.is_some() || self.oauth.is_some();
         if self.restore_focus {
             self.restore_focus = false;
             self.return_focus
@@ -1546,15 +1937,38 @@ impl Render for ProvidersPage {
         } else if count == Some(0) {
             body = body.child(self.render_empty(&theme, cx));
         } else if let Some(snapshot) = self.snapshot.ready().cloned() {
-            let rows = snapshot
+            let oauth: Vec<_> = snapshot
                 .providers
-                .into_iter()
-                .enumerate()
-                .map(|(index, provider)| {
-                    self.provider_row(provider, index, current.as_deref(), &theme, cx)
-                })
-                .collect::<Vec<_>>();
-            body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
+                .iter()
+                .filter(|provider| is_oauth(provider))
+                .cloned()
+                .collect();
+            let gateways: Vec<_> = snapshot
+                .providers
+                .iter()
+                .filter(|provider| !is_oauth(provider))
+                .cloned()
+                .collect();
+            if !oauth.is_empty() {
+                let rows = oauth
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, provider)| {
+                        self.provider_row(provider, index, current.as_deref(), &theme, cx)
+                    })
+                    .collect::<Vec<_>>();
+                body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
+            }
+            if !gateways.is_empty() {
+                let rows = gateways
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, provider)| {
+                        self.provider_row(provider, index + 8, current.as_deref(), &theme, cx)
+                    })
+                    .collect::<Vec<_>>();
+                body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
+            }
         }
         if count.is_some_and(|n| n > 0) {
             body = body.child(
@@ -1588,6 +2002,12 @@ impl Render for ProvidersPage {
                 "provider-confirm-modal",
                 window.viewport_size(),
                 self.render_confirmation(window, &theme, cx),
+            ))
+        } else if self.oauth.is_some() {
+            Some(popover::modal(
+                "provider-oauth-modal",
+                window.viewport_size(),
+                self.render_oauth(window, &theme, cx),
             ))
         } else {
             None
@@ -1631,6 +2051,7 @@ mod tests {
     fn provider() -> PiProviderInfo {
         PiProviderInfo {
             id: "mvp-lab".into(),
+            title: None,
             base_url: "https://api.example.com".into(),
             provider_type: "newapi".into(),
             credential_saved: true,
@@ -1731,6 +2152,8 @@ mod tests {
         assert_eq!(status_label(&p), "Verified");
         p.state = "signed_out".into();
         assert_eq!(status_label(&p), "Needs API key");
+        p.provider_type = "oauth".into();
+        assert_eq!(status_label(&p), "Needs sign-in");
         p.state = "error".into();
         assert_eq!(status_label(&p), "Connection failed");
         assert_eq!(checked_label(None, 0), "Not checked yet");

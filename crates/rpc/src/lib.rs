@@ -50,6 +50,10 @@ pub mod methods {
     pub const REFRESH_PI_PROVIDER: &str = "RefreshPiProvider";
     pub const LOGOUT_PI_PROVIDER: &str = "LogoutPiProvider";
     pub const REMOVE_PI_PROVIDER: &str = "RemovePiProvider";
+    pub const BEGIN_PI_PROVIDER_LOGIN: &str = "BeginPiProviderLogin";
+    pub const PI_PROVIDER_LOGIN_STATUS: &str = "PiProviderLoginStatus";
+    pub const COMPLETE_PI_PROVIDER_LOGIN: &str = "CompletePiProviderLogin";
+    pub const CANCEL_PI_PROVIDER_LOGIN: &str = "CancelPiProviderLogin";
     /// Current Pi CLI + package update facts, then every six-hour refresh or
     /// apply transition.
     pub const PI_UPDATE_STATUS: &str = "PiUpdateStatus";

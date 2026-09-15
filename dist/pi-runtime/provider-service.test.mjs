@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { normalizeUrl, validateId, serializeModelRefreshes } from "./provider-service.mjs";
+import { isOauthProvider, pickOauthSelect } from "./provider-service.mjs";
 
 test("SDK background refreshes and explicit refreshes are serialized, including failures", async () => {
   let release;
@@ -47,6 +48,17 @@ test("provider input validation", () => {
   for (const id of ["", "../x", "x/y", "__proto__", "constructor", "a b", "x".repeat(65)])
     assert.throws(() => validateId(id));
   assert.equal(validateId("mvp-lab"), "mvp-lab");
+});
+
+test("subscription providers are reserved and pick a headless OAuth method", () => {
+  assert.equal(isOauthProvider("anthropic"), true);
+  assert.equal(isOauthProvider("openai-codex"), true);
+  assert.equal(isOauthProvider("one"), false);
+  assert.equal(pickOauthSelect([
+    { id: "browser", label: "Browser login (default)" },
+    { id: "device_code", label: "Device code login (headless)" },
+  ]), "device_code");
+  assert.equal(pickOauthSelect([{ id: "browser" }]), "browser");
 });
 
 test("isolated Runtime provider lifecycle and credential redaction", {
@@ -96,29 +108,30 @@ test("isolated Runtime provider lifecycle and credential redaction", {
     assert.equal(envelope.ok, success, output);
     return success ? envelope.data : envelope.error;
   }
+  const gateways = (snapshot) => snapshot.providers.filter((p) => p.providerType === "newapi");
   try {
     await mkdir(join(agent, "extension-settings"), { recursive: true });
     await writeFile(join(agent, "extension-settings/provider-newapi.json"), JSON.stringify({
       version: 1, providers: {}, settings: { onboardingWarnCountdown: 0 },
     }));
-    assert.deepEqual((await call({ action: "list" })).providers, []);
+    assert.deepEqual(gateways(await call({ action: "list" })), []);
     await call({ action: "save", id: "one", baseUrl: url, apiKey: "wrong" }, false);
-    assert.deepEqual((await call({ action: "list" })).providers, []);
+    assert.deepEqual(gateways(await call({ action: "list" })), []);
     for (const failure of ["empty", "malformed", "redirect"]) {
       mode = failure;
       await call({ action: "save", id: "one", baseUrl: url, apiKey: secret }, false);
     }
     mode = "ok";
     let snapshot = await call({ action: "save", id: "one", baseUrl: `${url}/v1`, apiKey: secret });
-    assert.equal(snapshot.providers[0].state, "connected");
-    assert.equal(snapshot.providers[0].modelCount, 2);
+    assert.equal(gateways(snapshot)[0].state, "connected");
+    assert.equal(gateways(snapshot)[0].modelCount, 2);
     const authPath = join(agent, "auth.json");
     assert.equal(JSON.parse(await readFile(authPath, "utf8")).one.key, secret);
     assert.equal((await stat(authPath)).mode & 0o077, 0, "credential file is private");
     const before = requests;
     snapshot = await call({ action: "list" });
     assert.equal(requests, before, "listing is offline");
-    assert.equal(snapshot.providers[0].modelCount, 2, "catalog persists across processes");
+    assert.equal(gateways(snapshot)[0].modelCount, 2, "catalog persists across processes");
     // The same configuration + credential + catalog must work in Pi RPC,
     // not just in the settings helper's custom runtime.
     const packageRoot = await import("node:fs/promises").then(fs => fs.realpath(process.env.PI_PACKAGE_DIR));
@@ -165,6 +178,7 @@ test("isolated Runtime provider lifecycle and credential redaction", {
       pi.kill();
     }
     await call({ action: "save", id: "one", baseUrl: url, apiKey: secret }, false);
+    await call({ action: "save", id: "anthropic", baseUrl: url, apiKey: secret }, false);
     await call({ action: "save", id: "openai", baseUrl: url, apiKey: secret }, false);
     await call({ action: "save", id: "one", baseUrl: url + "/other", edit: true }, false);
     await call({ action: "save", id: "one", baseUrl: url, edit: true });
@@ -180,7 +194,7 @@ test("isolated Runtime provider lifecycle and credential redaction", {
     assert.equal(snapshot.providers.find(p => p.id === "one").credentialSaved, false);
     assert.equal(snapshot.providers.find(p => p.id === "two").credentialSaved, true);
     snapshot = await call({ action: "remove", id: "two" });
-    assert.equal(snapshot.providers.length, 1);
+    assert.equal(gateways(snapshot).length, 1);
     const config = JSON.parse(await readFile(join(agent, "extension-settings/provider-newapi.json"), "utf8"));
     assert.equal(config.settings.onboardingWarnCountdown, 0);
     assert.equal(JSON.parse(await readFile(authPath, "utf8")).two, undefined);
