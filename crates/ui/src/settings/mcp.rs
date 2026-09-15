@@ -505,7 +505,10 @@ impl Render for McpPage {
             .delete
             .as_ref()
             .map(|_| self.render_delete_confirmation(&theme, cx));
-        let login = self.login.as_ref().map(|_| self.render_mcp_login(&theme, cx));
+        let login = self
+            .login
+            .as_ref()
+            .map(|_| self.render_mcp_login(&theme, cx));
         div()
             .id("mcp-page")
             .size_full()

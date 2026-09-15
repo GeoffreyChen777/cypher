@@ -995,9 +995,13 @@ impl EngineRpc {
         };
         if matches!(
             method,
-            methods::SAVE_PI_PROVIDER | methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER
-                | methods::BEGIN_MCP_LOGIN | methods::MCP_LOGIN_STATUS
-                | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN
+            methods::SAVE_PI_PROVIDER
+                | methods::ADD_MCP_SERVERS
+                | methods::REMOVE_MCP_SERVER
+                | methods::BEGIN_MCP_LOGIN
+                | methods::MCP_LOGIN_STATUS
+                | methods::COMPLETE_MCP_LOGIN
+                | methods::CANCEL_MCP_LOGIN
         ) && !links.credential_transport_allowed()
         {
             return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
@@ -1591,10 +1595,19 @@ impl RpcService for EngineRpc {
                 .handle(method, params)
                 .await;
         }
-        if self.mcp_logins.active() && matches!(method,
-            methods::ADD_MCP_SERVERS | methods::REMOVE_MCP_SERVER | methods::SET_MCP_SERVER_ENABLED
-                | methods::START_MCP_AUTH | methods::LOGOUT_MCP_SERVER) {
-            return Err(RpcError::Failed("Finish or cancel the active MCP sign-in before changing MCP configuration.".into()));
+        if self.mcp_logins.active()
+            && matches!(
+                method,
+                methods::ADD_MCP_SERVERS
+                    | methods::REMOVE_MCP_SERVER
+                    | methods::SET_MCP_SERVER_ENABLED
+                    | methods::START_MCP_AUTH
+                    | methods::LOGOUT_MCP_SERVER
+            )
+        {
+            return Err(RpcError::Failed(
+                "Finish or cancel the active MCP sign-in before changing MCP configuration.".into(),
+            ));
         }
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
@@ -1725,26 +1738,43 @@ impl RpcService for EngineRpc {
             }
             methods::BEGIN_MCP_LOGIN => {
                 let p: crate::mcp::McpServerName = parse_params(params)?;
-                let harness = self.registry.resolve(HarnessId::Pi)
+                let harness = self
+                    .registry
+                    .resolve(HarnessId::Pi)
                     .map_err(|_| RpcError::Failed("Pi runtime unavailable.".into()))?;
-                let status = self.mcp_logins.begin(self.pi_runtime()?.paths().agent_dir.clone(), p.name, harness)
+                let status = self
+                    .mcp_logins
+                    .begin(
+                        self.pi_runtime()?.paths().agent_dir.clone(),
+                        p.name,
+                        harness,
+                    )
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&status)
             }
             methods::MCP_LOGIN_STATUS | methods::COMPLETE_MCP_LOGIN | methods::CANCEL_MCP_LOGIN => {
-                let id = params.get("attemptId").and_then(serde_json::Value::as_str)
+                let id = params
+                    .get("attemptId")
+                    .and_then(serde_json::Value::as_str)
                     .filter(|id| id.len() <= 64)
-                    .ok_or_else(|| RpcError::BadParams("MCP sign-in attempt ID required.".into()))?;
+                    .ok_or_else(|| {
+                        RpcError::BadParams("MCP sign-in attempt ID required.".into())
+                    })?;
                 let status = match method {
                     methods::COMPLETE_MCP_LOGIN => {
-                        let callback = params.get("callbackUrl").and_then(serde_json::Value::as_str)
+                        let callback = params
+                            .get("callbackUrl")
+                            .and_then(serde_json::Value::as_str)
                             .ok_or_else(|| RpcError::BadParams("Callback URL required.".into()))?;
                         self.mcp_logins.respond(id, callback)
                     }
                     methods::CANCEL_MCP_LOGIN => self.mcp_logins.cancel(id),
                     _ => self.mcp_logins.status(id),
-                }.map_err(RpcError::Failed)?;
-                if status.phase == "succeeded" { self.reload_pi_runtime().await; }
+                }
+                .map_err(RpcError::Failed)?;
+                if status.phase == "succeeded" {
+                    self.reload_pi_runtime().await;
+                }
                 RpcReply::value(&status)
             }
             methods::START_MCP_AUTH => {
