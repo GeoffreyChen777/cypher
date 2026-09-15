@@ -8,6 +8,16 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
+## Prepared build: 0.2.0 (8), 2026-09-15
+
+- Companion build for desktop **0.3.12**, source commit `4d9ff35`.
+- Signed archive/export verified: arm64, `ai.mvp-lab.cypher.ios`, version 0.2.0/build 8, production APNs, `get-task-allow=false`, strict deep signature.
+- App Store Connect build `2a2f7437-0033-468e-b0d9-b07c08168f85` is **VALID**.
+- `usesNonExemptEncryption=false` submitted for this build (same TLS/PKCE-only behavior as 0.1.6).
+- Internal TestFlight state: **IN_BETA_TESTING**. External state: **READY_FOR_BETA_SUBMISSION**.
+- No public-link, tester-group, or App Store review submission was made.
+- Evidence: `/tmp/cypher-ios-020.gtUTbk/` and `/tmp/cypher-ios-020-build.json`.
+
 ## Prepared build: 0.1.6 (7), 2026-09-14
 
 - Companion build for desktop **0.3.11**, source commit `b86f867`.
