@@ -16,7 +16,7 @@ out=pathlib.Path(sys.argv[1]); report={}
 for line in (out/'workerd.log').read_text().splitlines():
     if line.startswith('ROWS_BASELINE_'):
         name, value=line.split('=',1); report[name]=json.loads(value)
-assert len(report)==4, 'Expected all workload results'
+assert len(report)>=4, 'Expected all workload results'
 report['source']=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
 report['worktreeDirty']=bool(subprocess.check_output(['git','status','--porcelain'],text=True).strip())
 report['fixtureSHA256']=hashlib.sha256((out/'fixture.json').read_bytes()).hexdigest()

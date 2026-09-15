@@ -84,20 +84,38 @@ impl EngineChatSink {
 }
 
 impl ChatDocSink for EngineChatSink {
-    fn load_outbox(&self) -> Vec<(String, Vec<u8>)> {
-        self.store.load_outbox(&self.chat_id).unwrap_or_default()
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let batches = self
+            .store
+            .load_outbox(&self.chat_id)
+            .map_err(|e| e.to_string())?;
+        let doc = self.doc.upgrade().ok_or("doc evicted")?;
+        // Recovery import is idempotent and is not a local commit, so the
+        // subscription will not create new batch IDs for the same updates.
+        for (_, bytes) in &batches {
+            doc.doc().import(bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(batches)
     }
 
-    fn enqueue_outbox(&self, batch_id: &str, bytes: &[u8]) {
-        if let Err(err) = self.store.enqueue_outbox(&self.chat_id, batch_id, bytes) {
-            tracing::error!(chat = %self.chat_id, batch = %batch_id, error = %err, "chat2 outbox persist failed");
-        }
+    fn enqueue_outbox(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.store
+            .enqueue_outbox(&self.chat_id, batch_id, bytes)
+            .map_err(|e| e.to_string())
     }
 
-    fn retire_outbox(&self, batch_id: &str) {
-        if let Err(err) = self.store.retire_outbox(batch_id) {
-            tracing::warn!(chat = %self.chat_id, batch = %batch_id, error = %err, "chat2 outbox retire failed");
-        }
+    fn update_outbox(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.store
+            .update_outbox(batch_id, bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn acknowledge_outbox(&self, batch_id: &str, cursor: u64) -> Result<(), String> {
+        let doc = self.doc.upgrade().ok_or("doc evicted")?;
+        let snapshot = doc.export_snapshot().map_err(|e| e.to_string())?;
+        self.store
+            .acknowledge_outbox(&self.chat_id, batch_id, &snapshot, cursor, CHAT2_DOC_EPOCH)
+            .map_err(|e| e.to_string())
     }
     fn preview(&self) -> Option<Arc<cypher_sync::preview_link::PreviewLink>> {
         self.preview.clone()

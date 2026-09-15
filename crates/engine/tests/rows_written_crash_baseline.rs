@@ -131,10 +131,7 @@ async fn p0_engine_child() {
     let saved = store.load_snapshot_with_cursor(CHAT).unwrap().unwrap();
     let saved_doc = SessionDoc::from_doc(loro::LoroDoc::new());
     saved_doc.doc().import(&saved.0).unwrap();
-    assert_eq!(
-        contains(&saved_doc),
-        std::env::var("CYPHER_P0_SNAPSHOT").as_deref() == Ok("yes")
-    );
+    assert!(contains(&saved_doc));
     std::fs::write(
         dir.join("ready"),
         serde_json::to_vec(
@@ -198,9 +195,9 @@ async fn sigkill_characterizes_journal_snapshot_and_unacked_queue() {
         )
         .unwrap();
         let handle = core.doc_host.open(CHAT).unwrap();
-        // Existing recovery does NOT reconstruct missing transcript from the
-        // TextDelta journal; snapshot presence determines retained text.
-        assert_eq!(contains(handle.doc()), snapshot);
+        // Durable outbox replay recovers the local update even if the debounce
+        // snapshot did not run. The journal alone still is not the replay path.
+        assert!(contains(handle.doc()));
         let store = DocsStore::open(profile.store_root()).unwrap();
         assert_eq!(store.load_snapshot_with_cursor(CHAT).unwrap().unwrap().1, 1);
         let sql = rusqlite::Connection::open(profile.store_root().join("docs.sqlite3")).unwrap();
@@ -213,10 +210,15 @@ async fn sigkill_characterizes_journal_snapshot_and_unacked_queue() {
             .collect();
         assert_eq!(
             tables,
-            vec!["processed_commands", "schema_migrations", "snapshots"]
+            vec![
+                "chat_outbox",
+                "processed_commands",
+                "schema_migrations",
+                "snapshots"
+            ]
         );
         println!(
-            "P0_CRASH snapshot={snapshot} journal_tail=true transcript_tail={snapshot} cursor=1 durable_outbox=false"
+            "P2_CRASH snapshot={snapshot} journal_tail=true transcript_tail=true cursor=1 durable_outbox=true"
         );
         core.shutdown().await;
     }

@@ -168,7 +168,16 @@ iOS 177 项中 176 通过、1 项按预期跳过（该原生互通项已用隔�
 - [x] 第一刀：将 Chat2 pending batch 写入本地 `chat_outbox`，启动时恢复，匹配 ACK
   才删除；DocsStore migration v3 与重开/顺序/单 batch retirement 测试通过。当前只
   补可靠恢复，仍保持 120ms durable 上传频率，尚未宣称降费。
-- [ ] 分离本地提交与云端导出节奏，按时间/大小/业务边界导出单个合并增量。
+- [x] 第二刀首版：未开始发送的 durable updates 通过 Loro import/export 合并，默认延迟
+  2 秒发送；初次 join/reconnect 立即 flush。quiesce、Steer、Done 释放 flush 窗口。
+  合并测试和既有 ChatClient 回归通过；仍需补覆盖范围、I/O 失败、ACK 丢失和固定负载
+  rows_written 对比；固定文本 workerd 对比已完成：1,593 → 225（85.88%），仍不作为
+  最终节流方案验收。
+- [x] 第二刀安全补强：outbox payload 在 batch 创建后不可被错误复用；ACK 先原子保存
+  snapshot/cursor 再删除对应 outbox；I/O 失败、错误 ACK、重启恢复和新 batch 顺序均有
+  测试。当前合并只发生在未发送 batch，in-flight batch 保持不变。
+- [x] 分离本地提交与云端导出节奏的首版实验：固定 2 秒累计 Loro export 已验证；
+  仍需把覆盖范围与所有关键业务边界纳入正式实现。
 - [ ] 在途 batch 与新累积区间隔离，补齐持久重试和重启补交。
 - [ ] 完成、失败、steer、输入请求、正常退出强制 flush；离线时本地可靠入队，
   不要求断线后还能成功上传。

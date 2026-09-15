@@ -11,7 +11,7 @@ declare global { namespace Cloudflare { interface Env { TEST_LOG: DurableObjectN
 
 declare const __ROWS_FIXTURE__: {kind: string; textBytes: number; steps: {
   at: number; update: number[]; tail: unknown; checkpoint: number[] | null;
-}[]};
+}[]; optimized: {at:number; update:number[]}[]};
 const fixture = __ROWS_FIXTURE__;
 
 function meter(state: DurableObjectState, sockets: WebSocket[] = []) {
@@ -171,4 +171,33 @@ it("P0: registry heartbeat and notification event/activity writes", async ({task
     return {events,activity};
   });
   Object.assign(task.meta, {baseline:{ROWS_BASELINE_REGISTRY:registry,ROWS_BASELINE_NOTIFICATIONS:notifications}});
+});
+
+it("P2 experiment: cumulative Loro export every 2s against the same ChatRoom", async ({task}) => {
+  const result = await runInDurableObject(env.TEST_LOG.get(env.TEST_LOG.idFromName("p2-cumulative-chat")), async (_, state) => {
+    const host = peer("p2-host"), m = meter(state, [host.socket]);
+    const room = new ChatRoom(m.context, {} as Env);
+    state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','p0-user')");
+    const setup = m.take();
+    let seq = 0; const phases: Record<string, ReturnType<typeof m.take>> = {};
+    const add = (name: string) => { const value = m.take(); const old = phases[name]; if (!old) { phases[name] = value; return; }
+      old.written += value.written; old.read += value.read; for (const [k,c] of Object.entries(value.sql)) { const o = old.sql[k] ??= {calls:0,written:0,read:0}; o.calls += c.calls; o.written += c.written; o.read += c.read; } };
+    let optimizedIndex = 0, tailAt = 1000;
+    for (const step of fixture.steps) {
+      while (optimizedIndex < fixture.optimized.length && fixture.optimized[optimizedIndex]!.at <= step.at) {
+        const update = fixture.optimized[optimizedIndex++]!.update;
+        await room.webSocketMessage(host.socket, encodeFrame(FRAME.push, { batchId: `p2-${++seq}` }, new Uint8Array(update)).buffer as ArrayBuffer);
+        expect(decodeFrame(host.frames.at(-1)!)?.type).toBe(FRAME.ack); add("push");
+      }
+      if (step.at >= tailAt || step === fixture.steps.at(-1)) {
+        expect((await room.fetch(request("/tail", "PUT", JSON.stringify(step.tail)))).status).toBe(200); add("tail"); tailAt = step.at + 1000;
+      }
+      if (step.checkpoint) {
+        const checkpointRequest = new Request(`https://test/checkpoint?seqCovered=${seq}`, { method:"POST", headers:{[AUTH_USER_HEADER]:"p0-user","content-type":"application/octet-stream","x-chat2-frontier":""}, body:new Uint8Array(step.checkpoint) });
+        expect((await room.fetch(checkpointRequest)).status).toBe(200); add("checkpoint");
+      }
+    }
+    return { fixture:"text-240x120ms-cumulative-2s", watchers:1, batches:seq, textBytes:fixture.textBytes, setup, phases, totalWritten:total(phases), pushPayloadBytes:host.frames.filter(f=>decodeFrame(f)?.type===FRAME.ack).map(f=>f.byteLength).reduce((a,b)=>a+b,0) };
+  });
+  Object.assign(task.meta, {baseline:{ROWS_BASELINE_CHAT_CUMULATIVE:result}});
 });

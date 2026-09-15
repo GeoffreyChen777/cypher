@@ -935,6 +935,14 @@ impl DocHost {
                 None => SessionDoc::init(chat_id)?,
             }
         };
+        // Replay before installing subscriptions or handing the document to
+        // journal recovery. This works offline, not just on a successful dial.
+        // Never advance the cloud cursor for local replay.
+        for (_, bytes) in self.inner.store.load_outbox(chat_id)? {
+            doc.doc()
+                .import(&bytes)
+                .map_err(|e| EngineError::Other(format!("outbox recovery import failed: {e}")))?;
+        }
         let doc = Arc::new(doc);
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
@@ -2404,6 +2412,18 @@ impl DocHost {
                 }));
             if let Some(client) = lock(&handle.chat2).as_ref() {
                 client.redial();
+            }
+        }
+    }
+
+    /// Force the accumulated durable batch at a business boundary. This only
+    /// releases the ChatClient's two-second coalescing gate; the outbox and
+    /// ACK rules remain unchanged.
+    pub(crate) fn flush_chat_sync(&self, chat: &str) {
+        let handle = lock(&self.inner.handles).get(chat).cloned();
+        if let Some(handle) = handle {
+            if let Some(client) = lock(&handle.chat2).as_ref() {
+                client.flush_pending();
             }
         }
     }

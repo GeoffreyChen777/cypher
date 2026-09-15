@@ -127,6 +127,33 @@ chat、重开恢复、重连重发；此前的内存队列仍保留作为 actor 
 这不是完整 P2：写入失败的显式错误策略、批次覆盖范围/因果 frontier、ACK 丢失与
 并发新写入的全矩阵仍待补齐；上传频率保持 120ms，rows_written 尚未下降。
 
+P2 第二刀首版已加入 ChatClient 的两秒合并窗口：连续且尚未 in-flight 的 Loro updates
+通过 Loro import/export 合成单个合法 update；初次 join/reconnect 立即发送，quiesce、
+Steer、Done 调用 `flush_pending`。本版本尚未把合并结果与业务覆盖范围持久绑定，也未
+证明所有关键命令边界都已接入；固定负载前后对比和异常矩阵完成前，不宣称最终降费。
+
+## ChatClient/DO 负载对比实验
+
+固定文本 fixture 经合法 Loro cumulative export 后送入同一真实 workerd ChatRoom，
+tail/checkpoint 时间边界保持一致：
+
+| 方案 | durable batch | PUSH rows | Tail rows | Checkpoint rows | 总 rows |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| P0 120ms | 243 | 1,218 | 108 | 267 | 1,593 |
+| P2 2s cumulative | 15 | 78 | 108 | 39 | 225 |
+
+因此该固定文本实验总写入从 1,593 降至 225，约 **85.9%**；PUSH 阶段约 **93.6%**。
+P2 的 checkpoint 删除行数也随待删 log 行数下降，所以没有把 checkpoint 省略掉。
+每次 cumulative payload 均由 Rust fixture 的 Loro 文档重建并断言最终 entries 等于
+原文档；DO 仍只把 payload 当 opaque bytes。此为本地 workerd/SQLite 实验，不是
+生产账单、CPU、duration 或网络延迟预测；两秒窗口的尾部故障恢复由 durable outbox
+覆盖，但业务关键边界、工具/输入混合负载和云端 p95 仍待验收。
+
+随后补强了安全边界：outbox batch 创建后 payload 不可因 batch ID 复用而改变；ACK 必须
+先在一个 SQLite transaction 中保存当前 snapshot/cursor，再删除精确 batch，失败会回滚
+并保留全部 replay evidence。合并仅限未 in-flight 队列头，发送后绝不改 payload；本地
+测试覆盖 ACK I/O 失败、错误 batch/owner、重启恢复、新旧 batch 顺序和 Loro 因果前缀。
+
 ## 复现
 
 ```sh
