@@ -2749,8 +2749,9 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - f32::from(event.event.position.x);
-        // zeron caps the pane at 52% of the window on top of the absolute range.
-        let max = RIGHT_PANE_MAX.min(viewport * 0.52);
+        // Cap the pane at 94% of the window on top of the absolute range
+        // (1.8× the previous 52% zeron cap, matching RIGHT_PANE_MAX).
+        let max = RIGHT_PANE_MAX.min(viewport * 0.936);
         self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max.max(RIGHT_PANE_MIN));
         self.right_tween = None;
         self.schedule_save(cx);

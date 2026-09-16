@@ -33,7 +33,7 @@ pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
 /// Right ("Changes") pane drag-resize bounds (px).
 pub const RIGHT_PANE_MIN: f32 = 360.0;
-pub const RIGHT_PANE_MAX: f32 = 760.0;
+pub const RIGHT_PANE_MAX: f32 = 1368.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 
 /// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
