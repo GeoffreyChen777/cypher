@@ -1,6 +1,6 @@
 //! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
-//! worktree toggle), HarnessModelPicker (harness rail + model list, harness
+//! worktree toggle), HarnessModelPicker (provider rail + model list, Pi
 //! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
 //! model options; trigger shows the non-default summary "High · 1M · Fast").
 //!
@@ -11,7 +11,7 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{
@@ -91,6 +91,44 @@ fn concrete_pi_model(id: &str) -> bool {
     id.split_once('/').is_some_and(|(provider, model)| {
         !provider.is_empty() && !model.is_empty() && provider != "unknown" && model != "unknown"
     })
+}
+
+/// Pi catalogs use `provider/model`. Mock has no prefix.
+fn model_provider_id(harness: HarnessId, model_id: &str) -> String {
+    if harness == HarnessId::Mock {
+        return "mock".into();
+    }
+    model_id
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .filter(|provider| !provider.is_empty() && *provider != "unknown")
+        .unwrap_or("other")
+        .to_string()
+}
+
+fn provider_display_name(id: &str) -> SharedString {
+    SharedString::from(match id {
+        "anthropic" => "Claude",
+        "openai-codex" | "openai" => "ChatGPT",
+        "mock" => "Mock",
+        "other" => "Other",
+        other => other,
+    })
+}
+
+fn provider_brand_icon(id: &str) -> (&'static str, Option<gpui::Hsla>) {
+    match id {
+        "anthropic" => (
+            crate::icons::CLAUDE_MARK,
+            Some(crate::icons::claude_brand()),
+        ),
+        "openai-codex" | "openai" => (crate::icons::OPENAI_MARK, None),
+        "mock" => (
+            crate::icons::CLAUDE_MARK,
+            Some(crate::icons::claude_brand()),
+        ),
+        _ => (crate::icons::GLOBAL, None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,24 +430,22 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&cypher_proto::FolderEntry> 
 /// the first Down lands on row 0.
 const NO_ACTIVE_ROW: usize = usize::MAX;
 
-/// Which pane the harness/model picker's icon rail is showing (t3code
-/// ModelPickerContent `selectedInstanceId | "favorites"`). `Harness` means
-/// "the effective harness's list" — the rail has no browse-without-commit
-/// state; clicking a brand icon picks that harness.
+/// Which pane the model picker's icon rail is showing. `Provider` means
+/// the models of [`Pickers::selected_provider`] (Pi `provider/model` prefix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ModelRail {
     Favorites,
     #[default]
-    Harness,
+    Provider,
 }
 
-/// One row of the model list: the model plus the harness it belongs to —
-/// search results and the favorites view mix harnesses, and every row's
-/// subline names its harness (t3code ModelListRow `showProvider`).
+/// One row of the model list. Search and favorites mix providers; the
+/// subline names the provider (t3code ModelListRow `showProvider`).
 #[derive(Debug, Clone)]
 struct ModelRowData {
     harness: HarnessId,
-    harness_name: SharedString,
+    provider_id: String,
+    provider_title: SharedString,
     model: Model,
 }
 
@@ -453,9 +489,12 @@ pub struct Pickers {
     /// space-scoped and authoritative without refs; see [`PinnedCheckout`].
     pinned: Option<PinnedCheckout>,
     open: popover::Popup<PickerKind>,
-    /// The harness/model picker's rail selection (favorites vs the effective
-    /// harness's list). Re-primed on every open.
+    /// The model picker's rail selection (favorites vs one provider).
+    /// Re-primed on every open.
     model_rail: ModelRail,
+    /// Provider id (`anthropic`, `openai-codex`, a custom gateway, or `mock`)
+    /// shown when [`ModelRail::Provider`] is selected.
+    selected_provider: Option<String>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
     model_generation: u64,
@@ -613,6 +652,7 @@ impl Pickers {
             draft_owner,
             open,
             model_rail: ModelRail::default(),
+            selected_provider: None,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
             model_generation: 0,
@@ -908,8 +948,11 @@ impl Pickers {
             self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
-                ModelRail::Harness
+                ModelRail::Provider
             };
+            if self.selected_provider.is_none() {
+                self.selected_provider = self.viewed_provider(cx);
+            }
         }
         // The keyboard-nav highlight starts ON the selected row — row 0
         // otherwise reads as a second active row (user report).
@@ -1333,17 +1376,80 @@ impl Pickers {
         self.config.harness = Some(harness);
         self.defaults.harness = Some(harness);
         self.save_defaults();
+        if harness == HarnessId::Mock {
+            self.selected_provider = Some("mock".into());
+        }
         self.model_scroll.set_offset(gpui::Point::default());
         self.ensure_models(harness, cx);
-        // Re-anchor the keyboard highlight onto the new harness's selected row.
+        // Re-anchor the keyboard highlight onto the new list's selected row.
         self.active = self.selected_model_index(cx);
         cx.notify();
+    }
+
+    fn pick_provider(&mut self, provider: String, cx: &mut Context<Self>) {
+        let harness = if provider == "mock" {
+            HarnessId::Mock
+        } else {
+            HarnessId::Pi
+        };
+        if self.effective_harness(cx) != Some(harness) {
+            if self.harness_locked(cx) {
+                return;
+            }
+            self.pick_harness(harness, cx);
+        }
+        self.model_rail = ModelRail::Provider;
+        self.selected_provider = Some(provider);
+        self.model_scroll.set_offset(gpui::Point::default());
+        self.active = self.selected_model_index(cx);
+        self.model_scroll.scroll_to_item(self.active);
+        cx.notify();
+    }
+
+    fn viewed_provider(&self, cx: &App) -> Option<String> {
+        if let Some(id) = self.selected_provider.clone() {
+            return Some(id);
+        }
+        let harness = self.effective_harness(cx)?;
+        let model_id = self.selected_model(cx).map(|m| m.id.clone()).or_else(|| {
+            self.effective_model_id(cx).map(str::to_string)
+        })?;
+        Some(model_provider_id(harness, &model_id))
+    }
+
+    /// Unique providers in catalog order for the left rail.
+    fn provider_tabs(&self, cx: &App) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut tabs = Vec::new();
+        let effective = self.effective_harness(cx);
+        let mut descriptors = self.rail_descriptors(cx);
+        if self.harness_locked(cx) {
+            descriptors.retain(|d| Some(d.id) == effective);
+        }
+        for descriptor in &descriptors {
+            let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready()) else {
+                if descriptor.id == HarnessId::Mock && seen.insert("mock".into()) {
+                    tabs.push("mock".into());
+                }
+                continue;
+            };
+            for model in models {
+                let id = model_provider_id(descriptor.id, &model.id);
+                if seen.insert(id.clone()) {
+                    tabs.push(id);
+                }
+            }
+        }
+        tabs
     }
 
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         // Read-only (temporary Side Chat): inherited values are display-only.
         if self.locked {
             return;
+        }
+        if let Some(harness) = self.effective_harness(cx) {
+            self.selected_provider = Some(model_provider_id(harness, &model_id));
         }
         self.animate_close(cx);
         if self.state.read(cx).selected_chat.is_some() {
@@ -1537,14 +1643,18 @@ impl Pickers {
         if self.harness_locked(cx) {
             descriptors.retain(|d| Some(d.id) == effective);
         }
-        let row = |descriptor: &HarnessDescriptor, model: &Model| ModelRowData {
-            harness: descriptor.id,
-            harness_name: SharedString::from(descriptor.name.clone()),
-            model: model.clone(),
+        let row = |descriptor: &HarnessDescriptor, model: &Model| {
+            let provider_id = model_provider_id(descriptor.id, &model.id);
+            ModelRowData {
+                harness: descriptor.id,
+                provider_title: provider_display_name(&provider_id),
+                provider_id,
+                model: model.clone(),
+            }
         };
         let query = self.search.read(cx).text().trim().to_string();
         if !query.is_empty() {
-            // Rank: label prefix < label substring < harness-name hit;
+            // Rank: label prefix < label substring < provider-name hit;
             // stars, then input order, break ties (t3 modelPickerSearch's
             // field ladder + favorite boost, collapsed to our ranks).
             let mut ranked: Vec<(usize, usize, usize, ModelRowData)> = Vec::new();
@@ -1554,13 +1664,14 @@ impl Pickers {
                     continue;
                 };
                 for model in models {
+                    let provider = provider_display_name(&model_provider_id(descriptor.id, &model.id));
                     let by_label = popover::match_rank(&query, &model.label);
-                    let by_harness = popover::match_rank(
+                    let by_provider = popover::match_rank(
                         &query,
-                        &format!("{} {}", descriptor.name, model.label),
+                        &format!("{} {}", provider, model.label),
                     )
                     .map(|rank| rank + 2);
-                    if let Some(rank) = by_label.into_iter().chain(by_harness).min() {
+                    if let Some(rank) = by_label.into_iter().chain(by_provider).min() {
                         let starred = !self.defaults.is_favorite(descriptor.id, &model.id);
                         ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
                     }
@@ -1586,21 +1697,26 @@ impl Pickers {
                 }
                 rows
             }
-            ModelRail::Harness => {
-                let Some(descriptor) = descriptors.iter().find(|d| Some(d.id) == effective) else {
-                    return Vec::new();
-                };
-                let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready()) else {
-                    return Vec::new();
-                };
-                let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
-                    .iter()
-                    .partition(|m| self.defaults.is_favorite(descriptor.id, &m.id));
-                starred
+            ModelRail::Provider => {
+                let viewed = self.viewed_provider(cx);
+                let mut rows = Vec::new();
+                for descriptor in &descriptors {
+                    let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready())
+                    else {
+                        continue;
+                    };
+                    for model in models {
+                        if Some(model_provider_id(descriptor.id, &model.id).as_str())
+                            == viewed.as_deref()
+                        {
+                            rows.push(row(descriptor, model));
+                        }
+                    }
+                }
+                let (starred, rest): (Vec<ModelRowData>, Vec<ModelRowData>) = rows
                     .into_iter()
-                    .chain(rest)
-                    .map(|model| row(descriptor, model))
-                    .collect()
+                    .partition(|row| self.defaults.is_favorite(row.harness, &row.model.id));
+                starred.into_iter().chain(rest).collect()
             }
         }
     }
@@ -3112,16 +3228,10 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// The combined harness + model switcher (zeron harness-model-picker.tsx):
-    /// a vertical harness rail of square brand-icon tabs on the left, the
-    /// viewed harness's models on the right. On an existing chat the other
-    /// tabs stay visible but disabled — the lock reads as a rule.
-    /// The harness/model picker (t3code ModelPickerContent): an icons-only
-    /// harness rail on the left (favorites star on top), a search box over
-    /// the model list on the right. Rows are two lines — model name over the
-    /// harness icon + name (t3 `showProvider`, replacing the description) —
-    /// with a ⌘N jump chip and a star toggle trailing. Searching hides the
-    /// rail and spans every harness.
+    /// The model picker: an icons-only provider rail on the left (favorites
+    /// star on top), a search box over that provider's models on the right.
+    /// Rows are two lines — model name over the provider icon + name. Searching
+    /// hides the rail and spans every provider.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         const HEIGHT: f32 = 346.0; // t3 max-h-86.5
 
@@ -3165,15 +3275,14 @@ impl Pickers {
         let query = self.search.read(cx).text().trim().to_string();
         let searching = !query.is_empty();
         let favorites_view = !searching && self.model_rail == ModelRail::Favorites;
-        let descriptors = self.rail_descriptors(cx);
+        let provider_tabs = self.provider_tabs(cx);
+        let viewed_provider = self.viewed_provider(cx);
         let rows = self.visible_model_rows(cx);
         let active = self.active;
         let selected_id = self.selected_model(cx).map(|m| m.id.clone());
 
-        // ── rail: icons only (t3 ModelPickerSidebar) — the favorites star,
-        //    a divider, one brand icon per harness. The selected tab wears a
-        //    3px accent bar hugging the rail's right edge. Hidden while a
-        //    search is live (the query spans every harness).
+        // ── rail: icons only — the favorites star, a divider, one brand
+        //    icon per provider. Hidden while a search is live.
         let rail: Option<AnyElement> = (!searching).then(|| {
             let mut column = div()
                 .w(px(44.0))
@@ -3227,14 +3336,17 @@ impl Pickers {
                     .my(px(1.0))
                     .bg(crate::theme::hairline(0.08)),
             );
-            for (ix, descriptor) in descriptors.iter().enumerate() {
-                let harness = descriptor.id;
-                let is_viewed = !favorites_view && effective == Some(harness);
-                let is_disabled = locked && effective != Some(harness);
-                let (icon_path, tint) = harness_brand_icon(harness);
+            for (ix, provider) in provider_tabs.iter().enumerate() {
+                let provider = provider.clone();
+                let is_viewed = !favorites_view && viewed_provider.as_deref() == Some(provider.as_str());
+                let is_disabled = locked
+                    && ((provider == "mock" && effective != Some(HarnessId::Mock))
+                        || (provider != "mock" && effective == Some(HarnessId::Mock)));
+                let (icon_path, tint) = provider_brand_icon(&provider);
                 column = column.child(
                     div()
-                        .id(("harness-tab", ix))
+                        .id(("provider-tab", ix))
+                        .aria_label(provider_display_name(&provider).to_string())
                         .relative()
                         .w(px(36.0))
                         .h(px(36.0))
@@ -3248,9 +3360,7 @@ impl Pickers {
                             el.hover(|s| s.bg(crate::theme::ink(0.06)))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.model_rail = ModelRail::Harness;
-                            this.pick_harness(harness, cx);
-                            cx.notify();
+                            this.pick_provider(provider.clone(), cx);
                         }))
                         .child(crate::icons::icon(icon_path).size(px(18.0)).text_color(
                             tint.unwrap_or(if is_viewed {
@@ -3308,16 +3418,12 @@ impl Pickers {
                         && selected_id.as_deref() == Some(row.model.id.as_str());
                     let is_active = ix == active;
                     let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
-                    let (icon_path, tint) = harness_brand_icon(row.harness);
+                    let (icon_path, tint) = provider_brand_icon(&row.provider_id);
                     let label: SharedString = row.model.label.clone().into();
-                    // Harness identity subline (t3 `showProvider`); the
-                    // model's description rides the same muted line after a
-                    // dot (proto: "rendered under the name in the model
-                    // picker, 11px muted") — for pi it carries the provider,
-                    // which is what tells same-named vendor models apart.
                     let subline: SharedString = match &row.model.description {
-                        Some(description) => format!("{} · {description}", row.harness_name).into(),
-                        None => row.harness_name.clone(),
+                        Some(description) if !favorites_view && !searching => description.clone().into(),
+                        Some(description) => format!("{} · {description}", row.provider_title).into(),
+                        None => row.provider_title.clone(),
                     };
                     let harness = row.harness;
                     let star_model = row.model.id.clone();
@@ -3935,13 +4041,18 @@ impl Render for Pickers {
             });
             label.map(SharedString::from).unwrap_or_default()
         };
-        let harness_icon: (&'static str, Option<gpui::Hsla>) = self
-            .effective_harness(cx)
-            .map(harness_brand_icon)
-            .unwrap_or((
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ));
+        let harness_icon: (&'static str, Option<gpui::Hsla>) = {
+            let from_model = self.selected_model(cx).and_then(|model| {
+                let harness = self.effective_harness(cx)?;
+                Some(provider_brand_icon(&model_provider_id(harness, &model.id)))
+            });
+            from_model
+                .or_else(|| self.viewed_provider(cx).map(|id| provider_brand_icon(&id)))
+                .unwrap_or((
+                    crate::icons::CLAUDE_MARK,
+                    Some(crate::icons::claude_brand()),
+                ))
+        };
         let explicit_options = self.explicit_options(cx);
         let traits_set = traits_summary(
             self.selected_model(cx),
@@ -4535,6 +4646,24 @@ mod tests {
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);
         assert_eq!(visible_harnesses_impl(&mixed, true)[1].id, HarnessId::Pi);
+    }
+
+    #[test]
+    fn model_provider_id_uses_pi_prefix_and_mock_sentinel() {
+        assert_eq!(
+            model_provider_id(HarnessId::Pi, "anthropic/claude-sonnet-4"),
+            "anthropic"
+        );
+        assert_eq!(
+            model_provider_id(HarnessId::Pi, "openai-codex/gpt-5"),
+            "openai-codex"
+        );
+        assert_eq!(model_provider_id(HarnessId::Pi, "mvp-lab/kimi"), "mvp-lab");
+        assert_eq!(model_provider_id(HarnessId::Pi, "unknown/x"), "other");
+        assert_eq!(model_provider_id(HarnessId::Mock, "any"), "mock");
+        assert_eq!(provider_display_name("anthropic").as_ref(), "Claude");
+        assert_eq!(provider_display_name("openai-codex").as_ref(), "ChatGPT");
+        assert_eq!(provider_display_name("mvp-lab").as_ref(), "mvp-lab");
     }
 
     #[test]
