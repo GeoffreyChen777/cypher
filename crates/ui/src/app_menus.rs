@@ -21,6 +21,7 @@ actions!(
     cypher,
     [
         About,
+        CheckForUpdates,
         OpenSettings,
         Quit,
         Hide,
@@ -105,8 +106,8 @@ pub fn app_menus() -> Vec<Menu> {
     // macOS titles the first menu with the bundle/process name regardless of
     // what we pass, but gpui still wants a name.
     let mut app_items = vec![
-        // Placeholder until a real about dialog exists (explicitly disabled).
-        MenuItem::action("About Cypher", About).disabled(true),
+        MenuItem::action("About Cypher", About),
+        MenuItem::action("Check for Updates…", CheckForUpdates),
         MenuItem::separator(),
         MenuItem::action("Settings…", OpenSettings),
         MenuItem::separator(),
@@ -189,12 +190,18 @@ mod tests {
     }
 
     #[test]
-    fn about_is_disabled_placeholder() {
+    fn app_menu_starts_with_about_and_update_check() {
         let menus = app_menus();
-        let first = &menus[0].items[0];
+        let names = action_names(&menus[0]);
+        assert_eq!(names[0], About.name());
+        assert_eq!(names[1], CheckForUpdates.name());
         assert!(
-            first.is_disabled(),
-            "About stays disabled until implemented"
+            !menus[0].items[0].is_disabled(),
+            "About opens the version dialog"
+        );
+        assert!(
+            !menus[0].items[1].is_disabled(),
+            "Check for Updates runs a release check"
         );
     }
 

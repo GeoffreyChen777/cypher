@@ -1288,6 +1288,7 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_ATTACHMENT_CHUNK
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
+            | methods::CHECK_UPDATE
             | methods::APPLY_UPDATE
             // Side Chats are owned by the parent chat's host device.
             | methods::START_SIDE_CHAT
@@ -2088,6 +2089,7 @@ impl RpcService for EngineRpc {
                 ))))
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
+            methods::CHECK_UPDATE => RpcReply::value(&self.updater()?.check().await),
             methods::APPLY_UPDATE => {
                 let version = self
                     .updater()?

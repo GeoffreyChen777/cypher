@@ -797,6 +797,13 @@ impl Updater {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
+    /// Run one release check immediately and return the resulting status.
+    /// Menu "Check for Updates" waits on this rather than the 6h cadence.
+    pub async fn check(&self) -> UpdateStatus {
+        let _ = self.check_once().await;
+        self.status_tx.borrow().clone()
+    }
+
     /// Credentials changed, but the public release endpoint does not need
     /// them. Only a new sign-in or recovery from a failed check merits an
     /// early retry; ordinary token rotation must not bypass the 6h cadence.

@@ -136,6 +136,22 @@ async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
     updater.shutdown().await;
 }
 
+#[tokio::test]
+async fn check_fetches_the_manifest_immediately() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let body = br#"{"version":"9.9.9","files":{}}"#.to_vec();
+    let server = server(vec![("/releases/manifest.json", 200, body)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let updater = Updater::spawn(server.url.clone(), None, dir.path().into());
+    let status = updater.check().await;
+    assert_eq!(status.latest_version.as_deref(), Some("9.9.9"));
+    assert!(status.update_available);
+    assert!(status.checked_at.is_some());
+    assert!(status.error.is_none());
+    assert!(server.requests.load(SeqCst) >= 1);
+    updater.shutdown().await;
+}
+
 fn manifest(file: &str, bytes: &[u8]) -> Manifest {
     Manifest {
         version: "1.2.3".into(),

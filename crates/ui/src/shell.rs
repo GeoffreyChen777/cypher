@@ -613,6 +613,54 @@ enum UpdateFlow {
     Failed(SharedString),
 }
 
+/// About dialog + Check for Updates status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AboutCheck {
+    Idle,
+    Checking,
+    Current,
+    Available { latest: SharedString },
+    Failed { message: SharedString },
+}
+
+struct AboutDialog {
+    check: AboutCheck,
+}
+
+fn install_kind_label(kind: &cypher_update::InstallKind) -> &'static str {
+    match kind {
+        cypher_update::InstallKind::MacApp { .. } => "macOS app",
+        cypher_update::InstallKind::Managed { .. } => "Installed",
+        cypher_update::InstallKind::Unmanaged => "Development build",
+    }
+}
+
+fn about_check_from_status(
+    status: Option<&cypher_update::UpdateStatus>,
+    app_version: &str,
+) -> AboutCheck {
+    let Some(status) = status else {
+        return AboutCheck::Idle;
+    };
+    if let Some(error) = status.error.as_deref().filter(|e| !e.is_empty()) {
+        return AboutCheck::Failed {
+            message: error.to_string().into(),
+        };
+    }
+    let Some(latest) = status.latest_version.as_deref() else {
+        return AboutCheck::Idle;
+    };
+    if cypher_update::version_newer(latest, app_version) {
+        AboutCheck::Available {
+            latest: latest.to_string().into(),
+        }
+    } else if status.checked_at.is_some() {
+        AboutCheck::Current
+    } else {
+        AboutCheck::Idle
+    }
+}
+
 /// Account lifecycle owned by this process. Sign-in on a local workspace
 /// flows through the in-place switch wizard (offer → switch → import → done);
 /// `RestartPending` survives only as the fallback when the in-place swap
@@ -1006,6 +1054,8 @@ pub struct Shell {
     /// download/stage of it has come in this process.
     update_flow: UpdateFlow,
     update_task: Option<Task<()>>,
+    about: Option<AboutDialog>,
+    about_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
     update_dismissed: Option<String>,
@@ -1442,6 +1492,8 @@ impl Shell {
             fork_request_ids: std::collections::HashMap::new(),
             update_flow: UpdateFlow::Idle,
             update_task: None,
+            about: None,
+            about_task: None,
             update_dismissed: None,
             pi_update_busy: false,
             pi_update_task: None,
@@ -4809,6 +4861,101 @@ impl Shell {
         }
     }
 
+    fn open_about(&mut self, cx: &mut Context<Self>) {
+        let check = about_check_from_status(
+            self.state.read(cx).update.as_ref(),
+            cypher_update::current_version(),
+        );
+        self.about = Some(AboutDialog { check });
+        cx.notify();
+    }
+
+    fn begin_update_check(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.about.as_ref().map(|about| &about.check),
+            Some(AboutCheck::Checking)
+        ) {
+            return;
+        }
+        let check = AboutCheck::Checking;
+        if let Some(about) = &mut self.about {
+            about.check = check;
+        } else {
+            self.about = Some(AboutDialog { check });
+        }
+        let engine = self.state.read(cx).engine().cloned();
+        let edge_url = self.boot.edge_url.clone();
+        let state = self.state.clone();
+        self.about_task = Some(cx.spawn(async move |this, cx| {
+            let status = if let Some(engine) = engine {
+                match engine
+                    .client()
+                    .call(methods::CHECK_UPDATE, serde_json::json!({}))
+                    .await
+                {
+                    Ok(value) => serde_json::from_value::<cypher_update::UpdateStatus>(value).ok(),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            let status = match status {
+                Some(status) => status,
+                None => match Tokio::spawn(cx, async move {
+                    cypher_update::fetch_latest(&edge_url).await
+                })
+                .await
+                {
+                    Ok(Ok(manifest)) => cypher_update::UpdateStatus {
+                        current_version: cypher_update::current_version().into(),
+                        update_available: cypher_update::version_newer(
+                            &manifest.version,
+                            cypher_update::current_version(),
+                        ),
+                        latest_version: Some(manifest.version),
+                        checked_at: Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                        ),
+                        error: None,
+                    },
+                    Ok(Err(err)) => cypher_update::UpdateStatus {
+                        current_version: cypher_update::current_version().into(),
+                        latest_version: None,
+                        update_available: false,
+                        checked_at: None,
+                        error: Some(format!("{err:#}")),
+                    },
+                    Err(err) => cypher_update::UpdateStatus {
+                        current_version: cypher_update::current_version().into(),
+                        latest_version: None,
+                        update_available: false,
+                        checked_at: None,
+                        error: Some(err.to_string()),
+                    },
+                },
+            };
+            let _ = state.update(cx, |state, cx| {
+                state.apply_update(status.clone());
+                cx.notify();
+            });
+            this.update(cx, |shell, cx| {
+                if let Some(about) = &mut shell.about {
+                    about.check =
+                        about_check_from_status(Some(&status), cypher_update::current_version());
+                    if matches!(about.check, AboutCheck::Idle) {
+                        about.check = AboutCheck::Current;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     /// Scope-aware sidebar identity and account menu. Local runtimes advertise
     /// their storage boundary and offer sync; synced runtimes offer sign-out.
     fn render_user_menu(
@@ -5635,7 +5782,101 @@ impl Shell {
             overlays.push(self.render_setup_overlay(cx));
         }
 
+        if let Some(overlay) = self.render_about_overlay(viewport, cx) {
+            overlays.push(overlay);
+        }
+
         overlays
+    }
+
+    fn render_about_overlay(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let about = self.about.as_ref()?;
+        let theme = Theme::of(cx).clone();
+        let version = cypher_update::current_version();
+        let install = install_kind_label(&self.install);
+        let checking = matches!(about.check, AboutCheck::Checking);
+        let status = match &about.check {
+            AboutCheck::Idle => None,
+            AboutCheck::Checking => Some("Checking for updates…".to_string()),
+            AboutCheck::Current => Some(format!("Cypher {version} is up to date.")),
+            AboutCheck::Available { latest } => Some(format!("Update available — v{latest}")),
+            AboutCheck::Failed { message } => Some(message.to_string()),
+        };
+        let failed = matches!(about.check, AboutCheck::Failed { .. });
+        let mut card = popover::dialog_card(&theme)
+            .id("about-cypher-dialog")
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.about = None;
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(cypher_app_icon().size(px(72.0)).rounded(px(16.0)))
+                    .child(popover::dialog_title(&theme, "Cypher"))
+                    .child(popover::dialog_body(&theme, format!("Version {version}")))
+                    .child(
+                        popover::dialog_body(&theme, install)
+                            .text_color(theme.text_muted),
+                    ),
+            );
+        if let Some(status) = status {
+            card = card.child(
+                div()
+                    .mt(px(12.0))
+                    .w_full()
+                    .child(
+                        popover::dialog_body(&theme, status).when(failed, |el| {
+                            el.text_color(theme.danger)
+                        }),
+                    ),
+            );
+        }
+        card = card.child(
+            div()
+                .mt(px(16.0))
+                .w_full()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap(px(8.0))
+                .child(
+                    popover::btn_ghost(&theme, "OK", "about-cypher-ok")
+                        .id("about-cypher-ok")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.about = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    popover::btn_primary(
+                        &theme,
+                        if checking {
+                            "Checking…"
+                        } else {
+                            "Check for Updates"
+                        },
+                    )
+                    .id("about-cypher-check")
+                    .when(!checking, |el| {
+                        el.on_click(cx.listener(|this, _, _, cx| this.begin_update_check(cx)))
+                    }),
+                ),
+        );
+        Some(popover::modal(
+            "about-cypher-dialog",
+            viewport,
+            card.into_any_element(),
+        ))
     }
 
     fn resize_handle<T>(
@@ -7621,6 +7862,14 @@ impl Render for Shell {
                     this.open_settings(SettingsSection::Harnesses, cx);
                 }),
             )
+            .on_action(cx.listener(|this, _: &crate::app_menus::About, _, cx| {
+                this.open_about(cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::app_menus::CheckForUpdates, _, cx| {
+                    this.begin_update_check(cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
                     this.add_space = None;
@@ -8055,6 +8304,41 @@ mod tests {
             .await
             .unwrap();
         release.await.unwrap();
+    }
+
+    #[test]
+    fn about_check_uses_app_version_and_last_check() {
+        use cypher_update::UpdateStatus;
+        let status = |latest: Option<&str>, checked: bool, error: Option<&str>| UpdateStatus {
+            current_version: "0.1.0".into(),
+            latest_version: latest.map(str::to_string),
+            update_available: latest.is_some(),
+            checked_at: checked.then_some(1),
+            error: error.map(str::to_string),
+        };
+        assert_eq!(about_check_from_status(None, "0.1.0"), AboutCheck::Idle);
+        assert_eq!(
+            about_check_from_status(Some(&status(None, false, None)), "0.1.0"),
+            AboutCheck::Idle
+        );
+        assert_eq!(
+            about_check_from_status(Some(&status(Some("0.1.0"), true, None)), "0.1.0"),
+            AboutCheck::Current
+        );
+        assert_eq!(
+            about_check_from_status(Some(&status(Some("0.1.1"), true, None)), "0.1.0"),
+            AboutCheck::Available {
+                latest: "0.1.1".into()
+            }
+        );
+        assert!(matches!(
+            about_check_from_status(Some(&status(None, false, Some("offline"))), "0.1.0"),
+            AboutCheck::Failed { .. }
+        ));
+        assert_eq!(
+            install_kind_label(&cypher_update::InstallKind::Unmanaged),
+            "Development build"
+        );
     }
 
     #[test]
