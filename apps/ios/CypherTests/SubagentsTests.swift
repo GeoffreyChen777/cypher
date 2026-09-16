@@ -173,6 +173,27 @@ final class SubagentsTests: XCTestCase {
         XCTAssertEqual(SessionNavigation.opening("child", in: child), child)
     }
 
+    func testNotificationTapDoesNotRebuildASpaceParentChatStack() {
+        // The crashing assignment was `path = [.space, .parent, .chat]` even
+        // when `.chat` was already on screen. Notification open may only
+        // pop-to-existing or append that one chat.
+        XCTAssertEqual(SessionNavigation.openingNotification("chat", in: []), [.chat("chat")])
+        XCTAssertEqual(SessionNavigation.openingNotification("chat", in: [.chat("chat")]),
+                       [.chat("chat")])
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("chat", in: [.space("project"), .chat("chat")]),
+            [.space("project"), .chat("chat")]
+        )
+        XCTAssertEqual(
+            SessionNavigation.openingNotification("child", in: [.chat("parent")]),
+            [.chat("parent"), .chat("child")]
+        )
+        XCTAssertFalse(
+            SessionNavigation.openingNotification("chat", in: [.chat("chat")])
+                .contains(.space("project"))
+        )
+    }
+
     @MainActor
     func testWorkspaceProjectsChildrenAndSnapshotsWithoutPollutingRootLists() throws {
         let doc = RegistryDoc(deviceId: "ios-test")

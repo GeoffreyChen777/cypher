@@ -92,4 +92,32 @@ final class NavigationChromeTests: XCTestCase {
             XCTAssertFalse(restored.hidesBackButton)
         }
     }
+
+    func testNotificationOpenReusesVisibleChatInsteadOfRebuildingTheStack() async throws {
+        let model = AppModel()
+        model.enterDemoMode()
+        let driver = NavigationDriver()
+        let host = UIHostingController(rootView: NavigationChromeFixture(driver: driver, model: model))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        try await settle { self.navigationController(in: host) != nil }
+        let nav = try XCTUnwrap(navigationController(in: host))
+
+        driver.path = SessionNavigation.openingNotification("chat-tabs", in: [])
+        try await settle { nav.viewControllers.count == 2 && nav.transitionCoordinator == nil }
+        XCTAssertEqual(driver.path, [.chat("chat-tabs")])
+
+        driver.path = SessionNavigation.openingNotification("chat-tabs", in: driver.path)
+        try await settle { nav.viewControllers.count == 2 && nav.transitionCoordinator == nil }
+        XCTAssertEqual(nav.viewControllers.count, 2)
+        XCTAssertEqual(driver.path, [.chat("chat-tabs")])
+    }
 }

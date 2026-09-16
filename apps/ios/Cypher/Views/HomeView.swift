@@ -19,6 +19,14 @@ enum SessionNavigation {
         }
         return path + [.chat(chatId)]
     }
+
+    /// Notification taps may arrive while that chat is already presented, or
+    /// while the stack is empty. Rebuilding `[space, parent, chat]` from
+    /// scratch re-inserts an on-screen destination at a new index and
+    /// NavigationStack crashes. Only pop-to-existing or append the chat.
+    static func openingNotification(_ chatId: String, in path: [Route]) -> [Route] {
+        opening(chatId, in: path)
+    }
 }
 
 struct HomeView: View {
@@ -120,11 +128,8 @@ struct HomeView: View {
                     return
                 }
                 if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
-                    var route: [Route] = [.space(pending.projectId)]
-                    if let relation = chat.child, let parent = model.chat(id: relation.parentChatId),
-                       parent.deviceId == chat.deviceId { route.append(.chat(parent.id)) }
-                    route.append(.chat(chat.id))
-                    path = route
+                    let route = SessionNavigation.openingNotification(chat.id, in: path)
+                    if route != path { path = route }
                     model.notifications.viewing(chat.id)
                     model.notifications.pendingNavigation = nil
                 } else {
