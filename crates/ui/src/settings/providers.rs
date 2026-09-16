@@ -38,6 +38,40 @@ pub fn command_intent(text: &str) -> Option<ProviderIntent> {
     }
 }
 
+/// Kinds the Add-provider dropdown can create. OAuth subscriptions (Claude,
+/// ChatGPT) are listed separately; this catalog is only custom gateways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomProviderKind {
+    NewApi,
+}
+
+struct CustomProviderKindSpec {
+    title: &'static str,
+    caption: &'static str,
+    icon: &'static str,
+}
+
+impl CustomProviderKind {
+    /// Add new custom types here; the dropdown renders this list in order.
+    const ALL: &[Self] = &[Self::NewApi];
+
+    fn spec(self) -> CustomProviderKindSpec {
+        match self {
+            Self::NewApi => CustomProviderKindSpec {
+                title: "OpenAI-compatible",
+                caption: "NewAPI and compatible gateways",
+                icon: icons::GLOBAL,
+            },
+        }
+    }
+
+    fn from_provider(provider: Option<&PiProviderInfo>) -> Self {
+        match provider.map(|p| p.provider_type.as_str()) {
+            Some("newapi") | _ => Self::NewApi,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
     Name,
@@ -183,6 +217,7 @@ struct Form {
     url: Entity<ComposerInput>,
     key: Entity<ComposerInput>,
     original: Option<PiProviderInfo>,
+    kind: CustomProviderKind,
     errors: FieldErrors,
     focus: Option<Field>,
     _events: Vec<Subscription>,
@@ -214,6 +249,11 @@ struct OauthLogin {
 #[derive(Clone)]
 struct ProviderMenu {
     provider: PiProviderInfo,
+    active: usize,
+}
+
+#[derive(Clone)]
+struct AddProviderMenu {
     active: usize,
 }
 
@@ -345,7 +385,9 @@ pub struct ProvidersPage {
     error: Option<String>,
     notice: Option<String>,
     menu: popover::Popup<ProviderMenu>,
+    add_menu: popover::Popup<AddProviderMenu>,
     menu_focus: FocusHandle,
+    add_menu_focus: FocusHandle,
     dialog_focus: FocusHandle,
     cancel_focus: FocusHandle,
     submit_focus: FocusHandle,
@@ -411,7 +453,9 @@ impl ProvidersPage {
             error: None,
             notice: None,
             menu: popover::Popup::default(),
+            add_menu: popover::Popup::default(),
             menu_focus: cx.focus_handle(),
+            add_menu_focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             cancel_focus: cx.focus_handle(),
             submit_focus: cx.focus_handle(),
@@ -431,8 +475,10 @@ impl ProvidersPage {
             | self.confirm.take().is_some()
             | self.oauth.take().is_some()
             | self.intent.take().is_some()
-            | self.menu.get().is_some();
+            | self.menu.get().is_some()
+            | self.add_menu.get().is_some();
         self.menu = popover::Popup::default();
+        self.add_menu = popover::Popup::default();
         self.return_focus = None;
         self.restore_focus = false;
         if changed {
@@ -517,6 +563,7 @@ impl ProvidersPage {
         self.error = None;
         self.notice = None;
         self.menu = popover::Popup::default();
+        self.add_menu = popover::Popup::default();
         self.task = None;
         let target = self.target.clone();
         let lease = writing.then(|| target.update(cx, |target, cx| target.lock(cx)));
@@ -587,6 +634,8 @@ impl ProvidersPage {
         self.notice = None;
         self.confirm = None;
         self.menu = popover::Popup::default();
+        self.add_menu = popover::Popup::default();
+        let kind = CustomProviderKind::from_provider(provider.as_ref());
         let id = cx.new(|cx| ComposerInput::settings_field("e.g. my-gateway", false, cx));
         let url = cx.new(|cx| ComposerInput::settings_field("https://api.example.com", false, cx));
         let key = cx.new(|cx| {
@@ -636,6 +685,7 @@ impl ProvidersPage {
             url,
             key,
             original: provider,
+            kind,
             errors: FieldErrors::default(),
             focus,
             _events: events,
@@ -885,6 +935,152 @@ impl ProvidersPage {
         }
     }
 
+    fn close_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu.begin_close() {
+            if self.add_menu_focus.is_focused(window) {
+                self.page_focus.focus(window, cx);
+            }
+            popover::reap_popup(cx, |page: &mut Self| &mut page.add_menu);
+            cx.notify();
+        }
+    }
+
+    fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu.take_press_was_open() {
+            self.close_add_menu(window, cx);
+            return;
+        }
+        self.menu = popover::Popup::default();
+        self.add_menu.open(AddProviderMenu { active: 0 });
+        self.add_menu_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn add_custom_kind(
+        &mut self,
+        kind: CustomProviderKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_menu = popover::Popup::default();
+        self.page_focus.focus(window, cx);
+        match kind {
+            CustomProviderKind::NewApi => self.edit(None, cx),
+        }
+    }
+
+    fn render_add_trigger(
+        &mut self,
+        theme: &Theme,
+        id: &'static str,
+        enabled: bool,
+        align_end: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let open = self.add_menu.get().is_some();
+        let mut trigger = add_provider_button(theme, id, enabled)
+            .relative()
+            .child(provider_icon(icons::ALT_ARROW_DOWN, 12.0, theme.on_solid))
+            .when(open, |el| el.bg(theme.element_active))
+            .when(enabled, |el| {
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|page, _, _, _| page.add_menu.note_trigger_press()),
+                )
+                .on_click(cx.listener(|page, _, window, cx| page.toggle_add_menu(window, cx)))
+            });
+        if open {
+            trigger = trigger.child(self.render_add_menu(theme, align_end, cx));
+        }
+        trigger
+    }
+
+    fn render_add_menu(
+        &mut self,
+        theme: &Theme,
+        align_end: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let menu = self.add_menu.get().unwrap().clone();
+        let closing = self.add_menu.closing_since();
+        let mut card = popover::popover_card(theme)
+            .id("provider-add-menu")
+            .role(gpui::Role::Menu)
+            .aria_label("Add provider")
+            .track_focus(&self.add_menu_focus)
+            .w(px(268.0))
+            .on_mouse_down_out(cx.listener(|page, _, window, cx| page.close_add_menu(window, cx)))
+            .on_key_down(cx.listener(|page, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" | "tab" => {
+                        page.close_add_menu(window, cx);
+                        page.page_focus.focus(window, cx);
+                    }
+                    "up" | "down" => {
+                        if let Some(menu) = page.add_menu.open_mut() {
+                            let delta = if event.keystroke.key == "up" { -1 } else { 1 };
+                            menu.active = popover::menu_step(
+                                Some(menu.active),
+                                CustomProviderKind::ALL.len(),
+                                delta,
+                            )
+                            .unwrap_or(0);
+                        }
+                    }
+                    "enter" | "space" => {
+                        if let Some(menu) = page.add_menu.as_open().cloned() {
+                            if let Some(&kind) = CustomProviderKind::ALL.get(menu.active) {
+                                page.add_custom_kind(kind, window, cx);
+                            }
+                        }
+                    }
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }));
+        for (index, kind) in CustomProviderKind::ALL.iter().copied().enumerate() {
+            let spec = kind.spec();
+            let enabled = closing.is_none() && self.busy.is_none();
+            card = card.child(
+                popover::menu_row(
+                    theme,
+                    index == menu.active,
+                    format!("provider-add-kind-{index}"),
+                )
+                .id(("provider-add-kind", index))
+                .role(gpui::Role::MenuItem)
+                .aria_label(spec.title)
+                .items_start()
+                .py(px(8.0))
+                .when(enabled, |el| {
+                    el.on_click(cx.listener(move |page, _, window, cx| {
+                        page.add_custom_kind(kind, window, cx)
+                    }))
+                })
+                .child(
+                    provider_icon(spec.icon, 16.0, theme.text_muted).mt(px(2.0)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(SharedString::from(spec.title))
+                        .child(caption(theme, spec.caption)),
+                ),
+            );
+        }
+        let layer = "provider-add-menu-layer";
+        if align_end {
+            popover::anchored_menu_below_end(layer, card.into_any_element(), closing)
+        } else {
+            popover::anchored_menu_below(layer, card.into_any_element(), closing)
+        }
+    }
+
     fn menu_action(
         &mut self,
         provider: PiProviderInfo,
@@ -999,6 +1195,7 @@ impl ProvidersPage {
         let saved = form.original.as_ref().is_some_and(|p| p.credential_saved);
         let busy = self.busy.is_some();
         let width = (f32::from(window.viewport_size().width) - 40.0).clamp(280.0, 464.0);
+        let spec = form.kind.spec();
         let mut fields = div()
             .px(px(24.0))
             .py(px(24.0))
@@ -1010,12 +1207,12 @@ impl ProvidersPage {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .child(widgets::row_tile(theme, icons::GLOBAL).size(px(32.0)))
+                    .child(widgets::row_tile(theme, spec.icon).size(px(32.0)))
                     .child(
                         div()
                             .flex_1()
-                            .child(widgets::row_title(theme, "OpenAI-compatible"))
-                            .child(caption(theme, "NewAPI and compatible gateways")),
+                            .child(widgets::row_title(theme, spec.title))
+                            .child(caption(theme, spec.caption)),
                     )
                     .child(widgets::badge(theme, "API key")),
             );
@@ -1263,7 +1460,12 @@ impl ProvidersPage {
             )
         } else if oauth {
             format!(
-                "You'll need to sign in again to use {id} models on {}.",
+                "You'll need to sign in again to use {} models on {}.",
+                if id == "anthropic" {
+                    "Claude"
+                } else {
+                    "ChatGPT"
+                },
                 self.target.read(cx).label(cx)
             )
         } else {
@@ -1451,6 +1653,7 @@ impl ProvidersPage {
         &mut self,
         provider: PiProviderInfo,
         index: usize,
+        first: bool,
         current: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -1520,6 +1723,7 @@ impl ProvidersPage {
                 if page.menu.take_press_was_open() {
                     page.close_menu(window, cx);
                 } else {
+                    page.add_menu = popover::Popup::default();
                     page.menu.open(ProviderMenu {
                         provider: menu_provider.clone(),
                         active: if menu_provider.credential_saved {
@@ -1547,7 +1751,7 @@ impl ProvidersPage {
         div()
             .px(px(20.0))
             .py(px(16.0))
-            .when(index > 0, |el| el.border_t_1().border_color(theme.border))
+            .when(!first, |el| el.border_t_1().border_color(theme.border))
             .flex()
             .items_start()
             .gap(px(12.0))
@@ -1629,32 +1833,32 @@ impl ProvidersPage {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .child(
-                        button(
-                            theme,
-                            ("provider-manage", index),
-                            if oauth && provider.credential_saved {
-                                "Sign in again"
-                            } else if oauth {
-                                "Sign in"
-                            } else if provider.credential_saved {
-                                "Manage"
-                            } else {
-                                "Connect"
-                            },
-                            ButtonStyle::Secondary,
-                            !busy,
-                        )
-                        .when(!busy, |el| {
-                            el.on_click(cx.listener(move |page, _, _, cx| {
-                                if is_oauth(&edit) {
-                                    page.start_oauth(&edit.id, cx);
+                    .when(!(oauth && provider.credential_saved), |el| {
+                        el.child(
+                            button(
+                                theme,
+                                ("provider-manage", index),
+                                if oauth {
+                                    "Sign in"
+                                } else if provider.credential_saved {
+                                    "Manage"
                                 } else {
-                                    page.edit(Some(edit.clone()), cx);
-                                }
-                            }))
-                        }),
-                    )
+                                    "Connect"
+                                },
+                                ButtonStyle::Secondary,
+                                !busy,
+                            )
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(move |page, _, _, cx| {
+                                    if is_oauth(&edit) {
+                                        page.start_oauth(&edit.id, cx);
+                                    } else {
+                                        page.edit(Some(edit.clone()), cx);
+                                    }
+                                }))
+                            }),
+                        )
+                    })
                     .child(more),
             )
             .into_any_element()
@@ -1673,8 +1877,8 @@ impl ProvidersPage {
         let url = status.and_then(|s| s.authorization_url.clone());
         let title = status
             .map(|s| match s.provider_id.as_str() {
-                "anthropic" => "Claude Pro/Max",
-                "openai-codex" => "ChatGPT Plus/Pro",
+                "anthropic" => "Claude",
+                "openai-codex" => "ChatGPT",
                 other => other,
             })
             .unwrap_or("Sign in");
@@ -1772,7 +1976,7 @@ impl ProvidersPage {
             .into_any_element()
     }
 
-    fn render_empty(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_empty(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         widgets::section_card(theme).mt(px(16.0)).px(px(32.0)).py(px(48.0))
             .items_center().gap(px(12.0))
             .child(div().size(px(56.0)).rounded(px(16.0)).bg(theme.accent.opacity(0.07))
@@ -1782,9 +1986,15 @@ impl ProvidersPage {
                 .child("Connect your first provider"))
             .child(caption(theme, "Bring your own API key to use models from NewAPI\nor another OpenAI-compatible service.")
                 .text_center().max_w(px(340.0)))
-            .child(add_provider_button(theme, "provider-empty-add", self.busy.is_none() && self.target.read(cx).can_write(cx))
-                .mt(px(8.0)).h(px(36.0))
-                .when(self.busy.is_none(), |el| el.on_click(cx.listener(|page, _, _, cx| page.edit(None, cx)))))
+            .child(self.render_add_trigger(
+                theme,
+                "provider-empty-add",
+                self.busy.is_none() && self.target.read(cx).can_write(cx),
+                false,
+                cx,
+            )
+            .mt(px(8.0))
+            .h(px(36.0)))
             .into_any_element()
     }
 }
@@ -1805,7 +2015,11 @@ impl Render for ProvidersPage {
                 self.return_focus = Some(
                     window
                         .focused(cx)
-                        .filter(|focus| focus != &self.menu_focus && focus != &self.dialog_focus)
+                        .filter(|focus| {
+                            focus != &self.menu_focus
+                                && focus != &self.add_menu_focus
+                                && focus != &self.dialog_focus
+                        })
                         .unwrap_or_else(|| self.page_focus.clone()),
                 );
             }
@@ -1855,13 +2069,11 @@ impl Render for ProvidersPage {
                         caption(&theme, "Connect the models you want to work with.").mt(px(8.0)),
                     ),
             )
-            .when(count.is_some_and(|n| n > 0), |el| {
-                el.child(
-                    add_provider_button(&theme, "provider-add", !blocked).when(!blocked, |el| {
-                        el.on_click(cx.listener(|page, _, _, cx| page.edit(None, cx)))
-                    }),
-                )
-            });
+            .children(
+                count.is_some_and(|n| n > 0).then(|| {
+                    self.render_add_trigger(&theme, "provider-add", !blocked, true, cx)
+                }),
+            );
         let mut body = widgets::page_column().pt(px(36.0)).child(header).child(
             div()
                 .w_full()
@@ -1949,12 +2161,13 @@ impl Render for ProvidersPage {
                 .filter(|provider| !is_oauth(provider))
                 .cloned()
                 .collect();
-            if !oauth.is_empty() {
+            let has_oauth = !oauth.is_empty();
+            if has_oauth {
                 let rows = oauth
                     .into_iter()
                     .enumerate()
                     .map(|(index, provider)| {
-                        self.provider_row(provider, index, current.as_deref(), &theme, cx)
+                        self.provider_row(provider, index, index == 0, current.as_deref(), &theme, cx)
                     })
                     .collect::<Vec<_>>();
                 body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
@@ -1964,10 +2177,23 @@ impl Render for ProvidersPage {
                     .into_iter()
                     .enumerate()
                     .map(|(index, provider)| {
-                        self.provider_row(provider, index + 8, current.as_deref(), &theme, cx)
+                        self.provider_row(
+                            provider,
+                            index + 8,
+                            index == 0,
+                            current.as_deref(),
+                            &theme,
+                            cx,
+                        )
                     })
                     .collect::<Vec<_>>();
-                body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
+                // Default section_card already has 24px top margin; keep the
+                // tighter 12px only when this is the first (and only) card.
+                body = body.child(
+                    widgets::section_card(&theme)
+                        .when(!has_oauth, |el| el.mt(px(12.0)))
+                        .children(rows),
+                );
             }
         }
         if count.is_some_and(|n| n > 0) {
@@ -2060,6 +2286,14 @@ mod tests {
             checked_at: None,
             message: None,
         }
+    }
+
+    #[test]
+    fn add_menu_kinds_start_with_openai_compatible() {
+        assert_eq!(CustomProviderKind::ALL, &[CustomProviderKind::NewApi]);
+        let spec = CustomProviderKind::NewApi.spec();
+        assert_eq!(spec.title, "OpenAI-compatible");
+        assert!(spec.caption.contains("NewAPI"));
     }
 
     #[test]

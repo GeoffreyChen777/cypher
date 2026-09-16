@@ -182,9 +182,7 @@ impl Logins {
 
     pub fn begin(&self, paths: &PiRuntimePaths, provider_id: &str) -> Result<LoginStatus, String> {
         if provider_id != "anthropic" && provider_id != "openai-codex" {
-            return Err(
-                "Sign in is only available for Claude Pro/Max and ChatGPT Plus/Pro.".into(),
-            );
+            return Err("Sign in is only available for Claude and ChatGPT.".into());
         }
         if !paths.installed() {
             return Err(

@@ -35,8 +35,8 @@ export function validateId(id) {
 }
 
 export const OAUTH_PROVIDERS = Object.freeze([
-  { id: "anthropic", title: "Claude Pro/Max", baseUrl: "https://api.anthropic.com" },
-  { id: "openai-codex", title: "ChatGPT Plus/Pro (Codex)", baseUrl: "https://chatgpt.com" },
+  { id: "anthropic", title: "Claude", baseUrl: "https://api.anthropic.com" },
+  { id: "openai-codex", title: "ChatGPT", baseUrl: "https://chatgpt.com" },
 ]);
 
 export function isOauthProvider(id) {

@@ -29,8 +29,8 @@ runtime, and the bundled NewAPI model builder. It shares the plugin's
 it does not create a parallel credential store. Legacy NewAPI plugin commands
 remain compatible. The native TUI auth bridge remains available outside RPC.
 
-Settings also expose Pi's built-in subscription OAuth for **Claude Pro/Max**
-(`anthropic`) and **ChatGPT Plus/Pro / Codex** (`openai-codex`). Sign-in runs
+Settings also expose Pi's built-in subscription OAuth for **Claude**
+(`anthropic`) and **ChatGPT** (`openai-codex`). Sign-in runs
 on the selected Runtime host, stores tokens in that host's `auth.json`, and
 uses a paste-callback / device-code handoff so remote devices work. Cypher
 does not open a Runtime-local browser callback for those hosts.

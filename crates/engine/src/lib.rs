@@ -1091,11 +1091,23 @@ pub async fn shutdown_signal() -> std::io::Result<()> {
     {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result,
-            _ = sigterm.recv() => Ok(()),
-            _ = sighup.recv() => Ok(()),
+        // SIGHUP is an interactive hangup (SSH/TTY). `nohup` and launchd
+        // processes have no controlling terminal; treating HUP as stop made
+        // detached `cypher headless` exit as soon as the launching shell
+        // closed, which then showed `connection closed` in every Settings page.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let mut sighup =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = sigterm.recv() => Ok(()),
+                _ = sighup.recv() => Ok(()),
+            }
+        } else {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = sigterm.recv() => Ok(()),
+            }
         }
     }
     #[cfg(not(unix))]
