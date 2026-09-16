@@ -8,6 +8,16 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
+## Prepared build: 0.2.0 (9), 2026-09-16
+
+- Companion to the iOS notification-tap crash fix (`1dbe430`).
+- Signed archive/export verified: arm64, `ai.mvp-lab.cypher.ios`, version 0.2.0/build 9, production APNs, `get-task-allow=false`, strict deep signature.
+- App Store Connect build `fd9e04ac-fdba-48bc-9b6b-49d185085b4d` is **VALID**.
+- `usesNonExemptEncryption=false` submitted for this build (same TLS/PKCE-only behavior as 0.2.0 (8)).
+- Internal TestFlight state: **IN_BETA_TESTING**. External state: **READY_FOR_BETA_SUBMISSION**.
+- No public-link, tester-group, or App Store review submission was made.
+- Evidence: `/tmp/cypher-ios-distribution.xHGJaU/` and `/tmp/cypher-ios-0209-build.json`.
+
 ## Prepared build: 0.2.0 (8), 2026-09-15
 
 - Companion build for desktop **0.3.12**, source commit `4d9ff35`.
