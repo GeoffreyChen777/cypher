@@ -244,6 +244,8 @@ struct OauthLogin {
     callback: Entity<ComposerInput>,
     submitting: bool,
     error: Option<String>,
+    focus_callback: bool,
+    _events: Vec<Subscription>,
 }
 
 #[derive(Clone)]
@@ -734,14 +736,27 @@ impl ProvidersPage {
             method: methods::BEGIN_PI_PROVIDER_LOGIN,
             provider: Some(id.to_string()),
         });
+        let callback = cx.new(|cx| {
+            ComposerInput::settings_field("Paste callback URL or authorization code", false, cx)
+        });
+        let events = vec![cx.subscribe(&callback, |page: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                page.submit_oauth(cx);
+            } else if matches!(
+                event,
+                ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved
+            ) {
+                cx.notify();
+            }
+        })];
         self.oauth = Some(OauthLogin {
             ticket: ticket.clone(),
             status: None,
-            callback: cx.new(|cx| {
-                ComposerInput::settings_field("Paste callback URL or authorization code", true, cx)
-            }),
+            callback,
             submitting: false,
             error: None,
+            focus_callback: false,
+            _events: events,
         });
         let target = self.target.clone();
         let lease = target.update(cx, |target, cx| target.lock(cx));
@@ -787,6 +802,15 @@ impl ProvidersPage {
                                 && form.status.is_some()
                         {
                             return false;
+                        }
+                        let waiting = status.phase == "awaiting_callback";
+                        if waiting
+                            && form
+                                .status
+                                .as_ref()
+                                .is_none_or(|s| s.phase != "awaiting_callback")
+                        {
+                            form.focus_callback = true;
                         }
                         form.status = Some(status.clone());
                         if terminal {
@@ -1116,9 +1140,25 @@ impl ProvidersPage {
                 handles.push(form.url.focus_handle(cx));
                 handles.push(form.key.focus_handle(cx));
             }
+            if let Some(oauth) = &self.oauth {
+                if oauth
+                    .status
+                    .as_ref()
+                    .is_some_and(|s| s.phase == "awaiting_callback")
+                {
+                    handles.push(oauth.callback.focus_handle(cx));
+                }
+            }
             handles.push(self.cancel_focus.clone());
             handles.push(self.submit_focus.clone());
-            if self.busy.is_some() {
+            let steal_dialog = self.busy.is_some()
+                && self.oauth.as_ref().is_none_or(|oauth| {
+                    !oauth
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.phase == "awaiting_callback")
+                });
+            if steal_dialog {
                 self.dialog_focus.focus(window, cx);
             } else {
                 let active = handles.iter().position(|h| h.is_focused(window));
@@ -1942,6 +1982,7 @@ impl ProvidersPage {
                         ButtonStyle::Primary,
                         !form.submitting,
                     )
+                    .track_focus(&self.submit_focus)
                     .when(!form.submitting, |el| {
                         el.on_click(cx.listener(|page, _, _, cx| page.submit_oauth(cx)))
                     }),
@@ -1963,6 +2004,7 @@ impl ProvidersPage {
                             ButtonStyle::Ghost,
                             true,
                         )
+                        .track_focus(&self.cancel_focus)
                         .on_click(cx.listener(|page, _, window, cx| {
                             page.oauth = None;
                             page.busy = None;
@@ -2028,10 +2070,22 @@ impl Render for ProvidersPage {
             {
                 form.input(field).focus_handle(cx).focus(window, cx);
             }
+            if let Some(oauth) = &mut self.oauth
+                && std::mem::take(&mut oauth.focus_callback)
+            {
+                oauth.callback.focus_handle(cx).focus(window, cx);
+            }
             if std::mem::take(&mut self.confirm_focus) {
                 self.cancel_focus.focus(window, cx);
             }
-            if self.busy.is_some() {
+            let steal_dialog = self.busy.is_some()
+                && self.oauth.as_ref().is_none_or(|oauth| {
+                    !oauth
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.phase == "awaiting_callback")
+                });
+            if steal_dialog {
                 self.dialog_focus.focus(window, cx);
             }
         }
