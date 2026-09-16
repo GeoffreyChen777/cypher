@@ -965,16 +965,14 @@ struct OptionalCommentCopy {
 }
 
 fn wizard_context_card(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
-    div()
-        .mt(px(12.0))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .line_height(px(16.0))
-                .font_weight(gpui::FontWeight::NORMAL)
-                .text_color(theme.text_faint)
-                .child(SharedString::from(context.to_owned())),
-        )
+    div().mt(px(12.0)).child(
+        div()
+            .text_size(px(11.0))
+            .line_height(px(16.0))
+            .font_weight(gpui::FontWeight::NORMAL)
+            .text_color(theme.text_faint)
+            .child(SharedString::from(context.to_owned())),
+    )
 }
 
 fn split_question_context(prompt: &str) -> (String, Option<String>) {
@@ -9712,9 +9710,8 @@ mod tests {
 
         assert!(optional_comment_copy("Your answer", "plain prompt").is_none());
 
-        let (question, context) = split_question_context(
-            "Which source?\n\nContext:\nThe catalog is stale.",
-        );
+        let (question, context) =
+            split_question_context("Which source?\n\nContext:\nThe catalog is stale.");
         assert_eq!(question, "Which source?");
         assert_eq!(context.as_deref(), Some("The catalog is stale."));
         let (plain, none) = split_question_context("Just a question");

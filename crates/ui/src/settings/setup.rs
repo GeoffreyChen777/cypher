@@ -377,7 +377,7 @@ impl Render for SetupPage {
                                     .line_height(px(19.0))
                                     .text_color(theme.text_muted)
                                     .child(SharedString::from(
-                                        "Cypher uses its own Pi runtime and plugins, isolated from your system installation. Extensions can be managed later in Settings.",
+                                        "Cypher uses its own Pi runtime and plugins, isolated from your system installation.",
                                     )),
                             )
                             .children(

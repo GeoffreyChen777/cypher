@@ -405,6 +405,53 @@ fn model_from_wire(m: &Value) -> Option<Model> {
     })
 }
 
+fn catalog_providers(models: &[Model]) -> HashSet<String> {
+    models
+        .iter()
+        .filter_map(|model| {
+            model
+                .id
+                .split_once('/')
+                .map(|(provider, _)| provider.to_string())
+        })
+        .collect()
+}
+
+/// Providers that should appear in a complete catalog for this agent dir:
+/// NewAPI gateways plus pi-claude-bridge when that package is enabled.
+fn expected_model_providers(agent_dir: &std::path::Path) -> HashSet<String> {
+    let mut expected = HashSet::new();
+    let newapi = agent_dir.join("extension-settings/provider-newapi.json");
+    if let Some(value) = std::fs::read_to_string(newapi)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        && let Some(providers) = value.get("providers").and_then(Value::as_object)
+    {
+        expected.extend(providers.keys().cloned());
+    }
+    let settings = agent_dir.join("settings.json");
+    if let Some(value) = std::fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        && let Some(packages) = value.get("packages").and_then(Value::as_array)
+        && packages.iter().any(|entry| {
+            let source = match entry {
+                Value::String(source) => source.as_str(),
+                Value::Object(object) => object.get("source").and_then(Value::as_str).unwrap_or(""),
+                _ => "",
+            };
+            source.contains("pi-claude-bridge")
+        })
+    {
+        expected.insert("claude-bridge".into());
+    }
+    expected
+}
+
+fn catalog_covers(models: &[Model], expected: &HashSet<String>) -> bool {
+    !expected.is_empty() && expected.is_subset(&catalog_providers(models))
+}
+
 fn models_from_response(resp: &Value) -> Vec<Model> {
     resp.get("models")
         .and_then(Value::as_array)
@@ -443,9 +490,13 @@ struct DiscoveredModels {
     from_catalog: bool,
 }
 
-/// Pause between empty `get_available_models` snapshots. 200ms is well under
+/// Pause between `get_available_models` snapshots. 200ms is well under
 /// the catalog refresh we measured (~3s) without spinning the child.
 const MODEL_CATALOG_POLL: Duration = Duration::from_millis(200);
+/// After the first non-empty snapshot, keep polling this long without growth
+/// so an instantly-registered extension catalog cannot hide gateway providers
+/// that finish loading a moment later.
+const MODEL_CATALOG_STABLE: Duration = Duration::from_millis(2000);
 
 fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -885,12 +936,17 @@ impl PiHarness {
 
     /// Short-lived discovery run for [`Harness::models`]: `get_state` (a
     /// liveness probe — the child is up and serving) then poll
-    /// `get_available_models` until the catalog snapshot is non-empty.
+    /// `get_available_models` until configured providers appear (or the wait
+    /// expires). Size-stability is only a fallback when we do not know which
+    /// providers to expect.
     ///
     /// pi's RPC handler returns `modelRuntime.getAvailableSnapshot()` with no
     /// await; `--list-models` instead awaits `getAvailable()`. A probe that
     /// reads the snapshot immediately after spawn therefore sees `[]` even
-    /// when the CLI lists dozens of models a moment later.
+    /// when the CLI lists dozens of models a moment later. An extension such
+    /// as pi-claude-bridge can also fill the snapshot before gateway
+    /// providers finish registering — returning at first non-empty would
+    /// cache a Claude-only catalog.
     async fn discover_models(&self) -> Result<DiscoveredModels, HarnessError> {
         let (mut child, _stderr) = self
             .spawn_child(None, &RunHostContext::default(), None, None, None)
@@ -903,22 +959,61 @@ impl PiHarness {
             }
         };
         let wait = self.model_catalog_wait;
+        let expected = self
+            .agent_dir
+            .as_deref()
+            .map(expected_model_providers)
+            .unwrap_or_default();
         let discovery = async {
             let state = client.request("get_state", Map::new()).await?;
             let deadline = Instant::now() + wait;
+            let stable_for = wait.min(MODEL_CATALOG_STABLE);
+            let mut best: Vec<Model> = Vec::new();
+            let mut unchanged_since: Option<Instant> = None;
             loop {
-                let available = client.request("get_available_models", Map::new()).await?;
+                let available = match client
+                    .request("get_available_models", Map::new())
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(_err) if !best.is_empty() => {
+                        return Ok(DiscoveredModels {
+                            models: best,
+                            from_catalog: true,
+                        });
+                    }
+                    Err(err) => return Err(err),
+                };
                 let models = models_from_response(&available);
-                if !models.is_empty() {
+                let now = Instant::now();
+                if models.len() > best.len() {
+                    best = models;
+                    unchanged_since = Some(now);
+                }
+                if catalog_covers(&best, &expected) {
                     return Ok(DiscoveredModels {
-                        models,
+                        models: best,
                         from_catalog: true,
                     });
                 }
-                if Instant::now() >= deadline {
+                if expected.is_empty() && !best.is_empty() {
+                    let since = unchanged_since.get_or_insert(now);
+                    if now.duration_since(*since) >= stable_for {
+                        return Ok(DiscoveredModels {
+                            models: best,
+                            from_catalog: true,
+                        });
+                    }
+                }
+                if now >= deadline {
+                    let from_catalog = !best.is_empty();
                     return Ok(DiscoveredModels {
-                        models: models_from_responses(&available, &state),
-                        from_catalog: false,
+                        models: if from_catalog {
+                            best
+                        } else {
+                            models_from_responses(&available, &state)
+                        },
+                        from_catalog,
                     });
                 }
                 tokio::time::sleep(MODEL_CATALOG_POLL).await;
@@ -2652,6 +2747,25 @@ fn mime_for_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_model_providers_read_newapi_and_claude_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("extension-settings")).unwrap();
+        std::fs::write(
+            dir.path().join("extension-settings/provider-newapi.json"),
+            r#"{"version":1,"providers":{"mvp":{"baseUrl":"https://x"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"packages":["npm:pi-claude-bridge"]}"#,
+        )
+        .unwrap();
+        let expected = expected_model_providers(dir.path());
+        assert!(expected.contains("mvp"), "{expected:?}");
+        assert!(expected.contains("claude-bridge"), "{expected:?}");
+    }
 
     #[test]
     fn synthesized_commands_dedup_against_the_probe() {

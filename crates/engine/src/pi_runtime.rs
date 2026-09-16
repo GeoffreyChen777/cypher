@@ -380,8 +380,14 @@ impl PiRuntimeManager {
             install_result?;
         }
 
+        let previous_plugins = read_installed(&self.inner.paths).map(|runtime| runtime.plugins);
         initialize_agent(&self.inner.paths, &destination)?;
         activate(&self.inner.paths, &destination)?;
+        if let Err(err) =
+            enable_new_bundled_packages(&self.inner.paths, previous_plugins.as_ref(), &destination)
+        {
+            tracing::warn!(error = %err, "could not enable new Pi runtime packages");
+        }
         if let Err(err) = prune_stale_managed_packages(&self.inner.paths, &destination) {
             tracing::warn!(error = %err, "could not prune retired Pi runtime packages");
         }
@@ -715,6 +721,73 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
     Ok(())
 }
 
+fn enable_new_bundled_packages(
+    paths: &PiRuntimePaths,
+    previous_plugins: Option<&BTreeMap<String, String>>,
+    runtime: &Path,
+) -> Result<(), String> {
+    let settings = paths.agent_dir.join("settings.json");
+    if !settings.exists() {
+        return Ok(());
+    }
+    let next = read_installed_dir(runtime)?;
+    let previous = previous_plugins.cloned().unwrap_or_default();
+    let bytes = std::fs::read(&settings).map_err(|err| err.to_string())?;
+    let mut root = serde_json::from_slice::<Value>(&bytes).map_err(|err| err.to_string())?;
+    let packages = root
+        .as_object_mut()
+        .ok_or_else(|| "Pi settings must be a JSON object.".to_string())?
+        .entry("packages")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "Pi settings packages must be an array.".to_string())?;
+    let configured: Vec<String> = packages
+        .iter()
+        .filter_map(|entry| match entry {
+            Value::String(source) => Some(source.clone()),
+            Value::Object(object) => object
+                .get("source")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    let mut changed = false;
+    for name in next.plugins.keys() {
+        if previous.contains_key(name) {
+            continue;
+        }
+        let source = paths.current.join("npm/node_modules").join(name);
+        if configured.iter().any(|existing| {
+            Path::new(existing)
+                .file_name()
+                .is_some_and(|file| file == name.as_str())
+                || existing.ends_with(&format!("/{name}"))
+        }) {
+            continue;
+        }
+        if !source.join("package.json").is_file() {
+            continue;
+        }
+        packages.push(if name == "pi-permission-control" {
+            serde_json::json!({
+                "source": source.display().to_string(),
+                "extensions": ["-index.ts"]
+            })
+        } else {
+            Value::String(source.display().to_string())
+        });
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&root).map_err(|err| err.to_string())?;
+    let temporary = settings.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes).map_err(|err| err.to_string())?;
+    std::fs::rename(temporary, settings).map_err(|err| err.to_string())
+}
+
 fn prune_stale_managed_packages(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {
     let settings = paths.agent_dir.join("settings.json");
     let bytes = std::fs::read(&settings).map_err(|err| err.to_string())?;
@@ -876,5 +949,70 @@ mod tests {
             before,
             "data-directory aliases must not duplicate provider extensions or rewrite settings"
         );
+    }
+
+    #[test]
+    fn runtime_upgrade_enables_new_bundled_packages_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = PiRuntimePaths::for_data_dir(temp.path());
+        let search = paths.current.join("npm/node_modules/pi-web-search");
+        let bridge = paths.current.join("npm/node_modules/pi-claude-bridge");
+        std::fs::create_dir_all(&search).unwrap();
+        std::fs::create_dir_all(&bridge).unwrap();
+        std::fs::write(search.join("package.json"), r#"{"name":"pi-web-search"}"#).unwrap();
+        std::fs::write(
+            bridge.join("package.json"),
+            r#"{"name":"pi-claude-bridge"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(
+            paths.agent_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "packages": [search.display().to_string()]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            paths.current.join("runtime.json"),
+            serde_json::to_vec(&InstalledRuntime {
+                version: "2".into(),
+                pi_version: "0.85.1".into(),
+                plugins: BTreeMap::from([
+                    ("pi-web-search".into(), "1.4.0".into()),
+                    ("pi-claude-bridge".into(), "0.7.0".into()),
+                ]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let previous = BTreeMap::from([("pi-web-search".into(), "1.4.0".into())]);
+        enable_new_bundled_packages(&paths, Some(&previous), &paths.current).unwrap();
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(paths.agent_dir.join("settings.json")).unwrap())
+                .unwrap();
+        let packages = settings["packages"].as_array().unwrap();
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[1].as_str(), Some(bridge.to_str().unwrap()));
+
+        std::fs::write(
+            paths.agent_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "packages": [search.display().to_string()]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let previous = BTreeMap::from([
+            ("pi-web-search".into(), "1.4.0".into()),
+            ("pi-claude-bridge".into(), "0.7.0".into()),
+        ]);
+        enable_new_bundled_packages(&paths, Some(&previous), &paths.current).unwrap();
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(paths.agent_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["packages"].as_array().unwrap().len(), 1);
     }
 }

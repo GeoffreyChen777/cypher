@@ -5,7 +5,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use cypher_engine::pi_packages::{PiPackage, PiPackagesSnapshot};
+use cypher_engine::pi_packages::PiPackagesSnapshot;
 use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
@@ -88,11 +88,16 @@ impl HarnessesPage {
             return;
         };
         let params = ticket.params(serde_json::json!({}));
+        let status_params = ticket.params(serde_json::json!({}));
         self.packages = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::LIST_PI_PACKAGES, params)
+                .await;
+            let status = engine
+                .client()
+                .call(methods::PI_RUNTIME_STATUS, status_params)
                 .await;
             this.update(cx, |page, cx| {
                 if !page.target.read(cx).matches(&ticket) {
@@ -105,6 +110,11 @@ impl HarnessesPage {
                     },
                     Err(err) => Loadable::Error(format!("{}: {err}", ticket.label)),
                 };
+                if !page.installing_runtime {
+                    page.runtime_status = status
+                        .ok()
+                        .and_then(|value| serde_json::from_value::<PiRuntimeStatus>(value).ok());
+                }
                 cx.notify();
             })
             .ok();
@@ -113,25 +123,6 @@ impl HarnessesPage {
 
     fn install_pi(&mut self, cx: &mut Context<Self>) {
         self.mutate(methods::INSTALL_PI, serde_json::json!({}), cx);
-    }
-
-    fn install_package(&mut self, source: String, cx: &mut Context<Self>) {
-        self.mutate(
-            methods::INSTALL_PI_PACKAGE,
-            serde_json::json!({ "source": source }),
-            cx,
-        );
-    }
-
-    fn set_package_enabled(&mut self, source: String, enabled: bool, cx: &mut Context<Self>) {
-        self.mutate(
-            methods::SET_PI_PACKAGE_ENABLED,
-            serde_json::json!({
-                "source": source,
-                "enabled": enabled,
-            }),
-            cx,
-        );
     }
 
     fn mutate(&mut self, method: &'static str, params: serde_json::Value, cx: &mut Context<Self>) {
@@ -211,7 +202,6 @@ impl HarnessesPage {
                 page.busy = false;
                 page.installing_runtime = false;
                 page.progress_task = None;
-                page.runtime_status = None;
                 match result {
                     Ok(value) => {
                         if let Ok(snapshot) = serde_json::from_value::<PiPackagesSnapshot>(value) {
@@ -234,113 +224,6 @@ impl HarnessesPage {
             .hover(|s| widgets::ghost_hover(theme, s))
             .child(label.into())
     }
-
-    fn package_tile(theme: &Theme, name: &str, description: Option<&str>) -> gpui::Div {
-        match package_icon(name, description) {
-            Some(icon) => widgets::row_tile(theme, icon),
-            None => widgets::row_tile_letter(theme, package_initial(name)),
-        }
-    }
-
-    fn package_row(
-        &mut self,
-        theme: &Theme,
-        package: PiPackage,
-        index: usize,
-        official: bool,
-        pi_installed: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let source = package.source.clone();
-        let name = package.name.clone();
-        let installed = package.installed;
-        let enabled = package.enabled;
-        let blocked = self.busy || !self.target.read(cx).can_write(cx);
-        let mut title = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(widgets::row_title(theme, name.clone()));
-        if let Some(version) = package.version.clone() {
-            title = title
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted.opacity(0.45))
-                        .child(SharedString::from("·")),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("v{version}"))),
-                );
-        }
-        if official {
-            title = title.child(widgets::badge_active(theme, "cypher"));
-        }
-        let mut row = widgets::card_row(theme, index == 0)
-            .id(("pi-package-row", index))
-            .child(Self::package_tile(
-                theme,
-                &name,
-                package.description.as_deref(),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .child(title)
-                    .when_some(package.description.clone(), |el, description| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .w_full()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .truncate()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from(description)),
-                        )
-                    }),
-            );
-        if installed {
-            row = row.child(
-                widgets::toggle_switch(theme, enabled)
-                    .flex_none()
-                    .id(("pi-package-toggle", index))
-                    .when(blocked, |el| el.opacity(0.45))
-                    .when(!blocked, |el| {
-                        el.on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_package_enabled(source.clone(), !enabled, cx);
-                        }))
-                    }),
-            );
-        } else {
-            let source_for_click = package.source.clone();
-            row = row.child(
-                Self::action_button(theme, "Install")
-                    .flex_none()
-                    .id(("pi-package-install", index))
-                    .when(!pi_installed || blocked, |el| el.opacity(0.45))
-                    .when(pi_installed && !blocked, |el| {
-                        el.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.install_package(source_for_click.clone(), cx);
-                            }))
-                    }),
-            );
-        }
-        row.into_any_element()
-    }
 }
 
 impl Render for HarnessesPage {
@@ -353,7 +236,7 @@ impl Render for HarnessesPage {
                 .child(popover::skeleton_rows(
                     "agents-skeleton",
                     &theme,
-                    5,
+                    2,
                     cx.entity_id(),
                     cx,
                 ))
@@ -368,14 +251,39 @@ impl Render for HarnessesPage {
                 )
                 .into_any_element(),
             Loadable::Ready(snapshot) => {
-                let extensions: Vec<_> = snapshot
-                    .packages
-                    .iter()
-                    .filter(|p| p.recommended || p.installed)
-                    .cloned()
-                    .collect();
                 let mut content = div().flex().flex_col().gap(px(10.0));
-                if !snapshot.pi_installed {
+                if snapshot.pi_installed {
+                    let version = self
+                        .runtime_status
+                        .as_ref()
+                        .and_then(|status| status.version.clone())
+                        .unwrap_or_else(|| "Installed".into());
+                    content = content.child(
+                        widgets::section_card(&theme).child(
+                            div()
+                                .px(px(20.0))
+                                .py(px(16.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(12.0))
+                                .child(widgets::row_tile(&theme, crate::icons::TUNING))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(widgets::row_title(&theme, "Pi Runtime"))
+                                        .child(
+                                            div()
+                                                .mt(px(3.0))
+                                                .text_size(px(12.0))
+                                                .text_color(theme.text_muted)
+                                                .child(SharedString::from("Isolated coding agent")),
+                                        ),
+                                )
+                                .child(widgets::badge(&theme, version)),
+                        ),
+                    );
+                } else {
                     content = content.child(
                         widgets::section_card(&theme).p(px(16.0)).child(
                             div()
@@ -389,7 +297,7 @@ impl Render for HarnessesPage {
                                         .text_size(px(13.0))
                                         .text_color(theme.text_muted)
                                         .child(SharedString::from(
-                                            "Download Cypher's isolated Pi runtime to enable the agent and extensions.",
+                                            "Download Cypher's isolated Pi runtime to enable the agent.",
                                         )),
                                 )
                                 .child(
@@ -406,25 +314,6 @@ impl Render for HarnessesPage {
                         ),
                     );
                 }
-                if !extensions.is_empty() {
-                    let extensions_label = widgets::field_label(&theme, "Extensions")
-                        .when(snapshot.pi_installed, |el| el.mt(px(24.0)));
-                    content = content.child(extensions_label).child(
-                        widgets::section_card(&theme).children(
-                            extensions.into_iter().enumerate().map(|(ix, package)| {
-                                let official = package.recommended;
-                                self.package_row(
-                                    &theme,
-                                    package,
-                                    ix,
-                                    official,
-                                    snapshot.pi_installed,
-                                    cx,
-                                )
-                            }),
-                        ),
-                    );
-                }
                 content.into_any_element()
             }
         };
@@ -438,7 +327,7 @@ impl Render for HarnessesPage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "Manage Pi and its extensions for this device.",
+                            "Manage Cypher's isolated Pi runtime for this device.",
                         )
                         .max_w(px(560.0))
                         .line_height(px(20.0)),
@@ -458,11 +347,12 @@ impl Render for HarnessesPage {
                         ))
                     })
                     .child(body)
-                    .child(div().mt(px(32.0)).child(self.titles.clone())),
+                    .child(div().mt(px(24.0)).child(self.titles.clone())),
             )
     }
 }
 
+#[cfg(test)]
 fn package_tokens(name: &str, description: Option<&str>) -> Vec<String> {
     let unscoped = name.rsplit('/').next().unwrap_or(name);
     let mut blob = unscoped.to_ascii_lowercase();
@@ -476,6 +366,7 @@ fn package_tokens(name: &str, description: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn tokens_match(tokens: &[String], keywords: &[&str]) -> bool {
     tokens
         .iter()
@@ -484,10 +375,12 @@ fn tokens_match(tokens: &[String], keywords: &[&str]) -> bool {
 
 /// Infer a glyph from the package name/description. Unknown third-party
 /// packages return `None` so the row can fall back to an initial tile.
+#[cfg(test)]
 pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'static str> {
     use crate::icons;
     let tokens = package_tokens(name, description);
     const RULES: &[(&[&str], &str)] = &[
+        (&["claude"], icons::CLAUDE_MARK),
         (&["search", "searches", "searching"], icons::MAGNIFER),
         (&["compaction", "compacting"], icons::FOLD_VERTICAL),
         (&["mcp"], icons::COMMAND),
@@ -530,7 +423,6 @@ pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'st
             ],
             icons::BELL,
         ),
-        (&["web", "http", "browser", "fetch"], icons::GLOBAL),
         (&["file", "files", "folder", "filesystem"], icons::FOLDER),
     ];
     RULES
@@ -539,6 +431,7 @@ pub(crate) fn package_icon(name: &str, description: Option<&str>) -> Option<&'st
         .map(|(_, icon)| *icon)
 }
 
+#[cfg(test)]
 pub(crate) fn package_initial(name: &str) -> SharedString {
     let unscoped = name.rsplit('/').next().unwrap_or(name);
     let rest = unscoped
@@ -744,6 +637,13 @@ mod tests {
                 "pi-provider-newapi",
                 Some("Additional provider integration."),
                 icons::CLOUD,
+            ),
+            (
+                "pi-claude-bridge",
+                Some(
+                    "Use a Claude Code subscription as a Pi provider. Requires the Claude Code CLI.",
+                ),
+                icons::CLAUDE_MARK,
             ),
         ];
         for (name, description, icon) in cases {

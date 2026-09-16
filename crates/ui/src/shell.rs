@@ -4899,44 +4899,45 @@ impl Shell {
             } else {
                 None
             };
-            let status = match status {
-                Some(status) => status,
-                None => match Tokio::spawn(cx, async move {
-                    cypher_update::fetch_latest(&edge_url).await
-                })
-                .await
-                {
-                    Ok(Ok(manifest)) => cypher_update::UpdateStatus {
-                        current_version: cypher_update::current_version().into(),
-                        update_available: cypher_update::version_newer(
-                            &manifest.version,
-                            cypher_update::current_version(),
-                        ),
-                        latest_version: Some(manifest.version),
-                        checked_at: Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0),
-                        ),
-                        error: None,
+            let status =
+                match status {
+                    Some(status) => status,
+                    None => match Tokio::spawn(cx, async move {
+                        cypher_update::fetch_latest(&edge_url).await
+                    })
+                    .await
+                    {
+                        Ok(Ok(manifest)) => cypher_update::UpdateStatus {
+                            current_version: cypher_update::current_version().into(),
+                            update_available: cypher_update::version_newer(
+                                &manifest.version,
+                                cypher_update::current_version(),
+                            ),
+                            latest_version: Some(manifest.version),
+                            checked_at: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0),
+                            ),
+                            error: None,
+                        },
+                        Ok(Err(err)) => cypher_update::UpdateStatus {
+                            current_version: cypher_update::current_version().into(),
+                            latest_version: None,
+                            update_available: false,
+                            checked_at: None,
+                            error: Some(format!("{err:#}")),
+                        },
+                        Err(err) => cypher_update::UpdateStatus {
+                            current_version: cypher_update::current_version().into(),
+                            latest_version: None,
+                            update_available: false,
+                            checked_at: None,
+                            error: Some(err.to_string()),
+                        },
                     },
-                    Ok(Err(err)) => cypher_update::UpdateStatus {
-                        current_version: cypher_update::current_version().into(),
-                        latest_version: None,
-                        update_available: false,
-                        checked_at: None,
-                        error: Some(format!("{err:#}")),
-                    },
-                    Err(err) => cypher_update::UpdateStatus {
-                        current_version: cypher_update::current_version().into(),
-                        latest_version: None,
-                        update_available: false,
-                        checked_at: None,
-                        error: Some(err.to_string()),
-                    },
-                },
-            };
+                };
             let _ = state.update(cx, |state, cx| {
                 state.apply_update(status.clone());
                 cx.notify();
@@ -5824,22 +5825,12 @@ impl Shell {
                     .child(cypher_app_icon().size(px(72.0)).rounded(px(16.0)))
                     .child(popover::dialog_title(&theme, "Cypher"))
                     .child(popover::dialog_body(&theme, format!("Version {version}")))
-                    .child(
-                        popover::dialog_body(&theme, install)
-                            .text_color(theme.text_muted),
-                    ),
+                    .child(popover::dialog_body(&theme, install).text_color(theme.text_muted)),
             );
         if let Some(status) = status {
-            card = card.child(
-                div()
-                    .mt(px(12.0))
-                    .w_full()
-                    .child(
-                        popover::dialog_body(&theme, status).when(failed, |el| {
-                            el.text_color(theme.danger)
-                        }),
-                    ),
-            );
+            card = card.child(div().mt(px(12.0)).w_full().child(
+                popover::dialog_body(&theme, status).when(failed, |el| el.text_color(theme.danger)),
+            ));
         }
         card = card.child(
             div()

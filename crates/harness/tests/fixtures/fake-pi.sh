@@ -66,9 +66,14 @@ while read -r line; do
     if [ -f "$SESSION_DIR/.empty-models-once" ]; then
       rm -f "$SESSION_DIR/.empty-models-once"
       emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[]}}"
+    elif [ -f "$SESSION_DIR/.partial-models-once" ]; then
+      rm -f "$SESSION_DIR/.partial-models-once"
+      touch "$SESSION_DIR/.partial-models-grow"
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-opus-5\",\"name\":\"Claude Opus 5\",\"provider\":\"claude-bridge\",\"reasoning\":true,\"contextWindow\":1000000}]}}"
+    elif [ -f "$SESSION_DIR/.partial-models-grow" ]; then
+      emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-opus-5\",\"name\":\"Claude Opus 5\",\"provider\":\"claude-bridge\",\"reasoning\":true,\"contextWindow\":1000000},{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\",\"reasoning\":true,\"contextWindow\":200000},{\"id\":\"gpt-4o-mini\",\"name\":\"GPT-4o Mini\",\"provider\":\"openai\",\"reasoning\":false,\"contextWindow\":128000},{\"id\":\"kimi\",\"name\":\"Kimi\",\"provider\":\"mvp-lab\",\"reasoning\":false,\"contextWindow\":128000}]}}"
     else
       emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"get_available_models\",\"success\":true,\"data\":{\"models\":[{\"id\":\"claude-sonnet-4-20250514\",\"name\":\"Claude Sonnet 4\",\"provider\":\"anthropic\",\"reasoning\":true,\"contextWindow\":200000},{\"id\":\"gpt-4o-mini\",\"name\":\"GPT-4o Mini\",\"provider\":\"openai\",\"reasoning\":false,\"contextWindow\":128000}]}}"
-      exit 0
     fi
     ;;
 

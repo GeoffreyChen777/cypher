@@ -3,15 +3,15 @@
 use cypher_proto::{Model, TitleModelSettings};
 use cypher_rpc::methods;
 use gpui::{
-    AnyElement, Context, Entity, Render, SharedString, Subscription, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, FocusHandle, Focusable, Render, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 
 use super::{device_target::DeviceTarget, widgets};
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
     icons,
-    popover::Loadable,
+    popover::{self, Loadable},
     state::AppState,
     theme::Theme,
 };
@@ -27,6 +27,8 @@ pub struct TitlesPage {
     notice: Option<String>,
     error: Option<String>,
     task: Option<Task<()>>,
+    menu_open: bool,
+    trigger_focus: FocusHandle,
     _target_observer: Subscription,
     _search_observer: Subscription,
     embedded: bool,
@@ -65,6 +67,7 @@ impl TitlesPage {
                 page.notice = None;
                 page.error = None;
                 page.search.update(cx, |input, cx| input.set_text("", cx));
+                page.menu_open = false;
                 page.load(cx);
             }
             cx.notify();
@@ -86,6 +89,8 @@ impl TitlesPage {
             notice: None,
             error: None,
             task: None,
+            menu_open: false,
+            trigger_focus: cx.focus_handle(),
             _target_observer: observer,
             _search_observer: search_observer,
             embedded,
@@ -196,6 +201,7 @@ impl TitlesPage {
                     return;
                 }
                 page.busy = false;
+                page.menu_open = false;
                 match result {
                     Ok(value) => match serde_json::from_value(value) {
                         Ok(settings) => {
@@ -219,6 +225,35 @@ impl TitlesPage {
         cx.notify();
     }
 
+    fn selected_label(&self, settings: &TitleModelSettings) -> String {
+        match &settings.model {
+            None => "Automatic".into(),
+            Some(id) => self
+                .models
+                .ready()
+                .and_then(|models| {
+                    models
+                        .iter()
+                        .find(|model| &model.id == id)
+                        .map(|model| model.label.clone())
+                })
+                .unwrap_or_else(|| id.clone()),
+        }
+    }
+
+    fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || !self.target.read(cx).can_write(cx) {
+            return;
+        }
+        self.menu_open = !self.menu_open;
+        if self.menu_open {
+            self.search.focus_handle(cx).focus(window, cx);
+        } else {
+            self.trigger_focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn model_row(
         &self,
         model: Option<&Model>,
@@ -230,21 +265,18 @@ impl TitlesPage {
         let label = model
             .map(|model| model.label.clone())
             .unwrap_or_else(|| "Automatic".into());
-        let description = id
-            .clone()
-            .unwrap_or_else(|| "Choose a small model automatically (current behavior)".into());
         let enabled = !self.busy && self.target.read(cx).can_write(cx);
         div()
             .id(SharedString::from(format!(
                 "title-model-{}",
                 id.as_deref().unwrap_or("auto")
             )))
-            .px(px(14.0))
-            .py(px(11.0))
-            .rounded(px(10.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
             .flex()
             .items_center()
-            .gap(px(12.0))
+            .gap(px(8.0))
             .bg(if selected {
                 theme.ink(0.07)
             } else {
@@ -264,127 +296,203 @@ impl TitlesPage {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(description)),
-                    ),
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(label)),
             )
             .child(div().w(px(16.0)).when(selected, |row| {
                 row.child(
                     icons::icon(icons::CHECK)
-                        .size(px(14.0))
-                        .text_color(theme.text),
+                        .size(px(12.0))
+                        .text_color(theme.accent),
                 )
             }))
             .into_any_element()
     }
+
+    fn model_popup(
+        &mut self,
+        settings: &TitleModelSettings,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut menu = div()
+            .w(px(280.0))
+            .rounded(px(10.0))
+            .bg(theme.surface_overlay)
+            .border_1()
+            .border_color(theme.border_strong)
+            .on_mouse_down_out(cx.listener(|page, _, window, cx| {
+                page.menu_open = false;
+                page.trigger_focus.focus(window, cx);
+                cx.notify();
+            }))
+            .child(div().p(px(8.0)).child(self.search.clone()))
+            .child(div().px(px(4.0)).child(self.model_row(
+                None,
+                settings.model.is_none(),
+                theme,
+                cx,
+            )));
+        match self.models.clone() {
+            Loadable::Ready(models) => {
+                let query = self.search.read(cx).text().trim().to_lowercase();
+                let filtered: Vec<_> = models
+                    .iter()
+                    .filter(|model| {
+                        query.is_empty()
+                            || model.label.to_lowercase().contains(&query)
+                            || model.id.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if filtered.is_empty() {
+                    menu = menu.child(
+                        div()
+                            .p(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(if models.is_empty() {
+                                "No Pi models available."
+                            } else {
+                                "No matching models."
+                            }),
+                    );
+                } else {
+                    menu = menu.child(
+                        div()
+                            .id("title-model-list")
+                            .max_h(px(240.0))
+                            .overflow_y_scroll()
+                            .px(px(4.0))
+                            .pb(px(4.0))
+                            .children(filtered.into_iter().map(|model| {
+                                self.model_row(
+                                    Some(model),
+                                    settings.model.as_ref() == Some(&model.id),
+                                    theme,
+                                    cx,
+                                )
+                            })),
+                    );
+                }
+            }
+            Loadable::Error(error) => {
+                menu = menu.child(widgets::error_strip(theme, error).mt(px(0.0)))
+            }
+            _ => {
+                menu = menu.child(
+                    div()
+                        .p(px(12.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("Loading models…"),
+                )
+            }
+        }
+        popover::anchored_menu_below("title-model-popup", menu.into_any_element(), None)
+    }
 }
 
 impl Render for TitlesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let body: AnyElement = match self.settings.clone() {
+        let picker: AnyElement = match self.settings.clone() {
             Loadable::Ready(settings) => {
-                let mut card = widgets::section_card(&theme)
-                    .p(px(8.0))
-                    .child(self.model_row(None, settings.model.is_none(), &theme, cx));
-                if let Some(id) = &settings.model {
-                    card = card.child(
+                let missing = settings.model.as_ref().is_some_and(|id| {
+                    self.models
+                        .ready()
+                        .is_some_and(|models| !models.iter().any(|model| &model.id == id))
+                });
+                let popup = self
+                    .menu_open
+                    .then(|| self.model_popup(&settings, &theme, cx));
+                let trigger_label = self.selected_label(&settings);
+                widgets::section_card(&theme)
+                    .child(
                         div()
-                            .px(px(14.0))
-                            .py(px(10.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("Selected: {id}"))),
-                    );
-                }
-                card = card.child(div().px(px(6.0)).py(px(8.0)).child(self.search.clone()));
-                match self.models.clone() {
-                    Loadable::Ready(models) => {
-                        if settings
-                            .model
-                            .as_ref()
-                            .is_some_and(|id| !models.iter().any(|model| &model.id == id))
-                        {
-                            card = card.child(widgets::error_strip(&theme,
-                                "The selected model is no longer in this device's catalog. It remains selected; no other LLM will be used."));
-                        }
-                        let query = self.search.read(cx).text().trim().to_lowercase();
-                        let filtered: Vec<_> = models
-                            .iter()
-                            .filter(|model| {
-                                model.label.to_lowercase().contains(&query)
-                                    || model.id.to_lowercase().contains(&query)
-                            })
-                            .collect();
-                        if filtered.is_empty() {
-                            card = card.child(div().p(px(14.0)).text_size(px(12.0)).text_color(theme.text_muted)
-                                .child(if models.is_empty() { "No Pi models available. Configure Providers on this device, then refresh." } else { "No matching models." }));
-                        }
-                        card = card.child(
-                            div()
-                                .id("title-model-list")
-                                .max_h(px(380.0))
-                                .overflow_y_scroll()
-                                .children(filtered.into_iter().map(|model| {
-                                    self.model_row(
-                                        Some(model),
-                                        settings.model.as_ref() == Some(&model.id),
-                                        &theme,
-                                        cx,
+                            .px(px(20.0))
+                            .py(px(14.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(widgets::row_title(&theme, "Automatic titles"))
+                                    .child(
+                                        div()
+                                            .mt(px(3.0))
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from(
+                                                "Model used for new session titles",
+                                            )),
                                     )
-                                })),
-                        );
-                    }
-                    Loadable::Error(error) => {
-                        card = card.child(widgets::error_strip(&theme, error))
-                    }
-                    _ => {
-                        card = card.child(
-                            div()
-                                .p(px(14.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child("Loading models…"),
-                        )
-                    }
-                }
-                card.into_any_element()
+                                    .when(missing, |el| {
+                                        el.child(
+                                            div()
+                                                .mt(px(4.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme.warning_muted)
+                                                .child(
+                                                    "Selected model is no longer in the catalog.",
+                                                ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                widgets::ghost_action(&theme)
+                                    .id("title-model-trigger")
+                                    .aria_label("Title model")
+                                    .track_focus(&self.trigger_focus)
+                                    .relative()
+                                    .w(px(220.0))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .hover(|s| widgets::ghost_hover(&theme, s))
+                                    .on_click(cx.listener(|page, _, window, cx| {
+                                        page.toggle_menu(window, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(trigger_label)),
+                                    )
+                                    .child(
+                                        icons::icon(icons::ALT_ARROW_DOWN)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .children(popup),
+                            ),
+                    )
+                    .into_any_element()
             }
             Loadable::Error(error) => widgets::error_strip(&theme, error).into_any_element(),
-            _ => div()
-                .mt(px(24.0))
-                .text_size(px(13.0))
-                .text_color(theme.text_muted)
-                .child("Loading title settings…")
+            _ => widgets::section_card(&theme)
+                .p(px(16.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme.text_muted)
+                        .child("Loading title settings…"),
+                )
                 .into_any_element(),
         };
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(widgets::page_header(&theme, "Automatic titles", None))
-            .child(
-                widgets::ghost_action(&theme)
-                    .id("title-model-refresh")
-                    .child(if self.busy { "Saving…" } else { "Refresh" })
-                    .on_click(cx.listener(|page, _, _, cx| page.load(cx))),
-            );
         let column = widgets::page_column()
-            .when(self.embedded, |el| el.max_w(px(768.0)).px_0().pt_0())
-            .child(header)
-            .child(widgets::page_subtitle(
-                &theme,
-                "Choose the model used for new session titles.",
-            ))
+            .when(self.embedded, |el| el.max_w(px(768.0)).px_0().pt_0().pb_0())
+            .when(!self.embedded, |el| {
+                el.child(widgets::page_header(&theme, "Automatic titles", None))
+                    .child(widgets::page_subtitle(
+                        &theme,
+                        "Choose the model used for new session titles.",
+                    ))
+            })
             .children(
                 self.target
                     .read(cx)
@@ -403,11 +511,10 @@ impl Render for TitlesPage {
                     .text_color(theme.success_muted)
                     .child(SharedString::from(notice))
             }))
-            .child(body);
+            .child(picker);
         div()
             .id("title-settings-page")
-            .size_full()
-            .overflow_y_scroll()
+            .when(!self.embedded, |el| el.size_full().overflow_y_scroll())
             .child(column)
     }
 }

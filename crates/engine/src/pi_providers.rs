@@ -127,7 +127,43 @@ pub async fn request(
             .map_err(|_| "Invalid provider snapshot.".to_string())
     })
     .await;
-    result.map_err(|_| "Provider operation timed out.".to_string())?
+    let snapshot = result.map_err(|_| "Provider operation timed out.".to_string())??;
+    Ok(with_claude_cli(snapshot, paths))
+}
+
+fn with_claude_cli(
+    mut snapshot: PiProvidersSnapshot,
+    paths: &PiRuntimePaths,
+) -> PiProvidersSnapshot {
+    snapshot
+        .providers
+        .retain(|provider| provider.id != "anthropic");
+    let cli = cypher_harness::resolve_cli("claude");
+    if let Some(path) = &cli {
+        crate::pi_packages::sync_claude_bridge_executable(&paths.agent_dir, path);
+    }
+    snapshot.providers.insert(
+        0,
+        PiProviderInfo {
+            id: "claude-code".into(),
+            title: Some("Claude".into()),
+            base_url: cli
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            provider_type: "claude-cli".into(),
+            credential_saved: cli.is_some(),
+            state: if cli.is_some() {
+                "connected".into()
+            } else {
+                "signed_out".into()
+            },
+            model_count: 0,
+            checked_at: Some(chrono::Utc::now().timestamp_millis()),
+            message: None,
+        },
+    );
+    snapshot
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -181,8 +217,8 @@ impl Logins {
     }
 
     pub fn begin(&self, paths: &PiRuntimePaths, provider_id: &str) -> Result<LoginStatus, String> {
-        if provider_id != "anthropic" && provider_id != "openai-codex" {
-            return Err("Sign in is only available for Claude and ChatGPT.".into());
+        if provider_id != "openai-codex" {
+            return Err("Sign in is only available for ChatGPT.".into());
         }
         if !paths.installed() {
             return Err(
@@ -511,7 +547,9 @@ echo '{"ok":true,"data":{"providers":[]}}'
         )
         .await
         .unwrap();
-        assert!(result.providers.is_empty());
+        assert_eq!(result.providers.len(), 1);
+        assert_eq!(result.providers[0].id, "claude-code");
+        assert_eq!(result.providers[0].provider_type, "claude-cli");
         assert!(
             !serde_json::to_string(&result)
                 .unwrap()

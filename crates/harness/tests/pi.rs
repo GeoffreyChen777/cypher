@@ -355,6 +355,26 @@ async fn model_mismatch_is_a_loud_error_instead_of_silent_fallback() {
 }
 
 #[tokio::test]
+async fn models_keep_polling_after_an_extension_only_snapshot() {
+    let dir = tempfile::tempdir().expect("session dir");
+    std::fs::write(dir.path().join(".partial-models-once"), b"").expect("marker");
+    let harness = PiHarness::new(dir.path().to_path_buf())
+        .with_executable(fixture_path())
+        .with_model_catalog_wait(Duration::from_millis(400));
+    let models = harness
+        .models()
+        .await
+        .expect("model discovery after partial snapshot");
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert!(
+        ids.contains(&"claude-bridge/claude-opus-5")
+            && ids.contains(&"mvp-lab/kimi")
+            && ids.contains(&"openai/gpt-4o-mini"),
+        "{ids:?}"
+    );
+}
+
+#[tokio::test]
 async fn models_retry_when_first_catalog_snapshot_is_empty() {
     let dir = tempfile::tempdir().expect("session dir");
     std::fs::write(dir.path().join(".empty-models-once"), b"").expect("marker");

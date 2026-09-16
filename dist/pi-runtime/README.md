@@ -29,11 +29,16 @@ runtime, and the bundled NewAPI model builder. It shares the plugin's
 it does not create a parallel credential store. Legacy NewAPI plugin commands
 remain compatible. The native TUI auth bridge remains available outside RPC.
 
-Settings also expose Pi's built-in subscription OAuth for **Claude**
-(`anthropic`) and **ChatGPT** (`openai-codex`). Sign-in runs
+Settings expose **ChatGPT** (`openai-codex`) subscription OAuth. Sign-in runs
 on the selected Runtime host, stores tokens in that host's `auth.json`, and
 uses a paste-callback / device-code handoff so remote devices work. Cypher
 does not open a Runtime-local browser callback for those hosts.
+
+**Claude** in Settings → Providers is the Claude Code CLI, via the bundled
+**pi-claude-bridge** plugin (pinned from GitHub, not npm). Cypher does not ship
+`claude` and no longer uses Pi's built-in Anthropic OAuth. If the host has
+Claude Code installed, Runtime points the bridge at that executable; otherwise
+Providers prompts to install it.
 
 - Connect-and-add verifies an authenticated `/v1/models` response before saving.
 - The engine sends keys through stdin, never process arguments or chat commands.

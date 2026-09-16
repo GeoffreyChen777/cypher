@@ -67,6 +67,9 @@ pub struct PiPackagesSnapshot {
     pub pi_installed: bool,
     pub npm_available: bool,
     pub packages: Vec<PiPackage>,
+    /// Absolute path to a `claude` CLI on this runtime host, if one was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_cli: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +110,10 @@ const RECOMMENDED: &[(&str, &str)] = &[
     (
         "npm:pi-ask-user",
         "Let the model ask you questions with a choice picker.",
+    ),
+    (
+        "npm:pi-claude-bridge",
+        "Use a Claude Code subscription as a Pi provider. Requires the Claude Code CLI.",
     ),
     ("npm:pi-agent-squad", "Coordinate multiple Pi agents."),
     ("npm:pi-provider-newapi", "Additional provider integration."),
@@ -292,10 +299,56 @@ pub fn list(paths: &crate::pi_runtime::PiRuntimePaths) -> PiPackagesSnapshot {
             }
         })
         .collect();
+    let claude_code_cli = cypher_harness::resolve_cli("claude").and_then(|path| {
+        sync_claude_bridge_executable(&paths.agent_dir, &path);
+        path.to_str().map(str::to_string)
+    });
     PiPackagesSnapshot {
         pi_installed: pi(paths).is_some(),
         npm_available: npm(paths).is_some(),
         packages,
+        claude_code_cli,
+    }
+}
+
+/// Point pi-claude-bridge at the host `claude` CLI without overwriting a path
+/// the user already set, or a previous detection that still exists.
+pub(crate) fn sync_claude_bridge_executable(agent_dir: &Path, cli: &Path) {
+    let path = agent_dir.join("claude-bridge.json");
+    let mut root = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(object) = root.as_object_mut() else {
+        return;
+    };
+    let provider = object
+        .entry("provider")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(provider) = provider.as_object_mut() else {
+        return;
+    };
+    if provider
+        .get("pathToClaudeCodeExecutable")
+        .and_then(Value::as_str)
+        .is_some_and(|existing| Path::new(existing).is_file())
+    {
+        return;
+    }
+    provider.insert(
+        "pathToClaudeCodeExecutable".into(),
+        Value::String(cli.display().to_string()),
+    );
+    if std::fs::create_dir_all(agent_dir).is_err() {
+        return;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let Ok(text) = serde_json::to_string_pretty(&root) else {
+        return;
+    };
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(tmp, path);
     }
 }
 
@@ -424,5 +477,41 @@ mod tests {
             Some(package.to_str().unwrap())
         );
         assert!(package_enabled("npm:pi-web-search", &configured));
+    }
+
+    #[test]
+    fn claude_bridge_config_keeps_an_existing_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path().join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        let custom = temp.path().join("custom-claude");
+        std::fs::write(&custom, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&custom).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&custom, permissions).unwrap();
+        }
+        std::fs::write(
+            agent.join("claude-bridge.json"),
+            serde_json::json!({
+                "provider": { "pathToClaudeCodeExecutable": custom.display().to_string(), "plan": "max" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let detected = temp.path().join("other-claude");
+        std::fs::write(&detected, "#!/bin/sh\n").unwrap();
+        sync_claude_bridge_executable(&agent, &detected);
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(agent.join("claude-bridge.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            value["provider"]["pathToClaudeCodeExecutable"].as_str(),
+            Some(custom.to_str().unwrap())
+        );
+        assert_eq!(value["provider"]["plan"].as_str(), Some("max"));
     }
 }

@@ -38,8 +38,8 @@ pub fn command_intent(text: &str) -> Option<ProviderIntent> {
     }
 }
 
-/// Kinds the Add-provider dropdown can create. OAuth subscriptions (Claude,
-/// ChatGPT) are listed separately; this catalog is only custom gateways.
+/// Kinds the Add-provider dropdown can create. Claude Code and ChatGPT are
+/// listed separately; this catalog is only custom gateways.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CustomProviderKind {
     NewApi,
@@ -161,10 +161,14 @@ fn validate_form(
     errors
 }
 
+const CLAUDE_CODE_INSTALL: &str = "https://code.claude.com/docs/en/quickstart";
+
 fn status_label(provider: &PiProviderInfo) -> &'static str {
     match provider.state.as_str() {
+        "connected" if is_claude_cli(provider) => "Installed",
         "connected" => "Verified",
         "error" => "Connection failed",
+        "signed_out" if is_claude_cli(provider) => "Needs Claude Code",
         "signed_out" if provider.provider_type == "oauth" => "Needs sign-in",
         "signed_out" => "Needs API key",
         _ => "Not verified",
@@ -173,6 +177,14 @@ fn status_label(provider: &PiProviderInfo) -> &'static str {
 
 fn is_oauth(provider: &PiProviderInfo) -> bool {
     provider.provider_type == "oauth"
+}
+
+fn is_claude_cli(provider: &PiProviderInfo) -> bool {
+    provider.provider_type == "claude-cli"
+}
+
+fn is_subscription(provider: &PiProviderInfo) -> bool {
+    is_oauth(provider) || is_claude_cli(provider)
 }
 
 fn provider_title(provider: &PiProviderInfo) -> String {
@@ -508,13 +520,22 @@ impl ProvidersPage {
         match self.intent.take() {
             Some(ProviderIntent::Add) => self.edit(None, cx),
             Some(ProviderIntent::Edit(id)) => {
+                let id = if id == "anthropic" {
+                    "claude-code".to_string()
+                } else {
+                    id
+                };
                 let provider = self
                     .snapshot
                     .ready()
                     .and_then(|s| s.providers.iter().find(|p| p.id == id))
                     .cloned();
                 if let Some(provider) = provider {
-                    if is_oauth(&provider) {
+                    if is_claude_cli(&provider) {
+                        if !provider.credential_saved {
+                            cx.open_url(CLAUDE_CODE_INSTALL);
+                        }
+                    } else if is_oauth(&provider) {
                         self.start_oauth(&provider.id, cx);
                     } else {
                         self.edit(Some(provider), cx);
@@ -1082,9 +1103,7 @@ impl ProvidersPage {
                         page.add_custom_kind(kind, window, cx)
                     }))
                 })
-                .child(
-                    provider_icon(spec.icon, 16.0, theme.text_muted).mt(px(2.0)),
-                )
+                .child(provider_icon(spec.icon, 16.0, theme.text_muted).mt(px(2.0)))
                 .child(
                     div()
                         .flex_1()
@@ -1689,6 +1708,20 @@ impl ProvidersPage {
         popover::anchored_menu_below("provider-menu-layer", card.into_any_element(), closing)
     }
 
+    fn subscription_group(
+        &mut self,
+        theme: &Theme,
+        provider: PiProviderInfo,
+        index: usize,
+        first_group: bool,
+        current: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        widgets::section_card(theme)
+            .mt(px(if first_group { 12.0 } else { 24.0 }))
+            .child(self.provider_row(provider, index, true, current, theme, cx))
+    }
+
     fn provider_row(
         &mut self,
         provider: PiProviderInfo,
@@ -1783,8 +1816,9 @@ impl ProvidersPage {
             more = more.child(self.render_menu(theme, cx));
         }
         let oauth = is_oauth(&provider);
+        let claude_cli = is_claude_cli(&provider);
         let (mark, tint) = match provider.id.as_str() {
-            "anthropic" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
+            "anthropic" | "claude-code" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
             "openai-codex" => (icons::OPENAI_MARK, None),
             _ => (icons::GLOBAL, Some(theme.accent)),
         };
@@ -1821,7 +1855,7 @@ impl ProvidersPage {
                             .child(status)
                             .when_some(selected, |el, _| el.child(widgets::badge(theme, "In use"))),
                     )
-                    .when(!oauth, |el| {
+                    .when(!oauth && !claude_cli, |el| {
                         el.child(caption(theme, provider.base_url.clone()).truncate())
                     })
                     .child(
@@ -1833,27 +1867,38 @@ impl ProvidersPage {
                             .child(
                                 caption(
                                     theme,
-                                    if oauth {
-                                        "Pi subscription"
+                                    if claude_cli {
+                                        "Claude Code CLI"
+                                    } else if oauth {
+                                        "ChatGPT subscription"
                                     } else {
                                         "OpenAI-compatible"
                                     },
                                 )
                                 .text_size(px(11.5)),
                             )
-                            .child(caption(theme, "·"))
-                            .child(caption(theme, model_label).text_size(px(11.5)))
-                            .child(caption(theme, "·"))
-                            .child(
-                                caption(
-                                    theme,
-                                    checked_label(
-                                        provider.checked_at,
-                                        chrono::Utc::now().timestamp_millis(),
-                                    ),
+                            .when(claude_cli && !provider.base_url.is_empty(), |el| {
+                                el.child(caption(theme, "·")).child(
+                                    caption(theme, provider.base_url.clone())
+                                        .text_size(px(11.5))
+                                        .truncate(),
                                 )
-                                .text_size(px(11.5)),
-                            ),
+                            })
+                            .when(!claude_cli, |el| {
+                                el.child(caption(theme, "·"))
+                                    .child(caption(theme, model_label).text_size(px(11.5)))
+                                    .child(caption(theme, "·"))
+                                    .child(
+                                        caption(
+                                            theme,
+                                            checked_label(
+                                                provider.checked_at,
+                                                chrono::Utc::now().timestamp_millis(),
+                                            ),
+                                        )
+                                        .text_size(px(11.5)),
+                                    )
+                            }),
                     )
                     .when_some(provider.message, |el, message| {
                         el.child(
@@ -1873,33 +1918,50 @@ impl ProvidersPage {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .when(!(oauth && provider.credential_saved), |el| {
+                    .when(claude_cli && !provider.credential_saved, |el| {
                         el.child(
                             button(
                                 theme,
                                 ("provider-manage", index),
-                                if oauth {
-                                    "Sign in"
-                                } else if provider.credential_saved {
-                                    "Manage"
-                                } else {
-                                    "Connect"
-                                },
+                                "Install Claude Code",
                                 ButtonStyle::Secondary,
-                                !busy,
+                                true,
                             )
-                            .when(!busy, |el| {
-                                el.on_click(cx.listener(move |page, _, _, cx| {
-                                    if is_oauth(&edit) {
-                                        page.start_oauth(&edit.id, cx);
-                                    } else {
-                                        page.edit(Some(edit.clone()), cx);
-                                    }
-                                }))
-                            }),
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.open_url(CLAUDE_CODE_INSTALL);
+                            })),
                         )
                     })
-                    .child(more),
+                    .when(
+                        !(claude_cli || (oauth && provider.credential_saved)),
+                        |el| {
+                            el.child(
+                                button(
+                                    theme,
+                                    ("provider-manage", index),
+                                    if oauth {
+                                        "Sign in"
+                                    } else if provider.credential_saved {
+                                        "Manage"
+                                    } else {
+                                        "Connect"
+                                    },
+                                    ButtonStyle::Secondary,
+                                    !busy,
+                                )
+                                .when(!busy, |el| {
+                                    el.on_click(cx.listener(move |page, _, _, cx| {
+                                        if is_oauth(&edit) {
+                                            page.start_oauth(&edit.id, cx);
+                                        } else {
+                                            page.edit(Some(edit.clone()), cx);
+                                        }
+                                    }))
+                                }),
+                            )
+                        },
+                    )
+                    .when(!claude_cli, |el| el.child(more)),
             )
             .into_any_element()
     }
@@ -2124,9 +2186,9 @@ impl Render for ProvidersPage {
                     ),
             )
             .children(
-                count.is_some_and(|n| n > 0).then(|| {
-                    self.render_add_trigger(&theme, "provider-add", !blocked, true, cx)
-                }),
+                count
+                    .is_some_and(|n| n > 0)
+                    .then(|| self.render_add_trigger(&theme, "provider-add", !blocked, true, cx)),
             );
         let mut body = widgets::page_column().pt(px(36.0)).child(header).child(
             div()
@@ -2203,28 +2265,44 @@ impl Render for ProvidersPage {
         } else if count == Some(0) {
             body = body.child(self.render_empty(&theme, cx));
         } else if let Some(snapshot) = self.snapshot.ready().cloned() {
-            let oauth: Vec<_> = snapshot
+            let claude = snapshot
                 .providers
                 .iter()
-                .filter(|provider| is_oauth(provider))
-                .cloned()
-                .collect();
+                .find(|provider| is_claude_cli(provider))
+                .cloned();
+            let chatgpt = snapshot
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai-codex")
+                .cloned();
             let gateways: Vec<_> = snapshot
                 .providers
                 .iter()
-                .filter(|provider| !is_oauth(provider))
+                .filter(|provider| !is_subscription(provider))
                 .cloned()
                 .collect();
-            let has_oauth = !oauth.is_empty();
-            if has_oauth {
-                let rows = oauth
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, provider)| {
-                        self.provider_row(provider, index, index == 0, current.as_deref(), &theme, cx)
-                    })
-                    .collect::<Vec<_>>();
-                body = body.child(widgets::section_card(&theme).mt(px(12.0)).children(rows));
+            let mut first_group = true;
+            if let Some(provider) = claude {
+                body = body.child(self.subscription_group(
+                    &theme,
+                    provider,
+                    0,
+                    first_group,
+                    current.as_deref(),
+                    cx,
+                ));
+                first_group = false;
+            }
+            if let Some(provider) = chatgpt {
+                body = body.child(self.subscription_group(
+                    &theme,
+                    provider,
+                    1,
+                    first_group,
+                    current.as_deref(),
+                    cx,
+                ));
+                first_group = false;
             }
             if !gateways.is_empty() {
                 let rows = gateways
@@ -2241,11 +2319,9 @@ impl Render for ProvidersPage {
                         )
                     })
                     .collect::<Vec<_>>();
-                // Default section_card already has 24px top margin; keep the
-                // tighter 12px only when this is the first (and only) card.
                 body = body.child(
                     widgets::section_card(&theme)
-                        .when(!has_oauth, |el| el.mt(px(12.0)))
+                        .when(first_group, |el| el.mt(px(12.0)))
                         .children(rows),
                 );
             }
@@ -2442,6 +2518,10 @@ mod tests {
         assert_eq!(status_label(&p), "Needs API key");
         p.provider_type = "oauth".into();
         assert_eq!(status_label(&p), "Needs sign-in");
+        p.provider_type = "claude-cli".into();
+        assert_eq!(status_label(&p), "Needs Claude Code");
+        p.state = "connected".into();
+        assert_eq!(status_label(&p), "Installed");
         p.state = "error".into();
         assert_eq!(status_label(&p), "Connection failed");
         assert_eq!(checked_label(None, 0), "Not checked yet");

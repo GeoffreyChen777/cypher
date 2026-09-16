@@ -35,12 +35,15 @@ export function validateId(id) {
 }
 
 export const OAUTH_PROVIDERS = Object.freeze([
-  { id: "anthropic", title: "Claude", baseUrl: "https://api.anthropic.com" },
   { id: "openai-codex", title: "ChatGPT", baseUrl: "https://chatgpt.com" },
 ]);
 
 export function isOauthProvider(id) {
   return OAUTH_PROVIDERS.some((provider) => provider.id === id);
+}
+
+export function isReservedProvider(id) {
+  return id === "anthropic" || isOauthProvider(id);
 }
 
 /** Headless Cypher cannot complete a Runtime-local browser callback. */
@@ -159,8 +162,8 @@ export async function providerRequest(request) {
     const id = validateId(request.id);
     const existing = Object.hasOwn(config.providers, id) ? config.providers[id] : undefined;
     if (action === "save") {
-      if (isOauthProvider(id))
-        throw new ProviderError("Use Sign in for Claude or ChatGPT. That name is reserved.");
+      if (isReservedProvider(id))
+        throw new ProviderError("That name is reserved.");
       if (!request.edit && (existing || runtime.getProvider(id)))
         throw new ProviderError("That provider name is already in use.");
       if (request.edit && !existing) throw new ProviderError("Provider no longer exists. Reload the page.");
@@ -189,7 +192,7 @@ export async function providerRequest(request) {
         fingerprint: fingerprint(entry, await auth.read(id)),
       };
     } else {
-      if (isOauthProvider(id)) {
+      if (isOauthProvider(id) || id === "anthropic") {
         if (action === "remove")
           throw new ProviderError("Subscription providers cannot be deleted. Sign out instead.");
         if (action !== "logout" && action !== "refresh")

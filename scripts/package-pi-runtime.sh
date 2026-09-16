@@ -83,6 +83,20 @@ find "$STAGE/npm/node_modules" -type d -name '@mariozechner' -print0 |
       done
   done
 
+# Claude Agent SDK ships a native binary per OS/arch. Keep this artifact's.
+case "$PLATFORM" in
+  macos-arm64) sdk_keep='claude-agent-sdk-darwin-arm64' ;;
+  linux-x86_64) sdk_keep='claude-agent-sdk-linux-x64|claude-agent-sdk-linux-x64-musl' ;;
+  linux-aarch64) sdk_keep='claude-agent-sdk-linux-arm64|claude-agent-sdk-linux-arm64-musl' ;;
+esac
+find "$STAGE/npm/node_modules" -type d -name '@anthropic-ai' -print0 |
+  while IFS= read -r -d '' anthropic_dir; do
+    find "$anthropic_dir" -mindepth 1 -maxdepth 1 -type d -name 'claude-agent-sdk-*' |
+      while read -r path; do
+        [[ "$(basename "$path")" =~ ^($sdk_keep)$ ]] || rm -rf "$path"
+      done
+  done
+
 # Developer-only material is useful in a system Pi install but not required by
 # the managed runtime. Source maps are also omitted; production stack traces
 # still contain generated file and line locations.

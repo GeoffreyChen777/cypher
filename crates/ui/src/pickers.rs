@@ -108,7 +108,7 @@ fn model_provider_id(harness: HarnessId, model_id: &str) -> String {
 
 fn provider_display_name(id: &str) -> SharedString {
     SharedString::from(match id {
-        "anthropic" => "Claude",
+        "anthropic" | "claude-code" | "claude-bridge" => "Claude",
         "openai-codex" | "openai" => "ChatGPT",
         "mock" => "Mock",
         "other" => "Other",
@@ -118,7 +118,7 @@ fn provider_display_name(id: &str) -> SharedString {
 
 fn provider_brand_icon(id: &str) -> (&'static str, Option<gpui::Hsla>) {
     match id {
-        "anthropic" => (
+        "anthropic" | "claude-code" | "claude-bridge" => (
             crate::icons::CLAUDE_MARK,
             Some(crate::icons::claude_brand()),
         ),
@@ -1411,9 +1411,10 @@ impl Pickers {
             return Some(id);
         }
         let harness = self.effective_harness(cx)?;
-        let model_id = self.selected_model(cx).map(|m| m.id.clone()).or_else(|| {
-            self.effective_model_id(cx).map(str::to_string)
-        })?;
+        let model_id = self
+            .selected_model(cx)
+            .map(|m| m.id.clone())
+            .or_else(|| self.effective_model_id(cx).map(str::to_string))?;
         Some(model_provider_id(harness, &model_id))
     }
 
@@ -1664,13 +1665,12 @@ impl Pickers {
                     continue;
                 };
                 for model in models {
-                    let provider = provider_display_name(&model_provider_id(descriptor.id, &model.id));
+                    let provider =
+                        provider_display_name(&model_provider_id(descriptor.id, &model.id));
                     let by_label = popover::match_rank(&query, &model.label);
-                    let by_provider = popover::match_rank(
-                        &query,
-                        &format!("{} {}", provider, model.label),
-                    )
-                    .map(|rank| rank + 2);
+                    let by_provider =
+                        popover::match_rank(&query, &format!("{} {}", provider, model.label))
+                            .map(|rank| rank + 2);
                     if let Some(rank) = by_label.into_iter().chain(by_provider).min() {
                         let starred = !self.defaults.is_favorite(descriptor.id, &model.id);
                         ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
@@ -3338,7 +3338,8 @@ impl Pickers {
             );
             for (ix, provider) in provider_tabs.iter().enumerate() {
                 let provider = provider.clone();
-                let is_viewed = !favorites_view && viewed_provider.as_deref() == Some(provider.as_str());
+                let is_viewed =
+                    !favorites_view && viewed_provider.as_deref() == Some(provider.as_str());
                 let is_disabled = locked
                     && ((provider == "mock" && effective != Some(HarnessId::Mock))
                         || (provider != "mock" && effective == Some(HarnessId::Mock)));
@@ -3421,8 +3422,12 @@ impl Pickers {
                     let (icon_path, tint) = provider_brand_icon(&row.provider_id);
                     let label: SharedString = row.model.label.clone().into();
                     let subline: SharedString = match &row.model.description {
-                        Some(description) if !favorites_view && !searching => description.clone().into(),
-                        Some(description) => format!("{} · {description}", row.provider_title).into(),
+                        Some(description) if !favorites_view && !searching => {
+                            description.clone().into()
+                        }
+                        Some(description) => {
+                            format!("{} · {description}", row.provider_title).into()
+                        }
                         None => row.provider_title.clone(),
                     };
                     let harness = row.harness;

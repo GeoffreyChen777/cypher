@@ -51,7 +51,7 @@ test("provider input validation", () => {
 });
 
 test("subscription providers are reserved and pick a headless OAuth method", () => {
-  assert.equal(isOauthProvider("anthropic"), true);
+  assert.equal(isOauthProvider("anthropic"), false);
   assert.equal(isOauthProvider("openai-codex"), true);
   assert.equal(isOauthProvider("one"), false);
   assert.equal(pickOauthSelect([
