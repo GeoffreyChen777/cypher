@@ -964,6 +964,31 @@ struct OptionalCommentCopy {
     selected: String,
 }
 
+fn wizard_context_card(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
+    div()
+        .mt(px(12.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .font_weight(gpui::FontWeight::NORMAL)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(context.to_owned())),
+        )
+}
+
+fn split_question_context(prompt: &str) -> (String, Option<String>) {
+    let prompt = prompt.replace("\r\n", "\n");
+    if let Some((question, context)) = prompt.split_once("\n\nContext:\n") {
+        (
+            question.trim().to_owned(),
+            Some(context.trim().to_owned()).filter(|text| !text.is_empty()),
+        )
+    } else {
+        (prompt.trim().to_owned(), None)
+    }
+}
+
 fn optional_comment_copy(header: &str, prompt: &str) -> Option<OptionalCommentCopy> {
     if header != "Optional comment" {
         return None;
@@ -977,12 +1002,7 @@ fn optional_comment_copy(header: &str, prompt: &str) -> Option<OptionalCommentCo
         } else {
             return None;
         };
-    let (question, context) =
-        if let Some((question, context)) = before_selected.split_once("\n\nContext:\n") {
-            (question, Some(context.trim().to_owned()))
-        } else {
-            (before_selected, None)
-        };
+    let (question, context) = split_question_context(before_selected);
     let selected = selected
         .lines()
         .map(|line| line.trim().strip_prefix("- ").unwrap_or(line.trim()))
@@ -7428,11 +7448,8 @@ impl Composer {
 
     // ---- render pieces ----
 
-    /// The agent-asked-a-question panel, rendered in place of the composer:
-    /// compact card chrome, an uppercase header + counter chip, option rows
-    /// with number kbd chips, a free-text override, and a fixed footer. The
-    /// content area scrolls independently so large question payloads cannot
-    /// overflow the window.
+    /// Question card: pinned chrome (title + close), a divided scroll body
+    /// (prompt / context / options / comment), and a footer for paging.
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
@@ -7446,26 +7463,20 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let pick_only = !question.options.is_empty() && !question.multi_select;
-        let compact = pick_only;
         let optional_comment = optional_comment_copy(&question.header, &question.question);
         let can_advance = optional_comment.is_some() || wizard.page_has_pick() || !typed_empty;
-        // Pi's dialog fallback uses the full prompt as both its title and
-        // body. In that case the title row would repeat the same question,
-        // context, and selected-option text in a second style. Keep the
-        // content once; a distinct header is still useful for native
-        // questions that provide one.
         let show_header = !pick_only && question.header.trim() != question.question.trim();
+        let prompt = if question.question.is_empty() {
+            question.header.clone()
+        } else {
+            question.question.clone()
+        };
+        let chrome_title = wizard
+            .slash
+            .clone()
+            .unwrap_or_else(|| SharedString::from("Question"));
         let options = question.options.iter().enumerate().map(|(ix, label)| {
-            // Selection reads on the row only while no typed override exists
-            // (typed answers win — zeron question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
-            let (pad_x, pad_y, radius, text, kbd) = if compact {
-                // Match the density of sidebar rows rather than the large
-                // question-card treatment used for free-text questions.
-                (8.0, 4.0, 7.0, 12.0, 16.0)
-            } else {
-                (10.0, 6.0, 8.0, 12.5, 18.0)
-            };
             div()
                 .id(("wizard-option", ix))
                 .w_full()
@@ -7473,23 +7484,23 @@ impl Composer {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(if compact { 6.0 } else { 8.0 }))
-                .px(px(pad_x))
-                .py(px(pad_y))
-                .rounded(px(radius))
+                .gap(px(10.0))
+                .px(px(12.0))
+                .py(px(10.0))
+                .rounded(px(10.0))
                 .border_1()
                 .border_color(if picked {
-                    crate::theme::ink(0.16)
+                    theme.border_strong
                 } else {
-                    gpui::transparent_black()
+                    theme.border
                 })
                 .bg(if picked {
-                    crate::theme::ink(0.09)
+                    crate::theme::ink(0.08)
                 } else {
                     motion::hover_blend(
                         &format!("wizard-option-{ix}"),
-                        crate::theme::ink(0.025),
-                        crate::theme::ink(0.06),
+                        crate::theme::ink(0.02),
+                        crate::theme::ink(0.05),
                     )
                 })
                 .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
@@ -7499,39 +7510,296 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(text))
-                        .line_height(px(if compact { 16.0 } else { 17.0 }))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if picked {
-                            theme.text
-                        } else {
-                            theme.text.opacity(0.9)
-                        })
+                        .text_color(theme.text)
                         .child(SharedString::from(label.clone())),
                 )
                 .when(ix < 9, |el| {
                     el.child(
                         div()
                             .flex_none()
-                            .size(px(kbd))
+                            .size(px(20.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.0))
-                            .bg(if picked {
-                                crate::theme::ink(0.16)
-                            } else {
-                                crate::theme::ink(0.05)
-                            })
-                            .text_size(px(if compact { 10.0 } else { 11.0 }))
+                            .rounded(px(6.0))
+                            .bg(crate::theme::ink(if picked { 0.14 } else { 0.05 }))
+                            .text_size(px(11.0))
                             .text_color(if picked {
                                 theme.text
                             } else {
-                                theme.text_muted.opacity(0.6)
+                                theme.text_muted.opacity(0.65)
                             })
                             .child(SharedString::from(format!("{}", ix + 1))),
                     )
                 })
+        });
+
+        let header = div()
+            .flex_none()
+            .h(px(44.0))
+            .px(px(12.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                crate::icons::icon(if wizard.slash.is_some() {
+                    crate::icons::TUNING
+                } else {
+                    crate::icons::CHAT_ROUND_LINE
+                })
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(chrome_title),
+            )
+            .when(wizard.questions.len() > 1, |el| {
+                el.child(
+                    div()
+                        .h(px(22.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .bg(crate::theme::ink(0.06))
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(counter)),
+                )
+            })
+            .child(
+                div()
+                    .id("wizard-cancel")
+                    .flex_none()
+                    .size(px(28.0))
+                    .rounded(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.08)))
+                    .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+                    .child(
+                        crate::icons::icon(crate::icons::CLOSE)
+                            .size(px(13.0))
+                            .text_color(theme.text_muted),
+                    ),
+            );
+
+        let mut body = div()
+            .id("wizard-scroll")
+            .min_w_0()
+            .max_h(px(WIZARD_CONTENT_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .px(px(16.0))
+            .py(px(14.0))
+            .flex()
+            .flex_col();
+        if show_header {
+            body = body.child(
+                div()
+                    .mb(px(8.0))
+                    .text_size(px(10.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(SharedString::from(crate::popover::tracked_upper(
+                        &question.header,
+                    ))),
+            );
+        }
+        if let Some(copy) = optional_comment.clone() {
+            body = body.child(
+                div()
+                    .text_size(px(15.0))
+                    .line_height(px(21.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(copy.question)),
+            );
+            if let Some(context) = copy.context {
+                body = body.child(wizard_context_card(&context, &theme));
+            }
+            body = body.child(
+                div()
+                    .mt(px(12.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.accent.opacity(0.22))
+                    .bg(theme.surface_raised)
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.accent)
+                            .child(SharedString::from(copy.selected_label.to_uppercase())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(18.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(copy.selected)),
+                    ),
+            );
+        } else {
+            let (question_text, context) = split_question_context(&prompt);
+            body = body.child(
+                div()
+                    .text_size(px(15.0))
+                    .line_height(px(21.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(question_text)),
+            );
+            if let Some(context) = context {
+                body = body.child(wizard_context_card(&context, &theme));
+            }
+        }
+        if question.multi_select {
+            body = body.child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("Select one or more options.")),
+            );
+        }
+        if !question.options.is_empty() {
+            body = body.child(
+                div()
+                    .mt(px(14.0))
+                    .pt(px(14.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .children(options),
+            );
+        }
+        if optional_comment.is_some() {
+            body = body.child(
+                div()
+                    .mt(px(14.0))
+                    .pt(px(14.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from("Add context — optional")),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_h(px(56.0))
+                            .rounded(px(10.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.surface_card)
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .child(self.input.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(
+                                "Leave blank to submit the selection without a comment.",
+                            )),
+                    ),
+            );
+        } else if !pick_only {
+            body = body.child(
+                div()
+                    .mt(px(14.0))
+                    .pt(px(14.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .w_full()
+                            .min_h(px(56.0))
+                            .rounded(px(10.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.surface_card)
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .child(self.input.clone()),
+                    ),
+            );
+        }
+
+        let show_footer = !pick_only || page > 0 || wizard.questions.len() > 1;
+        let footer = show_footer.then(|| {
+            div()
+                .flex_none()
+                .h(px(52.0))
+                .px(px(12.0))
+                .border_t_1()
+                .border_color(theme.border)
+                .flex()
+                .flex_row()
+                .justify_between()
+                .items_center()
+                .child(if optional_comment.is_some() {
+                    crate::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
+                        .id("wizard-comment-skip")
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+                        .into_any_element()
+                } else if page > 0 {
+                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                        .id("wizard-back")
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                        .into_any_element()
+                } else {
+                    gpui::Empty.into_any_element()
+                })
+                .child(
+                    crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                        .id("wizard-submit")
+                        .px(px(14.0))
+                        .when(!can_advance, |el| el.opacity(0.4))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let ready = this.wizard.as_ref().is_some_and(|wizard| {
+                                let typed = !this.input.read(cx).is_empty();
+                                let optional = wizard.current().is_some_and(|q| {
+                                    optional_comment_copy(&q.header, &q.question).is_some()
+                                });
+                                optional || wizard.page_has_pick() || typed
+                            });
+                            if ready {
+                                this.wizard_advance(cx);
+                            }
+                        })),
+                )
         });
 
         div()
@@ -7540,9 +7808,6 @@ impl Composer {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
-            // This is an opaque foreground surface. Occlude pointer hit-testing
-            // and always consume wheel bubbling so scrolling its option list
-            // never moves the transcript behind it.
             .occlude()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .w_full()
@@ -7550,324 +7815,16 @@ impl Composer {
             .max_w(px(560.0))
             .mx_auto()
             .overflow_hidden()
-            .rounded(px(12.0))
+            .rounded(px(14.0))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.surface_dialog)
             .shadow_lg()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("wizard-scroll")
-                    .min_w_0()
-                    .max_h(px(WIZARD_CONTENT_MAX_HEIGHT))
-                    .overflow_y_scroll()
-                    .px(px(if pick_only { 10.0 } else { 12.0 }))
-                    .pt(px(if pick_only { 10.0 } else { 12.0 }))
-                    .when(pick_only, |el| el.pb(px(10.0)))
-                    .flex()
-                    .flex_col()
-                    .when(pick_only, |el| {
-                        let title = if question.question.is_empty() {
-                            question.header.clone()
-                        } else {
-                            question.question.clone()
-                        };
-                        el.when_some(wizard.slash.clone(), |el, cmd| {
-                            el.child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .child(
-                                        crate::icons::icon(crate::icons::TUNING)
-                                            .size(px(12.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text_muted)
-                                            .child(cmd),
-                                    ),
-                            )
-                        })
-                        .child(
-                            div()
-                                .when(wizard.slash.is_some(), |el| el.mt(px(4.0)))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(12.5))
-                                        .line_height(px(17.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(title)),
-                                )
-                                .when(wizard.questions.len() > 1, |el| {
-                                    el.child(
-                                        div()
-                                            .h(px(18.0))
-                                            .px(px(6.0))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .bg(crate::theme::ink(0.06))
-                                            .text_size(px(10.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text_muted.opacity(0.6))
-                                            .child(SharedString::from(counter.clone())),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .id("wizard-cancel")
-                                        .flex_none()
-                                        .size(px(20.0))
-                                        .rounded(px(6.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(crate::theme::ink(0.06)))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.wizard_cancel(cx)),
-                                        )
-                                        .child(
-                                            crate::icons::icon(crate::icons::CLOSE)
-                                                .size(px(12.0))
-                                                .text_color(theme.text_muted),
-                                        ),
-                                ),
-                        )
-                    })
-                    .when(show_header, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(10.0))
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(crate::popover::tracked_upper(
-                                            &question.header,
-                                        ))),
-                                )
-                                .when(wizard.questions.len() > 1, |el| {
-                                    el.child(
-                                        div()
-                                            .h(px(20.0))
-                                            .px(px(6.0))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(6.0))
-                                            .bg(crate::theme::ink(0.06))
-                                            .text_size(px(10.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text_muted.opacity(0.6))
-                                            .child(SharedString::from(counter)),
-                                    )
-                                }),
-                        )
-                    })
-                    .when_some(optional_comment.clone(), |el, copy| {
-                        el.child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(px(14.0))
-                                .line_height(px(19.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(SharedString::from(copy.question)),
-                        )
-                        .when_some(copy.context, |el, context| {
-                            el.child(
-                                div()
-                                    .mt(px(12.0))
-                                    .rounded(px(8.0))
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.surface_card)
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(9.5))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.text_faint)
-                                            .child(SharedString::from("CONTEXT")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .line_height(px(17.0))
-                                            .text_color(theme.text_muted)
-                                            .child(SharedString::from(context)),
-                                    ),
-                            )
-                        })
-                        .child(
-                            div()
-                                .mt(px(8.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.accent.opacity(0.22))
-                                .bg(theme.surface_raised)
-                                .px(px(10.0))
-                                .py(px(8.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .text_size(px(9.5))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.accent)
-                                        .child(SharedString::from(
-                                            copy.selected_label.to_uppercase(),
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .line_height(px(17.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(copy.selected)),
-                                ),
-                        )
-                    })
-                    .when(!pick_only && optional_comment.is_none(), |el| {
-                        el.child(
-                            div()
-                                .mt(px(if show_header { 6.0 } else { 0.0 }))
-                                .text_size(px(14.0))
-                                .line_height(px(19.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from(question.question.clone())),
-                        )
-                    })
-                    .when(question.multi_select, |el| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .mt(px(if compact { 6.0 } else { 12.0 }))
-                            .flex()
-                            .flex_col()
-                            .gap(px(if compact { 1.0 } else { 4.0 }))
-                            .children(options),
-                    )
-                    .when(optional_comment.is_some(), |el| {
-                        el.child(
-                            div()
-                                .mt(px(12.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(5.0))
-                                .child(
-                                    div()
-                                        .text_size(px(9.5))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from("ADD CONTEXT — OPTIONAL")),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_h(px(54.0))
-                                        .rounded(px(8.0))
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .bg(theme.surface_card)
-                                        .px(px(10.0))
-                                        .py(px(8.0))
-                                        .child(self.input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from(
-                                            "Leave blank to submit the selection without a comment.",
-                                        )),
-                                ),
-                        )
-                    })
-                    .when(!pick_only && optional_comment.is_none(), |el| {
-                        el.child(
-                            div()
-                                .mt(px(12.0))
-                                .border_t_1()
-                                .border_color(crate::theme::hairline(0.06))
-                                .pt(px(12.0))
-                                .pb(px(4.0))
-                                .px(px(4.0))
-                                .child(self.input.clone()),
-                        )
-                    }),
-            )
-            .when(!pick_only, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_between()
-                        .items_center()
-                        .px(px(12.0))
-                        .pb(px(12.0))
-                        .pt(px(4.0))
-                        .child(if optional_comment.is_some() {
-                            crate::popover::btn_ghost(
-                                &theme,
-                                "Skip",
-                                "wizard-comment-skip",
-                            )
-                            .id("wizard-comment-skip")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
-                            .into_any_element()
-                        } else if page > 0 {
-                            crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                                .id("wizard-back")
-                                .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                                .into_any_element()
-                        } else {
-                            gpui::Empty.into_any_element()
-                        })
-                        .child(
-                            crate::popover::btn_primary(
-                                &theme,
-                                if last { "Submit" } else { "Next" },
-                            )
-                            .id("wizard-submit")
-                            .px(px(12.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                        ),
-                )
-            })
+            .child(header)
+            .child(body)
+            .children(footer)
             .into_any_element()
     }
 
@@ -9754,6 +9711,15 @@ mod tests {
         assert_eq!(multiple.selected, "Unit\nE2E");
 
         assert!(optional_comment_copy("Your answer", "plain prompt").is_none());
+
+        let (question, context) = split_question_context(
+            "Which source?\n\nContext:\nThe catalog is stale.",
+        );
+        assert_eq!(question, "Which source?");
+        assert_eq!(context.as_deref(), Some("The catalog is stale."));
+        let (plain, none) = split_question_context("Just a question");
+        assert_eq!(plain, "Just a question");
+        assert_eq!(none, None);
     }
 
     #[test]

@@ -23,6 +23,7 @@ struct QuestionPanel: View {
             let presentation = QuestionPresentation(question)
             VStack(spacing: 0) {
                 header(presentation)
+                Rectangle().fill(Theme.border).frame(height: 1)
                 ScrollView {
                     content(question, presentation: presentation)
                         .padding(.horizontal, 16)
@@ -34,7 +35,7 @@ struct QuestionPanel: View {
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .scrollDismissesKeyboard(.interactively)
-                .frame(height: min(contentHeight, max(64, maximumHeight - 109)))
+                .frame(height: min(contentHeight, max(64, maximumHeight - 113)))
                 .id(question.id)
                 .accessibilityIdentifier("question-content")
                 Rectangle().fill(Theme.border).frame(height: 1)
@@ -48,24 +49,27 @@ struct QuestionPanel: View {
     }
 
     private func header(_ presentation: QuestionPresentation) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.system(size: 12))
+                .font(.system(size: 13, weight: .medium))
                 .accessibilityHidden(true)
             Text(presentation.header)
-                .font(Theme.sans(11, weight: .medium))
+                .font(Theme.sans(13, weight: .medium))
                 .lineLimit(1)
             Spacer(minLength: 8)
             if questions.count > 1 {
                 Text("\(page + 1) of \(questions.count)")
-                    .font(Theme.mono(10))
+                    .font(Theme.mono(11))
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .background(Theme.elementHover, in: Capsule())
                     .fixedSize()
             }
             if let stop {
                 Button(action: stop) {
-                    Image(systemName: "stop.circle")
-                        .font(.system(size: 16))
-                        .frame(width: 44, height: 44)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -74,14 +78,14 @@ struct QuestionPanel: View {
             }
         }
         .foregroundStyle(Theme.textMuted)
-        .frame(height: 44)
+        .frame(height: 48)
         .padding(.leading, 16)
-        .padding(.trailing, stop == nil ? 16 : 4)
+        .padding(.trailing, 12)
     }
 
     private func content(_ question: UserInputQuestion,
                          presentation: QuestionPresentation) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             Text(presentation.prompt)
                 .font(Theme.sans(16, weight: .medium))
                 .foregroundStyle(Theme.text)
