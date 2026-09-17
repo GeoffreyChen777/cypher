@@ -34,8 +34,24 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showNotifications = false
+    /// The in-flight notification navigation (see `scheduleNotificationNavigation`).
+    @State private var notificationTask: Task<Void, Never>?
+    /// When `path` last changed — a push/pop is likely still animating for a
+    /// moment afterwards, and a notification route must not land on top of it.
+    @State private var lastPathChangeAt: TimeInterval = 0
+    /// The stack's UINavigationController, for `transitionCoordinator`: the
+    /// only honest signal that a push/pop (incl. an interactive back swipe)
+    /// is still in flight — SwiftUI reports a UIKit-driven pop only once it
+    /// has finished.
+    @State private var navigation = NavigationProbe()
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeProjectFilter") private var spaceFilter: String = ""
+
+    /// Registry rows a pending notification may be waiting on: the chat and
+    /// its project id, so a late-hydrating row re-triggers the attempt.
+    private var chatsKey: String {
+        model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined()
+    }
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
@@ -53,6 +69,7 @@ struct HomeView: View {
                 }
             }
             .listStyle(.plain)
+            .background(NavigationProbeView(probe: navigation))
             .environment(\.defaultMinListRowHeight, 10)
             .contentMargins(.top, 2, for: .scrollContent)
             .scrollContentBackground(.hidden)
@@ -118,26 +135,22 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
             .onChange(of: path) { _, route in
+                lastPathChangeAt = Date().timeIntervalSinceReferenceDate
                 if case .chat(let id) = route.last { model.notifications.viewing(id) }
                 else { model.notifications.viewing(nil) }
             }
-            .task(id: "\(model.notifications.pendingNavigation?.id ?? "")/\(model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined())") {
-                guard let pending = model.notifications.pendingNavigation else { return }
-                guard pending.scope == model.notifications.scope else {
-                    model.notifications.pendingNavigation = nil
-                    return
-                }
-                if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
-                    let route = SessionNavigation.openingNotification(chat.id, in: path)
-                    if route != path { path = route }
-                    model.notifications.viewing(chat.id)
-                    model.notifications.pendingNavigation = nil
-                } else {
-                    try? await Task.sleep(for: .seconds(12))
-                    guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
-                    model.notifications.pendingNavigation = nil
-                    model.notifications.navigationError = "This session isn't available in the current workspace."
-                }
+            // Notification taps navigate from `onChange`, NOT a `.task` on
+            // this root: `.task` is cancelled while a pushed session covers
+            // Home, so a tap taken inside a session was swallowed — and the
+            // stale request then fired on the way back, replacing the path
+            // in the middle of the pop transition (the reported crash).
+            // `onChange` stays live while covered, so the tap opens the
+            // session immediately, whichever screen the app was on.
+            .onChange(of: model.notifications.pendingNavigation?.id, initial: true) { _, _ in
+                scheduleNotificationNavigation()
+            }
+            .onChange(of: chatsKey) { _, _ in
+                scheduleNotificationNavigation()
             }
             .alert("Notification", isPresented: Binding(
                 get: { model.notifications.navigationError != nil },
@@ -169,6 +182,57 @@ struct HomeView: View {
             }
         }
     }
+
+    // MARK: Notification navigation
+
+    /// Resolve the pending notification into a route, once the chat row is
+    /// known (`chatsKey` re-triggers on late hydration; 12s later it gives
+    /// up with a notice). The request is consumed before `path` changes so
+    /// nothing can replay it, and the assignment waits out a push/pop that
+    /// is still animating — a path replaced mid-transition is undefined.
+    private func scheduleNotificationNavigation() {
+        guard let pending = model.notifications.pendingNavigation else { return }
+        notificationTask?.cancel()
+        notificationTask = Task { @MainActor in
+            let since = Date().timeIntervalSinceReferenceDate - lastPathChangeAt
+            if since < Self.transitionGrace {
+                try? await Task.sleep(for: .seconds(Self.transitionGrace - since))
+            } else {
+                await Task.yield()
+            }
+            // A user-driven pop (Back, or the edge swipe) is invisible to
+            // SwiftUI until it ends; never replace the path underneath it.
+            var waited: TimeInterval = 0
+            while navigation.transitioning, waited < 3 {
+                try? await Task.sleep(for: .milliseconds(50))
+                waited += 0.05
+            }
+            if waited > 0 {
+                // Let SwiftUI fold the finished UIKit transition into `path`
+                // before the route is computed from it.
+                try? await Task.sleep(for: .milliseconds(80))
+            }
+            guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
+            guard pending.scope == model.notifications.scope else {
+                model.notifications.pendingNavigation = nil
+                return
+            }
+            if let chat = model.chat(id: pending.chatId), chat.spaceId == pending.projectId {
+                let route = SessionNavigation.openingNotification(chat.id, in: path)
+                model.notifications.pendingNavigation = nil
+                if route != path { path = route }
+                model.notifications.viewing(chat.id)
+            } else {
+                try? await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled, model.notifications.pendingNavigation?.id == pending.id else { return }
+                model.notifications.pendingNavigation = nil
+                model.notifications.navigationError = "This session isn't available in the current workspace."
+            }
+        }
+    }
+
+    /// Longer than a NavigationStack push/pop animation (~0.35s).
+    private static let transitionGrace: TimeInterval = 0.6
 
     // MARK: Space dropdown
 
@@ -516,4 +580,55 @@ func relativeTime(_ ms: Int64) -> String {
     if delta < 3600 { return "\(delta / 60)m" }
     if delta < 86_400 { return "\(delta / 3600)h" }
     return "\(delta / 86_400)d"
+}
+
+/// Weak handle onto the NavigationStack's UIKit controller (see
+/// `HomeView.navigation`).
+@MainActor
+final class NavigationProbe {
+    weak var controller: UINavigationController?
+    var transitioning: Bool { controller?.transitionCoordinator != nil }
+}
+
+/// Zero-size view inside the stack's root whose responder chain climbs
+/// through the hosting controller to the stack's UINavigationController.
+struct NavigationProbeView: UIViewRepresentable {
+    let probe: NavigationProbe
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.probe = probe
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.probe = probe
+        view.capture()
+    }
+
+    final class ProbeView: UIView {
+        var probe: NavigationProbe?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            capture()
+        }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            capture()
+        }
+        func capture() {
+            guard let probe, probe.controller == nil else { return }
+            var responder: UIResponder? = next
+            while let current = responder {
+                if let nav = current as? UINavigationController { probe.controller = nav; return }
+                if let controller = current as? UIViewController, let nav = controller.navigationController {
+                    probe.controller = nav
+                    return
+                }
+                responder = current.next
+            }
+        }
+    }
 }

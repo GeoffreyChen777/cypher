@@ -49,7 +49,9 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   Empty focus and the first typed character expand the model/thinking toolbar;
   picker/search keyboards cannot expand it. Editor generations reject late
   focus/text callbacks after a send; marked IME text is preserved during view
-  updates, and long drafts scroll within seven lines. Regression checks cover
+  updates, and long drafts scroll within seven lines, clipped to the editor,
+  with the expanded card's glass tinted so transcript rows underneath cannot
+  read through the controls. Regression checks cover
   the session's safeAreaBar and real taps in a Release simulator build; these
   are not a substitute for confirming the fix on the affected physical phone.
 - **Transcript rubber-banding:** automatic pin corrections yield during
@@ -111,7 +113,11 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   in this account; opening a session clears its contribution, Home does not
   clear everything, and logout clears the local icon. Registration, revocation,
   read receipts, badge revisions and notification taps are account-scoped.
-  Real-device APNs delivery is a separate rollout/acceptance step. See
+  A tap opens its session from any screen: the request is consumed the
+  moment it resolves (never replayed later), and it waits out a push/pop
+  that is still animating, including an interactive back swipe, before the
+  navigation path changes. Real-device APNs delivery is a separate
+  rollout/acceptance step. See
   [`docs/notifications.md`](../../docs/notifications.md) for rollout boundaries.
 
 ### Validation boundary

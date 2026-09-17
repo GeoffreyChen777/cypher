@@ -133,6 +133,10 @@ struct ComposerShell<Chips: View>: View {
                 .padding(.trailing, expanded ? 4 : 0)
                 .padding(.vertical, expanded ? 4 : 5)
                 .frame(minHeight: expanded ? 64 : nil, alignment: .topLeading)
+                // The native editor caps at seven lines and scrolls inside;
+                // nothing it draws may reach the control row below it, even
+                // mid-morph while the card's layout animates.
+                .clipped()
             if expanded {
                 HStack(spacing: 8) {
                     if onAttach != nil {
@@ -159,7 +163,11 @@ struct ComposerShell<Chips: View>: View {
         .padding(.horizontal, expanded ? 12 : 5)
         .padding(.vertical, expanded ? 12 : 5)
         .background(whiteAlpha(0.04), in: surfaceShape)
-        .glassEffect(.regular.interactive(), in: surfaceShape)
+        // A tall expanded card sits over transcript rows; tint its glass so
+        // the text underneath can't read through the editor and control row
+        // (the collapsed pill stays plain glass).
+        .glassEffect(expanded ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
+                              : .regular.interactive(), in: surfaceShape)
         .overlay(surfaceShape.strokeBorder(whiteAlpha(0.05), lineWidth: 1))
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
