@@ -22,10 +22,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-        D10000000000000000000001 /* Development.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Development.xcconfig; sourceTree = SOURCE_ROOT; };
-		A3000000000000000000PR01 /* CypherUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CypherUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000PR01 /* Cypher.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cypher.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* CypherTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CypherTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A3000000000000000000PR01 /* CypherUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CypherUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10000000000000000000001 /* Development.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Development.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -39,7 +39,6 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		A3000000000000000000G001 /* CypherUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = CypherUITests; sourceTree = "<group>"; };
 		A1000000000000000000G001 /* Cypher */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -51,6 +50,11 @@
 		A2000000000000000000G001 /* CypherTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = CypherTests;
+			sourceTree = "<group>";
+		};
+		A3000000000000000000G001 /* CypherUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CypherUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,6 +79,7 @@
 				A2000000000000000000G001 /* CypherTests */,
 				A3000000000000000000G001 /* CypherUITests */,
 				A1000000000000000000G002 /* Products */,
+				C3E038F1305A91BB000EF161 /* Recovered References */,
 			);
 			sourceTree = "<group>";
 		};
@@ -88,21 +93,17 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		C3E038F1305A91BB000EF161 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				D10000000000000000000001 /* Development.xcconfig */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A3000000000000000000T001 /* CypherUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = A3000000000000000000C001;
-			buildPhases = (A3000000000000000000S001);
-			buildRules = ();
-			dependencies = (A2000000000000000000D001);
-			fileSystemSynchronizedGroups = (A3000000000000000000G001);
-			name = CypherUITests;
-			productName = CypherUITests;
-			productReference = A3000000000000000000PR01;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 		A1000000000000000000T001 /* Cypher */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A1000000000000000000C001 /* Build configuration list for PBXNativeTarget "Cypher" */;
@@ -147,6 +148,25 @@
 			productName = CypherTests;
 			productReference = A2000000000000000000PR01 /* CypherTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A3000000000000000000T001 /* CypherUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A3000000000000000000C001 /* Build configuration list for PBXNativeTarget "CypherUITests" */;
+			buildPhases = (
+				A3000000000000000000S001 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A2000000000000000000D001 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A3000000000000000000G001 /* CypherUITests */,
+			);
+			name = CypherUITests;
+			productName = CypherUITests;
+			productReference = A3000000000000000000PR01 /* CypherUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
 
@@ -199,7 +219,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A3000000000000000000S001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A1000000000000000000S001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -208,6 +227,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A2000000000000000000S001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A3000000000000000000S001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -225,30 +251,6 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		A3000000000000000000BC01 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.uitests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Cypher;
-			};
-			name = Debug;
-		};
-		A3000000000000000000BC02 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				GENERATE_INFOPLIST_FILE = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.uitests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Cypher;
-			};
-			name = Release;
-		};
 		A1000000000000000000BC01 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -304,13 +306,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Cypher/Cypher.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
 				CYPHER_APNS_ENVIRONMENT = development;
-                CYPHER_DISPLAY_NAME = Cypher;
-                CYPHER_BUILD_ENVIRONMENT = production;
-                CYPHER_URL_SCHEME = cypher;
-				CURRENT_PROJECT_VERSION = 9;
+				CYPHER_BUILD_ENVIRONMENT = production;
+				CYPHER_DISPLAY_NAME = Cypher;
+				CYPHER_URL_SCHEME = cypher;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -335,13 +337,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Cypher/Cypher.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
 				CYPHER_APNS_ENVIRONMENT = production;
-                CYPHER_DISPLAY_NAME = Cypher;
-                CYPHER_BUILD_ENVIRONMENT = production;
-                CYPHER_URL_SCHEME = cypher;
-				CURRENT_PROJECT_VERSION = 9;
+				CYPHER_BUILD_ENVIRONMENT = production;
+				CYPHER_DISPLAY_NAME = Cypher;
+				CYPHER_URL_SCHEME = cypher;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -366,7 +368,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 0.2.0;
@@ -385,7 +387,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 999875MHT4;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 0.2.0;
@@ -399,50 +401,84 @@
 			};
 			name = Release;
 		};
+		A3000000000000000000BC01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.uitests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Cypher;
+			};
+			name = Debug;
+		};
+		A3000000000000000000BC02 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.uitests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Cypher;
+			};
+			name = Release;
+		};
+		C3E039D4305A91BB000EF161 /* Development */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COPY_PHASE_STRIP = NO;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				PRODUCT_NAME = CypherUITests;
+			};
+			name = Development;
+		};
+		D10000000000000000000002 /* Development */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				ENABLE_TESTABILITY = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Development;
+		};
+		D10000000000000000000003 /* Development */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = D10000000000000000000001 /* Development.xcconfig */;
+			buildSettings = {
+			};
+			name = Development;
+		};
+		D10000000000000000000004 /* Development */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 999875MHT4;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.dev.tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = CYPHER_DEVELOPMENT;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cypher.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Cypher";
+			};
+			name = Development;
+		};
 /* End XCBuildConfiguration section */
-        D10000000000000000000002 /* Development project */ = {
-            isa = XCBuildConfiguration;
-            buildSettings = {
-                SDKROOT = iphoneos;
-                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-                CLANG_ENABLE_MODULES = YES;
-                CLANG_ENABLE_OBJC_ARC = YES;
-                SWIFT_OPTIMIZATION_LEVEL = "-O";
-                ENABLE_TESTABILITY = YES;
-                ONLY_ACTIVE_ARCH = YES;
-            };
-            name = Development;
-        };
-        D10000000000000000000003 /* Development app */ = {
-            isa = XCBuildConfiguration;
-            baseConfigurationReference = D10000000000000000000001;
-            buildSettings = {};
-            name = Development;
-        };
-        D10000000000000000000004 /* Development tests */ = {
-            isa = XCBuildConfiguration;
-            buildSettings = {
-                BUNDLE_LOADER = "$(TEST_HOST)";
-                CODE_SIGN_STYLE = Automatic;
-                DEVELOPMENT_TEAM = 999875MHT4;
-                GENERATE_INFOPLIST_FILE = YES;
-                PRODUCT_BUNDLE_IDENTIFIER = "ai.mvp-lab.cypher.ios.dev.tests";
-                PRODUCT_NAME = "$(TARGET_NAME)";
-                SWIFT_VERSION = 5.0;
-                SWIFT_ACTIVE_COMPILATION_CONDITIONS = CYPHER_DEVELOPMENT;
-                TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Cypher.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Cypher";
-            };
-            name = Development;
-        };
 
 /* Begin XCConfigurationList section */
-		A3000000000000000000C001 = {isa = XCConfigurationList; buildConfigurations = (A3000000000000000000BC01, A3000000000000000000BC02); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 		A1000000000000000000C000 /* Build configuration list for PBXProject "Cypher" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1000000000000000000BC01 /* Debug */,
 				A1000000000000000000BC02 /* Release */,
-                D10000000000000000000002 /* Development */,
+				D10000000000000000000002 /* Development */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -452,7 +488,7 @@
 			buildConfigurations = (
 				A1000000000000000000BC03 /* Debug */,
 				A1000000000000000000BC04 /* Release */,
-                D10000000000000000000003 /* Development */,
+				D10000000000000000000003 /* Development */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -462,10 +498,20 @@
 			buildConfigurations = (
 				A2000000000000000000BC03 /* Debug */,
 				A2000000000000000000BC04 /* Release */,
-                D10000000000000000000004 /* Development */,
+				D10000000000000000000004 /* Development */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
+		};
+		A3000000000000000000C001 /* Build configuration list for PBXNativeTarget "CypherUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A3000000000000000000BC01 /* Debug */,
+				A3000000000000000000BC02 /* Release */,
+				C3E039D4305A91BB000EF161 /* Development */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 

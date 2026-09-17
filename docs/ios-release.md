@@ -8,6 +8,21 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
+## Prepared build: 0.2.0 (10), 2026-09-17
+
+- Companion to the iOS notification-navigation fix and composer hardening
+  (`b6a751e`): a tap now opens its session from any screen and never replays
+  on the way back mid-pop; the expanded composer clips its editor and tints
+  its glass.
+- 181 Debug simulator unit tests passed (ad-hoc signed; the two keychain
+  fixtures need signing). Distribution archives do not use that override.
+- Signed archive/export verified: arm64, `ai.mvp-lab.cypher.ios`, version
+  0.2.0/build 10, production APNs, `get-task-allow=false`,
+  `beta-reports-active=true`, strict deep signature.
+- **Not uploaded.** No export-compliance declaration, tester/group change or
+  review submission was made.
+- Evidence: `/tmp/cypher-ios-distribution.uPQ5mL/` (archive, export, unpacked payload, logs).
+
 ## Prepared build: 0.2.0 (9), 2026-09-16
 
 - Companion to the iOS notification-tap crash fix (`1dbe430`).
