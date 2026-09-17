@@ -6288,7 +6288,8 @@ impl Composer {
     /// New-chat sends need a project: with none picked (empty device, or a
     /// selection healed away) the send button dims and submit is a no-op —
     /// project-less `~`-cwd sessions are no longer mintable from the canvas.
-    /// Existing chats carry their own project, so they always send.
+    /// A quick chat is the deliberate exception (its folder is minted on
+    /// send). Existing chats carry their own project, so they always send.
     fn send_blocked(&self, cx: &App) -> bool {
         if matches!(self.transport, ComposerTransport::Main)
             && self
@@ -6303,7 +6304,9 @@ impl Composer {
             return false;
         }
         let state = self.state.read(cx);
-        state.selected_chat.is_none() && state.selected_space_row().is_none()
+        state.selected_chat.is_none()
+            && state.selected_space_row().is_none()
+            && !state.scratch_pending
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {

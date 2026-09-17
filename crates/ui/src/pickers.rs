@@ -733,7 +733,15 @@ impl Pickers {
         let device = state
             .selected_chat_row()
             .map(|c| c.device_id.clone())
-            .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))?;
+            .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
+            // A quick-chat canvas has no project: its models come from the
+            // device the chat will run on.
+            .or_else(|| {
+                state
+                    .scratch_pending
+                    .then(|| state.effective_device_id())
+                    .flatten()
+            })?;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
