@@ -13,7 +13,7 @@
 //! lives separately under `<data_dir>/pi-runtime/agent`; its `npm` entry points
 //! at the active runtime's curated package tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -138,6 +138,7 @@ impl PiRuntimeManager {
         let initialization_error = if paths.installed() {
             initialize_agent(&paths, &paths.current)
                 .and_then(|_| prune_stale_managed_packages(&paths, &paths.current))
+                .and_then(|_| reconcile_bundled_packages(&paths, &paths.current))
                 .err()
         } else {
             None
@@ -396,16 +397,13 @@ impl PiRuntimeManager {
             install_result?;
         }
 
-        let previous_plugins = read_installed(&self.inner.paths).map(|runtime| runtime.plugins);
         initialize_agent(&self.inner.paths, &destination)?;
         activate(&self.inner.paths, &destination)?;
-        if let Err(err) =
-            enable_new_bundled_packages(&self.inner.paths, previous_plugins.as_ref(), &destination)
-        {
-            tracing::warn!(error = %err, "could not enable new Pi runtime packages");
-        }
         if let Err(err) = prune_stale_managed_packages(&self.inner.paths, &destination) {
             tracing::warn!(error = %err, "could not prune retired Pi runtime packages");
+        }
+        if let Err(err) = reconcile_bundled_packages(&self.inner.paths, &destination) {
+            tracing::warn!(error = %err, "could not enable new Pi runtime packages");
         }
         read_installed(&self.inner.paths)
             .ok_or_else(|| "Pi Runtime activation completed without valid metadata.".into())
@@ -737,17 +735,36 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
     Ok(())
 }
 
-fn enable_new_bundled_packages(
-    paths: &PiRuntimePaths,
-    previous_plugins: Option<&BTreeMap<String, String>>,
-    runtime: &Path,
-) -> Result<(), String> {
+/// Bundled plugin names this agent directory has already been offered.
+/// Lives beside `settings.json`; a name recorded here is never re-added,
+/// so a package the user removed afterwards stays removed.
+fn offered_packages_path(paths: &PiRuntimePaths) -> PathBuf {
+    paths.agent_dir.join("bundled-packages.json")
+}
+
+fn read_offered_packages(paths: &PiRuntimePaths) -> BTreeSet<String> {
+    std::fs::read(offered_packages_path(paths))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value.get("offered").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+/// Add every bundled package the active Runtime ships that this agent
+/// directory has never been offered. Runs at engine boot and after each
+/// Runtime activation, so a bundle activated by an older engine (which knew
+/// nothing about the new package) is repaired on the next start instead of
+/// staying silently disabled. A host without the record is treated as never
+/// offered anything: each currently bundled package missing from
+/// `settings.json` is enabled once.
+fn reconcile_bundled_packages(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {
     let settings = paths.agent_dir.join("settings.json");
     if !settings.exists() {
         return Ok(());
     }
-    let next = read_installed_dir(runtime)?;
-    let previous = previous_plugins.cloned().unwrap_or_default();
+    let bundled = read_installed_dir(runtime)?;
+    let mut offered = read_offered_packages(paths);
     let bytes = std::fs::read(&settings).map_err(|err| err.to_string())?;
     let mut root = serde_json::from_slice::<Value>(&bytes).map_err(|err| err.to_string())?;
     let packages = root
@@ -769,10 +786,12 @@ fn enable_new_bundled_packages(
         })
         .collect();
     let mut changed = false;
-    for name in next.plugins.keys() {
-        if previous.contains_key(name) {
+    let mut offered_changed = false;
+    for name in bundled.plugins.keys() {
+        if !offered.insert(name.clone()) {
             continue;
         }
+        offered_changed = true;
         let source = paths.current.join("npm/node_modules").join(name);
         if configured.iter().any(|existing| {
             Path::new(existing)
@@ -795,13 +814,21 @@ fn enable_new_bundled_packages(
         });
         changed = true;
     }
-    if !changed {
-        return Ok(());
+    if changed {
+        let bytes = serde_json::to_vec_pretty(&root).map_err(|err| err.to_string())?;
+        let temporary = settings.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(|err| err.to_string())?;
+        std::fs::rename(temporary, settings).map_err(|err| err.to_string())?;
     }
-    let bytes = serde_json::to_vec_pretty(&root).map_err(|err| err.to_string())?;
-    let temporary = settings.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes).map_err(|err| err.to_string())?;
-    std::fs::rename(temporary, settings).map_err(|err| err.to_string())
+    if offered_changed {
+        let record = offered_packages_path(paths);
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "offered": offered }))
+            .map_err(|err| err.to_string())?;
+        let temporary = record.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(|err| err.to_string())?;
+        std::fs::rename(temporary, record).map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 fn prune_stale_managed_packages(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {
@@ -1044,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_upgrade_enables_new_bundled_packages_once() {
+    fn bundled_packages_are_offered_once_at_boot_and_after_install() {
         let temp = tempfile::tempdir().unwrap();
         let paths = PiRuntimePaths::for_data_dir(temp.path());
         let search = paths.current.join("npm/node_modules/pi-web-search");
@@ -1058,6 +1085,9 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        // The bundle was activated by an engine that did not know about the
+        // bridge: settings.json lists only the older package and no record
+        // of offered packages exists.
         std::fs::write(
             paths.agent_dir.join("settings.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -1080,15 +1110,25 @@ mod tests {
         )
         .unwrap();
 
-        let previous = BTreeMap::from([("pi-web-search".into(), "1.4.0".into())]);
-        enable_new_bundled_packages(&paths, Some(&previous), &paths.current).unwrap();
-        let settings: Value =
-            serde_json::from_slice(&std::fs::read(paths.agent_dir.join("settings.json")).unwrap())
-                .unwrap();
-        let packages = settings["packages"].as_array().unwrap();
-        assert_eq!(packages.len(), 2);
-        assert_eq!(packages[1].as_str(), Some(bridge.to_str().unwrap()));
+        let packages = |paths: &PiRuntimePaths| -> Vec<Value> {
+            let settings: Value = serde_json::from_slice(
+                &std::fs::read(paths.agent_dir.join("settings.json")).unwrap(),
+            )
+            .unwrap();
+            settings["packages"].as_array().unwrap().clone()
+        };
 
+        // Boot-time repair enables the never-offered bridge.
+        reconcile_bundled_packages(&paths, &paths.current).unwrap();
+        let listed = packages(&paths);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].as_str(), Some(bridge.to_str().unwrap()));
+        assert_eq!(
+            read_offered_packages(&paths),
+            BTreeSet::from(["pi-web-search".to_string(), "pi-claude-bridge".to_string()])
+        );
+
+        // The user removes the bridge afterwards: later boots respect that.
         std::fs::write(
             paths.agent_dir.join("settings.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -1097,14 +1137,30 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let previous = BTreeMap::from([
-            ("pi-web-search".into(), "1.4.0".into()),
-            ("pi-claude-bridge".into(), "0.7.0".into()),
-        ]);
-        enable_new_bundled_packages(&paths, Some(&previous), &paths.current).unwrap();
-        let settings: Value =
-            serde_json::from_slice(&std::fs::read(paths.agent_dir.join("settings.json")).unwrap())
-                .unwrap();
-        assert_eq!(settings["packages"].as_array().unwrap().len(), 1);
+        reconcile_bundled_packages(&paths, &paths.current).unwrap();
+        assert_eq!(packages(&paths).len(), 1);
+
+        // A newer bundle with one more package offers only that package.
+        let squad = paths.current.join("npm/node_modules/pi-agent-squad");
+        std::fs::create_dir_all(&squad).unwrap();
+        std::fs::write(squad.join("package.json"), r#"{"name":"pi-agent-squad"}"#).unwrap();
+        std::fs::write(
+            paths.current.join("runtime.json"),
+            serde_json::to_vec(&InstalledRuntime {
+                version: "3".into(),
+                pi_version: "0.85.2".into(),
+                plugins: BTreeMap::from([
+                    ("pi-web-search".into(), "1.4.0".into()),
+                    ("pi-claude-bridge".into(), "0.7.0".into()),
+                    ("pi-agent-squad".into(), "0.8.5".into()),
+                ]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        reconcile_bundled_packages(&paths, &paths.current).unwrap();
+        let listed = packages(&paths);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].as_str(), Some(squad.to_str().unwrap()));
     }
 }

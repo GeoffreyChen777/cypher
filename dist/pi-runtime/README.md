@@ -16,7 +16,10 @@ before any model exists. At runtime:
 - immutable versions live in `<device-data>/pi-runtime/versions/<version>`;
 - `current` is an atomically replaced symlink;
 - mutable settings, MCP config, OAuth state, and user-installed packages live
-  in `<device-data>/pi-runtime/agent`;
+  in `<device-data>/pi-runtime/agent`; `bundled-packages.json` there records
+  which curated packages have been offered, so each newly bundled package is
+  enabled exactly once (at boot or after activation, whichever engine sees it
+  first) and a package the user removed afterwards stays removed;
 - Pi subprocesses receive `PI_CODING_AGENT_DIR` and `PI_PACKAGE_DIR`, so
   `~/.pi` and a system `pi` executable are never consulted.
 
