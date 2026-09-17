@@ -186,6 +186,20 @@ esac
         self.assertEqual((self.home/".bashrc").read_text().count("# Cypher command path"),1)
         self.assertEqual((self.home/".profile").read_text().count("# Cypher command path"),1)
 
+    def test_reinstall_over_a_current_unit_restarts_the_running_service(self):
+        unit=self.home/".config/systemd/user/cypher.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nEnvironment="CYPHER_DATA_DIR=x"\n'
+                        'ExecStart=:"%h/.cypher/app/current/cypher" headless\n')
+        self.release()
+        result=self.install()
+        self.assertEqual(unit.read_text().count("ExecStart="),1)
+        # The running engine is the previous binary: the unit is reloaded and
+        # the service restarted, and no second setup is requested.
+        self.assertEqual((self.root/"actions").read_text(),
+                         "--user daemon-reload\n--user restart cypher.service\n")
+        self.assertNotIn("cypher setup",result.stdout)
+
     def test_pipe_install_uses_the_controlling_terminal_for_setup(self):
         self.release(body=b'''#!/bin/sh
 case "$*" in
@@ -570,7 +584,12 @@ if len(args)>1 and args[1] in ("start","restart") and not alive():
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
         self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
         self.env["CYPHER_PI_RUNTIME_BASE_URL"]=f"http://127.0.0.1:{self.server.server_port}"
-        inner={"version":"1","piVersion":"fixture","plugins":{}}
+        self.runtime_release("1")
+        self.addCleanup(self.stop_engine)
+
+    def runtime_release(self,version):
+        """Publish a Runtime bundle revision on the loopback fixture."""
+        inner={"version":version,"piVersion":"fixture","plugins":{}}
         contents={
             "runtime.json":json.dumps(inner).encode(),
             "bin/pi":b"#!/bin/sh\necho fixture\n",
@@ -590,7 +609,20 @@ if len(args)>1 and args[1] in ("start","restart") and not alive():
             "url":"runtime.tar.gz","size":len(body),"sha256":hashlib.sha256(body).hexdigest()}})
         self.routes["/manifest.json"]=(200,json.dumps(self.manifest).encode())
         self.routes["/runtime.tar.gz"]=(200,body)
-        self.addCleanup(self.stop_engine)
+
+    def app_release(self,version):
+        """Publish a Cypher release (a stub answering --help) on the loopback fixture."""
+        name=f"cypher-{version}-linux-{platform.machine()}"
+        stub=b'#!/bin/sh\ncase "$*" in --help) exit 0;; *) exit 1;; esac\n'
+        archive=io.BytesIO()
+        with tarfile.open(fileobj=archive,mode="w:gz") as tar:
+            info=tarfile.TarInfo(name+"/cypher");info.mode=0o755;info.size=len(stub)
+            tar.addfile(info,io.BytesIO(stub))
+        data=archive.getvalue()
+        self.routes["/releases/manifest.json"]=(200,json.dumps({"version":version,
+            "files":{name+".tar.gz":{"sha256":hashlib.sha256(data).hexdigest()}}}).encode())
+        self.routes["/releases/"+name+".tar.gz"]=(200,data)
+        self.env["CYPHER_EDGE_URL"]=f"http://127.0.0.1:{self.server.server_port}"
 
     def stop_engine(self):
         path=self.root/"engine.pid"
@@ -718,6 +750,57 @@ if len(args)>1 and args[1] in ("start","restart") and not alive():
                 process.send_signal(signal.SIGTERM)
                 try:process.wait(timeout=12)
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
+
+    def test_update_switches_binary_restarts_service_and_installs_newer_runtime(self):
+        self.setup()
+        # A managed layout: the binary behind `current`, not under a checkout.
+        app=self.home/".cypher/app"
+        (app/"0.0.1").mkdir(parents=True)
+        managed=app/"0.0.1/cypher"
+        shutil.copy2(BINARY,managed)
+        (app/"current").symlink_to(app/"0.0.1")
+        self.app_release("9.9.9")
+        self.runtime_release("2")
+        check=self.run_command([str(managed),"update","--check"],timeout=60)
+        self.assertEqual(check.returncode,1,check.stdout+check.stderr)
+        self.assertIn("9.9.9 available",check.stdout)
+        self.assertIn("1 → 2 available",check.stdout)
+        self.assertEqual(os.readlink(app/"current"),str(app/"0.0.1"),"--check must not install")
+        result=self.run_command([str(managed),"update"],timeout=120)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(os.readlink(app/"current"),str(app/"9.9.9"))
+        self.assertIn("--user restart cypher.service",(self.root/"actions").read_text())
+        self.assertEqual(os.readlink(self.home/".cypher/pi-runtime/current"),
+                         str(self.home/".cypher/pi-runtime/versions/2"))
+        self.assertIn("bundle 2",result.stdout)
+        status=self.run_command([BINARY,"status"])
+        self.assertIn("Runtime:  Pi fixture (bundle 2)",status.stdout)
+        self.assertIn("Updates:  automatic",status.stdout)
+
+    def test_update_adopts_a_hand_copied_binary_and_repoints_its_service(self):
+        # A binary outside the managed layout that nevertheless runs the service.
+        copy=self.home/"bin/cypher"
+        copy.parent.mkdir()
+        shutil.copy2(BINARY,copy)
+        self.env["TEST_ENGINE_BINARY"]=str(copy)
+        result=self.run_command([str(copy),"setup","--local","--non-interactive"],timeout=45)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        unit=Path(self.env["TEST_UNIT"])
+        self.assertIn(f'ExecStart=:"{copy}" headless',unit.read_text())
+        self.app_release("9.9.9")
+        result=self.run_command([str(copy),"update"],timeout=120)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        app=self.home/".cypher/app"
+        self.assertEqual(os.readlink(app/"current"),str(app/"9.9.9"))
+        self.assertEqual(os.readlink(self.home/".local/bin/cypher"),str(app/"current/cypher"))
+        self.assertIn('ExecStart=:"%h/.cypher/app/current/cypher" headless',unit.read_text())
+        self.assertIn("--user daemon-reload",(self.root/"actions").read_text())
+        self.assertIn("--user restart cypher.service",(self.root/"actions").read_text())
+        # A source checkout is never adopted or replaced.
+        self.env["TEST_ENGINE_BINARY"]=BINARY
+        result=self.run_command([BINARY,"update"],timeout=60)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("source build",result.stderr)
 
 
 if __name__ == "__main__":

@@ -49,11 +49,15 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
-    /// Check for a newer release and apply it (download → verify → swap →
-    /// service restart). `--check` only reports (exits 1 when one is available).
+    /// Bring this device current: download and verify the newest release,
+    /// switch to it, restart the service, and install the newest Pi Runtime.
+    /// `--check` only reports (exits 1 when either has a newer release).
     Update {
         #[arg(long)]
         check: bool,
+        /// Restart the service even while runs are active.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -280,9 +284,14 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("engine sync diagnostics timed out"))?
             })
         }
-        Some(Command::Update { check }) => {
+        Some(Command::Update { check, force }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+            let result = runtime.block_on(update_cli::update(
+                engine_config_from_env()?,
+                update_cli::UpdateOptions { check, force },
+            ));
+            runtime.shutdown_timeout(std::time::Duration::from_millis(250));
+            result
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env()?.data_dir),

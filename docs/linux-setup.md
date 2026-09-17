@@ -29,8 +29,9 @@ Typical completion:
 ```text
 ✓ Device connected
 Device:  gpu-server
-Runtime: Pi 0.85.1
+Runtime: Pi 0.85.1 (bundle 0.85.1.5)
 Service: running · starts at boot
+Updates: automatic (idle windows) · `cypher update` runs one now
 
 In Cypher desktop, select this device and configure Providers / MCP.
 ```
@@ -48,8 +49,14 @@ cypher status             # concise engine / Runtime / connection status
 cypher status --verbose   # data directory, account and IPC diagnostics
 cypher logs               # recent engine logs
 cypher logs --follow      # stream logs
-cypher update             # existing managed binary updater
+cypher update             # newest release + Runtime, service restart
+cypher update --check     # report only; exits 1 when something is newer
 ```
+
+`cypher update` adopts any non-checkout Linux binary into the managed
+`~/.cypher/app` layout, so it works regardless of how Cypher was first
+installed. Services apply releases automatically when idle unless
+`CYPHER_AUTO_UPDATE=0` is set for the service.
 
 The low-level `headless`, `login`, `logout`, `sync` and `daemon` commands remain.
 The guided flow handles stopping and restarting its own idle service around

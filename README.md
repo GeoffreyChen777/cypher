@@ -38,12 +38,21 @@ cypher             # setup on first use; concise status afterwards
 cypher setup       # continue or repair setup
 cypher status      # concise device status
 cypher logs        # recent engine logs; --follow streams them
-cypher update      # update to the latest release
+cypher update      # newest release + Pi Runtime; restarts the service
 ```
 
 `cypher --version` prints the installed binary's version. `cypher update --check`
-exits 1 when an update is available; download/network errors also fail, so check
-the diagnostic output. `cypher status --verbose` includes the original account,
+exits 1 when a newer release or Runtime is available; download/network errors
+also fail, so check the diagnostic output. `cypher update` works after any Linux
+installation: a binary outside the managed `~/.cypher/app/<version>` layout is
+moved into it, `~/.local/bin/cypher` is linked there, and a service that ran the
+old path is repointed. Only a source checkout stays report-only. The service is
+not restarted while runs are active unless you pass `--force`.
+
+Linux services apply releases **automatically** in an idle window (no live runs
+or open terminals) and restart themselves; the engine also keeps the Runtime
+current. Set `CYPHER_AUTO_UPDATE=0` before `cypher daemon install`, or in
+`~/.cypher/env`, to make updates manual. `cypher status` shows which applies. `cypher status --verbose` includes the original account,
 data-directory and IPC diagnostics. Status does not refresh credentials.
 Advanced `cypher daemon start|stop|restart|status` commands remain available.
 

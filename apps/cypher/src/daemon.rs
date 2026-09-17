@@ -19,7 +19,7 @@ const LAUNCHD_LABEL: &str = "ai.mvp-lab.cypher";
 #[cfg(test)]
 const SYSTEMD_UNIT: &str = "cypher.service";
 
-fn systemd_unit() -> anyhow::Result<String> {
+pub(crate) fn systemd_unit() -> anyhow::Result<String> {
     Ok(cypher_env::service_names(&cypher_env::data_dir())?.0)
 }
 fn launchd_label() -> anyhow::Result<String> {
@@ -267,6 +267,32 @@ pub(crate) fn setup_unit_matches(config: &cypher_engine::EngineConfig) -> anyhow
         );
     }
     Ok(exists)
+}
+
+/// Whether a service unit for this data directory has been installed
+/// (regardless of its current state).
+pub(crate) fn service_installed() -> bool {
+    if cfg!(target_os = "macos") {
+        launchd_plist_path().is_ok_and(|plist| plist.is_file())
+    } else {
+        systemd_unit_path().is_ok_and(|unit| unit.is_file())
+    }
+}
+
+/// The automatic-update setting the installed service actually runs with:
+/// its captured `CYPHER_AUTO_UPDATE`, else the platform default.
+pub(crate) fn service_auto_update() -> bool {
+    let captured = systemd_unit_path()
+        .ok()
+        .and_then(|unit| std::fs::read_to_string(unit).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                line.strip_prefix("Environment=\"CYPHER_AUTO_UPDATE=")
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_string)
+            })
+        });
+    cypher_update::auto_update_setting(captured.as_deref())
 }
 
 pub(crate) fn user_bus_available() -> bool {

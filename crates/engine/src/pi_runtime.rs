@@ -106,11 +106,49 @@ pub struct PiRuntimeFile {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct InstalledRuntime {
-    version: String,
-    pi_version: String,
+pub struct InstalledRuntime {
+    pub version: String,
+    pub pi_version: String,
     #[serde(default)]
-    plugins: BTreeMap<String, String>,
+    pub plugins: BTreeMap<String, String>,
+}
+
+/// The Runtime bundle currently activated for `data_dir`, if any.
+pub fn installed_runtime(data_dir: &Path) -> Option<InstalledRuntime> {
+    read_installed(&PiRuntimePaths::for_data_dir(data_dir))
+}
+
+/// The newest published Runtime for this Cypher edge (honours
+/// `CYPHER_PI_RUNTIME_BASE_URL`). Read-only: nothing is installed.
+pub async fn latest_manifest(edge_url: &str) -> Result<PiRuntimeManifest, String> {
+    fetch_manifest_from(&runtime_base_url(edge_url)).await
+}
+
+fn runtime_base_url(edge_url: &str) -> String {
+    cypher_env::var("PI_RUNTIME_BASE_URL")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| public_runtime_base_url(edge_url))
+        .trim_end_matches('/')
+        .to_string()
+}
+
+async fn fetch_manifest_from(base_url: &str) -> Result<PiRuntimeManifest, String> {
+    let url = format!("{base_url}/manifest.json");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| format!("Could not fetch Pi Runtime manifest: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Could not fetch Pi Runtime manifest: {err}"))?;
+    let manifest = response
+        .json::<PiRuntimeManifest>()
+        .await
+        .map_err(|err| format!("Invalid Pi Runtime manifest: {err}"))?;
+    if manifest.version.trim().is_empty() || manifest.pi_version.trim().is_empty() {
+        return Err("Pi Runtime manifest is missing its version.".into());
+    }
+    Ok(manifest)
 }
 
 struct Inner {
@@ -410,30 +448,11 @@ impl PiRuntimeManager {
     }
 
     async fn fetch_manifest(&self) -> Result<PiRuntimeManifest, String> {
-        let url = format!("{}/manifest.json", self.base_url());
-        let response = reqwest::Client::new()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|err| format!("Could not fetch Pi Runtime manifest: {err}"))?
-            .error_for_status()
-            .map_err(|err| format!("Could not fetch Pi Runtime manifest: {err}"))?;
-        let manifest = response
-            .json::<PiRuntimeManifest>()
-            .await
-            .map_err(|err| format!("Invalid Pi Runtime manifest: {err}"))?;
-        if manifest.version.trim().is_empty() || manifest.pi_version.trim().is_empty() {
-            return Err("Pi Runtime manifest is missing its version.".into());
-        }
-        Ok(manifest)
+        fetch_manifest_from(&self.base_url()).await
     }
 
     fn base_url(&self) -> String {
-        cypher_env::var("PI_RUNTIME_BASE_URL")
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| public_runtime_base_url(&self.inner.edge_url))
-            .trim_end_matches('/')
-            .to_string()
+        runtime_base_url(&self.inner.edge_url)
     }
 
     async fn download(

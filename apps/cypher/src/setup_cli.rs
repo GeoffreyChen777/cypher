@@ -22,8 +22,8 @@ pub struct SetupOptions {
     pub non_interactive: bool,
 }
 
-struct LiveEngine {
-    client: RpcClient,
+pub(crate) struct LiveEngine {
+    pub(crate) client: RpcClient,
     scope: WorkspaceScope,
     device: String,
 }
@@ -42,18 +42,18 @@ fn marker(data: &Path) -> PathBuf {
     data.join("setup-completed.json")
 }
 
-fn runtime_label(data: &Path) -> String {
+pub(crate) fn runtime_label(data: &Path) -> String {
     let paths = cypher_engine::pi_runtime::PiRuntimePaths::for_data_dir(data);
     if !paths.installed() {
         return "not installed".into();
     }
-    std::fs::read(paths.current.join("runtime.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| {
-            v["piVersion"]
-                .as_str()
-                .map(|version| format!("Pi {}", clean_label(version)))
+    cypher_engine::pi_runtime::installed_runtime(data)
+        .map(|runtime| {
+            format!(
+                "Pi {} (bundle {})",
+                clean_label(&runtime.pi_version),
+                clean_label(&runtime.version)
+            )
         })
         .unwrap_or_else(|| "installed (version unavailable)".into())
 }
@@ -101,7 +101,7 @@ async fn prompt(prompt: &str, default: bool, cancel: &Cancel) -> anyhow::Result<
     }
 }
 
-async fn connect(config: &EngineConfig) -> anyhow::Result<Option<LiveEngine>> {
+pub(crate) async fn connect(config: &EngineConfig) -> anyhow::Result<Option<LiveEngine>> {
     let client = match tokio::time::timeout(
         Duration::from_secs(2),
         cypher_rpc::connect_local(&config.ipc_socket),
@@ -140,7 +140,7 @@ async fn connect(config: &EngineConfig) -> anyhow::Result<Option<LiveEngine>> {
     }))
 }
 
-async fn ensure_idle(live: &LiveEngine) -> anyhow::Result<()> {
+pub(crate) async fn ensure_idle(live: &LiveEngine) -> anyhow::Result<()> {
     let active = tokio::time::timeout(Duration::from_secs(3), async {
         let mut sessions = live
             .client
@@ -220,7 +220,11 @@ async fn install_runtime(config: &EngineConfig, cancel: &Cancel) -> anyhow::Resu
     Ok(())
 }
 
-async fn ready(config: &EngineConfig, remote: bool, cancel: &Cancel) -> anyhow::Result<LiveEngine> {
+pub(crate) async fn ready(
+    config: &EngineConfig,
+    remote: bool,
+    cancel: &Cancel,
+) -> anyhow::Result<LiveEngine> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         check_cancel(cancel)?;
@@ -552,6 +556,14 @@ async fn run_inner(
             " · may stop after logout"
         }
     );
+    println!(
+        "Updates: {}",
+        if crate::daemon::service_auto_update() {
+            "automatic (idle windows) · `cypher update` runs one now"
+        } else {
+            "manual · `cypher update`"
+        }
+    );
     if remote {
         println!("\nIn Cypher desktop, select this device and configure Providers / MCP.");
     } else {
@@ -606,7 +618,16 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
         println!("Engine:   stopped");
         println!("Next:     cypher setup");
     }
+    println!("Version:  {}", cypher_update::current_version());
     println!("Runtime:  {}", runtime_label(&config.data_dir));
+    println!(
+        "Updates:  {}",
+        if crate::daemon::service_auto_update() {
+            "automatic · `cypher update --check`"
+        } else {
+            "manual · `cypher update`"
+        }
+    );
     Ok(())
 }
 
@@ -615,7 +636,8 @@ pub fn logs(config: EngineConfig, follow: bool) -> anyhow::Result<()> {
     if !path.is_file() {
         if cfg!(target_os = "linux") && crate::daemon::setup_unit_matches(&config)? {
             let mut command = std::process::Command::new("journalctl");
-            command.args(["--user", "--no-pager", "-u", "cypher.service", "-n", "80"]);
+            let unit = crate::daemon::systemd_unit()?;
+            command.args(["--user", "--no-pager", "-u", &unit, "-n", "80"]);
             if follow {
                 command.arg("-f");
             }

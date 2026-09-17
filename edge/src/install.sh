@@ -193,4 +193,8 @@ if [ "$setup" = yes ] && [ "$service_migrated" = no ] && ( : </dev/tty ) >/dev/n
   trap - 0 INT TERM
   exec "$app_root/current/cypher" setup </dev/tty
 fi
-echo 'Run: ~/.local/bin/cypher setup'
+if [ "$service_migrated" = yes ]; then
+  echo "Done. \`cypher status\` shows the device; future updates: \`cypher update\` (or automatic)."
+else
+  echo 'Run: ~/.local/bin/cypher setup'
+fi

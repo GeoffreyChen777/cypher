@@ -212,15 +212,22 @@ pub fn detect_install() -> InstallKind {
         return InstallKind::Unmanaged;
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(app_root) = managed_by_layout(&exe) {
+        return InstallKind::Managed { app_root };
+    }
     detect_install_from(&exe, home.as_deref())
 }
 
 fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir;
-        // installs live under `~/.cypher/app`.
+        // installs live under `~/.cypher/app`. HOME itself may be a symlink
+        // alias of the canonical path `/proc/self/exe` reports.
         let app_root = home.join(".cypher").join("app");
-        if exe.starts_with(&app_root) {
+        let canonical = std::fs::canonicalize(home)
+            .map(|home| home.join(".cypher").join("app"))
+            .unwrap_or_else(|_| app_root.clone());
+        if exe.starts_with(&app_root) || exe.starts_with(&canonical) {
             return InstallKind::Managed { app_root };
         }
     }
@@ -234,6 +241,34 @@ fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
         }
     }
     InstallKind::Unmanaged
+}
+
+/// The installer layout recognised by shape rather than location: the binary
+/// sits in `<root>/<version>/` and `<root>/current` is a symlink to that
+/// directory. Covers a relocated `.cypher/app`, a HOME the installer saw
+/// differently, or a `CYPHER_DATA_DIR`-style custom root.
+fn managed_by_layout(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let root = dir.parent()?;
+    let current = root.join("current");
+    if !current.is_symlink() {
+        return None;
+    }
+    let (Ok(link), Ok(here)) = (std::fs::canonicalize(&current), std::fs::canonicalize(dir)) else {
+        return None;
+    };
+    (link == here).then(|| root.to_path_buf())
+}
+
+/// A checkout's `target/{debug,release}/cypher`: updates would silently
+/// replace a developer's build with a release, so those stay report-only.
+pub fn is_source_build(exe: &Path) -> bool {
+    exe.ancestors().any(|dir| {
+        dir.file_name().is_some_and(|name| name == "target")
+            && dir
+                .parent()
+                .is_some_and(|parent| parent.join("Cargo.toml").is_file())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +532,79 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     }
 }
 
+/// The managed layout every Linux install converges on: `~/.cypher/app`.
+pub fn managed_app_root(home: &Path) -> PathBuf {
+    home.join(".cypher").join("app")
+}
+
+/// Point `~/.local/bin/cypher` at `<app_root>/current/cypher`, replacing an
+/// existing file or link atomically (the installer's own layout). A directory
+/// at that path is left alone and reported.
+pub fn link_command(home: &Path, app_root: &Path) -> anyhow::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin)?;
+        let command = bin.join("cypher");
+        if command.is_dir() && !command.is_symlink() {
+            bail!("{} is a directory; move it aside", command.display());
+        }
+        let target = app_root.join("current").join("cypher");
+        if std::fs::read_link(&command).is_ok_and(|existing| existing == target) {
+            return Ok(command);
+        }
+        let staging = tempfile::Builder::new()
+            .prefix(".cypher-")
+            .tempdir_in(&bin)?;
+        let tmp = staging.path().join("cypher");
+        std::os::unix::fs::symlink(&target, &tmp).context("creating the command link")?;
+        std::fs::rename(&tmp, &command).context("replacing the command link")?;
+        Ok(command)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (home, app_root);
+        bail!("managed installs are unix-only");
+    }
+}
+
+/// Bring an unmanaged Linux binary (hand-copied, or installed by an older
+/// layout) into the managed layout: stage the release under `~/.cypher/app`,
+/// switch `current`, link the command, and repoint a service unit that ran
+/// the old executable. Returns the managed app root.
+pub async fn adopt_managed_install(
+    edge_url: &str,
+    manifest: &Manifest,
+    home: &Path,
+    data_dir: &Path,
+    previous_exe: &Path,
+) -> anyhow::Result<PathBuf> {
+    let app_root = managed_app_root(home);
+    stage_headless(edge_url, manifest, &app_root).await?;
+    apply_headless(&app_root, &manifest.version)?;
+    link_command(home, &app_root)?;
+    let previous = previous_exe.to_string_lossy().into_owned();
+    let alias = home
+        .join(".local/bin/cypher")
+        .to_string_lossy()
+        .into_owned();
+    rewrite_linux_service_exec(data_dir, |line| {
+        exec_line_binary(line).is_some_and(|binary| binary == previous || binary == alias)
+    })?;
+    Ok(app_root)
+}
+
+/// The executable an `ExecStart=:"<path>" headless` line runs, unquoted.
+fn exec_line_binary(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("ExecStart=:\"")?;
+    let rest = rest.strip_suffix("\" headless")?;
+    Some(
+        rest.replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+            .replace("%%", "%"),
+    )
+}
+
 /// Restart the installed engine service (the same units `cypher daemon` and the
 /// curl|sh installer manage). Called after a symlink swap so the running daemon
 /// picks up the new binary.
@@ -516,6 +624,22 @@ pub fn restart_service(data_dir: &Path) -> anyhow::Result<()> {
 }
 
 pub fn migrate_linux_service_to_current(data_dir: &Path) -> anyhow::Result<bool> {
+    rewrite_linux_service_exec(data_dir, |line| {
+        line.starts_with("ExecStart=:\"%h/.cypher/app/")
+            && line.ends_with("/cypher\" headless")
+            && line != CURRENT_EXEC_LINE
+    })
+}
+
+const CURRENT_EXEC_LINE: &str = "ExecStart=:\"%h/.cypher/app/current/cypher\" headless";
+
+/// Rewrite the default unit's `ExecStart` to the managed `current` link when
+/// `matches` accepts the existing line. Only the default data directory's
+/// unit at its expected path is touched; anything else is left as-is.
+fn rewrite_linux_service_exec(
+    data_dir: &Path,
+    matches: impl Fn(&str) -> bool,
+) -> anyhow::Result<bool> {
     if !cfg!(target_os = "linux") {
         return Ok(false);
     }
@@ -542,30 +666,52 @@ pub fn migrate_linux_service_to_current(data_dir: &Path) -> anyhow::Result<bool>
     }
     let text = std::fs::read_to_string(&expected)?;
     let data = std::path::absolute(data_dir)?;
-    if !text
-        .lines()
-        .any(|line| line == format!("Environment=\"CYPHER_DATA_DIR={}\"", data.display()))
-    {
+    let data_line = format!(
+        "Environment={}",
+        systemd_quote(&format!("CYPHER_DATA_DIR={}", data.display()))
+    );
+    if !text.lines().any(|line| line == data_line) {
         return Ok(false);
     }
-    let Some(old) = text.lines().find(|line| {
-        line.starts_with("ExecStart=:\"%h/.cypher/app/") && line.ends_with("/cypher\" headless")
-    }) else {
+    let Some(rewritten) = rewrite_exec_start(&text, matches) else {
         return Ok(false);
     };
     let tmp = expected.with_extension("service.cypher-update");
-    std::fs::write(
-        &tmp,
-        text.replacen(
-            old,
-            "ExecStart=:\"%h/.cypher/app/current/cypher\" headless",
-            1,
-        ),
-    )?;
+    std::fs::write(&tmp, rewritten)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     std::fs::rename(&tmp, &expected)?;
     run("systemctl", &["--user", "daemon-reload"])?;
     Ok(true)
+}
+
+/// systemd C-style quoting as `cypher daemon install` writes it: the unit's
+/// own `Environment=` line for a data directory containing `%`, `"` or `\\`
+/// must still be recognised.
+fn systemd_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '%' => quoted.push_str("%%"),
+            ch if ch.is_ascii_control() => quoted.push_str(&format!("\\x{:02x}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Pure half of [`rewrite_linux_service_exec`]: the unit text with the first
+/// matching `ExecStart` line replaced, or `None` when nothing matched.
+fn rewrite_exec_start(text: &str, matches: impl Fn(&str) -> bool) -> Option<String> {
+    let old = text
+        .lines()
+        .find(|line| line.starts_with("ExecStart=") && matches(line))?;
+    Some(text.replacen(old, CURRENT_EXEC_LINE, 1))
 }
 
 fn restart_service_from_engine(data_dir: &Path) -> anyhow::Result<()> {
@@ -716,11 +862,21 @@ impl UpdateStatus {
     }
 }
 
-/// `CYPHER_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
-fn auto_update_enabled() -> bool {
-    cypher_env::var("AUTO_UPDATE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+/// `CYPHER_AUTO_UPDATE=1|true|yes|on` or `0|false|no|off`. Unset means
+/// **on for Linux** — a headless device has no update strip to click, so the
+/// service applies releases itself in a quiet window and restarts — and off
+/// elsewhere, where the desktop app owns updates.
+pub fn auto_update_enabled() -> bool {
+    auto_update_setting(cypher_env::var("AUTO_UPDATE").as_deref())
+}
+
+pub fn auto_update_setting(value: Option<&str>) -> bool {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        Some(_) => false,
+        None => cfg!(target_os = "linux"),
+    }
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine
@@ -1046,6 +1202,92 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), updater.shutdown())
             .await
             .expect("immediate updater shutdown must not hang");
+    }
+
+    #[test]
+    fn auto_update_defaults_on_for_linux_only_and_honours_explicit_values() {
+        for value in ["1", "true", "YES", " on "] {
+            assert!(auto_update_setting(Some(value)), "{value}");
+        }
+        for value in ["0", "false", "no", "off", "maybe"] {
+            assert!(!auto_update_setting(Some(value)), "{value}");
+        }
+        assert_eq!(auto_update_setting(None), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn exec_start_rewrite_targets_only_the_matching_line() {
+        let text = "[Service]\nEnvironment=\"A=1\"\nExecStart=:\"/opt/cypher\" headless\nRestart=on-failure\n";
+        assert_eq!(
+            exec_line_binary("ExecStart=:\"/opt/cypher\" headless").as_deref(),
+            Some("/opt/cypher")
+        );
+        assert_eq!(
+            exec_line_binary("ExecStart=:\"/home/u/bin %% \\\" q/cypher\" headless").as_deref(),
+            Some("/home/u/bin % \" q/cypher")
+        );
+        // Round-trips the daemon installer's quoting, including `%`.
+        let odd = "/home/u/dir % \" x/cypher";
+        assert_eq!(
+            exec_line_binary(&format!("ExecStart=:{} headless", systemd_quote(odd))).as_deref(),
+            Some(odd)
+        );
+        assert_eq!(systemd_quote("a%b"), "\"a%%b\"");
+        let rewritten = rewrite_exec_start(text, |line| {
+            exec_line_binary(line).as_deref() == Some("/opt/cypher")
+        })
+        .unwrap();
+        assert!(rewritten.contains(CURRENT_EXEC_LINE));
+        assert!(rewritten.contains("Environment=\"A=1\""));
+        assert!(rewrite_exec_start(text, |line| line.contains("elsewhere")).is_none());
+        assert!(
+            rewrite_exec_start(&format!("{CURRENT_EXEC_LINE}\n"), |line| {
+                line.starts_with("ExecStart=:\"%h/.cypher/app/") && line != CURRENT_EXEC_LINE
+            })
+            .is_none(),
+            "an already-migrated unit is left alone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn layout_detection_and_command_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("elsewhere").join("app");
+        let versioned = root.join("0.3.16");
+        std::fs::create_dir_all(&versioned).unwrap();
+        let exe = versioned.join("cypher");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        // No `current` link yet: not managed by shape.
+        assert!(managed_by_layout(&exe).is_none());
+        std::os::unix::fs::symlink(&versioned, root.join("current")).unwrap();
+        assert_eq!(managed_by_layout(&exe).as_deref(), Some(root.as_path()));
+        // A `current` that points elsewhere does not claim this binary.
+        let other = root.join("0.3.17");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::remove_file(root.join("current")).unwrap();
+        std::os::unix::fs::symlink(&other, root.join("current")).unwrap();
+        assert!(managed_by_layout(&exe).is_none());
+
+        let checkout = tmp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+        std::fs::write(checkout.join("Cargo.toml"), "[package]").unwrap();
+        assert!(is_source_build(&checkout.join("target/debug/cypher")));
+        assert!(!is_source_build(&exe));
+
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/cypher"), "hand-copied").unwrap();
+        let command = link_command(&home, &root).unwrap();
+        assert_eq!(
+            std::fs::read_link(&command).unwrap(),
+            root.join("current/cypher")
+        );
+        // Idempotent, and never replaces a directory.
+        link_command(&home, &root).unwrap();
+        std::fs::remove_file(&command).unwrap();
+        std::fs::create_dir(&command).unwrap();
+        assert!(link_command(&home, &root).is_err());
     }
 
     #[cfg(unix)]
