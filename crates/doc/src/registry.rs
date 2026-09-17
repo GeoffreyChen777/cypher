@@ -786,6 +786,7 @@ impl RegistryDoc {
             ("gitCheckedAt", opt_ms(space.git_checked_at)),
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
+            ("pinned", json!(space.pinned)),
         ]);
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -819,6 +820,34 @@ impl RegistryDoc {
             space_id,
             OpKind::Update,
             fields([("name", opt_str(name))]),
+        );
+        Ok(true)
+    }
+
+    /// LWW user pin on a project row. `false` when no such row.
+    pub fn set_space_pinned(&mut self, space_id: &str, pinned: bool) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_SPACES, space_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_SPACES,
+            space_id,
+            OpKind::Update,
+            fields([("pinned", json!(pinned))]),
+        );
+        Ok(true)
+    }
+
+    /// LWW user pin on a chat row. `false` when no such row.
+    pub fn set_chat_pinned(&mut self, chat_id: &str, pinned: bool) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("pinned", json!(pinned))]),
         );
         Ok(true)
     }
@@ -882,6 +911,7 @@ impl RegistryDoc {
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
             ("archived", json!(chat.archived)),
+            ("pinned", json!(chat.pinned)),
             ("cwd", opt_str(chat.cwd.as_deref())),
             ("branch", opt_str(chat.branch.as_deref())),
             ("checkoutId", opt_str(chat.checkout_id.as_deref())),
@@ -1240,6 +1270,7 @@ impl RegistryDoc {
                     ("gitCheckedAt", opt_ms(space.git_checked_at)),
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),
                     ("createdAt", json!(space.created_at.timestamp_millis())),
+                    ("pinned", json!(space.pinned)),
                 ]),
             );
         }
@@ -1262,6 +1293,7 @@ impl RegistryDoc {
                     ("deviceId", json!(chat.device_id)),
                     ("title", opt_str(chat.title.as_deref())),
                     ("archived", json!(chat.archived)),
+                    ("pinned", json!(chat.pinned)),
                     ("cwd", opt_str(chat.cwd.as_deref())),
                     ("branch", opt_str(chat.branch.as_deref())),
                     ("checkoutId", opt_str(chat.checkout_id.as_deref())),

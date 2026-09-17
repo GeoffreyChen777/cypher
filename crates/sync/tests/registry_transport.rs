@@ -15,6 +15,7 @@ use tokio::sync::Notify;
 
 fn chat(id: &str, title: &str) -> Chat {
     Chat {
+        pinned: false,
         id: id.into(),
         device_id: "dev-http".into(),
         title: Some(title.into()),

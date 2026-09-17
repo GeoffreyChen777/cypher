@@ -2507,6 +2507,7 @@ impl Shell {
                         && !s.chats.iter().any(|c| c.id == *chat_id)
                     {
                         s.insert_chat_optimistic(cypher_proto::Chat {
+                            pinned: false,
                             id: chat_id.clone(),
                             device_id: parent.device_id.clone(),
                             title: None,
@@ -3222,6 +3223,16 @@ impl Shell {
         self.close_chat_menu(cx);
         self.mutate(
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pin/unpin a session (synced): pinned sessions lead their project.
+    fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        self.mutate(
+            serde_json::json!({ "op": "setChatPinned", "chatId": chat_id, "pinned": pinned }),
             cx,
         );
         cx.notify();
@@ -4373,6 +4384,7 @@ impl Shell {
         harness: Option<cypher_proto::HarnessId>,
         status: ChatIndicator,
         selected: bool,
+        pinned: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4482,7 +4494,15 @@ impl Shell {
                             .text_size(px(13.0))
                             .line_height(px(17.0))
                             .child(title),
-                    ),
+                    )
+                    .when(pinned, |el| {
+                        el.child(
+                            icon(icons::PIN)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(subline),
+                        )
+                    }),
             )
             // Status corner: spinner / unread check / relative time.
             .child(div().text_color(subline).child(corner))
@@ -5636,6 +5656,13 @@ impl Shell {
             let rename_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
+            let pin_id = chat_id.clone();
+            let pinned = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|c| c.id == chat_id && c.pinned);
             let menu = popover::popover_card(&theme)
                 .w(px(170.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -5643,6 +5670,15 @@ impl Shell {
                 }))
                 .flex()
                 .flex_col()
+                .child(
+                    popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
+                        .id("chat-menu-pin")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_chat_pinned(pin_id.clone(), !pinned, cx)
+                        }))
+                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
+                )
                 .child(
                     popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                         .id("chat-menu-rename")
@@ -8303,6 +8339,7 @@ mod tests {
         )));
         // A definitive reply (Created / typed Unavailable) drops the mapping.
         let chat = cypher_proto::Chat {
+            pinned: false,
             id: "fork-x".into(),
             device_id: "dev".into(),
             title: Some("Fork".into()),

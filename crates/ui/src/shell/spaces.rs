@@ -106,6 +106,7 @@ struct ChatGroup {
 struct GroupCard {
     key: String,
     kind: SidebarGroupKind,
+    pinned: bool,
     title: String,
     device: String,
     offline: bool,
@@ -782,6 +783,7 @@ impl Shell {
                 .map(|g| GroupCard {
                     key: g.key,
                     kind: g.kind,
+                    pinned: g.pinned,
                     title: g.title,
                     device: g.device,
                     offline: g.offline,
@@ -910,6 +912,7 @@ impl Shell {
                                 harness,
                                 *status,
                                 is_selected,
+                                chat.pinned,
                                 theme,
                                 cx,
                             )
@@ -1071,6 +1074,7 @@ impl Shell {
         } else {
             icons::FOLDER
         };
+        let pinned = group.pinned;
         let presence = div()
             .size(px(6.0))
             .flex_none()
@@ -1131,7 +1135,15 @@ impl Shell {
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(SharedString::from(title)),
-                    ),
+                    )
+                    .when(pinned, |el| {
+                        el.child(
+                            icon(icons::PIN)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(theme.text_muted.opacity(0.6)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1480,6 +1492,7 @@ impl Shell {
         // Optimistic echo: the watch frame carrying the real row replaces it
         // by id (apply_spaces re-sorts; same-id upsert is idempotent).
         let space = Space {
+            pinned: false,
             id: space_id.clone(),
             device_id: device.id.clone(),
             path: path.clone(),
@@ -2207,6 +2220,21 @@ impl Shell {
         }
     }
 
+    /// Pin/unpin a project (synced): pinned projects lead the sidebar.
+    pub(super) fn set_space_pinned(
+        &mut self,
+        space_id: String,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_space_menu(cx);
+        self.mutate(
+            serde_json::json!({ "op": "setSpacePinned", "spaceId": space_id, "pinned": pinned }),
+            cx,
+        );
+        cx.notify();
+    }
+
     pub(super) fn open_rename_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.close_space_menu(cx);
         let current = self
@@ -2272,6 +2300,12 @@ impl Shell {
             let closing = self.space_menu.closing_since();
             let rename_id = space_id.clone();
             let delete_id = space_id.clone();
+            let pin_id = space_id.clone();
+            let pinned = self
+                .state
+                .read(cx)
+                .space_row(&space_id)
+                .is_some_and(|s| s.pinned);
             let menu = popover::popover_card(&theme)
                 .w(px(170.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -2279,6 +2313,15 @@ impl Shell {
                 }))
                 .flex()
                 .flex_col()
+                .child(
+                    popover::menu_row(&theme, false, format!("space-menu-pin-{space_id}"))
+                        .id("space-menu-pin")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_space_pinned(pin_id.clone(), !pinned, cx)
+                        }))
+                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
+                        .child(SharedString::from(if pinned { "Unpin" } else { "Pin" })),
+                )
                 .child(
                     popover::menu_row(&theme, false, format!("space-menu-rename-{space_id}"))
                         .id("space-menu-rename")
@@ -2425,6 +2468,7 @@ mod tests {
         (
             ChatIndicator::Idle,
             Chat {
+                pinned: false,
                 id: id.into(),
                 device_id: "dev".into(),
                 title: None,
@@ -2622,6 +2666,7 @@ mod tests {
 
     fn space(id: &str, path: &str) -> Space {
         Space {
+            pinned: false,
             id: id.into(),
             device_id: "dev".into(),
             path: path.into(),

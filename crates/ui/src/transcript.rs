@@ -5994,6 +5994,7 @@ mod tests {
 
     fn pi_chat(child: bool, non_pi: bool) -> Chat {
         Chat {
+            pinned: false,
             id: "chat-1".into(),
             device_id: "dev-1".into(),
             title: Some("My chat".into()),

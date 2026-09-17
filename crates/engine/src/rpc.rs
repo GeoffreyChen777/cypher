@@ -417,6 +417,12 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
+    /// User pins (synced LWW): pinned projects lead the sidebar, pinned
+    /// sessions lead their project's list.
+    #[serde(rename_all = "camelCase")]
+    SetChatPinned { chat_id: String, pinned: bool },
+    #[serde(rename_all = "camelCase")]
+    SetSpacePinned { space_id: String, pinned: bool },
     /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -1143,6 +1149,16 @@ impl EngineRpc {
             MutateParams::SetChatArchived { chat_id, archived } => self
                 .workspace
                 .set_chat_archived(&chat_id, archived)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::SetChatPinned { chat_id, pinned } => self
+                .workspace
+                .set_chat_pinned(&chat_id, pinned)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::SetSpacePinned { space_id, pinned } => self
+                .workspace
+                .set_space_pinned(&space_id, pinned)
                 .map_err(failed)
                 .map(drop),
             MutateParams::SetChatConfig { chat_id, config } => self

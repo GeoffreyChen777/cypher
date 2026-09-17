@@ -494,6 +494,7 @@ mod cycle_tests {
 
     fn chat(id: &str, space_id: Option<&str>) -> cypher_proto::Chat {
         cypher_proto::Chat {
+            pinned: false,
             id: id.into(),
             device_id: "dev".into(),
             title: None,

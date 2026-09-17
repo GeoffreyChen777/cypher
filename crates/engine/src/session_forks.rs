@@ -941,6 +941,7 @@ mod tests {
     #[test]
     fn fork_title_appends_and_bounds() {
         let mut chat = Chat {
+            pinned: false,
             id: "c".into(),
             device_id: "d".into(),
             title: Some("My chat".into()),

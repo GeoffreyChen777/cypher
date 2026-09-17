@@ -842,6 +842,7 @@ impl WorkspaceHost {
             return Ok(space.id.clone());
         }
         let space = Space {
+            pinned: false,
             id: crate::new_id(),
             device_id: device_id.clone(),
             path: root.unwrap_or_else(|| path.to_string()),
@@ -955,6 +956,7 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                pinned: false,
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,
@@ -1008,6 +1010,7 @@ impl WorkspaceHost {
         }
         self.mutate(|doc| {
             doc.upsert_space(&Space {
+                pinned: false,
                 id: space_id.to_string(),
                 device_id: device_id.to_string(),
                 path: path.to_string(),
@@ -1023,6 +1026,14 @@ impl WorkspaceHost {
 
     pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_space(space_id, name))?)
+    }
+
+    pub fn set_space_pinned(&self, space_id: &str, pinned: bool) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_space_pinned(space_id, pinned))?)
+    }
+
+    pub fn set_chat_pinned(&self, chat_id: &str, pinned: bool) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_pinned(chat_id, pinned))?)
     }
 
     /// Hard-delete a space and its chats (registry cascade — one atomic batch).
@@ -1177,6 +1188,7 @@ impl WorkspaceHost {
         }
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                pinned: false,
                 id: side_chat_id.to_string(),
                 device_id: parent.device_id.clone(),
                 title: Some(title.to_string()),
@@ -1228,6 +1240,7 @@ impl WorkspaceHost {
         let now = Utc::now();
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                pinned: false,
                 id: fork_chat_id.to_string(),
                 device_id: source.device_id.clone(),
                 title: Some(title.to_string()),
@@ -1292,6 +1305,7 @@ impl WorkspaceHost {
             .unwrap_or(SandboxLevel::WorkspaceWrite);
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                pinned: false,
                 id: chat_id.clone(),
                 device_id: parent.device_id.clone(),
                 title: Some(title.to_string()),

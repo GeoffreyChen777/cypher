@@ -299,6 +299,7 @@ fn device(id: &str, name: &str) -> Device {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        pinned: false,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("First chat".into()),
@@ -327,6 +328,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
 
 fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
+        pinned: false,
         id: id.into(),
         device_id: device_id.into(),
         path: path.into(),

@@ -74,6 +74,7 @@ icon_assets![
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),
+    (PIN, "pin"),
     (SIDEBAR_MINIMALISTIC, "sidebar-minimalistic"),
     // Mirrored variant (zeron window-controls.tsx `-scale-x-100`): the LEFT
     // sidebar toggle shows the panel line on the left; gpui divs have no

@@ -107,6 +107,9 @@ pub struct Space {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// User pin: pinned projects sort to the top of the sidebar (synced).
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Space {
@@ -146,6 +149,9 @@ pub struct Chat {
     pub device_id: String,
     pub title: Option<String>,
     pub archived: bool,
+    /// User pin: pinned sessions sort to the top of their project (synced).
+    #[serde(default)]
+    pub pinned: bool,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     /// Canonical id of the repo checkout/worktree this chat operates in.

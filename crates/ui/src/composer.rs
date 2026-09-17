@@ -8949,6 +8949,7 @@ mod tests {
         last_message_at: Option<i64>,
     ) -> Chat {
         Chat {
+            pinned: false,
             id: id.into(),
             device_id: device_id.into(),
             title: title.map(Into::into),

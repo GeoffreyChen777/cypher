@@ -144,6 +144,7 @@ mod tests {
 
     fn sample_chat() -> Chat {
         Chat {
+            pinned: false,
             id: "fork-1".into(),
             device_id: "dev-1".into(),
             title: Some("My chat — Fork".into()),

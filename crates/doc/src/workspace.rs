@@ -650,6 +650,7 @@ pub(crate) struct RawSpace {
 impl From<RawSpace> for Space {
     fn from(raw: RawSpace) -> Self {
         Space {
+            pinned: false,
             id: raw.id,
             device_id: raw.device_id,
             path: raw.path,
@@ -705,6 +706,7 @@ pub(crate) struct RawChat {
 impl From<RawChat> for Chat {
     fn from(raw: RawChat) -> Self {
         Chat {
+            pinned: false,
             id: raw.id,
             device_id: raw.device_id,
             title: raw.title,
@@ -777,6 +779,7 @@ mod tests {
 
     fn chat(id: &str, device_id: &str) -> Chat {
         Chat {
+            pinned: false,
             id: id.into(),
             device_id: device_id.into(),
             title: Some("First chat".into()),
@@ -805,6 +808,7 @@ mod tests {
 
     fn space(id: &str, device_id: &str, path: &str) -> Space {
         Space {
+            pinned: false,
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),

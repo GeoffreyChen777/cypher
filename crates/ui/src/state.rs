@@ -780,7 +780,10 @@ pub struct SidebarGroup<'a> {
     pub offline: bool,
     /// The space id for live-space cards (the project context menu target).
     pub space_id: Option<&'a str>,
-    /// The card's chats in overview recency order (empty for quiet spaces).
+    /// User pin on the project (live spaces only): pinned cards lead the list.
+    pub pinned: bool,
+    /// The card's chats in overview recency order, pinned sessions first
+    /// (empty for quiet spaces).
     pub chats: Vec<(ChatIndicator, &'a Chat)>,
 }
 
@@ -1473,6 +1476,7 @@ impl AppState {
                 device,
                 offline,
                 space_id: space.map(|s| s.id.as_str()),
+                pinned: space.is_some_and(|s| s.pinned),
                 chats: vec![(status, chat)],
             });
         }
@@ -1515,9 +1519,17 @@ impl AppState {
                     .to_string(),
                 offline: !self.device_online(&space.device_id, now),
                 space_id: Some(space.id.as_str()),
+                pinned: space.pinned,
                 chats: Vec::new(),
             }
         }));
+        // Pins: a pinned project leads the list and a pinned session leads
+        // its project, each keeping the recency order among themselves
+        // (stable sorts — status churn still never reorders).
+        groups.sort_by_key(|g| !g.pinned);
+        for group in &mut groups {
+            group.chats.sort_by_key(|(_, chat)| !chat.pinned);
+        }
         groups
     }
 
@@ -2412,6 +2424,7 @@ fn spawn_side_chat_status_watch(
 /// in memory; there is no workspace row until promotion).
 fn side_chat_synthetic_row(parent: &Chat, side_chat_id: &str, target_device_id: &str) -> Chat {
     Chat {
+        pinned: false,
         id: side_chat_id.to_string(),
         device_id: target_device_id.to_string(),
         title: None,
@@ -2972,6 +2985,7 @@ mod tests {
             .unwrap()
             .to_utc();
         Chat {
+            pinned: false,
             id: id.into(),
             device_id: "dev".into(),
             title: None,
@@ -2997,6 +3011,7 @@ mod tests {
             .unwrap()
             .to_utc();
         Space {
+            pinned: false,
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),
@@ -3499,6 +3514,35 @@ mod tests {
         let dangling_chats: Vec<&str> =
             groups[2].chats.iter().map(|(_, c)| c.id.as_str()).collect();
         assert_eq!(dangling_chats, ["dang"]);
+    }
+
+    #[test]
+    fn sidebar_groups_pinned_projects_and_sessions_lead() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-a", "Mac")];
+        let mut pinned_space = space("s-pinned", "dev-a", "/p", 1);
+        pinned_space.pinned = true;
+        state.apply_spaces(vec![
+            space("s-busy", "dev-a", "/b", 1),
+            pinned_space,
+            space("s-quiet", "dev-a", "/q", 1),
+        ]);
+        // s-busy has the newest activity; s-pinned is older but pinned.
+        let mut busy = chat("busy", 0, Some(30));
+        busy.space_id = Some("s-busy".into());
+        let mut old_pinned_session = chat("old-pin", 0, Some(1));
+        old_pinned_session.space_id = Some("s-busy".into());
+        old_pinned_session.pinned = true;
+        let mut in_pinned = chat("in-pinned", 0, Some(5));
+        in_pinned.space_id = Some("s-pinned".into());
+        state.apply_chats(vec![busy, old_pinned_session, in_pinned]);
+        let groups = state.sidebar_groups(Utc::now());
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys, ["s:s-pinned", "s:s-busy", "s:s-quiet"]);
+        assert!(groups[0].pinned && !groups[1].pinned);
+        // Within the busy project the pinned (older) session leads.
+        let busy_ids: Vec<&str> = groups[1].chats.iter().map(|(_, c)| c.id.as_str()).collect();
+        assert_eq!(busy_ids, ["old-pin", "busy"]);
     }
 
     #[test]
