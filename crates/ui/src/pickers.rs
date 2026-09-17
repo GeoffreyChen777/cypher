@@ -944,6 +944,11 @@ impl Pickers {
             // have installed its Runtime or connected a provider elsewhere.
             self.models
                 .retain(|_, slot| !matches!(slot, Loadable::Error(_)));
+            // Neither is a success: the host may have taken a background
+            // Runtime update that bundles a new provider (pi-claude-bridge)
+            // since this list was cached — nothing on the desktop observes
+            // a remote host's Runtime version, so revalidate on open.
+            self.revalidate_ready_models(cx);
             self.prefetch_models(cx);
             self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
@@ -1113,11 +1118,54 @@ impl Pickers {
         {
             return;
         }
+        if self.engine(cx).is_none() {
+            return;
+        }
+        self.models.insert(harness, Loadable::Loading);
+        self.load_models(harness, cx);
+    }
+
+    /// Stale-while-revalidate for the opened model menu: every catalog that
+    /// already loaded is fetched again behind the rows on screen. The engine
+    /// answers from its own cache unless the host's Runtime or providers
+    /// changed, so a reopen costs one round trip and never a skeleton; a
+    /// failed refresh keeps the rows that were already usable.
+    fn revalidate_ready_models(&mut self, cx: &mut Context<Self>) {
+        let ready: Vec<HarnessId> = self
+            .models
+            .iter()
+            .filter(|(_, slot)| matches!(slot, Loadable::Ready(_)))
+            .map(|(harness, _)| *harness)
+            .collect();
+        for harness in ready {
+            self.load_models(harness, cx);
+        }
+    }
+
+    /// A refresh that failed must not replace rows the user can still pick
+    /// from; only a first load (the slot is `Loading`) surfaces the error row.
+    fn keeps_current_rows(
+        current: Option<&Loadable<Vec<Model>>>,
+        loaded: &Loadable<Vec<Model>>,
+    ) -> bool {
+        matches!(loaded, Loadable::Error(_)) && matches!(current, Some(Loadable::Ready(_)))
+    }
+
+    fn rows_changed(
+        previous: Option<&Loadable<Vec<Model>>>,
+        next: Option<&Loadable<Vec<Model>>>,
+    ) -> bool {
+        match (previous, next) {
+            (Some(Loadable::Ready(before)), Some(Loadable::Ready(after))) => before != after,
+            _ => true,
+        }
+    }
+
+    fn load_models(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         let Some(engine) = self.engine(cx) else {
             return;
         };
         let target = self.space_target(cx);
-        self.models.insert(harness, Loadable::Loading);
         let generation = self.model_generation;
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
@@ -1142,6 +1190,9 @@ impl Pickers {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                if Self::keeps_current_rows(pickers.models.get(&harness), &loaded) {
+                    return;
+                }
                 if let Loadable::Ready(models) = &loaded {
                     let fresh = pickers
                         .defaults
@@ -1150,12 +1201,14 @@ impl Pickers {
                         pickers.save_defaults();
                     }
                 }
-                pickers.models.insert(harness, loaded);
+                let previous = pickers.models.insert(harness, loaded);
                 // A list that landed while its popover is open re-anchors the
                 // keyboard highlight onto the selected row (it sat at 0 while
-                // loading).
+                // loading). A revalidation that confirmed the same rows leaves
+                // the user's arrow-key position alone.
                 if pickers.open_kind() == Some(PickerKind::HarnessModel)
                     && pickers.effective_harness(cx) == Some(harness)
+                    && Self::rows_changed(previous.as_ref(), pickers.models.get(&harness))
                 {
                     pickers.active = pickers.selected_model_index(cx);
                 }
@@ -4294,6 +4347,34 @@ mod tests {
             reasoning_levels: Vec::new(),
             options: Vec::new(),
         }
+    }
+
+    #[test]
+    fn revalidation_keeps_usable_rows_and_only_reanchors_on_change() {
+        let ready = Loadable::Ready(vec![bare_model("openai/gpt-5", "GPT-5")]);
+        let grown = Loadable::Ready(vec![
+            bare_model("openai/gpt-5", "GPT-5"),
+            bare_model("claude-bridge/claude-opus-5", "Claude Opus 5"),
+        ]);
+        let error = Loadable::Error("relay down".into());
+        // A failed refresh must not replace rows the user can still pick.
+        assert!(Pickers::keeps_current_rows(Some(&ready), &error));
+        // A first load surfaces its error row; a fresh catalog always lands.
+        assert!(!Pickers::keeps_current_rows(
+            Some(&Loadable::Loading),
+            &error
+        ));
+        assert!(!Pickers::keeps_current_rows(None, &error));
+        assert!(!Pickers::keeps_current_rows(Some(&ready), &grown));
+        // Same rows confirmed: leave the keyboard highlight where it is.
+        assert!(!Pickers::rows_changed(Some(&ready), Some(&ready)));
+        // New rows (a host that bundled pi-claude-bridge) or a first load re-anchor.
+        assert!(Pickers::rows_changed(Some(&ready), Some(&grown)));
+        assert!(Pickers::rows_changed(
+            Some(&Loadable::Loading),
+            Some(&ready)
+        ));
+        assert!(Pickers::rows_changed(None, Some(&ready)));
     }
 
     #[test]

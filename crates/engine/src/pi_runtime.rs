@@ -191,6 +191,22 @@ impl PiRuntimeManager {
         self.inner.updates_tx.subscribe()
     }
 
+    /// Run `reload` after every Runtime activation this manager performs,
+    /// including the six-hourly background install. Settings → Install goes
+    /// through the RPC handler, which already reloads Pi discovery; the
+    /// background path used to activate a new bundle (and enable its new
+    /// packages in `settings.json`) while the harness kept serving the model
+    /// catalog and parked children of the previous version until the engine
+    /// restarted — on a long-running Linux host that hid pi-claude-bridge's
+    /// models even though Providers reported the Claude CLI as connected.
+    pub fn spawn_reload_on_install<F, Fut>(&self, reload: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        spawn_reload_on_install(self.watch_runtime(), reload)
+    }
+
     pub fn update_status(&self) -> PiUpdateStatus {
         self.inner.updates_tx.borrow().clone()
     }
@@ -821,6 +837,32 @@ fn prune_stale_managed_packages(paths: &PiRuntimePaths, runtime: &Path) -> Resul
     std::fs::rename(temporary, settings).map_err(|err| err.to_string())
 }
 
+/// True when a status transition means a different Runtime bundle is now
+/// `current`. Progress ticks and errors keep the version and are ignored.
+fn runtime_replaced(previous: Option<&str>, next: Option<&str>) -> bool {
+    next.is_some() && next != previous
+}
+
+fn spawn_reload_on_install<F, Fut>(
+    mut status: watch::Receiver<PiRuntimeStatus>,
+    mut reload: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    tokio::spawn(async move {
+        let mut version = status.borrow_and_update().version.clone();
+        while status.changed().await.is_ok() {
+            let next = status.borrow_and_update().version.clone();
+            if runtime_replaced(version.as_deref(), next.as_deref()) {
+                reload().await;
+            }
+            version = next;
+        }
+    })
+}
+
 fn activate(paths: &PiRuntimePaths, destination: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -839,6 +881,56 @@ fn activate(paths: &PiRuntimePaths, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_replaced_ignores_progress_and_errors() {
+        assert!(!runtime_replaced(None, None));
+        assert!(!runtime_replaced(Some("0.85.1.3"), Some("0.85.1.3")));
+        assert!(!runtime_replaced(Some("0.85.1.3"), None));
+        assert!(runtime_replaced(None, Some("0.85.1.5")));
+        assert!(runtime_replaced(Some("0.85.1.3"), Some("0.85.1.5")));
+    }
+
+    #[tokio::test]
+    async fn background_install_triggers_exactly_one_reload_per_activation() {
+        let status = |version: Option<&str>, installing: bool| PiRuntimeStatus {
+            installed: version.is_some(),
+            version: version.map(str::to_string),
+            installing,
+            downloaded_bytes: if installing { 1024 } else { 0 },
+            total_bytes: None,
+            error: None,
+        };
+        let (tx, rx) = watch::channel(status(Some("0.85.1.3"), false));
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = reloads.clone();
+        let task = spawn_reload_on_install(rx, move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let settle = || async {
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+        };
+        // Download progress and a failed attempt keep the old version.
+        tx.send_replace(status(Some("0.85.1.3"), true));
+        tx.send_modify(|s| s.error = Some("network".into()));
+        settle().await;
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Activation of a new bundle reloads once.
+        tx.send_replace(status(Some("0.85.1.5"), false));
+        settle().await;
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A later status refresh of the same version is not a reload.
+        tx.send_replace(status(Some("0.85.1.5"), false));
+        settle().await;
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(tx);
+        task.await.unwrap();
+    }
 
     #[test]
     fn runtime_downloads_use_the_public_release_route() {

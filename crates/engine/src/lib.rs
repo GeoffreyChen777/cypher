@@ -199,6 +199,9 @@ pub struct EngineCore {
     pi_runtime: std::sync::Mutex<Option<pi_runtime::PiRuntimeManager>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Reloads Pi discovery + parked sessions after a background Runtime
+    /// install (see [`Self::set_pi_runtime`]) — owned so shutdown can end it.
+    pi_runtime_reload: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -379,6 +382,7 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             pi_runtime: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            pi_runtime_reload: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
     }
@@ -458,7 +462,32 @@ impl EngineCore {
             .clone()
     }
 
+    /// Attach the Runtime manager. Every Runtime activation it performs —
+    /// the six-hourly background install included — must reload Pi
+    /// discovery and recycle parked children, exactly like the Settings →
+    /// Install RPC path does, or the harness keeps serving the previous
+    /// bundle's model catalog (minus any newly bundled provider) until the
+    /// engine restarts.
     pub fn set_pi_runtime(&self, runtime: pi_runtime::PiRuntimeManager) {
+        let registry = self.registry.clone();
+        let sessions = self.sessions.clone();
+        let reload = runtime.spawn_reload_on_install(move || {
+            let registry = registry.clone();
+            let sessions = sessions.clone();
+            async move {
+                tracing::info!("pi runtime replaced; reloading pi discovery and parked sessions");
+                registry.invalidate_discovery(HarnessId::Pi);
+                sessions.recycle_idle_sessions().await;
+            }
+        });
+        if let Some(previous) = self
+            .pi_runtime_reload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(reload)
+        {
+            previous.abort();
+        }
         *self
             .pi_runtime
             .lock()
@@ -588,6 +617,15 @@ impl EngineCore {
             .take();
         if let Some(updater) = updater {
             updater.shutdown().await;
+        }
+        let reload = self
+            .pi_runtime_reload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(reload) = reload {
+            reload.abort();
+            let _ = reload.await;
         }
         let pi_runtime = self
             .pi_runtime

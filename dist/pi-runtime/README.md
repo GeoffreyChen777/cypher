@@ -55,7 +55,11 @@ Providers prompts to install it.
   identity, and the device selector remains locked until installation settles.
 - Model catalogs are loaded lazily and cached per picker/device. Runtime setup
   completion and provider/package changes invalidate those caches; reopening the
-  model menu retries failed loads. A missing-Runtime error names the chat's host
+  model menu retries failed loads and revalidates loaded ones behind the rows
+  on screen. On the host, every Runtime activation (Settings → Install and the
+  six-hourly background update alike) drops the engine's cached discovery and
+  recycles parked Pi sessions, so a newly bundled provider appears without an
+  engine restart. A missing-Runtime error names the chat's host
   and offers **Open Agents settings**, selecting that same device. Installing on
   the viewer does not install Runtime on a remote chat host.
 - A single device selector is pinned at the top of the Settings sidebar.

@@ -867,7 +867,10 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
             params["apiKey"] = "fixture-key".into();
         }
         let reply = client.call(method, params).await.unwrap();
-        assert_eq!(reply["providers"][0]["id"], "device-b");
+        // The target's snapshot: the Claude Code CLI row is prepended on the
+        // host, the fixture gateway carries the host's device id.
+        assert_eq!(reply["providers"][0]["id"], "claude-code");
+        assert_eq!(reply["providers"][1]["id"], "device-b");
         assert!(!reply.to_string().contains("fixture-key"));
         let observed: serde_json::Value = serde_json::from_slice(
             &std::fs::read(b_dir.join("pi-runtime/agent/observed.json")).unwrap(),
@@ -886,8 +889,9 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
     let local = client.call(methods::SAVE_PI_PROVIDER, serde_json::json!({
         "id":"local-gateway","baseUrl":"https://example.com","apiKey":"fixture-key","targetDeviceId":"device-a"
     })).await.unwrap();
+    assert_eq!(local["providers"][0]["id"], "claude-code");
     assert_eq!(
-        local["providers"][0]["id"], "device-a",
+        local["providers"][1]["id"], "device-a",
         "explicit local routing is accepted"
     );
     let mcp = client
