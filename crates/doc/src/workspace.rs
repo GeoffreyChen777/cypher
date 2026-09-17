@@ -645,12 +645,14 @@ pub(crate) struct RawSpace {
     checkout_id: Option<String>,
     #[serde(default)]
     created_at: i64,
+    #[serde(default)]
+    pinned: bool,
 }
 
 impl From<RawSpace> for Space {
     fn from(raw: RawSpace) -> Self {
         Space {
-            pinned: false,
+            pinned: raw.pinned,
             id: raw.id,
             device_id: raw.device_id,
             path: raw.path,
@@ -701,12 +703,14 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     child: Option<ChildChat>,
+    #[serde(default)]
+    pinned: bool,
 }
 
 impl From<RawChat> for Chat {
     fn from(raw: RawChat) -> Self {
         Chat {
-            pinned: false,
+            pinned: raw.pinned,
             id: raw.id,
             device_id: raw.device_id,
             title: raw.title,

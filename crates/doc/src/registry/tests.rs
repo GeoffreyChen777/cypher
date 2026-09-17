@@ -953,3 +953,22 @@ fn migration_seeds_pending_upserts_that_lose_to_live_writes() {
         Some("live rename")
     );
 }
+
+#[test]
+fn pins_survive_overlay_read_all_and_snapshot() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("c1", "dev-a")).unwrap();
+    assert!(doc.set_chat_pinned("c1", true).unwrap());
+    assert!(doc.chat("c1").unwrap().unwrap().pinned, "overlay pin");
+    let all = doc.read_all().unwrap();
+    assert!(all.chats[0].pinned, "read_all pin");
+    let bytes = doc.to_bytes().unwrap();
+    let again = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    assert!(again.chat("c1").unwrap().unwrap().pinned, "snapshot pin");
+    doc.upsert_space(&space("s1", "dev-a", "/repo")).unwrap();
+    assert!(doc.set_space_pinned("s1", true).unwrap());
+    assert!(doc.space("s1").unwrap().unwrap().pinned, "space pin");
+    assert!(doc.set_space_pinned("s1", false).unwrap());
+    assert!(!doc.space("s1").unwrap().unwrap().pinned, "space unpin");
+    assert!(!doc.set_chat_pinned("missing", true).unwrap());
+}
