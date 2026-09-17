@@ -1912,8 +1912,13 @@ impl RpcService for EngineRpc {
                 self.pi_runtime()?.paths(),
             )),
             methods::SET_WEB_SEARCH_FALLBACK => {
-                let request: crate::web_search_fallback::SetWebSearchFallback =
-                    parse_params(params)?;
+                // Routing is consumed by the forwarder; strip it before the
+                // strict parse (an explicit local target also carries it).
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
                 let paths = self.pi_runtime()?.paths();
                 let settings =
                     crate::web_search_fallback::save(paths, request).map_err(RpcError::Failed)?;

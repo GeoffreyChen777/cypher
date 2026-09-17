@@ -854,6 +854,38 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
     assert_eq!(b.title_settings.load().unwrap().model, None);
     assert_eq!(a.title_settings.load().unwrap().model, None);
 
+    // The web-search fallback is device-local too, and its strict request
+    // parser must tolerate the routing field for local AND remote targets
+    // (a stray `targetDeviceId` once failed every save with "unknown field").
+    for device in ["device-a", "device-b"] {
+        let saved = client
+            .call(
+                methods::SET_WEB_SEARCH_FALLBACK,
+                serde_json::json!({"targetDeviceId": device, "enabled": false, "model": format!("{device}/search")}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved["model"], format!("{device}/search"));
+        assert_eq!(saved["enabled"], false);
+    }
+    assert_eq!(
+        client
+            .call(
+                methods::GET_WEB_SEARCH_FALLBACK,
+                serde_json::json!({"targetDeviceId":"device-b"})
+            )
+            .await
+            .unwrap()["model"],
+        "device-b/search"
+    );
+    assert_eq!(
+        client
+            .call(methods::GET_WEB_SEARCH_FALLBACK, serde_json::json!({}))
+            .await
+            .unwrap()["model"],
+        "device-a/search"
+    );
+
     for (method, action) in [
         (methods::LIST_PI_PROVIDERS, "list"),
         (methods::SAVE_PI_PROVIDER, "save"),
