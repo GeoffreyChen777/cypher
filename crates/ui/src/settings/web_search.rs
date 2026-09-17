@@ -402,12 +402,51 @@ impl WebSearchFallbackControl {
 impl Render for WebSearchFallbackControl {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // Hidden until the host answers; older engines/runtimes never show it.
-        let Loadable::Ready(settings) = self.settings.clone() else {
-            return div().into_any_element();
+        let section = |theme: &Theme| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(widgets::field_label(theme, "Web search"))
+        };
+        let settings = match self.settings.clone() {
+            Loadable::Ready(settings) => settings,
+            Loadable::Error(error) => {
+                return section(&theme)
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(format!(
+                                "Web search fallback is unavailable on this device: {error}"
+                            ))),
+                    )
+                    .into_any_element();
+            }
+            _ => {
+                return section(&theme)
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child("Loading…"),
+                    )
+                    .into_any_element();
+            }
         };
         if !settings.available {
-            return div().into_any_element();
+            return section(&theme)
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(theme.text_muted)
+                        .child(
+                            "This device's Pi Runtime doesn't include the web search fallback yet. Update Runtime in Settings → Agents.",
+                        ),
+                )
+                .into_any_element();
         }
         let writable = !self.busy && self.target.read(cx).can_write(cx);
         let missing = settings.enabled
@@ -419,14 +458,7 @@ impl Render for WebSearchFallbackControl {
             .menu_open
             .then(|| self.model_popup(&settings, &theme, cx));
         let trigger_label = self.model_label(&settings.model);
-        div()
-            .mt(px(10.0))
-            .pt(px(10.0))
-            .border_t_1()
-            .border_color(theme.border)
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
+        section(&theme)
             .child(
                 div()
                     .flex()
@@ -439,9 +471,8 @@ impl Render for WebSearchFallbackControl {
                             .child(
                                 div()
                                     .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("Web search fallback"),
+                                    .child("Route web search through a fallback model"),
                             )
                             .child(
                                 div()
@@ -450,7 +481,7 @@ impl Render for WebSearchFallbackControl {
                                     .line_height(px(17.0))
                                     .text_color(theme.text_muted)
                                     .child(
-                                        "Claude Code models can't search the web. While one is selected, run web search through this model instead.",
+                                        "Claude Code models can't search the web. While one is selected, web search runs through the model below instead.",
                                     ),
                             ),
                     )
@@ -472,32 +503,18 @@ impl Render for WebSearchFallbackControl {
                 el.child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child("Search model")
-                                .when(missing, |el| {
-                                    el.child(
-                                        div()
-                                            .mt(px(2.0))
-                                            .text_size(px(11.0))
-                                            .text_color(theme.warning_muted)
-                                            .child("Not in this device's catalog — pick another."),
-                                    )
-                                }),
-                        )
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(widgets::field_label(&theme, "Search model"))
                         .child(
                             widgets::ghost_action(&theme)
                                 .id("web-search-model-trigger")
                                 .aria_label("Web search fallback model")
                                 .track_focus(&self.trigger_focus)
                                 .relative()
-                                .w(px(220.0))
+                                .w_full()
+                                .h(px(40.0))
+                                .px(px(12.0))
                                 .border_1()
                                 .border_color(theme.border)
                                 .hover(|s| widgets::ghost_hover(&theme, s))
@@ -509,6 +526,7 @@ impl Render for WebSearchFallbackControl {
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
+                                        .text_size(px(13.0))
                                         .text_color(theme.text)
                                         .child(SharedString::from(trigger_label)),
                                 )
@@ -518,7 +536,15 @@ impl Render for WebSearchFallbackControl {
                                         .text_color(theme.text_muted),
                                 )
                                 .children(popup),
-                        ),
+                        )
+                        .when(missing, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.warning_muted)
+                                    .child("Not in this device's catalog — pick another."),
+                            )
+                        }),
                 )
             })
             .children(

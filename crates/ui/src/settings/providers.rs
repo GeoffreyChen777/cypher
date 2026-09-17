@@ -412,8 +412,10 @@ pub struct ProvidersPage {
     page_focus: FocusHandle,
     scroll: gpui::ScrollHandle,
     task: Option<Task<()>>,
-    /// The Claude row's web-search fallback control (device-scoped).
+    /// The Claude dialog's web-search fallback control (device-scoped).
     web_search: Entity<WebSearchFallbackControl>,
+    /// The Claude row's Manage dialog is open.
+    claude_dialog: bool,
 }
 
 impl ProvidersPage {
@@ -463,6 +465,7 @@ impl ProvidersPage {
             observed_device,
             _target_observer: observer,
             web_search,
+            claude_dialog: false,
             snapshot: Loadable::Idle,
             form: None,
             confirm: None,
@@ -496,7 +499,8 @@ impl ProvidersPage {
             | self.oauth.take().is_some()
             | self.intent.take().is_some()
             | self.menu.get().is_some()
-            | self.add_menu.get().is_some();
+            | self.add_menu.get().is_some()
+            | std::mem::take(&mut self.claude_dialog);
         self.menu = popover::Popup::default();
         self.add_menu = popover::Popup::default();
         self.return_focus = None;
@@ -513,6 +517,7 @@ impl ProvidersPage {
         self.form = None;
         self.confirm = None;
         self.oauth = None;
+        self.claude_dialog = false;
         self.error = None;
         self.restore_focus = false;
         self.return_focus
@@ -1504,6 +1509,128 @@ impl ProvidersPage {
             )
     }
 
+    /// The Claude row's Manage dialog: the Claude Code CLI facts plus the
+    /// device-scoped web-search fallback (the control reloads on open so it
+    /// reflects the device's current catalog).
+    fn open_claude_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.dismiss(cx);
+        self.claude_dialog = true;
+        self.error = None;
+        self.return_focus = Some(self.page_focus.clone());
+        self.web_search.update(cx, |control, cx| control.reload(cx));
+        self.dialog_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn render_claude_dialog(
+        &mut self,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width = (f32::from(window.viewport_size().width) - 40.0).clamp(280.0, 464.0);
+        let cli = self
+            .snapshot
+            .ready()
+            .and_then(|snapshot| snapshot.providers.iter().find(|p| is_claude_cli(p)))
+            .cloned();
+        let installed = cli.as_ref().is_some_and(|p| p.credential_saved);
+        let path = cli.map(|p| p.base_url).filter(|path| !path.is_empty());
+        let body = div()
+            .px(px(24.0))
+            .py(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        widgets::row_tile(theme, icons::CLAUDE_MARK)
+                            .size(px(32.0))
+                            .bg(icons::claude_brand().opacity(0.06))
+                            .text_color(icons::claude_brand()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(widgets::row_title(theme, "Claude Code CLI"))
+                            .child(
+                                caption(
+                                    theme,
+                                    path.unwrap_or_else(|| {
+                                        "Not installed on this device.".to_string()
+                                    }),
+                                )
+                                .truncate(),
+                            ),
+                    )
+                    .child(widgets::badge(
+                        theme,
+                        if installed { "Installed" } else { "Missing" },
+                    )),
+            )
+            .when(!installed, |el| {
+                el.child(
+                    button(
+                        theme,
+                        "provider-claude-install",
+                        "Install Claude Code",
+                        ButtonStyle::Secondary,
+                        true,
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.open_url(CLAUDE_CODE_INSTALL);
+                    })),
+                )
+            })
+            .child(self.web_search.clone());
+        let footer = div().px(px(24.0)).pb(px(24.0)).flex().justify_end().child(
+            button(
+                theme,
+                "provider-claude-done",
+                "Done",
+                ButtonStyle::Primary,
+                true,
+            )
+            .on_click(cx.listener(|page, _, window, cx| page.close_dialog(window, cx))),
+        );
+        popover::dialog_card(theme)
+            .id("provider-claude-dialog")
+            .role(gpui::Role::Dialog)
+            .aria_label("Claude settings")
+            .track_focus(&self.dialog_focus)
+            .key_context("ProviderDialog")
+            .tab_group()
+            .p_0()
+            .w(px(width))
+            .overflow_hidden()
+            .on_key_down(cx.listener(Self::on_dialog_key))
+            .child(self.dialog_heading(
+                theme,
+                "Claude settings",
+                "Claude Code on the target device, and where its web searches run.",
+                cx,
+            ))
+            .child(
+                div()
+                    .id("provider-claude-scroll")
+                    .max_h(px(
+                        (f32::from(window.viewport_size().height) - 252.0).max(120.0)
+                    ))
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .child(footer)
+            .into_any_element()
+    }
+
     fn render_confirmation(
         &mut self,
         window: &Window,
@@ -1918,10 +2045,7 @@ impl ProvidersPage {
                                 .child(provider_icon(icons::DANGER_TRIANGLE, 14.0, theme.danger))
                                 .child(caption(theme, message).text_color(theme.danger_muted)),
                         )
-                    })
-                    // Claude Code models can't search: the fallback control
-                    // (toggle + search model) lives on this row.
-                    .when(claude_cli, |el| el.child(self.web_search.clone())),
+                    }),
             )
             .child(
                 div()
@@ -1929,6 +2053,22 @@ impl ProvidersPage {
                     .flex()
                     .items_center()
                     .gap(px(4.0))
+                    .when(claude_cli, |el| {
+                        el.child(
+                            button(
+                                theme,
+                                ("provider-claude-manage", index),
+                                "Manage",
+                                ButtonStyle::Secondary,
+                                !busy,
+                            )
+                            .when(!busy, |el| {
+                                el.on_click(cx.listener(|page, _, window, cx| {
+                                    page.open_claude_dialog(window, cx)
+                                }))
+                            }),
+                        )
+                    })
                     .when(claude_cli && !provider.credential_saved, |el| {
                         el.child(
                             button(
@@ -2375,6 +2515,12 @@ impl Render for ProvidersPage {
                 "provider-oauth-modal",
                 window.viewport_size(),
                 self.render_oauth(window, &theme, cx),
+            ))
+        } else if self.claude_dialog {
+            Some(popover::modal(
+                "provider-claude-modal",
+                window.viewport_size(),
+                self.render_claude_dialog(window, &theme, cx),
             ))
         } else {
             None
