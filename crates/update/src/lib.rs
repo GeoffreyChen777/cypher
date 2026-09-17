@@ -848,6 +848,11 @@ pub struct UpdateStatus {
     pub checked_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A new app bundle is in place and its relauncher is waiting for this
+    /// process to exit: the owning desktop app quits itself when it sees
+    /// this (a remotely triggered update has no UI click to do so).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relaunch_pending: bool,
 }
 
 impl UpdateStatus {
@@ -858,6 +863,7 @@ impl UpdateStatus {
             update_available: false,
             checked_at: None,
             error: None,
+            relaunch_pending: false,
         }
     }
 }
@@ -1035,7 +1041,7 @@ impl Updater {
             }
             tokio::time::sleep(IDLE_RECHECK).await;
         }
-        match self.apply().await {
+        match self.apply(true).await {
             Ok(version) => {
                 tracing::info!(%version, "auto-update applied; service restarting")
             }
@@ -1053,6 +1059,7 @@ impl Updater {
                     latest_version: Some(manifest.version),
                     checked_at: Some(now_ms()),
                     error: None,
+                    relaunch_pending: self.status_tx.borrow().relaunch_pending,
                 };
                 if status.update_available {
                     tracing::info!(
@@ -1073,30 +1080,48 @@ impl Updater {
         }
     }
 
-    /// Stage + apply the newest release on THIS device (managed installs only),
-    /// then restart the service after a short delay so the caller's RPC reply
-    /// flushes before systemd/launchd kills this process.
-    pub async fn apply(&self) -> anyhow::Result<String> {
-        let InstallKind::Managed { app_root } = detect_install() else {
-            bail!(
-                "this install is not update-managed — the desktop app updates from its UI; \
-                 source builds update via git"
-            );
-        };
+    /// Stage + apply the newest release on THIS device — the path a remote
+    /// desktop's Devices → Update takes. Managed (Linux) installs swap the
+    /// symlink and restart the service after a short delay so the caller's
+    /// reply flushes first. App bundles (a Mac) swap the bundle, arm the
+    /// relauncher, and raise `relaunch_pending` on the status stream; the
+    /// desktop app observing that stream quits, and the relauncher opens the
+    /// new bundle. Without `force`, live runs or open terminals refuse the
+    /// update instead of killing them.
+    pub async fn apply(&self, force: bool) -> anyhow::Result<String> {
+        if !force && !self.quiescent_now() {
+            bail!("busy: this device has active runs or open terminals");
+        }
         let manifest = fetch_latest(&self.edge_url).await?;
         if !version_newer(&manifest.version, current_version()) {
             bail!("already up to date ({})", current_version());
         }
-        stage_headless(&self.edge_url, &manifest, &app_root).await?;
-        apply_headless(&app_root, &manifest.version)?;
-        let data_dir = self.data_dir.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            if let Err(err) = restart_service_from_engine(&data_dir) {
-                tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+        match detect_install() {
+            InstallKind::Managed { app_root } => {
+                stage_headless(&self.edge_url, &manifest, &app_root).await?;
+                apply_headless(&app_root, &manifest.version)?;
+                let data_dir = self.data_dir.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    if let Err(err) = restart_service_from_engine(&data_dir) {
+                        tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+                    }
+                });
+                Ok(manifest.version)
             }
-        });
-        Ok(manifest.version)
+            InstallKind::MacApp { bundle } => {
+                let staged = stage_mac_app(&self.edge_url, &manifest, &self.data_dir).await?;
+                apply_mac_app(&staged, &bundle)?;
+                relaunch_app_after_exit(&bundle);
+                self.status_tx
+                    .send_modify(|status| status.relaunch_pending = true);
+                tracing::info!(version = %manifest.version, "app bundle replaced; waiting for the app to quit and relaunch");
+                Ok(manifest.version)
+            }
+            InstallKind::Unmanaged => {
+                bail!("this install is not update-managed — source builds update via git")
+            }
+        }
     }
 }
 

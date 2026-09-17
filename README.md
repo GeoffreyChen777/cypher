@@ -52,7 +52,15 @@ not restarted while runs are active unless you pass `--force`.
 Linux services apply releases **automatically** in an idle window (no live runs
 or open terminals) and restart themselves; the engine also keeps the Runtime
 current. Set `CYPHER_AUTO_UPDATE=0` before `cypher daemon install`, or in
-`~/.cypher/env`, to make updates manual. `cypher status` shows which applies. `cypher status --verbose` includes the original account,
+`~/.cypher/env`, to make updates manual. `cypher status` shows which applies.
+
+Any desktop can also update the whole fleet: Settings → Devices checks every
+online device for a newer release and offers **Update** per device or **Update
+all**. Each device applies its own release and restarts itself (a Linux service
+restarts; a Mac swaps its app bundle and relaunches). A device with active runs
+or open terminals refuses until idle, or until you choose **Update anyway**.
+iOS updates through TestFlight and is not part of this. Remote Mac updates need
+the target Mac to already run a build that includes this feature. `cypher status --verbose` includes the original account,
 data-directory and IPC diagnostics. Status does not refresh credentials.
 Advanced `cypher daemon start|stop|restart|status` commands remain available.
 

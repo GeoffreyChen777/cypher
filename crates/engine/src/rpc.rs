@@ -2128,9 +2128,14 @@ impl RpcService for EngineRpc {
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::CHECK_UPDATE => RpcReply::value(&self.updater()?.check().await),
             methods::APPLY_UPDATE => {
+                // `force` skips the idle guard (active runs / open terminals).
+                let force = params
+                    .get("force")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let version = self
                     .updater()?
-                    .apply()
+                    .apply(force)
                     .await
                     .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))

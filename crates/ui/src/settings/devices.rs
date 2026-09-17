@@ -7,10 +7,11 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
+    AnyElement, App, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
 };
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use cypher_proto::WorkspaceScope;
 use cypher_rpc::methods;
@@ -76,6 +77,66 @@ pub fn delete_device_copy(name: &str) -> String {
     )
 }
 
+/// Where one device stands in the fleet-update flow (Devices → Update).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceUpdate {
+    Checking,
+    UpToDate,
+    /// A newer release is published for that device.
+    Available(String),
+    /// ApplyUpdate is in flight (download + swap on the device).
+    Applying,
+    /// The device accepted the update and is restarting into `target`.
+    Restarting {
+        target: String,
+        since: Instant,
+    },
+    /// `busy`: the device refused because runs/terminals are active — the
+    /// row offers "Update anyway".
+    Failed {
+        message: String,
+        busy: bool,
+    },
+}
+
+/// A restarting device is done once its registry row reports the target
+/// version; after [`RESTART_TIMEOUT`] without it, the row says so. Pure.
+pub const RESTART_TIMEOUT: Duration = Duration::from_secs(240);
+
+pub fn restart_resolved(
+    phase: &DeviceUpdate,
+    device_version: Option<&str>,
+    now: Instant,
+) -> Option<DeviceUpdate> {
+    let DeviceUpdate::Restarting { target, since } = phase else {
+        return None;
+    };
+    if device_version == Some(target.as_str()) {
+        return Some(DeviceUpdate::UpToDate);
+    }
+    (now.duration_since(*since) >= RESTART_TIMEOUT).then(|| DeviceUpdate::Failed {
+        message: format!("Not back on {target} yet — check the device"),
+        busy: false,
+    })
+}
+
+/// Badge copy for a device's update phase. Pure.
+pub fn update_badge(phase: &DeviceUpdate) -> String {
+    match phase {
+        DeviceUpdate::Checking => "Checking…".into(),
+        DeviceUpdate::UpToDate => "Up to date".into(),
+        DeviceUpdate::Available(latest) => format!("{latest} available"),
+        DeviceUpdate::Applying => "Updating…".into(),
+        DeviceUpdate::Restarting { target, .. } => format!("Restarting into {target}…"),
+        DeviceUpdate::Failed { message, .. } => message.clone(),
+    }
+}
+
+/// ApplyUpdate error text that means "idle guard", not a real failure.
+pub fn is_busy_error(message: &str) -> bool {
+    message.contains("busy")
+}
+
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
@@ -92,12 +153,20 @@ pub struct DevicesPage {
     error: Option<SharedString>,
     task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    /// Per-device fleet-update phase (Devices → Update).
+    updates: HashMap<String, DeviceUpdate>,
+    update_tasks: Vec<Task<()>>,
+    /// The first render with a device list runs one check across the fleet.
+    auto_checked: bool,
     _observe: Subscription,
 }
 
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let observe = cx.observe(&state, |this: &mut Self, state, cx| {
+            this.reconcile_restarts(&state, cx);
+            cx.notify()
+        });
         Self {
             state,
             rename: None,
@@ -106,6 +175,9 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
+            updates: HashMap::new(),
+            update_tasks: Vec::new(),
+            auto_checked: false,
             _observe: observe,
         }
     }
@@ -185,6 +257,175 @@ impl DevicesPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    // ---- fleet updates ----
+
+    /// Restarting rows resolve from the registry: the device's engine writes
+    /// its version on boot.
+    fn reconcile_restarts(&mut self, state: &Entity<AppState>, cx: &App) {
+        let now = Instant::now();
+        let versions: HashMap<String, Option<String>> = state
+            .read(cx)
+            .devices
+            .iter()
+            .map(|d| (d.id.clone(), d.version.clone()))
+            .collect();
+        for (id, phase) in self.updates.iter_mut() {
+            if let Some(next) =
+                restart_resolved(phase, versions.get(id).and_then(|v| v.as_deref()), now)
+            {
+                *phase = next;
+            }
+        }
+    }
+
+    fn target_params(
+        &self,
+        device_id: &str,
+        cx: &App,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut params = serde_json::Map::new();
+        if self.state.read(cx).local_device_id.as_deref() != Some(device_id) {
+            params.insert("targetDeviceId".into(), device_id.into());
+        }
+        params
+    }
+
+    /// Ask every online device whether a newer release is published for it.
+    pub fn check_all(&mut self, cx: &mut Context<Self>) {
+        let now = Utc::now();
+        let ids: Vec<String> = self
+            .state
+            .read(cx)
+            .devices
+            .iter()
+            .filter(|d| d.platform != "ios" && d.platform != "android")
+            .filter(|d| device_online(d.last_seen_at, now))
+            .map(|d| d.id.clone())
+            .collect();
+        for id in ids {
+            self.check_device(id, cx);
+        }
+    }
+
+    fn check_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if matches!(
+            self.updates.get(&device_id),
+            Some(DeviceUpdate::Applying | DeviceUpdate::Restarting { .. })
+        ) {
+            return;
+        }
+        self.updates
+            .insert(device_id.clone(), DeviceUpdate::Checking);
+        let params = serde_json::Value::Object(self.target_params(&device_id, cx));
+        self.update_tasks.push(cx.spawn(async move |this, cx| {
+            let call = engine.client().call(methods::CHECK_UPDATE, params);
+            let deadline = cx.background_executor().timer(Duration::from_secs(30));
+            futures::pin_mut!(call);
+            futures::pin_mut!(deadline);
+            let phase = match futures::future::select(call, deadline).await {
+                futures::future::Either::Left((Ok(value), _)) => {
+                    match serde_json::from_value::<cypher_update::UpdateStatus>(value) {
+                        Ok(status) => match (status.update_available, status.latest_version) {
+                            (true, Some(latest)) => DeviceUpdate::Available(latest),
+                            _ if status.error.is_some() => DeviceUpdate::Failed {
+                                message: status.error.unwrap_or_default(),
+                                busy: false,
+                            },
+                            _ => DeviceUpdate::UpToDate,
+                        },
+                        Err(err) => DeviceUpdate::Failed {
+                            message: format!("Unreadable reply: {err}"),
+                            busy: false,
+                        },
+                    }
+                }
+                futures::future::Either::Left((Err(err), _)) => DeviceUpdate::Failed {
+                    message: format!("Check failed: {err}"),
+                    busy: false,
+                },
+                futures::future::Either::Right(_) => DeviceUpdate::Failed {
+                    message: "Check timed out".into(),
+                    busy: false,
+                },
+            };
+            this.update(cx, |page, cx| {
+                if page.updates.get(&device_id) == Some(&DeviceUpdate::Checking) {
+                    page.updates.insert(device_id.clone(), phase);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Apply the published release on one device: Linux services swap and
+    /// restart themselves; a Mac swaps its bundle and relaunches. Without
+    /// `force` the device refuses while runs or terminals are active.
+    fn apply_device(&mut self, device_id: String, force: bool, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = match self.updates.get(&device_id) {
+            Some(DeviceUpdate::Available(latest)) => latest.clone(),
+            Some(DeviceUpdate::Failed { .. }) => String::new(),
+            _ => return,
+        };
+        self.updates
+            .insert(device_id.clone(), DeviceUpdate::Applying);
+        let mut params = self.target_params(&device_id, cx);
+        params.insert("force".into(), force.into());
+        self.update_tasks.push(cx.spawn(async move |this, cx| {
+            let call = engine
+                .client()
+                .call(methods::APPLY_UPDATE, serde_json::Value::Object(params));
+            let deadline = cx.background_executor().timer(Duration::from_secs(20 * 60));
+            futures::pin_mut!(call);
+            futures::pin_mut!(deadline);
+            let phase = match futures::future::select(call, deadline).await {
+                futures::future::Either::Left((Ok(value), _)) => DeviceUpdate::Restarting {
+                    target: value["version"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or(target),
+                    since: Instant::now(),
+                },
+                futures::future::Either::Left((Err(err), _)) => {
+                    let message = err.to_string();
+                    DeviceUpdate::Failed {
+                        busy: is_busy_error(&message),
+                        message,
+                    }
+                }
+                futures::future::Either::Right(_) => DeviceUpdate::Failed {
+                    message: "No reply from the device — it may still be updating".into(),
+                    busy: false,
+                },
+            };
+            this.update(cx, |page, cx| {
+                page.updates.insert(device_id.clone(), phase);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn apply_all(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .updates
+            .iter()
+            .filter(|(_, phase)| matches!(phase, DeviceUpdate::Available(_)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.apply_device(id, false, cx);
+        }
     }
 
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
@@ -330,6 +571,18 @@ impl Render for DevicesPage {
         let delete_dialog = self.render_delete_dialog(viewport, cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
+        if !self.auto_checked && count > 0 && self.state.read(cx).engine().is_some() {
+            self.auto_checked = true;
+            self.check_all(cx);
+        }
+        let updates = self.updates.clone();
+        let available_count = updates
+            .values()
+            .filter(|phase| matches!(phase, DeviceUpdate::Available(_)))
+            .count();
+        let checking = updates
+            .values()
+            .any(|phase| matches!(phase, DeviceUpdate::Checking));
 
         let rows: Vec<AnyElement> = devices
             .into_iter()
@@ -342,7 +595,15 @@ impl Render for DevicesPage {
                 let rename_id = device.id.clone();
                 let rename_name = device.name.clone();
                 let remove_id = device.id.clone();
+                let update_id = device.id.clone();
                 let show_remove = can_remove_device(workspace_scope, is_local);
+                let phase = updates.get(&device.id).cloned();
+                let update_action: Option<(&'static str, bool)> = match &phase {
+                    Some(DeviceUpdate::Available(_)) => Some(("Update", false)),
+                    Some(DeviceUpdate::Failed { busy: true, .. }) => Some(("Update anyway", true)),
+                    Some(DeviceUpdate::Failed { busy: false, .. }) => Some(("Retry", false)),
+                    _ => None,
+                };
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -387,6 +648,20 @@ impl Render for DevicesPage {
                     meta.push(
                         div()
                             .child(SharedString::from(format!("v{version}")))
+                            .into_any_element(),
+                    );
+                }
+                if let Some(phase) = &phase {
+                    let tone = match phase {
+                        DeviceUpdate::Available(_) => theme.accent,
+                        DeviceUpdate::Failed { .. } => theme.danger,
+                        DeviceUpdate::UpToDate => theme.success_muted.opacity(0.9),
+                        _ => theme.text_muted,
+                    };
+                    meta.push(
+                        div()
+                            .text_color(tone)
+                            .child(SharedString::from(update_badge(phase)))
                             .into_any_element(),
                     );
                 }
@@ -456,6 +731,31 @@ impl Render for DevicesPage {
                                 } else {
                                     "This device"
                                 }),
+                        )
+                    })
+                    .when_some(update_action, |el, (label, force)| {
+                        let retry_check = label == "Retry";
+                        let id = update_id.clone();
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("device-update", ix))
+                                .text_color(theme.accent)
+                                .hover(|s| {
+                                    s.bg(theme.accent.opacity(0.10)).text_color(theme.accent)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if retry_check {
+                                        this.check_device(id.clone(), cx);
+                                    } else {
+                                        this.apply_device(id.clone(), force, cx);
+                                    }
+                                }))
+                                .child(
+                                    crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
+                                        .size(px(14.0))
+                                        .text_color(theme.accent),
+                                )
+                                .child(SharedString::from(label)),
                         )
                     })
                     .child(
@@ -535,6 +835,60 @@ impl Render for DevicesPage {
                         &theme,
                         devices_subtitle(workspace_scope),
                     ))
+                    // Fleet updates: check every online device, update the
+                    // ones with a newer release. Each device applies its own
+                    // release and restarts itself; iOS updates through
+                    // TestFlight and is left out.
+                    .when(count > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .pb(px(12.0))
+                                .child(
+                                    widgets::ghost_action(&theme)
+                                        .id("devices-check-updates")
+                                        .when(checking, |el| el.opacity(0.6))
+                                        .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
+                                        .child(
+                                            crate::icons::icon(crate::icons::REFRESH)
+                                                .size(px(14.0))
+                                                .text_color(theme.text_muted),
+                                        )
+                                        .child(SharedString::from(if checking {
+                                            "Checking…"
+                                        } else {
+                                            "Check for updates"
+                                        })),
+                                )
+                                .when(available_count > 0, |el| {
+                                    el.child(
+                                        widgets::ghost_action(&theme)
+                                            .id("devices-update-all")
+                                            .text_color(theme.accent)
+                                            .hover(|s| {
+                                                s.bg(theme.accent.opacity(0.10))
+                                                    .text_color(theme.accent)
+                                            })
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.apply_all(cx)),
+                                            )
+                                            .child(
+                                                crate::icons::icon(
+                                                    crate::icons::ARCHIVE_UP_MINIMALISTIC,
+                                                )
+                                                .size(px(14.0))
+                                                .text_color(theme.accent),
+                                            )
+                                            .child(SharedString::from(format!(
+                                                "Update all ({available_count})"
+                                            ))),
+                                    )
+                                }),
+                        )
+                    })
                     .when_some(self.error.clone(), |el, message| {
                         el.child(
                             widgets::error_strip(&theme, message)
@@ -612,6 +966,37 @@ mod tests {
         assert!(can_remove_device(Some(WorkspaceScope::Synced), false));
         assert!(can_remove_device(Some(WorkspaceScope::Development), false));
         assert!(!can_remove_device(None, false));
+    }
+
+    #[test]
+    fn restart_resolves_on_reported_version_or_times_out() {
+        let since = Instant::now();
+        let phase = DeviceUpdate::Restarting {
+            target: "0.3.17".into(),
+            since,
+        };
+        assert_eq!(restart_resolved(&phase, Some("0.3.16"), since), None);
+        assert_eq!(
+            restart_resolved(&phase, Some("0.3.17"), since),
+            Some(DeviceUpdate::UpToDate)
+        );
+        let late = since + RESTART_TIMEOUT;
+        assert!(matches!(
+            restart_resolved(&phase, Some("0.3.16"), late),
+            Some(DeviceUpdate::Failed { busy: false, .. })
+        ));
+        assert_eq!(
+            restart_resolved(&DeviceUpdate::UpToDate, Some("0.3.17"), late),
+            None
+        );
+        assert_eq!(
+            update_badge(&DeviceUpdate::Available("0.3.17".into())),
+            "0.3.17 available"
+        );
+        assert!(is_busy_error(
+            "busy: this device has active runs or open terminals"
+        ));
+        assert!(!is_busy_error("Check timed out"));
     }
 
     #[test]

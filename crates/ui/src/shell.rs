@@ -1023,6 +1023,9 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// The engine replaced this app's bundle (a Devices → Update, possibly
+    /// from another machine) and armed the relauncher: quit exactly once.
+    relaunch_quit_sent: bool,
     /// The quick-chat device palette (sidebar header "Quick chat").
     quick_chat: Option<spaces::QuickChatFlow>,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
@@ -1487,6 +1490,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            relaunch_quit_sent: false,
             quick_chat: None,
             scratch_cleanup_task: None,
             delete_worktree_confirm: None,
@@ -1561,6 +1565,23 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        // A remotely applied update swapped this app's bundle; the relauncher
+        // is waiting for this process to exit. Quit through the normal path so
+        // the embedded engine flushes before the new bundle opens.
+        if !self.relaunch_quit_sent
+            && state
+                .read(cx)
+                .update
+                .as_ref()
+                .is_some_and(|update| update.relaunch_pending)
+        {
+            self.relaunch_quit_sent = true;
+            tracing::info!(
+                "update applied by the engine; quitting so the relauncher can open the new bundle"
+            );
+            cx.quit();
+            return;
+        }
         let next_sync_flow = {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
@@ -5044,6 +5065,7 @@ impl Shell {
                                     .unwrap_or(0),
                             ),
                             error: None,
+                            relaunch_pending: false,
                         },
                         Ok(Err(err)) => cypher_update::UpdateStatus {
                             current_version: cypher_update::current_version().into(),
@@ -5051,6 +5073,7 @@ impl Shell {
                             update_available: false,
                             checked_at: None,
                             error: Some(format!("{err:#}")),
+                            relaunch_pending: false,
                         },
                         Err(err) => cypher_update::UpdateStatus {
                             current_version: cypher_update::current_version().into(),
@@ -5058,6 +5081,7 @@ impl Shell {
                             update_available: false,
                             checked_at: None,
                             error: Some(err.to_string()),
+                            relaunch_pending: false,
                         },
                     },
                 };
@@ -8446,6 +8470,7 @@ mod tests {
             update_available: latest.is_some(),
             checked_at: checked.then_some(1),
             error: error.map(str::to_string),
+            relaunch_pending: false,
         };
         assert_eq!(about_check_from_status(None, "0.1.0"), AboutCheck::Idle);
         assert_eq!(
@@ -8484,6 +8509,7 @@ mod tests {
             update_available: available,
             checked_at: None,
             error: None,
+            relaunch_pending: false,
         };
         // App-version source of truth: both table cases are decided against the
         // UI process's version, never the engine's `update_available` boolean.
