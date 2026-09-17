@@ -10,6 +10,7 @@ use gpui::{
 
 use super::device_target::DeviceTarget;
 use super::device_target::DeviceTicket;
+use super::web_search::WebSearchFallbackControl;
 use super::widgets;
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
@@ -411,6 +412,8 @@ pub struct ProvidersPage {
     page_focus: FocusHandle,
     scroll: gpui::ScrollHandle,
     task: Option<Task<()>>,
+    /// The Claude row's web-search fallback control (device-scoped).
+    web_search: Entity<WebSearchFallbackControl>,
 }
 
 impl ProvidersPage {
@@ -451,12 +454,15 @@ impl ProvidersPage {
         } else {
             intent
         };
+        let web_search =
+            cx.new(|cx| WebSearchFallbackControl::new(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
             target,
             generation,
             observed_device,
             _target_observer: observer,
+            web_search,
             snapshot: Loadable::Idle,
             form: None,
             confirm: None,
@@ -620,7 +626,9 @@ impl ProvidersPage {
                                 }
                             }
                             page.snapshot = Loadable::Ready(snapshot);
-                            if !writing {
+                            if writing {
+                                page.web_search.update(cx, |control, cx| control.reload(cx));
+                            } else {
                                 crate::pickers::bump_harness_catalog(cx);
                             }
                             if method != methods::LIST_PI_PROVIDERS {
@@ -1910,7 +1918,10 @@ impl ProvidersPage {
                                 .child(provider_icon(icons::DANGER_TRIANGLE, 14.0, theme.danger))
                                 .child(caption(theme, message).text_color(theme.danger_muted)),
                         )
-                    }),
+                    })
+                    // Claude Code models can't search: the fallback control
+                    // (toggle + search model) lives on this row.
+                    .when(claude_cli, |el| el.child(self.web_search.clone())),
             )
             .child(
                 div()

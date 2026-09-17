@@ -1276,6 +1276,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_MODELS
             | methods::GET_TITLE_MODEL_SETTINGS
             | methods::SET_TITLE_MODEL_SETTINGS
+            | methods::GET_WEB_SEARCH_FALLBACK
+            | methods::SET_WEB_SEARCH_FALLBACK
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::RETRY_COMMAND
@@ -1905,6 +1907,20 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
+            }
+            methods::GET_WEB_SEARCH_FALLBACK => RpcReply::value(&crate::web_search_fallback::load(
+                self.pi_runtime()?.paths(),
+            )),
+            methods::SET_WEB_SEARCH_FALLBACK => {
+                let request: crate::web_search_fallback::SetWebSearchFallback =
+                    parse_params(params)?;
+                let paths = self.pi_runtime()?.paths();
+                let settings =
+                    crate::web_search_fallback::save(paths, request).map_err(RpcError::Failed)?;
+                // Enabling/disabling edits settings.json: parked Pi children
+                // and cached discovery must pick the change up.
+                self.reload_pi_runtime().await;
+                RpcReply::value(&settings)
             }
             methods::GET_TITLE_MODEL_SETTINGS => {
                 let store = self.title_settings.as_ref().ok_or_else(|| {
@@ -2929,6 +2945,8 @@ mod tests {
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
         assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
+        assert!(forwardable(methods::GET_WEB_SEARCH_FALLBACK));
+        assert!(forwardable(methods::SET_WEB_SEARCH_FALLBACK));
         assert!(forwardable(methods::FETCH_ALL));
     }
 

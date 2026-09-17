@@ -43,6 +43,14 @@ does not open a Runtime-local browser callback for those hosts.
 Claude Code installed, Runtime points the bridge at that executable; otherwise
 Providers prompts to install it.
 
+Claude Code models cannot run Pi's `web_search`. The bundled
+**pi-web-search-claude-bridge** package routes that tool through a fallback
+model only while a `claude-bridge/*` model is selected (other models keep
+their own search). The Claude row carries a **Web search fallback** toggle and
+a search-model picker; they write `agent/web-search-claude-bridge.json`
+(`{"provider","model"}`) and enable/disable the package in `settings.json` on
+the selected device. Both are device-local.
+
 - Connect-and-add verifies an authenticated `/v1/models` response before saving.
 - The engine sends keys through stdin, never process arguments or chat commands.
 - The UI masks keys, disables copy/cut and undo for the secret field, and clears

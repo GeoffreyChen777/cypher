@@ -115,6 +115,10 @@ const RECOMMENDED: &[(&str, &str)] = &[
         "npm:pi-claude-bridge",
         "Use a Claude Code subscription as a Pi provider. Requires the Claude Code CLI.",
     ),
+    (
+        "npm:pi-web-search-claude-bridge",
+        "Route web search through a fallback model while a Claude Code model is selected.",
+    ),
     ("npm:pi-agent-squad", "Coordinate multiple Pi agents."),
     ("npm:pi-provider-newapi", "Additional provider integration."),
 ];
@@ -213,6 +217,16 @@ fn value_source(value: &Value) -> Option<String> {
         Value::Object(o) => o.get("source").and_then(Value::as_str).map(str::to_string),
         _ => None,
     }
+}
+
+/// Whether a curated package is shipped by the active Runtime bundle.
+pub fn bundled(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> bool {
+    bundled_source(paths, source).is_some()
+}
+
+/// Whether a package is listed (and not `autoload: false`) in `settings.json`.
+pub fn enabled(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> bool {
+    package_enabled(source, &configured_packages(paths))
 }
 
 fn package_enabled(source: &str, values: &[Value]) -> bool {

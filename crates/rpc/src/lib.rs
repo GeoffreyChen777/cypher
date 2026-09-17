@@ -72,6 +72,8 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const GET_TITLE_MODEL_SETTINGS: &str = "GetTitleModelSettings";
     pub const SET_TITLE_MODEL_SETTINGS: &str = "SetTitleModelSettings";
+    pub const GET_WEB_SEARCH_FALLBACK: &str = "GetWebSearchFallback";
+    pub const SET_WEB_SEARCH_FALLBACK: &str = "SetWebSearchFallback";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Re-issue a failed/expired durable message command with a fresh command

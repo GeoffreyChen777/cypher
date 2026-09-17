@@ -421,6 +421,21 @@ pub struct TitleModelSettings {
     pub model: Option<String>,
 }
 
+/// Device-local web-search fallback for Claude Code sessions: while the
+/// conversation model is `claude-bridge/*`, Pi's `web_search` runs through
+/// `model` (a `provider/model` catalog id) instead of the conversation model,
+/// which cannot search. Backed by the bundled `pi-web-search-claude-bridge`
+/// package; `available` is false on runtimes that do not ship it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchFallbackSettings {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDirectory {
