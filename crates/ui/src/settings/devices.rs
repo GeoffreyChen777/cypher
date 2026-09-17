@@ -651,20 +651,28 @@ impl Render for DevicesPage {
                             .into_any_element(),
                     );
                 }
-                if let Some(phase) = &phase {
+                // Update state rides a right-aligned pill (below), never the
+                // meta line: a long status pushed the id chip onto its own
+                // row and rows stopped lining up.
+                let status_pill = phase.as_ref().map(|phase| {
                     let tone = match phase {
                         DeviceUpdate::Available(_) => theme.accent,
                         DeviceUpdate::Failed { .. } => theme.danger,
-                        DeviceUpdate::UpToDate => theme.success_muted.opacity(0.9),
+                        DeviceUpdate::UpToDate => theme.success_muted,
                         _ => theme.text_muted,
                     };
-                    meta.push(
-                        div()
-                            .text_color(tone)
-                            .child(SharedString::from(update_badge(phase)))
-                            .into_any_element(),
-                    );
-                }
+                    div()
+                        .flex_none()
+                        .max_w(px(220.0))
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded_full()
+                        .bg(tone.opacity(0.10))
+                        .text_size(px(10.5))
+                        .text_color(tone)
+                        .truncate()
+                        .child(SharedString::from(update_badge(phase)))
+                });
                 if !online {
                     meta.push(
                         div()
@@ -686,28 +694,28 @@ impl Render for DevicesPage {
                             .into_any_element(),
                     );
                 }
-                meta.push(
-                    div()
-                        .id(("device-id", ix))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(10.5))
-                        .text_color(if id_copied {
-                            theme.success_muted.opacity(0.9)
-                        } else {
-                            theme.text_muted.opacity(0.5)
-                        })
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text_muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.copy_id(copy_id.clone(), cx);
-                        }))
-                        .child(SharedString::from(if id_copied {
-                            "Copied".to_string()
-                        } else {
-                            short_id(&device.id)
-                        }))
-                        .into_any_element(),
-                );
+                // The id chip sits on the TITLE line, right after the name,
+                // so every row's second line is the same quiet meta text.
+                let id_chip = div()
+                    .id(("device-id", ix))
+                    .flex_none()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(10.5))
+                    .text_color(if id_copied {
+                        theme.success_muted.opacity(0.9)
+                    } else {
+                        theme.text_muted.opacity(0.5)
+                    })
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.text_muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_id(copy_id.clone(), cx);
+                    }))
+                    .child(SharedString::from(if id_copied {
+                        "Copied".to_string()
+                    } else {
+                        short_id(&device.id)
+                    }));
 
                 widgets::card_row(&theme, ix == 0)
                     .child(tile)
@@ -717,9 +725,19 @@ impl Render for DevicesPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, device.name.clone()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_baseline()
+                                    .gap(px(8.0))
+                                    .min_w_0()
+                                    .child(widgets::row_title(&theme, device.name.clone()))
+                                    .child(id_chip),
+                            )
                             .child(widgets::meta_line(&theme, meta)),
                     )
+                    .when_some(status_pill, |el, pill| el.child(pill))
                     .when(is_local, |el| {
                         el.child(
                             div()
