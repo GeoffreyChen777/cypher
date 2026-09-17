@@ -487,12 +487,12 @@ struct ComposerChip: View {
 
 // MARK: - Model picker sheet
 
-/// Detent bottom sheet in the t3 settings-sheet layout: one scrolling list of
-/// models sectioned per harness (collapsible uppercase provider headers with
-/// the brand mark — picking a model picks its harness), the selected row a
-/// filled high-contrast pill with a trailing checkmark. Effort lives in its
-/// own TraitPickerSheet, split like the desktop's footer pickers. Harness
-/// sections collapse to one once a chat exists — harness is locked mid-chat.
+/// Detent bottom sheet, grouped by PROVIDER like the desktop picker: a
+/// horizontal rail of provider chips (brand mark · name · count) across the
+/// top selects the group, and the list below shows only that provider's
+/// models — a flat list of every gateway model was unreadable on a phone.
+/// The rail opens on the current model's provider. Effort lives in its own
+/// TraitPickerSheet, split like the desktop's footer pickers.
 struct ModelPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var harness: String
@@ -507,51 +507,52 @@ struct ModelPickerSheet: View {
     var loading = false
     var onRefresh: (() -> Void)?
 
-    private func models(for harness: String) -> [ModelInfo] {
-        harness == "pi" ? (catalogs[harness] ?? []) : []
+    /// The provider whose models the list shows; nil = the current model's.
+    @State private var pickedProvider: String?
+
+    private var models: [ModelInfo] { catalogs["pi"] ?? [] }
+    private var groups: [HarnessCatalog.ProviderGroup] { HarnessCatalog.providerGroups(models) }
+
+    private var viewedProvider: String? {
+        if let pickedProvider, groups.contains(where: { $0.id == pickedProvider }) { return pickedProvider }
+        let current = HarnessCatalog.providerId(of: modelId)
+        if groups.contains(where: { $0.id == current }) { return current }
+        return groups.first?.id
     }
 
-    private var sections: [HarnessInfo] {
-        if lockedHarness, harness == "pi" {
-            return [HarnessInfo(id: harness, label: HarnessCatalog.label(for: harness))]
-        }
-        return harnesses.filter { $0.id == "pi" }
+    private var viewedGroup: HarnessCatalog.ProviderGroup? {
+        groups.first { $0.id == viewedProvider }
     }
-
-    /// Accordion state: which harness sections show their models. Seeded with
-    /// the current harness — with several agents enabled a flat list of every
-    /// catalog is unmanageable (t3's collapsible provider folds).
-    @State private var openSections: Set<String> = []
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        SheetLabel("Model")
-                        if loading {
-                            ProgressView("Loading models…").font(Theme.sans(13))
-                        } else if !sections.contains(where: { !models(for: $0.id).isEmpty }) {
-                            Text("No models loaded. Close this picker and retry from the session.")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textMuted)
+                VStack(alignment: .leading, spacing: 14) {
+                    if loading {
+                        ProgressView("Loading models…").font(Theme.sans(13))
+                            .padding(.horizontal, 4)
+                    } else if groups.isEmpty {
+                        Text("No models loaded. Close this picker and retry from the session.")
+                            .font(Theme.sans(13))
+                            .foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 4)
+                    } else {
+                        if groups.count > 1 {
+                            providerRail
                         }
-                        ForEach(sections) { h in
-                            if sections.count > 1 {
-                                sectionHeader(h)
-                            }
-                            if sections.count == 1 || openSections.contains(h.id) {
-                                ForEach(models(for: h.id)) { m in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let viewedGroup {
+                                SheetLabel(groups.count > 1 ? viewedGroup.name : "Model")
+                                ForEach(viewedGroup.models) { m in
                                     PickRow(title: m.label,
-                                            subtitle: m.description,
-                                            selected: harness == h.id && m.id == modelId) {
-                                        select(harness: h.id, model: m)
+                                            subtitle: HarnessCatalog.contextLabel(m),
+                                            selected: m.id == modelId) {
+                                        select(model: m)
                                     }
                                 }
                             }
                         }
                     }
-                    .onAppear { openSections = [harness] }
                 }
                 .padding(20)
                 .padding(.bottom, 12)
@@ -585,48 +586,59 @@ struct ModelPickerSheet: View {
         .presentationCornerRadius(32)
     }
 
-    private var selectedModel: ModelInfo? {
-        models(for: harness).first { $0.id == modelId }
-    }
-
-    /// t3's collapsible ProviderHeader: brand mark + tracked-out uppercase
-    /// provider name, trailing model count + chevron; tapping folds the section.
-    private func sectionHeader(_ h: HarnessInfo) -> some View {
-        let open = openSections.contains(h.id)
-        return Button {
-            UISelectionFeedbackGenerator().selectionChanged()
-            withAnimation(Motion.collapse) {
-                if open { openSections.remove(h.id) } else { openSections.insert(h.id) }
-            }
-        } label: {
-            HStack(spacing: 7) {
-                HarnessBadge(harness: h.id, size: 13)
-                Text(h.label.uppercased())
-                    .font(Theme.sans(10.5, weight: .medium))
-                    .kerning(1.2)
-                    .foregroundStyle(Theme.textMuted.opacity(0.7))
-                Spacer(minLength: 8)
-                if !open {
-                    Text("\(models(for: h.id).count)")
-                        .font(Theme.sans(10.5))
-                        .foregroundStyle(Theme.textFaint)
+    /// The provider rail: one chip per provider in catalog order. The viewed
+    /// chip is the filled high-contrast pill (the rows' selected language);
+    /// the others carry a faint count.
+    private var providerRail: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(groups) { group in
+                    providerChip(group, viewed: group.id == viewedProvider)
                 }
-                Image(systemName: open ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textFaint)
             }
-            .padding(.horizontal, 4)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-            .contentShape(Rectangle())
+            .padding(.horizontal, 2)
         }
-        .buttonStyle(.plain)
+        .scrollClipDisabled()
+        .accessibilityIdentifier("model-provider-rail")
     }
 
-    private func select(harness harnessId: String, model m: ModelInfo) {
+    private func providerChip(_ group: HarnessCatalog.ProviderGroup, viewed: Bool) -> some View {
+        Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            withAnimation(Motion.collapse) { pickedProvider = group.id }
+        } label: {
+            HStack(spacing: 6) {
+                if let badge = HarnessCatalog.providerBadgeHarness(group.id) {
+                    HarnessBadge(harness: badge, size: 14, neutral: viewed ? Theme.bg : Theme.text)
+                } else {
+                    Image(systemName: "globe")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(viewed ? Theme.bg : Theme.textMuted)
+                }
+                Text(group.name)
+                    .font(Theme.sans(13, weight: .medium))
+                    .foregroundStyle(viewed ? Theme.bg : Theme.text)
+                    .lineLimit(1)
+                Text("\(group.models.count)")
+                    .font(Theme.sans(11))
+                    .foregroundStyle(viewed ? Theme.bg.opacity(0.65) : Theme.textFaint)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(viewed ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.06)),
+                        in: Capsule())
+            .overlay(Capsule().strokeBorder(whiteAlpha(viewed ? 0 : 0.08), lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(ChipPressButtonStyle())
+        .accessibilityIdentifier("model-provider-\(group.id)")
+        .accessibilityAddTraits(viewed ? .isSelected : [])
+    }
+
+    private func select(model m: ModelInfo) {
         UISelectionFeedbackGenerator().selectionChanged()
-        if harness != harnessId {
-            harness = harnessId
+        if harness != "pi" {
+            harness = "pi"
         }
         modelId = m.id
         if let current = reasoning, m.reasoningLevels.contains(current) {
@@ -634,7 +646,6 @@ struct ModelPickerSheet: View {
         }
         reasoning = HarnessCatalog.defaultReasoning(for: m)
     }
-
 }
 
 // MARK: - Trait (effort) picker sheet

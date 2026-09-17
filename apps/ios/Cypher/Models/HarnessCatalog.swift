@@ -34,6 +34,64 @@ enum HarnessCatalog {
         modelId ?? "Select model"
     }
 
+    // MARK: Providers (the desktop picker's rail, ported)
+
+    /// One provider group of the catalog, in first-appearance order.
+    struct ProviderGroup: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let models: [ModelInfo]
+    }
+
+    /// Model ids are `provider/model` (the engine prefixes them); a bare or
+    /// `unknown` prefix files under "Other" — same rule as the desktop.
+    static func providerId(of modelId: String) -> String {
+        guard let slash = modelId.firstIndex(of: "/") else { return "other" }
+        let provider = String(modelId[..<slash])
+        return provider.isEmpty || provider == "unknown" ? "other" : provider
+    }
+
+    static func providerName(_ id: String) -> String {
+        switch id {
+        case "anthropic", "claude-code", "claude-bridge": return "Claude"
+        case "openai-codex", "openai": return "ChatGPT"
+        case "demo": return "Demo"
+        case "other": return "Other"
+        default: return id
+        }
+    }
+
+    /// The harness key `HarnessBadge` draws a brand mark for; nil = no mark.
+    static func providerBadgeHarness(_ id: String) -> String? {
+        switch id {
+        case "anthropic", "claude-code", "claude-bridge": return "claude-code"
+        case "openai-codex", "openai": return "codex"
+        default: return nil
+        }
+    }
+
+    static func providerGroups(_ models: [ModelInfo]) -> [ProviderGroup] {
+        var order: [String] = []
+        var byProvider: [String: [ModelInfo]] = [:]
+        for model in models {
+            let id = providerId(of: model.id)
+            if byProvider[id] == nil { order.append(id) }
+            byProvider[id, default: []].append(model)
+        }
+        return order.map { ProviderGroup(id: $0, name: providerName($0), models: byProvider[$0] ?? []) }
+    }
+
+    /// The engine describes a model as "<provider> · <context>" (or just the
+    /// provider). Inside a provider group only the context is news.
+    static func contextLabel(_ model: ModelInfo) -> String? {
+        guard let description = model.description else { return nil }
+        guard let range = description.range(of: " · ") else {
+            return description == providerId(of: model.id) ? nil : description
+        }
+        let rest = description[range.upperBound...].trimmingCharacters(in: .whitespaces)
+        return rest.isEmpty ? nil : rest
+    }
+
     /// Used only in explicitly offline demo mode, never a network fallback.
     static let demoModels = [
         ModelInfo(id: "demo/pi", label: "Pi demo model",

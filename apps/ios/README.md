@@ -18,7 +18,10 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   but cannot be driven from the mobile composer. The internal mock E2E rig
   remains test infrastructure, not a selectable agent.
 - **Target-device catalogs:** installed/enabled Pi and available models are
-  read from that project's engine. No static Claude/Codex models or synthetic
+  read from that project's engine. The model picker groups them by provider
+  like the desktop: a rail of provider chips (brand mark, name, count) opens
+  on the current model's provider and the list shows that provider's models
+  with their context size. No static Claude/Codex models or synthetic
   “Pi default” fallback. Empty/error states explain how to prepare **that
   device** using desktop Agents/Providers settings; the phone does not install
   Runtime. Retry, picker refresh, reconnect and foregrounding reload catalogs.
