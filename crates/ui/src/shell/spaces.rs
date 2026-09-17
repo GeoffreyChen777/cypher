@@ -351,6 +351,43 @@ impl Shell {
             .on_hover(motion::hover_listener("sidebar-add-project"))
             .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
             .child(icon(icons::PLUS).size(px(14.0)).text_color(theme.text));
+        // View menu: filter the cards by device and pick their sort. Tinted
+        // while a non-default view is active so the narrowed list is obvious.
+        let view_active = self.settings.sidebar_device_filter.is_some()
+            || self.settings.sidebar_sort != crate::settings::SidebarSort::Activity;
+        let view_button = div()
+            .id("sidebar-view-menu")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_color(if view_active {
+                theme.accent
+            } else {
+                motion::hover_blend(
+                    "sidebar-view-menu",
+                    theme.text_muted.opacity(0.8),
+                    theme.text,
+                )
+            })
+            .bg(motion::hover_blend(
+                "sidebar-view-menu",
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener("sidebar-view-menu"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.close_space_menu(cx);
+                    this.sidebar_view_menu.open(event.position);
+                    cx.notify();
+                }),
+            )
+            .child(icon(icons::TUNING).size(px(14.0)));
         // Quick chat: a session in a throwaway folder on a device of your
         // choice — no project needed (the dialog only asks for the device).
         let quick_chat = div()
@@ -407,6 +444,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(2.0))
+                    .child(view_button)
                     .child(quick_chat)
                     .child(add_project),
             )
@@ -777,7 +815,8 @@ impl Shell {
         let now = Utc::now();
         let selected = self.state.read(cx).selected_chat.clone();
         let cards: Vec<GroupCard> = {
-            let groups = self.state.read(cx).sidebar_groups(now);
+            let view = self.sidebar_view();
+            let groups = self.state.read(cx).sidebar_groups_with(now, &view);
             groups
                 .into_iter()
                 .map(|g| GroupCard {
@@ -2211,6 +2250,101 @@ impl Shell {
         ))
     }
 
+    /// The sidebar view menu: a Devices section (All devices + one row per
+    /// device, this device first) and a Sort section, each with a check on
+    /// the current choice.
+    fn render_sidebar_view_menu(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let position = *self.sidebar_view_menu.get()?;
+        let closing = self.sidebar_view_menu.closing_since();
+        let (filter, sort) = (
+            self.settings.sidebar_device_filter.clone(),
+            self.settings.sidebar_sort,
+        );
+        let devices: Vec<(String, String)> = {
+            let state = self.state.read(cx);
+            let local = state.local_device_id.clone();
+            let mut devices = state.devices.clone();
+            devices.sort_by_key(|d| {
+                (
+                    local.as_deref() != Some(d.id.as_str()),
+                    d.name.to_lowercase(),
+                    d.id.clone(),
+                )
+            });
+            devices.into_iter().map(|d| (d.id, d.name)).collect()
+        };
+        let check = |on: bool, theme: &Theme| {
+            div().flex_none().size(px(14.0)).when(on, |el| {
+                el.child(icon(icons::CHECK).size(px(13.0)).text_color(theme.text))
+            })
+        };
+        let mut menu = popover::popover_card(theme)
+            .w(px(200.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_sidebar_view_menu(cx);
+            }))
+            .flex()
+            .flex_col()
+            .child(popover::menu_heading(theme, "Devices"))
+            .child(
+                popover::menu_row(theme, false, "sidebar-view-all-devices")
+                    .id("sidebar-view-all-devices")
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_sidebar_device_filter(None, cx)),
+                    )
+                    .child(check(filter.is_none(), theme))
+                    .child(SharedString::from("All devices")),
+            );
+        for (id, name) in devices {
+            let on = filter.as_deref() == Some(id.as_str());
+            let pick = id.clone();
+            menu = menu.child(
+                popover::menu_row(theme, false, format!("sidebar-view-device-{id}"))
+                    .id(SharedString::from(format!("sidebar-view-device-{id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_sidebar_device_filter(Some(pick.clone()), cx)
+                    }))
+                    .child(check(on, theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(name)),
+                    ),
+            );
+        }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(theme, "Sort by"));
+        for option in crate::settings::SidebarSort::ALL {
+            menu = menu.child(
+                popover::menu_row(
+                    theme,
+                    false,
+                    format!("sidebar-view-sort-{}", option.label()),
+                )
+                .id(SharedString::from(format!(
+                    "sidebar-view-sort-{}",
+                    option.label()
+                )))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_sidebar_sort(option, cx)))
+                .child(check(sort == option, theme))
+                .child(SharedString::from(option.label())),
+            );
+        }
+        Some(popover::menu_at(
+            "sidebar-view-menu-popover",
+            position,
+            menu.into_any_element(),
+            closing,
+        ))
+    }
+
     // ---- space context menu / rename / delete overlays ----
 
     fn close_space_menu(&mut self, cx: &mut Context<Self>) {
@@ -2294,6 +2428,9 @@ impl Shell {
         let mut overlays: Vec<AnyElement> = Vec::new();
         if let Some(dialog) = self.render_quick_chat_dialog(viewport, window, &theme, cx) {
             overlays.push(dialog);
+        }
+        if let Some(menu) = self.render_sidebar_view_menu(&theme, cx) {
+            overlays.push(menu);
         }
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {

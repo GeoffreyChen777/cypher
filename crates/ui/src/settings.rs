@@ -116,6 +116,45 @@ pub struct UiSettings {
     /// user hasn't customized yet — [`commands::default_hides`] applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_slash_commands: Option<Vec<String>>,
+    /// Sidebar card order (the header's view menu). Pins always lead.
+    pub sidebar_sort: SidebarSort,
+    /// Sidebar device filter: only cards hosted on this device id. `None`
+    /// shows every device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_device_filter: Option<String>,
+}
+
+/// How the sidebar orders its project cards (and the sessions inside them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarSort {
+    /// Newest activity first (the default).
+    #[default]
+    Activity,
+    /// Project display name, A→Z; sessions by title.
+    Name,
+    /// Host device name, A→Z; recency within a device.
+    Device,
+    /// Creation date, newest first.
+    Date,
+}
+
+impl SidebarSort {
+    pub const ALL: [SidebarSort; 4] = [
+        SidebarSort::Activity,
+        SidebarSort::Name,
+        SidebarSort::Device,
+        SidebarSort::Date,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarSort::Activity => "New activity",
+            SidebarSort::Name => "Name",
+            SidebarSort::Device => "Device",
+            SidebarSort::Date => "Date created",
+        }
+    }
 }
 
 impl Default for UiSettings {
@@ -141,6 +180,8 @@ impl Default for UiSettings {
             setup_completed: false,
             pi_runtime_setup_version: 0,
             hidden_slash_commands: None,
+            sidebar_sort: SidebarSort::Activity,
+            sidebar_device_filter: None,
         }
     }
 }
@@ -472,6 +513,8 @@ mod tests {
             setup_completed: true,
             pi_runtime_setup_version: 1,
             hidden_slash_commands: Some(vec!["compact-ui-config".into()]),
+            sidebar_sort: SidebarSort::Device,
+            sidebar_device_filter: Some("dev-1".into()),
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

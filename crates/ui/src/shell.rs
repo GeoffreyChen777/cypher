@@ -1031,6 +1031,8 @@ pub struct Shell {
     delete_worktree_confirm: Option<OrphanWorktree>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
+    /// Sidebar view menu (device filter + sort): window position.
+    sidebar_view_menu: popover::Popup<Point<Pixels>>,
     rename_space_dialog: Option<RenameSpaceDialog>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
@@ -1487,6 +1489,7 @@ impl Shell {
             scratch_cleanup_task: None,
             delete_worktree_confirm: None,
             space_menu: popover::Popup::default(),
+            sidebar_view_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
             add_space: None,
@@ -3225,6 +3228,35 @@ impl Shell {
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
             cx,
         );
+        cx.notify();
+    }
+
+    fn close_sidebar_view_menu(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_view_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.sidebar_view_menu);
+            cx.notify();
+        }
+    }
+
+    /// The sidebar view menu's current state (persisted in ui-settings).
+    pub(super) fn sidebar_view(&self) -> crate::state::SidebarView {
+        crate::state::SidebarView {
+            device: self.settings.sidebar_device_filter.clone(),
+            sort: self.settings.sidebar_sort,
+        }
+    }
+
+    fn set_sidebar_sort(&mut self, sort: crate::settings::SidebarSort, cx: &mut Context<Self>) {
+        self.settings.sidebar_sort = sort;
+        self.close_sidebar_view_menu(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn set_sidebar_device_filter(&mut self, device: Option<String>, cx: &mut Context<Self>) {
+        self.settings.sidebar_device_filter = device;
+        self.close_sidebar_view_menu(cx);
+        self.schedule_save(cx);
         cx.notify();
     }
 

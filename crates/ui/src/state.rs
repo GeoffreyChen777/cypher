@@ -38,6 +38,8 @@ use cypher_proto::{
 };
 use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
 
+use crate::settings::SidebarSort;
+
 // ---------------------------------------------------------------------------
 // Engine handle
 // ---------------------------------------------------------------------------
@@ -745,6 +747,13 @@ impl Default for AppState {
     }
 }
 
+/// The sidebar view menu's state: device filter + card sort.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SidebarView {
+    pub device: Option<String>,
+    pub sort: SidebarSort,
+}
+
 /// What kind of sidebar card a group is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarGroupKind {
@@ -776,8 +785,13 @@ pub struct SidebarGroup<'a> {
     pub path: Option<String>,
     /// Host device name.
     pub device: String,
+    /// Host device id (the sidebar device filter's key).
+    pub device_id: String,
     /// Host offline (live spaces only; synthetic cards read as online).
     pub offline: bool,
+    /// Creation instant for the Date sort: the space's `created_at`, or the
+    /// newest chat's for synthetic cards.
+    pub created_at: DateTime<Utc>,
     /// The space id for live-space cards (the project context menu target).
     pub space_id: Option<&'a str>,
     /// User pin on the project (live spaces only): pinned cards lead the list.
@@ -1407,6 +1421,55 @@ impl AppState {
     /// / id. Status changes never reorder. Archived and child chats stay
     /// excluded. Pure — see the tests in [`mod tests`] for the exact rules.
     pub fn sidebar_groups(&self, now: DateTime<Utc>) -> Vec<SidebarGroup<'_>> {
+        self.sidebar_groups_with(now, &SidebarView::default())
+    }
+
+    /// [`Self::sidebar_groups`] under the sidebar view menu's filter and
+    /// sort. The filter drops cards hosted elsewhere; the sort reorders
+    /// cards (and their sessions) with stable sorts so ties keep the
+    /// activity order, and pins always lead.
+    pub fn sidebar_groups_with(
+        &self,
+        now: DateTime<Utc>,
+        view: &SidebarView,
+    ) -> Vec<SidebarGroup<'_>> {
+        let mut groups = self.sidebar_groups_unsorted(now);
+        if let Some(device) = view.device.as_deref() {
+            groups.retain(|g| g.device_id == device);
+        }
+        match view.sort {
+            SidebarSort::Activity => {}
+            SidebarSort::Name => {
+                groups.sort_by_cached_key(|g| (g.title.to_lowercase(), g.device.to_lowercase()));
+            }
+            SidebarSort::Device => {
+                groups.sort_by_cached_key(|g| g.device.to_lowercase());
+            }
+            SidebarSort::Date => {
+                groups.sort_by_key(|g| std::cmp::Reverse(g.created_at));
+            }
+        }
+        for group in &mut groups {
+            match view.sort {
+                SidebarSort::Name => group
+                    .chats
+                    .sort_by_cached_key(|(_, c)| c.title.as_deref().unwrap_or("").to_lowercase()),
+                SidebarSort::Date => group
+                    .chats
+                    .sort_by_key(|(_, c)| std::cmp::Reverse(c.created_at)),
+                SidebarSort::Activity | SidebarSort::Device => {}
+            }
+        }
+        // Pins: a pinned project leads the list and a pinned session leads
+        // its project, each keeping the sort order among themselves.
+        groups.sort_by_key(|g| !g.pinned);
+        for group in &mut groups {
+            group.chats.sort_by_key(|(_, chat)| !chat.pinned);
+        }
+        groups
+    }
+
+    fn sidebar_groups_unsorted(&self, now: DateTime<Utc>) -> Vec<SidebarGroup<'_>> {
         let mut all: Vec<(ChatIndicator, &Chat)> = self
             .visible_chats()
             .map(|c| (self.display_status_for(c, now), c))
@@ -1468,13 +1531,19 @@ impl AppState {
                     false,
                 ),
             };
+            let device_id = space
+                .map(|s| s.device_id.clone())
+                .unwrap_or_else(|| chat.device_id.clone());
+            let created_at = space.map(|s| s.created_at).unwrap_or(chat.created_at);
             groups.push(SidebarGroup {
                 key,
                 kind,
                 title,
                 path,
                 device,
+                device_id,
                 offline,
+                created_at,
                 space_id: space.map(|s| s.id.as_str()),
                 pinned: space.is_some_and(|s| s.pinned),
                 chats: vec![(status, chat)],
@@ -1517,19 +1586,14 @@ impl AppState {
                     .device_name(&space.device_id)
                     .unwrap_or("Unknown device")
                     .to_string(),
+                device_id: space.device_id.clone(),
                 offline: !self.device_online(&space.device_id, now),
+                created_at: space.created_at,
                 space_id: Some(space.id.as_str()),
                 pinned: space.pinned,
                 chats: Vec::new(),
             }
         }));
-        // Pins: a pinned project leads the list and a pinned session leads
-        // its project, each keeping the recency order among themselves
-        // (stable sorts — status churn still never reorders).
-        groups.sort_by_key(|g| !g.pinned);
-        for group in &mut groups {
-            group.chats.sort_by_key(|(_, chat)| !chat.pinned);
-        }
         groups
     }
 
@@ -3543,6 +3607,66 @@ mod tests {
         // Within the busy project the pinned (older) session leads.
         let busy_ids: Vec<&str> = groups[1].chats.iter().map(|(_, c)| c.id.as_str()).collect();
         assert_eq!(busy_ids, ["old-pin", "busy"]);
+    }
+
+    #[test]
+    fn sidebar_view_filters_by_device_and_sorts_with_pins_first() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-a", "Mac"), device("dev-b", "Linux box")];
+        state.apply_spaces(vec![
+            space("s-zeta", "dev-a", "/zeta", 1),
+            space("s-alpha", "dev-b", "/alpha", 3),
+            space("s-mid", "dev-a", "/mid", 2),
+        ]);
+        let mut newest = chat("n", 0, Some(30));
+        newest.space_id = Some("s-zeta".into());
+        let mut older = chat("o", 0, Some(10));
+        older.space_id = Some("s-alpha".into());
+        let mut oldest = chat("p", 0, Some(1));
+        oldest.space_id = Some("s-mid".into());
+        state.apply_chats(vec![newest, older, oldest]);
+        let now = Utc::now();
+        let keys = |state: &AppState, view: &SidebarView| -> Vec<String> {
+            state
+                .sidebar_groups_with(now, view)
+                .iter()
+                .map(|g| g.key.clone())
+                .collect()
+        };
+        let view = |sort: SidebarSort, device: Option<&str>| SidebarView {
+            sort,
+            device: device.map(str::to_string),
+        };
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Activity, None)),
+            ["s:s-zeta", "s:s-alpha", "s:s-mid"]
+        );
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Name, None)),
+            ["s:s-alpha", "s:s-mid", "s:s-zeta"]
+        );
+        // Device: "Linux box" < "Mac"; within Mac the activity order holds.
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Device, None)),
+            ["s:s-alpha", "s:s-zeta", "s:s-mid"]
+        );
+        // Date: newest created first (alpha=3, mid=2, zeta=1).
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Date, None)),
+            ["s:s-alpha", "s:s-mid", "s:s-zeta"]
+        );
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Name, Some("dev-a"))),
+            ["s:s-mid", "s:s-zeta"]
+        );
+        // A pinned project leads regardless of the sort.
+        let mut spaces = state.spaces.clone();
+        spaces.iter_mut().find(|s| s.id == "s-zeta").unwrap().pinned = true;
+        state.apply_spaces(spaces);
+        assert_eq!(
+            keys(&state, &view(SidebarSort::Name, None)),
+            ["s:s-zeta", "s:s-alpha", "s:s-mid"]
+        );
     }
 
     #[test]
