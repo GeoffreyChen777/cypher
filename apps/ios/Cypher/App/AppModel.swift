@@ -399,6 +399,15 @@ final class AppModel {
         if demo != nil {
             return HarnessCatalog.demoModels
         }
+        #if CYPHER_DEVELOPMENT
+        // `-mock-providers` (dev-ios.sh argument): the engine's catalog plus
+        // mock providers, or the mocks alone when the engine is unreachable.
+        if ProcessInfo.processInfo.arguments.contains("-mock-providers") {
+            let real = (try? await workspace?.listPiModels(deviceId: deviceId)) ?? []
+            let mocked = HarnessCatalog.mockProviderModels.filter { mock in !real.contains { $0.id == mock.id } }
+            return real + mocked
+        }
+        #endif
         guard let workspace, deviceOnline(deviceId) else {
             throw PiCatalogError.unavailable
         }

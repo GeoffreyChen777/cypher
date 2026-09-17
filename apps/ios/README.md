@@ -201,7 +201,11 @@ Run these commands from the repository root.
 - **Dev**: against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`), enter a user
   id + org id; the bearer is `userId@orgId`.
 - **Demo mode**: fully offline dataset with a scripted streaming reply —
-  explore the UI with no infrastructure. Launch args for screenshot rigs:
+  explore the UI with no infrastructure. Development builds also take
+  `-mock-providers` (`scripts/dev-ios.sh -mock-providers`) to append mock
+  Claude / ChatGPT / gateway providers to the real engine's catalog, so the
+  grouped model picker can be exercised regardless of what is configured.
+  Launch args for screenshot rigs:
   `-demo [-route chat:<id>|space:<id>] [-stream]`.
   Subagent inspector fixture:
   `-demo -route chat:chat-veil -sheet subagents`.

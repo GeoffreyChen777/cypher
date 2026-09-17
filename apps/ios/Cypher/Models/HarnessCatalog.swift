@@ -92,6 +92,29 @@ enum HarnessCatalog {
         return rest.isEmpty ? nil : rest
     }
 
+    /// Development-build rig (`-mock-providers`): several providers so the
+    /// grouped picker can be exercised against any engine. Labels say
+    /// "mock"; runs on these ids fail on the engine, which is the point of
+    /// keeping them out of production builds.
+    static let mockProviderModels: [ModelInfo] = [
+        ModelInfo(id: "claude-bridge/claude-opus-5", label: "Claude Opus 5 (mock)",
+                  description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(id: "claude-bridge/claude-sonnet-5", label: "Claude Sonnet 5 (mock)",
+                  description: "claude-bridge · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(id: "claude-bridge/claude-haiku-4-5", label: "Claude Haiku 4.5 (mock)",
+                  description: "claude-bridge · 200k context", reasoningLevels: []),
+        ModelInfo(id: "openai-codex/gpt-5.5", label: "GPT-5.5 (mock)",
+                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
+        ModelInfo(id: "openai-codex/gpt-5.4-mini", label: "GPT-5.4 mini (mock)",
+                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(id: "mock-gateway/deepseek-v4", label: "DeepSeek V4 (mock)",
+                  description: "mock-gateway · 128k context", reasoningLevels: []),
+        ModelInfo(id: "mock-gateway/kimi-k3", label: "Kimi K3 (mock)",
+                  description: "mock-gateway · 256k context", reasoningLevels: ["low", "high"]),
+        ModelInfo(id: "mock-gateway/glm-5.2", label: "GLM-5.2 (mock)",
+                  description: "mock-gateway · 128k context", reasoningLevels: []),
+    ]
+
     /// Used only in explicitly offline demo mode, never a network fallback.
     static let demoModels = [
         ModelInfo(id: "demo/pi", label: "Pi demo model",
