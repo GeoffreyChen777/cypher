@@ -694,8 +694,8 @@ impl Render for DevicesPage {
                             .into_any_element(),
                     );
                 }
-                // The id chip sits on the TITLE line, right after the name,
-                // so every row's second line is the same quiet meta text.
+                // The id chip ends the meta line; with the update state on
+                // its own pill the line is short enough to stay one row.
                 let id_chip = div()
                     .id(("device-id", ix))
                     .flex_none()
@@ -716,6 +716,7 @@ impl Render for DevicesPage {
                     } else {
                         short_id(&device.id)
                     }));
+                meta.push(id_chip.into_any_element());
 
                 widgets::card_row(&theme, ix == 0)
                     .child(tile)
@@ -725,16 +726,7 @@ impl Render for DevicesPage {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_baseline()
-                                    .gap(px(8.0))
-                                    .min_w_0()
-                                    .child(widgets::row_title(&theme, device.name.clone()))
-                                    .child(id_chip),
-                            )
+                            .child(widgets::row_title(&theme, device.name.clone()))
                             .child(widgets::meta_line(&theme, meta)),
                     )
                     .when_some(status_pill, |el, pill| el.child(pill))
