@@ -3243,11 +3243,24 @@ impl Shell {
         crate::state::SidebarView {
             device: self.settings.sidebar_device_filter.clone(),
             sort: self.settings.sidebar_sort,
+            reversed: self.settings.sidebar_sort_reversed,
         }
     }
 
+    /// A new sort starts in its natural direction.
     fn set_sidebar_sort(&mut self, sort: crate::settings::SidebarSort, cx: &mut Context<Self>) {
+        if self.settings.sidebar_sort != sort {
+            self.settings.sidebar_sort_reversed = false;
+        }
         self.settings.sidebar_sort = sort;
+        self.close_sidebar_view_menu(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn set_sidebar_descending(&mut self, descending: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar_sort_reversed =
+            self.settings.sidebar_sort.natural_descending() != descending;
         self.close_sidebar_view_menu(cx);
         self.schedule_save(cx);
         cx.notify();

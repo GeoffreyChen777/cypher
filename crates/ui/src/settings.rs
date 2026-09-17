@@ -122,6 +122,9 @@ pub struct UiSettings {
     /// shows every device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_device_filter: Option<String>,
+    /// Sidebar sort direction flipped from the sort's natural one (newest
+    /// first for activity/date, A→Z for name/device).
+    pub sidebar_sort_reversed: bool,
 }
 
 /// How the sidebar orders its project cards (and the sessions inside them).
@@ -155,6 +158,12 @@ impl SidebarSort {
             SidebarSort::Date => "Date created",
         }
     }
+
+    /// The direction a sort reads as "ascending" is not what people want by
+    /// default for time: activity and date lead with the newest.
+    pub fn natural_descending(self) -> bool {
+        matches!(self, SidebarSort::Activity | SidebarSort::Date)
+    }
 }
 
 impl Default for UiSettings {
@@ -182,6 +191,7 @@ impl Default for UiSettings {
             hidden_slash_commands: None,
             sidebar_sort: SidebarSort::Activity,
             sidebar_device_filter: None,
+            sidebar_sort_reversed: false,
         }
     }
 }
@@ -515,6 +525,7 @@ mod tests {
             hidden_slash_commands: Some(vec!["compact-ui-config".into()]),
             sidebar_sort: SidebarSort::Device,
             sidebar_device_filter: Some("dev-1".into()),
+            sidebar_sort_reversed: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

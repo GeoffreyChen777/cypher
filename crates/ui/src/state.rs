@@ -752,6 +752,16 @@ impl Default for AppState {
 pub struct SidebarView {
     pub device: Option<String>,
     pub sort: SidebarSort,
+    /// Flip the sort's natural direction (see
+    /// [`SidebarSort::natural_descending`]).
+    pub reversed: bool,
+}
+
+impl SidebarView {
+    /// Whether the view currently reads newest/Z first.
+    pub fn descending(&self) -> bool {
+        self.sort.natural_descending() != self.reversed
+    }
 }
 
 /// What kind of sidebar card a group is.
@@ -1458,6 +1468,16 @@ impl AppState {
                     .chats
                     .sort_by_key(|(_, c)| std::cmp::Reverse(c.created_at)),
                 SidebarSort::Activity | SidebarSort::Device => {}
+            }
+        }
+        // Reversed direction flips cards, and sessions for the sorts that
+        // ordered them (Device leaves sessions in activity order).
+        if view.reversed {
+            groups.reverse();
+            if view.sort != SidebarSort::Device {
+                for group in &mut groups {
+                    group.chats.reverse();
+                }
             }
         }
         // Pins: a pinned project leads the list and a pinned session leads
@@ -3636,6 +3656,7 @@ mod tests {
         let view = |sort: SidebarSort, device: Option<&str>| SidebarView {
             sort,
             device: device.map(str::to_string),
+            reversed: false,
         };
         assert_eq!(
             keys(&state, &view(SidebarSort::Activity, None)),
@@ -3658,6 +3679,19 @@ mod tests {
         assert_eq!(
             keys(&state, &view(SidebarSort::Name, Some("dev-a"))),
             ["s:s-mid", "s:s-zeta"]
+        );
+        // Reversed: Z→A, and the pin still leads afterwards.
+        let reversed = SidebarView {
+            sort: SidebarSort::Name,
+            device: None,
+            reversed: true,
+        };
+        assert!(reversed.descending());
+        assert!(!view(SidebarSort::Name, None).descending());
+        assert!(view(SidebarSort::Activity, None).descending());
+        assert_eq!(
+            keys(&state, &reversed),
+            ["s:s-zeta", "s:s-mid", "s:s-alpha"]
         );
         // A pinned project leads regardless of the sort.
         let mut spaces = state.spaces.clone();

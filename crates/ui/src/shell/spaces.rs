@@ -354,7 +354,17 @@ impl Shell {
         // View menu: filter the cards by device and pick their sort. Tinted
         // while a non-default view is active so the narrowed list is obvious.
         let view_active = self.settings.sidebar_device_filter.is_some()
-            || self.settings.sidebar_sort != crate::settings::SidebarSort::Activity;
+            || self.settings.sidebar_sort != crate::settings::SidebarSort::Activity
+            || self.settings.sidebar_sort_reversed;
+        let view_tint = if view_active {
+            theme.accent
+        } else {
+            motion::hover_blend(
+                "sidebar-view-menu",
+                theme.text_muted.opacity(0.8),
+                theme.text,
+            )
+        };
         let view_button = div()
             .id("sidebar-view-menu")
             .size(px(28.0))
@@ -364,15 +374,7 @@ impl Shell {
             .justify_center()
             .rounded(px(8.0))
             .cursor_pointer()
-            .text_color(if view_active {
-                theme.accent
-            } else {
-                motion::hover_blend(
-                    "sidebar-view-menu",
-                    theme.text_muted.opacity(0.8),
-                    theme.text,
-                )
-            })
+            .text_color(view_tint)
             .bg(motion::hover_blend(
                 "sidebar-view-menu",
                 crate::theme::wash(0.0),
@@ -387,7 +389,8 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            .child(icon(icons::TUNING).size(px(14.0)));
+            // gpui SVGs take no colour from their parent: tint the glyph itself.
+            .child(icon(icons::TUNING).size(px(14.0)).text_color(view_tint));
         // Quick chat: a session in a throwaway folder on a device of your
         // choice — no project needed (the dialog only asks for the device).
         let quick_chat = div()
@@ -2264,6 +2267,7 @@ impl Shell {
             self.settings.sidebar_device_filter.clone(),
             self.settings.sidebar_sort,
         );
+        let descending = self.sidebar_view().descending();
         let devices: Vec<(String, String)> = {
             let state = self.state.read(cx);
             let local = state.local_device_id.clone();
@@ -2335,6 +2339,24 @@ impl Shell {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_sidebar_sort(option, cx)))
                 .child(check(sort == option, theme))
                 .child(SharedString::from(option.label())),
+            );
+        }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(theme, "Order"));
+        for (label, glyph, desc) in [
+            ("Ascending", icons::ARROW_UP, false),
+            ("Descending", icons::ARROW_DOWN, true),
+        ] {
+            menu = menu.child(
+                popover::menu_row(theme, false, format!("sidebar-view-order-{label}"))
+                    .id(SharedString::from(format!("sidebar-view-order-{label}")))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_sidebar_descending(desc, cx)),
+                    )
+                    .child(check(descending == desc, theme))
+                    .child(icon(glyph).size(px(13.0)).text_color(theme.text_muted))
+                    .child(SharedString::from(label)),
             );
         }
         Some(popover::menu_at(
