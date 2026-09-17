@@ -28,6 +28,11 @@ pub const SPACE_ICONS: &[(&str, &str)] = &[
     ("chat", icons::CHAT_ROUND_LINE),
     ("star", icons::STAR),
     ("command", icons::COMMAND),
+    ("laptop", icons::LAPTOP),
+    ("worktree", icons::GIT_WORKTREE),
+    ("keyboard", icons::KEYBOARD),
+    ("settings", icons::SETTINGS_MINIMALISTIC),
+    ("bell", icons::BELL),
 ];
 
 /// The pickable colours: (key, OKLCH hue). Chroma/lightness are fixed so
