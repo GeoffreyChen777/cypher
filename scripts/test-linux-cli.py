@@ -786,7 +786,8 @@ if len(args)>1 and args[1] in ("start","restart") and not alive():
         result=self.run_command([str(copy),"setup","--local","--non-interactive"],timeout=45)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         unit=Path(self.env["TEST_UNIT"])
-        self.assertIn(f'ExecStart=:"{copy}" headless',unit.read_text())
+        # systemd unit quoting doubles `%` (the fixture home contains one).
+        self.assertIn(f'ExecStart=:"{str(copy).replace("%","%%")}" headless',unit.read_text())
         self.app_release("9.9.9")
         result=self.run_command([str(copy),"update"],timeout=120)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
