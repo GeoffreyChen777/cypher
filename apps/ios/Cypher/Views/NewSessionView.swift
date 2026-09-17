@@ -529,13 +529,26 @@ struct ModelPickerSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if loading {
-                        ProgressView("Loading models…").font(Theme.sans(13))
-                            .padding(.horizontal, 4)
+                        // Centered in the sheet's visible area, not tucked
+                        // into the list's top-left corner.
+                        VStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.regular)
+                                .tint(Theme.textMuted)
+                            Text("Loading models…")
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 72)
                     } else if groups.isEmpty {
                         Text("No models loaded. Close this picker and retry from the session.")
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.textMuted)
-                            .padding(.horizontal, 4)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 72)
+                            .padding(.horizontal, 12)
                     } else {
                         if groups.count > 1 {
                             providerRail
