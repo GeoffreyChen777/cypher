@@ -61,6 +61,8 @@ pub(super) struct QuickChatFlow {
     active: usize,
     focus: FocusHandle,
     focus_pending: bool,
+    /// Device-list scroll — keyboard navigation keeps the highlight in view.
+    list_scroll: gpui::ScrollHandle,
 }
 
 /// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
@@ -421,6 +423,7 @@ impl Shell {
             active,
             focus: cx.focus_handle(),
             focus_pending: true,
+            list_scroll: gpui::ScrollHandle::new(),
         });
         cx.notify();
     }
@@ -465,6 +468,8 @@ impl Shell {
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.quick_chat.as_mut() {
                     flow.active = popover::menu_step(Some(flow.active), count, delta).unwrap_or(0);
+                    // Row 0 of the scroll container is the section label.
+                    flow.list_scroll.scroll_to_item(flow.active + 1);
                     cx.notify();
                 }
             }
@@ -489,12 +494,12 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (active, focus) = {
+        let (active, focus, list_scroll) = {
             let flow = self.quick_chat.as_mut()?;
             if std::mem::take(&mut flow.focus_pending) {
                 window.focus(&flow.focus, cx);
             }
-            (flow.active, flow.focus.clone())
+            (flow.active, flow.focus.clone(), flow.list_scroll.clone())
         };
         let rows = self.quick_chat_devices(cx);
         let hairline = crate::theme::hairline(0.06);
@@ -552,123 +557,114 @@ impl Shell {
                     }))
                     .child(SharedString::from("esc")),
             );
-        let list = div()
-            .px(px(8.0))
-            .py(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pt(px(2.0))
-                    .pb(px(4.0))
-                    .text_size(px(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.6))
-                    .child(SharedString::from("Run on device")),
-            )
-            .children(rows.into_iter().enumerate().map(|(ix, (dev, online, is_local))| {
-                let is_active = ix == active;
-                let platform_icon = match dev.platform.as_str() {
-                    "macos" | "darwin" => icons::LAPTOP,
-                    "web" => icons::GLOBAL,
-                    "ios" | "android" => icons::SMARTPHONE,
-                    _ => icons::MONITOR,
-                };
-                let name: SharedString = dev.name.clone().into();
-                let device_id = dev.id.clone();
-                div()
-                    .id(("quick-chat-device", ix))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(12.5))
-                    .when(online, |el| el.cursor_pointer())
-                    .when(!online, |el| el.opacity(0.55))
-                    .when(is_active, |el| {
-                        el.bg(crate::theme::card_selected_bg())
-                            .shadow(crate::theme::card_selected_shadows())
-                            .text_color(theme.text)
-                    })
-                    .when(!is_active, |el| {
-                        el.text_color(theme.text_muted.opacity(0.7))
-                            .hover(|s| s.bg(theme.element_hover))
-                    })
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        if let Some(flow) = this.quick_chat.as_mut()
-                            && flow.active != ix
-                        {
-                            flow.active = ix;
-                            cx.notify();
-                        }
-                    }))
-                    .when(online, |el| {
-                        el.on_click(cx.listener(move |this, _, _, cx| {
-                            this.start_quick_chat(device_id.clone(), cx);
-                        }))
-                    })
-                    .child(
-                        icon(platform_icon)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text_muted.opacity(0.8)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .when(is_local, |el| {
-                        el.child(
+        // FIXED height like the palette body: the list fills and scrolls,
+        // so the card never resizes with the device count. The gutters live
+        // on the wrapper, outside the scroll viewport.
+        let list = div().h(px(240.0)).flex_none().py(px(6.0)).child(
+            div()
+                .id("quick-chat-devices")
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&list_scroll)
+                .px(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .pt(px(2.0))
+                        .pb(px(4.0))
+                        .text_size(px(11.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted.opacity(0.6))
+                        .child(SharedString::from("Run on device")),
+                )
+                .children(
+                    rows.into_iter()
+                        .enumerate()
+                        .map(|(ix, (dev, online, is_local))| {
+                            let is_active = ix == active;
+                            let platform_icon = match dev.platform.as_str() {
+                                "macos" | "darwin" => icons::LAPTOP,
+                                "web" => icons::GLOBAL,
+                                "ios" | "android" => icons::SMARTPHONE,
+                                _ => icons::MONITOR,
+                            };
+                            let name: SharedString = dev.name.clone().into();
+                            let device_id = dev.id.clone();
                             div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from("this device")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .size(px(5.0))
-                            .rounded_full()
-                            .flex_none()
-                            .when(online, |el| {
-                                let emerald = theme.success;
-                                el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
-                                    color: emerald.opacity(0.55),
-                                    offset: gpui::point(px(0.0), px(0.0)),
-                                    blur_radius: px(6.0),
-                                    spread_radius: px(0.0),
-                                    inset: false,
-                                }])
-                            })
-                            .when(!online, |el| el.bg(crate::theme::ink(0.22))),
-                    )
-            }))
-            .child(div().h(px(1.0)).mx(px(2.0)).my(px(6.0)).bg(hairline))
-            .child(
-                div()
-                    .px(px(8.0))
-                    .pb(px(2.0))
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(6.0))
-                    .text_size(px(11.0))
-                    .line_height(px(15.0))
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(
-                        icon(icons::INFO_CIRCLE)
-                            .size(px(12.0))
-                            .flex_none()
-                            .mt(px(1.0))
-                            .text_color(theme.text_muted.opacity(0.5)),
-                    )
-                    .child(div().min_w_0().child(SharedString::from(
-                        "No project. The session runs in a temporary folder on that device; deleting the session removes the folder.",
-                    ))),
-            );
+                                .id(("quick-chat-device", ix))
+                                .h(px(28.0))
+                                .px(px(8.0))
+                                .rounded(px(8.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(12.5))
+                                .when(online, |el| el.cursor_pointer())
+                                .when(!online, |el| el.opacity(0.55))
+                                .when(is_active, |el| {
+                                    el.bg(crate::theme::card_selected_bg())
+                                        .shadow(crate::theme::card_selected_shadows())
+                                        .text_color(theme.text)
+                                })
+                                .when(!is_active, |el| {
+                                    el.text_color(theme.text_muted.opacity(0.7))
+                                        .hover(|s| s.bg(theme.element_hover))
+                                })
+                                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                    if let Some(flow) = this.quick_chat.as_mut()
+                                        && flow.active != ix
+                                    {
+                                        flow.active = ix;
+                                        cx.notify();
+                                    }
+                                }))
+                                .when(online, |el| {
+                                    el.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.start_quick_chat(device_id.clone(), cx);
+                                    }))
+                                })
+                                .child(
+                                    icon(platform_icon)
+                                        .size(px(14.0))
+                                        .flex_none()
+                                        .text_color(theme.text_muted.opacity(0.8)),
+                                )
+                                .child(div().flex_1().min_w_0().truncate().child(name))
+                                .when(is_local, |el| {
+                                    el.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.0))
+                                            .text_color(theme.text_faint)
+                                            .child(SharedString::from("this device")),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .size(px(5.0))
+                                        .rounded_full()
+                                        .flex_none()
+                                        .when(online, |el| {
+                                            let emerald = theme.success;
+                                            el.bg(emerald.opacity(0.9)).shadow(vec![
+                                                gpui::BoxShadow {
+                                                    color: emerald.opacity(0.55),
+                                                    offset: gpui::point(px(0.0), px(0.0)),
+                                                    blur_radius: px(6.0),
+                                                    spread_radius: px(0.0),
+                                                    inset: false,
+                                                },
+                                            ])
+                                        })
+                                        .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                                )
+                        }),
+                ),
+        );
         let footer = div()
             .flex_none()
             .bg(band)
