@@ -432,6 +432,27 @@ pub fn anchored_menu_below_gap(
     closing: Option<std::time::Instant>,
     gap: f32,
 ) -> AnyElement {
+    anchored_menu_below_at(id, content, closing, gap, 1)
+}
+
+/// [`anchored_menu_below`] for a trigger that lives INSIDE a modal dialog:
+/// dialogs are deferred at priority 2, so a priority-1 menu would draw
+/// underneath the card that contains its trigger.
+pub fn anchored_menu_below_in_dialog(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    anchored_menu_below_at(id, content, closing, 6.0, 3)
+}
+
+fn anchored_menu_below_at(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+    gap: f32,
+    priority: usize,
+) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
     div()
@@ -450,7 +471,7 @@ pub fn anchored_menu_below_gap(
                         div().occlude().pt(px(gap)).child(content),
                     )),
             )
-            .priority(1)
+            .priority(priority)
             .into_any_element(),
         )
         .into_any_element()

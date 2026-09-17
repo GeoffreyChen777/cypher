@@ -395,7 +395,12 @@ impl WebSearchFallbackControl {
                 )
             }
         }
-        popover::anchored_menu_below("web-search-model-popup", menu.into_any_element(), None)
+        // Mounted inside the Claude settings dialog: draw above it.
+        popover::anchored_menu_below_in_dialog(
+            "web-search-model-popup",
+            menu.into_any_element(),
+            None,
+        )
     }
 }
 
