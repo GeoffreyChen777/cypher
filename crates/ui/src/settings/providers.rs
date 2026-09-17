@@ -1145,6 +1145,16 @@ impl ProvidersPage {
         cx: &mut Context<Self>,
     ) {
         self.page_focus.focus(window, cx);
+        if is_claude_cli(&provider) {
+            match index {
+                0 => self.open_claude_dialog(window, cx),
+                // Re-detect: the provider list re-resolves the `claude` CLI.
+                1 => self.call(methods::LIST_PI_PROVIDERS, serde_json::json!({}), cx),
+                2 => cx.open_url(CLAUDE_CODE_INSTALL),
+                _ => {}
+            }
+            return;
+        }
         match index {
             0 if provider.credential_saved => {
                 self.call(
@@ -1771,7 +1781,7 @@ impl ProvidersPage {
                             let delta = if event.keystroke.key == "up" { -1 } else { 1 };
                             menu.active =
                                 popover::menu_step(Some(menu.active), 3, delta).unwrap_or(0);
-                            if !menu.provider.credential_saved {
+                            if !menu.provider.credential_saved && !is_claude_cli(&menu.provider) {
                                 menu.active = if is_oauth(&menu.provider) { 0 } else { 2 };
                             }
                         }
@@ -1786,26 +1796,34 @@ impl ProvidersPage {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        for (index, (label, glyph)) in [
-            ("Refresh models", icons::REFRESH),
-            (
-                if is_oauth(&menu.provider) {
-                    "Sign out"
-                } else {
-                    "Remove API key"
-                },
-                icons::KEY_MINIMALISTIC,
-            ),
-            ("Delete provider…", icons::TRASH_BIN_MINIMALISTIC),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        let claude = is_claude_cli(&menu.provider);
+        let items: [(&str, &'static str); 3] = if claude {
+            [
+                ("Manage…", icons::SETTINGS_MINIMALISTIC),
+                ("Re-detect Claude Code", icons::REFRESH),
+                ("Install Claude Code…", icons::GLOBAL),
+            ]
+        } else {
+            [
+                ("Refresh models", icons::REFRESH),
+                (
+                    if is_oauth(&menu.provider) {
+                        "Sign out"
+                    } else {
+                        "Remove API key"
+                    },
+                    icons::KEY_MINIMALISTIC,
+                ),
+                ("Delete provider…", icons::TRASH_BIN_MINIMALISTIC),
+            ]
+        };
+        for (index, (label, glyph)) in items.into_iter().enumerate() {
             if index == 2 && is_oauth(&menu.provider) {
                 continue;
             }
+            let destructive = index == 2 && !claude;
             let enabled = self.busy.is_none()
-                && (index == 2 || menu.provider.credential_saved)
+                && (claude || index == 2 || menu.provider.credential_saved)
                 && closing.is_none();
             let provider = menu.provider.clone();
             if index == 2 {
@@ -1821,7 +1839,7 @@ impl ProvidersPage {
                 .role(gpui::Role::MenuItem)
                 .aria_label(label)
                 .min_h(px(32.0))
-                .when(index == 2, |el| el.text_color(theme.danger_muted))
+                .when(destructive, |el| el.text_color(theme.danger_muted))
                 .when(!enabled, |el| el.opacity(0.4))
                 .when(enabled, |el| {
                     el.on_click(cx.listener(move |page, _, window, cx| {
@@ -1831,7 +1849,7 @@ impl ProvidersPage {
                 .child(provider_icon(
                     glyph,
                     15.0,
-                    if index == 2 {
+                    if destructive {
                         theme.danger_muted
                     } else {
                         theme.text_muted
@@ -1934,9 +1952,10 @@ impl ProvidersPage {
                     page.add_menu = popover::Popup::default();
                     page.menu.open(ProviderMenu {
                         provider: menu_provider.clone(),
-                        active: if menu_provider.credential_saved {
-                            0
-                        } else if is_oauth(&menu_provider) {
+                        active: if menu_provider.credential_saved
+                            || is_oauth(&menu_provider)
+                            || is_claude_cli(&menu_provider)
+                        {
                             0
                         } else {
                             2
@@ -2112,7 +2131,7 @@ impl ProvidersPage {
                             )
                         },
                     )
-                    .when(!claude_cli, |el| el.child(more)),
+                    .child(more),
             )
             .into_any_element()
     }
