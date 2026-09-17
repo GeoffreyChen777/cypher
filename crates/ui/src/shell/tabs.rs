@@ -227,7 +227,7 @@ impl Shell {
     /// project. The first send asks that device for a throwaway scratch
     /// folder and the session runs there; deleting the chat removes it.
     pub(super) fn start_quick_chat(&mut self, device_id: String, cx: &mut Context<Self>) {
-        self.quick_chat_dialog = false;
+        self.quick_chat = None;
         self.route = Route::Chat;
         self.state.update(cx, |s, cx| {
             s.begin_quick_chat(device_id, cx);

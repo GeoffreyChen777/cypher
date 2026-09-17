@@ -1023,8 +1023,8 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
-    /// The quick-chat device dialog is open (sidebar header "Quick chat").
-    quick_chat_dialog: bool,
+    /// The quick-chat device palette (sidebar header "Quick chat").
+    quick_chat: Option<spaces::QuickChatFlow>,
     /// Scratch-folder removal after a quick chat was deleted (host RPC).
     scratch_cleanup_task: Option<Task<()>>,
     /// Follow-up after the last session of a linked worktree was deleted.
@@ -1483,7 +1483,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
-            quick_chat_dialog: false,
+            quick_chat: None,
             scratch_cleanup_task: None,
             delete_worktree_confirm: None,
             space_menu: popover::Popup::default(),
