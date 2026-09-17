@@ -971,10 +971,7 @@ impl PiHarness {
             let mut best: Vec<Model> = Vec::new();
             let mut unchanged_since: Option<Instant> = None;
             loop {
-                let available = match client
-                    .request("get_available_models", Map::new())
-                    .await
-                {
+                let available = match client.request("get_available_models", Map::new()).await {
                     Ok(value) => value,
                     Err(_err) if !best.is_empty() => {
                         return Ok(DiscoveredModels {
