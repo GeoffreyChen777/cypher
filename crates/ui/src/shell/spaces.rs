@@ -806,9 +806,17 @@ impl Shell {
                 // header only; a collapsed branch group keeps its header and
                 // drops its rows.
                 let project_key = Self::project_group_key(&key);
+                // Quick chats have no checkout headers: rows sit directly
+                // under the card header.
+                let flat = card.kind == SidebarGroupKind::Scratch;
                 let height = super::GROUP_CARD_HEADER_HEIGHT
                     + if self.sidebar_group_collapsed(&project_key) {
                         0.0
+                    } else if flat {
+                        card.groups
+                            .iter()
+                            .map(|g| g.chats.len() as f32 * super::CHAT_ROW_HEIGHT)
+                            .sum()
                     } else {
                         card.groups.iter().fold(0.0_f32, |acc, g| {
                             let group_key = Self::branch_group_key(
@@ -853,6 +861,10 @@ impl Shell {
         // Rows are the visible branch/worktree group headers and their session
         // rows: a collapsed project hides every group, a collapsed branch
         // group keeps its header and drops its rows.
+        // Quick chats live in a temp folder: no checkout to name, so the
+        // branch/worktree group headers are skipped and every row sits
+        // directly under the card header.
+        let flat = group.kind == SidebarGroupKind::Scratch;
         let rows: Vec<AnyElement> = if project_collapsed {
             Vec::new()
         } else {
@@ -866,17 +878,19 @@ impl Shell {
                         &chat_group.label,
                         chat_group.worktree_path.as_deref(),
                     );
-                    let group_collapsed = self.sidebar_group_collapsed(&group_key);
+                    let group_collapsed = !flat && self.sidebar_group_collapsed(&group_key);
                     let mut elements: Vec<AnyElement> =
                         Vec::with_capacity(chat_group.chats.len() + 1);
-                    elements.push(self.render_branch_group_header(
-                        &group_key,
-                        chat_group,
-                        group_collapsed,
-                        group.space_id.as_deref(),
-                        theme,
-                        cx,
-                    ));
+                    if !flat {
+                        elements.push(self.render_branch_group_header(
+                            &group_key,
+                            chat_group,
+                            group_collapsed,
+                            group.space_id.as_deref(),
+                            theme,
+                            cx,
+                        ));
+                    }
                     if !group_collapsed {
                         elements.extend(chat_group.chats.iter().map(|(status, chat)| {
                             let time_ago: SharedString = format_time_ago(
