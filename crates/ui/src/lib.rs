@@ -35,6 +35,7 @@ pub mod settings;
 pub mod shell;
 pub mod side_chats;
 pub mod sound;
+pub mod space_style;
 pub mod state;
 pub mod subagents;
 pub mod surface_style;

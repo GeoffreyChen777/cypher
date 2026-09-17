@@ -110,6 +110,12 @@ pub struct Space {
     /// User pin: pinned projects sort to the top of the sidebar (synced).
     #[serde(default)]
     pub pinned: bool,
+    /// Sidebar glyph key (synced); `None` = the default folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Sidebar glyph colour key (synced); `None` = the text colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 impl Space {

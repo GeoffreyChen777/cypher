@@ -1033,6 +1033,8 @@ pub struct Shell {
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     /// Sidebar view menu (device filter + sort): window position.
     sidebar_view_menu: popover::Popup<Point<Pixels>>,
+    /// Project glyph/colour picker: (space id, window position).
+    space_style_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
@@ -1490,6 +1492,7 @@ impl Shell {
             delete_worktree_confirm: None,
             space_menu: popover::Popup::default(),
             sidebar_view_menu: popover::Popup::default(),
+            space_style_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
             add_space: None,

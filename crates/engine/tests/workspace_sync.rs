@@ -642,6 +642,8 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
             .unwrap();
         legacy
             .upsert_space(&Space {
+                icon: None,
+                color: None,
                 pinned: false,
                 id: "space-legacy".into(),
                 device_id: "dev-a".into(),

@@ -423,6 +423,16 @@ enum MutateParams {
     SetChatPinned { chat_id: String, pinned: bool },
     #[serde(rename_all = "camelCase")]
     SetSpacePinned { space_id: String, pinned: bool },
+    /// Sidebar glyph + colour keys for a project (synced LWW; absent/null
+    /// clears to the default).
+    #[serde(rename_all = "camelCase")]
+    SetSpaceAppearance {
+        space_id: String,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+    },
     /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -1159,6 +1169,15 @@ impl EngineRpc {
             MutateParams::SetSpacePinned { space_id, pinned } => self
                 .workspace
                 .set_space_pinned(&space_id, pinned)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::SetSpaceAppearance {
+                space_id,
+                icon,
+                color,
+            } => self
+                .workspace
+                .set_space_appearance(&space_id, icon.as_deref(), color.as_deref())
                 .map_err(failed)
                 .map(drop),
             MutateParams::SetChatConfig { chat_id, config } => self

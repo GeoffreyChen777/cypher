@@ -806,6 +806,9 @@ pub struct SidebarGroup<'a> {
     pub space_id: Option<&'a str>,
     /// User pin on the project (live spaces only): pinned cards lead the list.
     pub pinned: bool,
+    /// Sidebar glyph/colour keys (live spaces only; see `space_style`).
+    pub icon: Option<String>,
+    pub color: Option<String>,
     /// The card's chats in overview recency order, pinned sessions first
     /// (empty for quiet spaces).
     pub chats: Vec<(ChatIndicator, &'a Chat)>,
@@ -1566,6 +1569,8 @@ impl AppState {
                 created_at,
                 space_id: space.map(|s| s.id.as_str()),
                 pinned: space.is_some_and(|s| s.pinned),
+                icon: space.and_then(|s| s.icon.clone()),
+                color: space.and_then(|s| s.color.clone()),
                 chats: vec![(status, chat)],
             });
         }
@@ -1611,6 +1616,8 @@ impl AppState {
                 created_at: space.created_at,
                 space_id: Some(space.id.as_str()),
                 pinned: space.pinned,
+                icon: space.icon.clone(),
+                color: space.color.clone(),
                 chats: Vec::new(),
             }
         }));
@@ -3095,6 +3102,8 @@ mod tests {
             .unwrap()
             .to_utc();
         Space {
+            icon: None,
+            color: None,
             pinned: false,
             id: id.into(),
             device_id: device_id.into(),

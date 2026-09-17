@@ -647,11 +647,17 @@ pub(crate) struct RawSpace {
     created_at: i64,
     #[serde(default)]
     pinned: bool,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
 }
 
 impl From<RawSpace> for Space {
     fn from(raw: RawSpace) -> Self {
         Space {
+            icon: raw.icon,
+            color: raw.color,
             pinned: raw.pinned,
             id: raw.id,
             device_id: raw.device_id,
@@ -812,6 +818,8 @@ mod tests {
 
     fn space(id: &str, device_id: &str, path: &str) -> Space {
         Space {
+            icon: None,
+            color: None,
             pinned: false,
             id: id.into(),
             device_id: device_id.into(),

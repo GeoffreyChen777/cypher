@@ -842,6 +842,8 @@ impl WorkspaceHost {
             return Ok(space.id.clone());
         }
         let space = Space {
+            icon: None,
+            color: None,
             pinned: false,
             id: crate::new_id(),
             device_id: device_id.clone(),
@@ -1010,6 +1012,8 @@ impl WorkspaceHost {
         }
         self.mutate(|doc| {
             doc.upsert_space(&Space {
+                icon: None,
+                color: None,
                 pinned: false,
                 id: space_id.to_string(),
                 device_id: device_id.to_string(),
@@ -1030,6 +1034,15 @@ impl WorkspaceHost {
 
     pub fn set_space_pinned(&self, space_id: &str, pinned: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_space_pinned(space_id, pinned))?)
+    }
+
+    pub fn set_space_appearance(
+        &self,
+        space_id: &str,
+        icon: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_space_appearance(space_id, icon, color))?)
     }
 
     pub fn set_chat_pinned(&self, chat_id: &str, pinned: bool) -> Result<bool, EngineError> {

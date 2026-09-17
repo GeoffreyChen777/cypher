@@ -328,6 +328,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
 
 fn space(id: &str, device_id: &str, path: &str) -> Space {
     Space {
+        icon: None,
+        color: None,
         pinned: false,
         id: id.into(),
         device_id: device_id.into(),
@@ -971,4 +973,14 @@ fn pins_survive_overlay_read_all_and_snapshot() {
     assert!(doc.set_space_pinned("s1", false).unwrap());
     assert!(!doc.space("s1").unwrap().unwrap().pinned, "space unpin");
     assert!(!doc.set_chat_pinned("missing", true).unwrap());
+    assert!(
+        doc.set_space_appearance("s1", Some("rocket"), Some("blue"))
+            .unwrap()
+    );
+    let styled = doc.space("s1").unwrap().unwrap();
+    assert_eq!(styled.icon.as_deref(), Some("rocket"));
+    assert_eq!(styled.color.as_deref(), Some("blue"));
+    assert!(doc.set_space_appearance("s1", None, None).unwrap());
+    let plain = doc.space("s1").unwrap().unwrap();
+    assert_eq!((plain.icon, plain.color), (None, None));
 }

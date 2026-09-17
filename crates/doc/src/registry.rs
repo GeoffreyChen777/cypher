@@ -787,6 +787,8 @@ impl RegistryDoc {
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
             ("pinned", json!(space.pinned)),
+            ("icon", opt_str(space.icon.as_deref())),
+            ("color", opt_str(space.color.as_deref())),
         ]);
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -834,6 +836,26 @@ impl RegistryDoc {
             space_id,
             OpKind::Update,
             fields([("pinned", json!(pinned))]),
+        );
+        Ok(true)
+    }
+
+    /// LWW sidebar glyph/colour keys on a project row (`None` clears to the
+    /// default). `false` when no such row.
+    pub fn set_space_appearance(
+        &mut self,
+        space_id: &str,
+        icon: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_SPACES, space_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_SPACES,
+            space_id,
+            OpKind::Update,
+            fields([("icon", opt_str(icon)), ("color", opt_str(color))]),
         );
         Ok(true)
     }
@@ -1271,6 +1293,8 @@ impl RegistryDoc {
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),
                     ("createdAt", json!(space.created_at.timestamp_millis())),
                     ("pinned", json!(space.pinned)),
+                    ("icon", opt_str(space.icon.as_deref())),
+                    ("color", opt_str(space.color.as_deref())),
                 ]),
             );
         }
