@@ -693,6 +693,11 @@ pub struct AppState {
     /// [`Self::selected_space_row`] reads as `None` — healing must NOT
     /// re-select a project underneath it.
     pub no_project: bool,
+    /// The canvas is a QUICK CHAT: the next send asks the picked device for a
+    /// throwaway scratch folder and runs there (implies `no_project`).
+    /// Cleared by any project pick, chat selection, or the ordinary new
+    /// session.
+    pub scratch_pending: bool,
     /// The composer's device pick — where project-less sessions run, and the
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
@@ -747,6 +752,8 @@ pub enum SidebarGroupKind {
     Space,
     /// Project-less (`space_id = None`) chats of one device.
     NoProject,
+    /// Quick chats (project-less, scratch-folder cwd) of one device.
+    Scratch,
     /// Chats whose `space_id` names a missing space.
     Unavailable,
 }
@@ -757,7 +764,7 @@ pub enum SidebarGroupKind {
 #[derive(Debug)]
 pub struct SidebarGroup<'a> {
     /// Stable key: `s:<space id>` live space, `np:<device id>` no-project,
-    /// `u:<missing space id>` unavailable. Status changes never re-key a
+    /// `sc:<device id>` quick chats, `u:<missing space id>` unavailable. Status changes never re-key a
     /// group, so cards keep their identity across renders.
     pub key: String,
     pub kind: SidebarGroupKind,
@@ -814,6 +821,7 @@ impl AppState {
             sessions: Vec::new(),
             selected_space: None,
             no_project: false,
+            scratch_pending: false,
             selected_device: None,
             selected_chat: None,
             transcript: Vec::new(),
@@ -1288,6 +1296,15 @@ impl AppState {
         cx.notify();
     }
 
+    /// Aim the canvas at a quick chat on `device_id`: project-less, with the
+    /// next send minting a scratch folder there. The caller opens the canvas.
+    pub fn begin_quick_chat(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.selected_device = Some(device_id);
+        self.no_project = true;
+        self.scratch_pending = true;
+        cx.notify();
+    }
+
     pub fn space_row(&self, space_id: &str) -> Option<&Space> {
         self.spaces.iter().find(|s| s.id == space_id)
     }
@@ -1402,6 +1419,9 @@ impl AppState {
         let mut index: HashMap<String, usize> = HashMap::new();
         for (status, chat) in all {
             let (key, kind) = match chat.space_id.as_deref() {
+                None if chat.is_scratch() => {
+                    (format!("sc:{}", chat.device_id), SidebarGroupKind::Scratch)
+                }
                 None => (
                     format!("np:{}", chat.device_id),
                     SidebarGroupKind::NoProject,
@@ -1428,6 +1448,7 @@ impl AppState {
                     )
                 }
                 SidebarGroupKind::NoProject => (None, "No project".into(), None),
+                SidebarGroupKind::Scratch => (None, "Quick chats".into(), None),
                 SidebarGroupKind::Unavailable => (None, "Unavailable project".into(), None),
             };
             let (device, offline) = match space {
@@ -1543,6 +1564,7 @@ impl AppState {
         self.sessions.clear();
         self.selected_space = None;
         self.no_project = false;
+        self.scratch_pending = false;
         self.selected_device = None;
         self.selected_chat = None;
         self.auto_selected = false;
@@ -1675,6 +1697,7 @@ impl AppState {
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.
+            self.scratch_pending = false;
             if let Some(chat) = self.chats.iter().find(|c| c.id == id) {
                 match chat.space_id.clone() {
                     Some(space_id) => {
@@ -1704,6 +1727,7 @@ impl AppState {
         match &space_id {
             Some(id) => {
                 self.no_project = false;
+                self.scratch_pending = false;
                 if let Some(device) = self.space_row(id).map(|s| s.device_id.clone()) {
                     self.selected_device = Some(device);
                 }
@@ -3475,6 +3499,37 @@ mod tests {
         let dangling_chats: Vec<&str> =
             groups[2].chats.iter().map(|(_, c)| c.id.as_str()).collect();
         assert_eq!(dangling_chats, ["dang"]);
+    }
+
+    #[test]
+    fn sidebar_groups_quick_chats_by_scratch_folder_shape() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-b", "Laptop")];
+        let mut quick = chat("q1", 0, Some(30));
+        quick.space_id = None;
+        quick.device_id = "dev-b".into();
+        quick.cwd = Some("/tmp/cypher-scratch/q1".into());
+        let mut plain = chat("np", 0, Some(20));
+        plain.space_id = None;
+        plain.device_id = "dev-b".into();
+        plain.cwd = Some("~".into());
+        // A scratch-shaped cwd minted for ANOTHER chat is not this chat's.
+        let mut foreign = chat("other", 0, Some(10));
+        foreign.space_id = None;
+        foreign.device_id = "dev-b".into();
+        foreign.cwd = Some("/tmp/cypher-scratch/q1".into());
+        assert!(quick.is_scratch());
+        assert!(!plain.is_scratch());
+        assert!(!foreign.is_scratch());
+        state.apply_chats(vec![quick, plain, foreign]);
+        let groups = state.sidebar_groups(Utc::now());
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].key, "sc:dev-b");
+        assert_eq!(groups[0].kind, SidebarGroupKind::Scratch);
+        assert_eq!(groups[0].title, "Quick chats");
+        assert_eq!(groups[1].key, "np:dev-b");
+        let plain_ids: Vec<&str> = groups[1].chats.iter().map(|(_, c)| c.id.as_str()).collect();
+        assert_eq!(plain_ids, ["np", "other"]);
     }
 
     #[test]

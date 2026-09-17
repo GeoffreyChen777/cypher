@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod entities;
 pub mod motion;
+pub mod scratch;
 pub mod session_fork;
 pub mod side_chat;
 pub mod view;

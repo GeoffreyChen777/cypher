@@ -147,6 +147,9 @@ pub mod methods {
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
+    // Quick-chat scratch folders live on the chat's host device.
+    pub const CREATE_SCRATCH_DIR: &str = "CreateScratchDir";
+    pub const DELETE_SCRATCH_DIR: &str = "DeleteScratchDir";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";

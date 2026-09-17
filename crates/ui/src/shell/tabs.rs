@@ -192,6 +192,8 @@ impl Shell {
             // `None` for the explicit no-project opt-out and dangling ids, so
             // a project-less selection is repaired to the last remembered live
             // project (else the deterministic live-space fallback).
+            // The generic new session is never a quick chat.
+            s.scratch_pending = false;
             let has_live_selection = s.selected_space_row().is_some();
             if !has_live_selection && !s.spaces.is_empty() {
                 let target = self
@@ -217,6 +219,23 @@ impl Shell {
         // current entry, so a `+` pressed while already on the canvas is a
         // no-op and the `on_state_changed` canvas push after `select_chat`
         // never double-stacks.
+        self.nav.push(NavEntry::Chat(String::new()));
+        cx.notify();
+    }
+
+    /// Quick chat: open the new-session canvas aimed at `device_id` with no
+    /// project. The first send asks that device for a throwaway scratch
+    /// folder and the session runs there; deleting the chat removes it.
+    pub(super) fn start_quick_chat(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.quick_chat_dialog = false;
+        self.route = Route::Chat;
+        self.state.update(cx, |s, cx| {
+            s.begin_quick_chat(device_id, cx);
+            s.select_chat(None, cx);
+        });
+        self.composer.update(cx, |composer, cx| {
+            composer.clear_checkout_target(cx);
+        });
         self.nav.push(NavEntry::Chat(String::new()));
         cx.notify();
     }

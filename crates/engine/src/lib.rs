@@ -32,6 +32,7 @@ pub mod registry;
 pub mod repos;
 pub mod rpc;
 pub mod run_journal;
+mod scratch;
 pub mod session_forks;
 pub mod sessions;
 pub mod side_chats;

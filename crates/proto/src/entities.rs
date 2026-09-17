@@ -202,6 +202,19 @@ impl Chat {
 }
 
 impl Chat {
+    /// True for a quick chat: a project-less chat running in a host-minted
+    /// scratch folder (see [`crate::scratch`]). Deleting the chat removes
+    /// that folder on the host.
+    pub fn is_scratch(&self) -> bool {
+        self.space_id.is_none()
+            && self
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| crate::scratch::is_scratch_cwd_for(cwd, &self.id))
+    }
+}
+
+impl Chat {
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2

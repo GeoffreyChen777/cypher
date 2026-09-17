@@ -1262,6 +1262,8 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_WORKSPACE_FILE
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
+            | methods::CREATE_SCRATCH_DIR
+            | methods::DELETE_SCRATCH_DIR
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::GET_CHECKOUT_DIFF
@@ -2538,6 +2540,28 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::CREATE_SCRATCH_DIR => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    chat_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let path = crate::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "path": path }))
+            }
+            methods::DELETE_SCRATCH_DIR => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    chat_id: String,
+                    path: String,
+                }
+                let p: P = parse_params(params)?;
+                let removed =
+                    crate::scratch::delete(&p.chat_id, &p.path).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "removed": removed }))
             }
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;

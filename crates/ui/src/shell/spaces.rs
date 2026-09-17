@@ -12,6 +12,7 @@
 
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
+use crate::state::SidebarGroupKind;
 use cypher_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
 use std::collections::HashMap;
@@ -94,6 +95,7 @@ struct ChatGroup {
 /// here — the same clone-per-row cost the pre-grouping sidebar paid.
 struct GroupCard {
     key: String,
+    kind: SidebarGroupKind,
     title: String,
     device: String,
     offline: bool,
@@ -338,6 +340,34 @@ impl Shell {
             .on_hover(motion::hover_listener("sidebar-add-project"))
             .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
             .child(icon(icons::PLUS).size(px(14.0)).text_color(theme.text));
+        // Quick chat: a session in a throwaway folder on a device of your
+        // choice — no project needed (the dialog only asks for the device).
+        let quick_chat = div()
+            .id("sidebar-quick-chat")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_color(motion::hover_blend(
+                "sidebar-quick-chat",
+                theme.text_muted.opacity(0.8),
+                theme.text,
+            ))
+            .bg(motion::hover_blend(
+                "sidebar-quick-chat",
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener("sidebar-quick-chat"))
+            .on_click(cx.listener(|this, _, _, cx| this.open_quick_chat_dialog(cx)))
+            .child(
+                icon(icons::CHAT_ROUND_LINE)
+                    .size(px(14.0))
+                    .text_color(theme.text),
+            );
         div()
             .flex_none()
             .flex()
@@ -359,8 +389,134 @@ impl Shell {
                     .text_color(theme.text)
                     .child(SharedString::from("Cypher")),
             )
-            .child(add_project)
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(quick_chat)
+                    .child(add_project),
+            )
             .into_any_element()
+    }
+
+    pub(super) fn open_quick_chat_dialog(&mut self, cx: &mut Context<Self>) {
+        self.close_space_menu(cx);
+        self.quick_chat_dialog = true;
+        cx.notify();
+    }
+
+    /// The quick-chat dialog: pick the device the throwaway session runs on.
+    /// This device first, then by name; offline devices are shown but not
+    /// selectable (the host must mint the scratch folder).
+    fn render_quick_chat_dialog(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.quick_chat_dialog {
+            return None;
+        }
+        let now = Utc::now();
+        let rows: Vec<(Device, bool, bool)> = {
+            let state = self.state.read(cx);
+            let local = state.local_device_id.clone();
+            let mut devices = state.devices.clone();
+            devices.sort_by_key(|d| {
+                (
+                    local.as_deref() != Some(d.id.as_str()),
+                    d.name.to_lowercase(),
+                    d.id.clone(),
+                )
+            });
+            devices
+                .into_iter()
+                .map(|d| {
+                    let online = state.device_online(&d.id, now);
+                    let is_local = local.as_deref() == Some(d.id.as_str());
+                    (d, online, is_local)
+                })
+                .collect()
+        };
+        let list =
+            div()
+                .mt(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .children(rows.into_iter().map(|(device, online, is_local)| {
+                    let device_id = device.id.clone();
+                    let platform_icon = match device.platform.as_str() {
+                        "macos" | "darwin" => icons::LAPTOP,
+                        "web" => icons::GLOBAL,
+                        "ios" | "android" => icons::SMARTPHONE,
+                        _ => icons::MONITOR,
+                    };
+                    let name: SharedString = if is_local {
+                        format!("{} (this device)", device.name).into()
+                    } else {
+                        device.name.clone().into()
+                    };
+                    let tag: SharedString = if online { "".into() } else { "offline".into() };
+                    popover::menu_row(&theme, false, format!("quick-chat-device-{}", device.id))
+                        .id(SharedString::from(format!(
+                            "quick-chat-device-{}",
+                            device.id
+                        )))
+                        .when(!online, |el| el.opacity(0.5))
+                        .when(online, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_quick_chat(device_id.clone(), cx)
+                            }))
+                        })
+                        .child(
+                            icon(platform_icon)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(name))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(tag),
+                        )
+                        .into_any_element()
+                }));
+        let card = popover::dialog_card(theme)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.quick_chat_dialog = false;
+                    cx.notify();
+                }
+            }))
+            .child(popover::dialog_title(theme, "Quick chat"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(
+                theme,
+                "Chat without a project. The session runs in a temporary folder on the device you pick; deleting the session removes the folder.",
+            )))
+            .child(list)
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .child(
+                        popover::btn_ghost(theme, "Cancel", "quick-chat-cancel")
+                            .id("quick-chat-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.quick_chat_dialog = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("quick-chat-dialog", viewport, card))
     }
 
     /// Deterministic disclosure identity for a project card — the same
@@ -424,6 +580,7 @@ impl Shell {
                 .into_iter()
                 .map(|g| GroupCard {
                     key: g.key,
+                    kind: g.kind,
                     title: g.title,
                     device: g.device,
                     offline: g.offline,
@@ -694,6 +851,11 @@ impl Shell {
         let title = group.title.clone();
         let device: SharedString = group.device.clone().into();
         let offline = group.offline;
+        let card_icon = if group.kind == SidebarGroupKind::Scratch {
+            icons::CHAT_ROUND_LINE
+        } else {
+            icons::FOLDER
+        };
         let presence = div()
             .size(px(6.0))
             .flex_none()
@@ -740,7 +902,7 @@ impl Shell {
                     .items_center()
                     .gap(px(6.0))
                     .child(
-                        icon(icons::FOLDER)
+                        icon(card_icon)
                             .size(px(13.0))
                             .flex_none()
                             .text_color(theme.text),
@@ -1887,6 +2049,9 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        if let Some(dialog) = self.render_quick_chat_dialog(viewport, &theme, cx) {
+            overlays.push(dialog);
+        }
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
             let closing = self.space_menu.closing_since();

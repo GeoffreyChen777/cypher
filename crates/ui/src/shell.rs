@@ -1023,6 +1023,10 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// The quick-chat device dialog is open (sidebar header "Quick chat").
+    quick_chat_dialog: bool,
+    /// Scratch-folder removal after a quick chat was deleted (host RPC).
+    scratch_cleanup_task: Option<Task<()>>,
     /// Follow-up after the last session of a linked worktree was deleted.
     delete_worktree_confirm: Option<OrphanWorktree>,
     /// Space-row context menu (dropdown rows): (space id, window position).
@@ -1479,6 +1483,8 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            quick_chat_dialog: false,
+            scratch_cleanup_task: None,
             delete_worktree_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
@@ -3227,20 +3233,68 @@ impl Shell {
             let state = self.state.read(cx);
             spaces::orphan_worktree_after_delete(&state.chats, &state.spaces, &chat_id)
         };
+        // A quick chat's scratch folder dies with the row: captured before
+        // the mutate while the row is still in the local list.
+        let scratch = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|c| c.id == chat_id && c.is_scratch())
+            .and_then(|c| c.cwd.clone().map(|cwd| (c.device_id.clone(), cwd)));
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
             self.state.update(cx, |s, cx| s.select_chat(None, cx));
         }
         self.composer
             .update(cx, |composer, _| composer.purge_chat(&chat_id));
         self.mutate(
-            serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
+            serde_json::json!({ "op": "deleteChat", "chatId": chat_id.clone() }),
             cx,
         );
+        if let Some((device_id, cwd)) = scratch {
+            self.delete_scratch_dir(chat_id, device_id, cwd, cx);
+        }
         // Last session of a linked worktree: ask whether to remove the
         // checkout too. Captured before the mutate so the row is still in
         // the local list; children of this chat cascade and don't count.
         self.delete_worktree_confirm = orphan;
         cx.notify();
+    }
+
+    /// Remove a deleted quick chat's scratch folder on its host. The host
+    /// verifies the path is the folder it minted for this chat id before
+    /// deleting anything; a failure is surfaced, never retried silently.
+    fn delete_scratch_dir(
+        &mut self,
+        chat_id: String,
+        device_id: String,
+        cwd: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let mut params = serde_json::json!({ "chatId": chat_id, "path": cwd });
+        if local.as_deref() != Some(device_id.as_str())
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("targetDeviceId".into(), device_id.into());
+        }
+        self.scratch_cleanup_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(err) = engine
+                .client()
+                .call(methods::DELETE_SCRATCH_DIR, params)
+                .await
+            {
+                this.update(cx, |shell, cx| {
+                    shell.sidebar_notice =
+                        Some(format!("Scratch folder not removed: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
     }
 
     fn delete_worktree(&mut self, orphan: OrphanWorktree, cx: &mut Context<Self>) {

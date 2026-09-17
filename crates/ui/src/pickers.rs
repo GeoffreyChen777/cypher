@@ -2768,10 +2768,20 @@ impl Pickers {
             let offline = device_id
                 .as_deref()
                 .is_some_and(|id| !state.device_online(id, chrono::Utc::now()));
+            let quick_chat = state.selected_chat_row().map_or(
+                state.selected_chat.is_none() && state.scratch_pending,
+                |chat| chat.is_scratch(),
+            );
             let project_label: SharedString = state
                 .selected_space_row()
                 .map(|s| s.display_name().to_string())
-                .unwrap_or_else(|| "No project".to_string())
+                .unwrap_or_else(|| {
+                    if quick_chat {
+                        "Quick chat".to_string()
+                    } else {
+                        "No project".to_string()
+                    }
+                })
                 .into();
             (device_label, project_label, offline)
         };

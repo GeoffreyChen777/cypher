@@ -6457,6 +6457,9 @@ impl Composer {
         // project ("Don't work in a project") the composer's device pick is
         // the host and the session runs from `~` there.
         let space = self.state.read(cx).selected_space_row().cloned();
+        // A quick chat: the host mints a scratch folder for this chat id
+        // before the row is created, and the session runs there.
+        let scratch = is_new && space.is_none() && self.state.read(cx).scratch_pending;
         let local_device_id = self.state.read(cx).local_device_id.clone();
         let target_device_id = self.state.read(cx).effective_device_id();
         let device_id = if is_new {
@@ -6641,6 +6644,41 @@ impl Composer {
                 }
                 .unwrap_or_else(|| ".".to_string());
                 let mut worktree_cwd: Option<String> = None;
+                if scratch {
+                    // The folder must exist on the HOST before the row names
+                    // it as cwd. Bounded: a lost relay frame fails the send
+                    // visibly instead of wedging it on "Sending…".
+                    let mut params = serde_json::json!({ "chatId": chat_id });
+                    if let (Some(host), Some(object)) =
+                        (host_device_id.as_deref(), params.as_object_mut())
+                    {
+                        object.insert(
+                            "targetDeviceId".into(),
+                            serde_json::Value::String(host.to_string()),
+                        );
+                    }
+                    let deadline = cx
+                        .background_executor()
+                        .timer(std::time::Duration::from_secs(20));
+                    let call = engine.client().call(methods::CREATE_SCRATCH_DIR, params);
+                    futures::pin_mut!(call);
+                    futures::pin_mut!(deadline);
+                    let path = match futures::future::select(call, deadline).await {
+                        futures::future::Either::Left((Ok(value), _)) => value["path"]
+                            .as_str()
+                            .filter(|path| !path.is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| "The device returned no scratch folder.".to_string())?,
+                        futures::future::Either::Left((Err(err), _)) => {
+                            return Err(format!("Could not create the scratch folder: {err}"));
+                        }
+                        futures::future::Either::Right(_) => {
+                            return Err("Creating the scratch folder timed out.".into());
+                        }
+                    };
+                    cwd = path.clone();
+                    worktree_cwd = Some(path);
+                }
                 // Fresh-worktree plans ride the QUEUED Run command (a
                 // WorktreeSpec the HOST materializes at drain time) instead of
                 // a blocking CreateWorktree relay RPC here: the RPC had no

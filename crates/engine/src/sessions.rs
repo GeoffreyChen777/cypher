@@ -542,6 +542,9 @@ impl SessionsEngine {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
+        // A quick chat's scratch folder lives under the host's temp dir,
+        // which a reboot may have emptied: recreate it so the run spawns.
+        crate::scratch::ensure_for_run(chat_id, &request.cwd);
         // Visible prompt = the doc/user entry truth; the harness gets the
         // augmented effective prompt when `agent_prompt` is present.
         let visible_prompt = request.prompt.clone();
