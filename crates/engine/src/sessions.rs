@@ -1181,7 +1181,13 @@ impl Inner {
     /// staleness gate must not flip "Working" off mid-run. Throttled: a
     /// workspace-doc mirror per delta would be far too chatty.
     fn touch_session(&self, chat_id: &str) {
-        const TOUCH_THROTTLE_MS: i64 = 10_000;
+        // Freshness only: the row's fields are unchanged, so every touch is a
+        // durable registry write (≈5 DO rows, broadcast to every device) that
+        // says nothing but "still alive". `SESSION_STALE_MS` (45s) is the
+        // deadline it feeds, so the cadence only has to stay comfortably
+        // inside that window — at 20s a touch can be lost entirely and the
+        // next one still lands 5s before the session would read as dead.
+        const TOUCH_THROTTLE_MS: i64 = 20_000;
         let now = Utc::now();
         // The statuses guard is RELEASED before publish (publish re-locks
         // it to build the public list — a std Mutex is not reentrant).

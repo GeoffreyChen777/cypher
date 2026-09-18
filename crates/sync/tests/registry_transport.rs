@@ -126,29 +126,52 @@ fn ws_url() -> StaticUrl {
     StaticUrl("ws://127.0.0.1:9/registry/offline/ws".into())
 }
 
+/// Writes on a JOINED room take the socket and nothing else. The HTTPS cycle
+/// that used to run beside every mutation cost a full billable Durable Object
+/// request each time (a WS message bills at 20:1) and duplicated what the
+/// socket was already delivering. Bootstrap still runs its one cycle: that is
+/// the local-first path that makes the client usable before the WS answers.
 #[tokio::test]
-async fn one_nudge_on_a_connected_room_runs_one_http_cycle() {
+async fn nudges_on_a_connected_room_stay_on_the_socket() {
     let server = MockRegistryServer::start().await;
     let transport = FakeTransport::gated();
     let doc = Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-http")));
     let client = RegistryClient::connect_via_transport(
         Arc::new(StaticUrl(server.url())),
-        doc,
+        doc.clone(),
         "dev-http",
         transport.clone(),
     )
     .await
     .unwrap();
     wait_until(|| client.stats().connected && transport.fetches.load(Ordering::SeqCst) == 1).await;
-    // Let the bootstrap cycle retire before measuring an ordinary wake.
+    // Let the bootstrap cycle retire before measuring ordinary wakes.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    for expected in 2..=4 {
+    let after_bootstrap = (
+        transport.fetches.load(Ordering::SeqCst),
+        transport.pushes.load(Ordering::SeqCst),
+    );
+
+    for i in 0..3 {
+        doc.lock()
+            .unwrap()
+            .upsert_chat(&chat(&format!("chat-{i}"), "on the socket"))
+            .unwrap();
         client.nudge();
-        wait_until(|| transport.fetches.load(Ordering::SeqCst) >= expected).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(transport.fetches.load(Ordering::SeqCst), expected);
-        assert!(client.stats().connected);
+        // The write lands on the server through the WebSocket.
+        wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
     }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        (
+            transport.fetches.load(Ordering::SeqCst),
+            transport.pushes.load(Ordering::SeqCst)
+        ),
+        after_bootstrap,
+        "a joined room must not spend an HTTPS round trip per mutation"
+    );
+    assert!(client.stats().connected);
     client.shutdown().await;
 }
 

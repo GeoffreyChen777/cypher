@@ -89,7 +89,15 @@ const PRESENCE_FRESH_MS: i64 = 45_000;
 const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
 /// Per-request timeout for a relay-status probe.
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const RELAY_PROBE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+/// Ceiling on the negative-cache delay for a peer that keeps answering
+/// `hostConnected=false`. This sets the floor rate of the whole probe path:
+/// an org's long-offline devices are polled forever at exactly this interval,
+/// once per running engine, and that was the account's second largest source
+/// of Durable Object requests. A returning device does not wait it out — its
+/// presence beat clears the backoff the moment it arrives, as do a registry
+/// reconnect, a foreground retry, and a system wake — so the cap only bounds
+/// the FALLBACK path, for the case where presence itself is unavailable.
+const RELAY_PROBE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1_800);
 
 /// Only an explicit hostConnected=false earns negative-cache backoff. Network
 /// failures are not evidence that a device is offline. This is runtime-local;
@@ -2025,24 +2033,35 @@ mod tests {
         .unwrap();
     }
 
+    /// An offline peer is polled forever, by every running engine, at the
+    /// backoff cap. The unpaced policy cost 120 Durable Object requests per
+    /// hour per peer; the 5-minute cap cut that to 15, and the 30-minute cap
+    /// to 7 in the first hour and 2 per hour thereafter — the doubling ramp
+    /// still answers quickly for a peer that just dropped.
     #[tokio::test]
-    async fn relay_probe_negative_results_reduce_an_hour_to_fifteen_requests() {
+    async fn relay_probe_negative_results_pace_an_offline_peer_down_to_the_cap() {
         use std::time::Duration;
         let dir = tempfile::tempdir().unwrap();
         let host = open_host(dir.path(), "self", false);
         add_probe_peer(&host);
         let start = tokio::time::Instant::now();
         let mut requests = 0;
-        for tick in 0..120 {
+        let mut second_hour = 0;
+        for tick in 0..240 {
             let now = start + Duration::from_secs(tick * 30);
             let due = host.inner.relay_probe_candidates(now);
             assert!(!due.contains(&"self".to_string()));
             for peer in due {
-                requests += 1;
+                if tick < 120 {
+                    requests += 1;
+                } else {
+                    second_hour += 1;
+                }
                 host.inner.record_relay_probe(&peer, Some(false), now);
             }
         }
-        assert_eq!(requests, 15, "previous policy sent 120 requests per hour");
+        assert_eq!(requests, 7, "first hour, including the doubling ramp");
+        assert_eq!(second_hour, 2, "steady state is one probe per cap window");
         let backoff = super::lock(&host.inner.relay_probe_backoff);
         assert_eq!(backoff["peer"].delay, super::RELAY_PROBE_BACKOFF_CAP);
     }

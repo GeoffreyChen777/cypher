@@ -889,13 +889,27 @@ impl Actor {
                     }
                 }
                 _ = self.nudge_rx.recv() => {
+                    // Joined: the socket carries the write, and nothing else
+                    // does. The HTTPS cycle that used to run beside it cost a
+                    // full billable Durable Object request per mutation (a WS
+                    // message bills at 20:1), and it bought no safety the
+                    // socket does not already provide — SILENCE_LEASE tears
+                    // down a wedged session inside 45s, and a gap in the row
+                    // sequence redials through the probe path. The HTTPS
+                    // transport stays exactly where it is needed: dialing,
+                    // backoff waits, and every offline branch below.
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
                     }
-                    self.spawn_offline_sync();
                 }
                 _ = self.sync_rx.recv() => {
-                    self.spawn_offline_sync();
+                    // An overlapping offline cycle finished. Anything it left
+                    // queued belongs on the socket now, not on a second pull
+                    // (chat2's rule, chat_client.rs: once joined, queued
+                    // writes take one path).
+                    if !self.push_pending(&mut pipe).await {
+                        return SessionEnd::Reconnect;
+                    }
                 }
                 at = self.presence_rx.recv() => {
                     if let Some(at) = at {
