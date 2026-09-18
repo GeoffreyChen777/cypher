@@ -867,6 +867,7 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
             .unwrap();
         assert_eq!(saved["model"], format!("{device}/search"));
         assert_eq!(saved["enabled"], false);
+        assert_eq!(saved["automatic"], false);
     }
     assert_eq!(
         client
@@ -884,6 +885,24 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
             .await
             .unwrap()["model"],
         "device-a/search"
+    );
+    // Automatic carries no model and needs no catalog (the package ranks one).
+    let auto = client
+        .call(
+            methods::SET_WEB_SEARCH_FALLBACK,
+            serde_json::json!({"targetDeviceId":"device-b","enabled": false, "model": null}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auto["automatic"], true);
+    assert!(auto.get("model").is_none());
+    assert_eq!(
+        client
+            .call(methods::GET_WEB_SEARCH_FALLBACK, serde_json::json!({}))
+            .await
+            .unwrap()["model"],
+        "device-a/search",
+        "the other device keeps its pin"
     );
 
     for (method, action) in [

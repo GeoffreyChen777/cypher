@@ -17,6 +17,6 @@
     "pi-permission-control": "0.2.0",
     "pi-provider-newapi": "0.5.0",
     "pi-web-search": "1.6.0",
-    "pi-web-search-claude-bridge": "0.1.0"
+    "pi-web-search-claude-bridge": "0.2.0"
   }
 }

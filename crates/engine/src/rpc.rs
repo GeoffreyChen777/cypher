@@ -1919,11 +1919,12 @@ impl RpcService for EngineRpc {
                     object.remove("targetDeviceId");
                 }
                 let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
-                // Enabling points a real tool at this model: it must exist in
+                // Pinning points a real tool at one model: it must exist in
                 // THIS device's catalog (the same rule as the title model).
-                // A disabled save only remembers the preference.
-                if request.enabled {
-                    crate::web_search_fallback::validate_model(&request.model)
+                // Automatic ranks the catalog itself, and a disabled save only
+                // remembers the preference.
+                if let (true, Some(pinned)) = (request.enabled, request.model.as_deref()) {
+                    crate::web_search_fallback::validate_model(pinned)
                         .map_err(RpcError::BadParams)?;
                     let harness = self
                         .registry
@@ -1934,7 +1935,7 @@ impl RpcService for EngineRpc {
                             .await
                             .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
                             .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    if !models.iter().any(|model| model.id == request.model) {
+                    if !models.iter().any(|model| model.id == pinned) {
                         return Err(RpcError::BadParams(
                             "Model is not in this device's Pi catalog; refresh and choose again"
                                 .into(),

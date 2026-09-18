@@ -46,10 +46,18 @@ Providers prompts to install it.
 Claude Code models cannot run Pi's `web_search`. The bundled
 **pi-web-search-claude-bridge** package routes that tool through a fallback
 model only while a `claude-bridge/*` model is selected (other models keep
-their own search). The Claude row carries a **Web search fallback** toggle and
-a search-model picker; they write `agent/web-search-claude-bridge.json`
-(`{"provider","model"}`) and enable/disable the package in `settings.json` on
-the selected device. Both are device-local.
+their own search). Claude → **Manage** carries the toggle and the search
+model; they write `agent/web-search-claude-bridge.json` and enable/disable the
+package in `settings.json` on the selected device. Both are device-local.
+
+The default is **Automatic** (`{"model":"auto"}`, also the shape of a missing
+file): the package ranks a search-capable model from that device's own
+catalog per search and mirrors its choice into
+`web-search-claude-bridge.resolved.json`, which Cypher reads for display only.
+Pinning one writes `{"provider","model"}`; the host refuses to enable a pin
+that is not in its catalog. Cypher lists every non-Claude model, but only
+models whose API supports native search can serve as the fallback — prefer
+Automatic when unsure.
 
 - Connect-and-add verifies an authenticated `/v1/models` response before saving.
 - The engine sends keys through stdin, never process arguments or chat commands.

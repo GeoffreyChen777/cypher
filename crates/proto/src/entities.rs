@@ -423,21 +423,27 @@ pub struct TitleModelSettings {
 
 /// Device-local web-search fallback for Claude Code sessions: while the
 /// conversation model is `claude-bridge/*`, Pi's `web_search` runs through
-/// `model` (a `provider/model` catalog id) instead of the conversation model,
-/// which cannot search. Backed by the bundled `pi-web-search-claude-bridge`
-/// package; `available` is false on runtimes that do not ship it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// another model, since Claude Code models cannot search. Backed by the
+/// bundled `pi-web-search-claude-bridge` package; `available` is false on
+/// runtimes that do not ship it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchFallbackSettings {
     #[serde(default)]
     pub available: bool,
     #[serde(default)]
     pub enabled: bool,
-    /// False while `model` is still the package's built-in default — nothing
-    /// on this device has chosen one yet.
+    /// The package ranks a search-capable model from this device's catalog
+    /// on every run (its `"model": "auto"` config, and the default).
     #[serde(default)]
-    pub configured: bool,
-    pub model: String,
+    pub automatic: bool,
+    /// The pinned `provider/model` id; `None` while automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// What automatic last resolved to on this device — display only, written
+    /// by the package as a runtime pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
