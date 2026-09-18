@@ -282,7 +282,7 @@ def check_deploy(base):
     require(not parsed.username and not parsed.password and not parsed.query and not parsed.fragment,
             "Invalid release base URL")
 
-    def get(key, head=False):
+    def get(key, head=False, missing=False):
         command = ["curl", "--fail", "--silent", "--show-error", "--connect-timeout", "10",
                    "--max-time", "30"]
         if head:
@@ -291,26 +291,34 @@ def check_deploy(base):
             command += ["--max-filesize", str(MAX_METADATA)]
         command += [base.rstrip("/") + "/releases/" + key]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=35)
+        if missing and result.returncode != 0:
+            return None
         require(result.returncode == 0, "Deployment blocked: release endpoint unavailable: " + key)
         require(len(result.stdout) <= MAX_METADATA, "Release metadata exceeds limit")
         return result.stdout
 
-    # The installer resolves the Linux channel, so that is what gates its
-    # deployment; the shared pointers remain for pre-decoupling clients.
-    manifest = read_json(get("linux/manifest.json"))
+    # Gate on exactly what the installer resolves. It prefers the Linux channel
+    # and falls back to the shared pointers, so this does too: before the first
+    # per-platform release the shared channel is still the real one, and after
+    # it the Linux channel is.
+    raw = get("linux/manifest.json", missing=True)
+    channel = "linux/" if raw is not None else ""
+    manifest = read_json(raw if raw is not None else get("manifest.json"))
     v = manifest.get("version")
     version(v)
-    require(get("linux/latest.txt").decode().strip() == v,
+    require(get(channel + "latest.txt").decode().strip() == v,
             "Deployment blocked: release pointers disagree")
-    stem = get("linux/stem.txt").decode().strip()
-    require(stem == version_stem(v, manifest.get("build", 1)),
-            "Deployment blocked: release stem disagrees with the manifest")
+    build = manifest.get("build", 1)
+    if channel:
+        stem = get(channel + "stem.txt").decode().strip()
+        require(stem == version_stem(v, build),
+                "Deployment blocked: release stem disagrees with the manifest")
     installer = (ROOT / "edge/src/install.sh").read_text()
     floor = re.search(r"^MINIMUM_SETUP_VERSION=([0-9.]+)$", installer, re.M)
     if floor:
         require(version(v) >= version(floor.group(1)),
                 "Deployment blocked: publish a client release supporting guided setup first (>= " + floor.group(1) + ")")
-    for name in platform_files(v, manifest.get("build", 1), "linux").values():
+    for name in platform_files(v, build, "linux").values():
         expected = manifest.get("files", {}).get(name, {}).get("sha256")
         require(isinstance(expected, str) and re.fullmatch("[0-9a-fA-F]{64}", expected),
                 "Deployment blocked: missing Linux checksum in manifest")

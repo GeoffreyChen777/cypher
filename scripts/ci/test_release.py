@@ -554,6 +554,25 @@ class HttpTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "guided setup"):
             release.check_deploy(self.url)
 
+    def test_gate_follows_the_installer_onto_the_shared_channel(self):
+        # Before the first per-platform release the shared pointers are still
+        # the real channel, and install.sh falls back to them. Deployment must
+        # not be blocked by a Linux channel that does not exist yet.
+        v = "1.2.3"
+        names = release.platform_files(v, 1, "linux").values()
+        files = {name: {"sha256": "a" * 64} for name in release.app_files(v)}
+        self.routes["/releases/manifest.json"] = (
+            200, release.json_bytes({"version": v, "files": files}), None)
+        self.routes["/releases/latest.txt"] = (200, v.encode(), None)
+        for name in names:
+            self.routes["/releases/" + name + ".sha256"] = (200, b"a" * 64 + b"\n", None)
+            self.routes["/releases/" + name] = (200, b"", 20 * 1024 * 1024)
+        self.assertEqual(release.check_deploy(self.url), v)
+        # Once the Linux channel exists it takes precedence, as in the installer.
+        self.channel("9.9.9")
+        with self.assertRaises(release.ReleaseError):
+            release.check_deploy(self.url)
+
     def test_authenticated_put_streams_file_and_read_errors_are_not_missing(self):
         api = release.Api(self.url, "fixture-token")
         with tempfile.TemporaryDirectory() as root:

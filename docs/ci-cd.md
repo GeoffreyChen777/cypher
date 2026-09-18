@@ -155,9 +155,13 @@ deploy it against an older channel that lacks those files.
    deployment gate requires.
 4. Run `deploy` on `main` again.
 
-The deployment gate reads `linux/manifest.json`, `linux/latest.txt` and
-`linux/stem.txt`, requires them to agree, and verifies that both Linux archives
-for the published build and their matching checksum sidecars exist. Until ready, deployment fails and the existing workers
+The deployment gate resolves the channel exactly as `install.sh` does: it reads
+`linux/manifest.json`, `linux/latest.txt` and `linux/stem.txt` when the Linux
+channel exists, and falls back to the shared `manifest.json`/`latest.txt` before
+the first per-platform release. It requires them to agree and verifies that both
+Linux archives for the published build and their matching checksum sidecars
+exist. Deployment is therefore not blocked by a per-platform channel that has
+not been published yet. Until ready, deployment fails and the existing workers
 remain in place. This is intentional: the installer and release workflows are
 not made into a new download protocol or migrated to a different storage model.
 
