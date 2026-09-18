@@ -57,6 +57,24 @@ still rather than pointing at a superseded build; it resumes at the next fully
 covered version. The shared channel is never rolled back. This is enforced in
 `legacy_value()` and covered by tests.
 
+**How quickly a release arrives.** Clients poll their own channel hourly
+(`CHECK_INTERVAL`), retry a failed check after 30 minutes, and check 20 seconds
+after launch. They also check on the rising edge of window activation
+(`UpdateOnActivation`), rate-limited to once per 5 minutes by the engine
+(`ACTIVATION_COOLDOWN`), so a release published while the user was away is
+noticed when they come back rather than at the next tick. The manifest is served
+with `max-age=60`, so this costs little. "Check for Updates" remains the
+immediate, user-driven path.
+
+**One-time bootstrap.** A client released *before* per-platform channels existed
+reads only the shared pointers, so it cannot see a single-platform release. To
+start benefiting, publish one **fully covered** version — push both
+`cypher-linux-v<version>-b1` and `cypher-macos-v<version>-b1`. That advances the
+shared pointers under the rule above, the fleet updates to a per-platform-aware
+client, and every later release can target one platform alone. This cannot be
+retrofitted: a legacy client rebuilds the artifact name from the version and
+sends no platform hint the worker could branch on.
+
 **Publisher isolation.** A platform publish may write only its own
 `<platform>/manifest.json`, `<platform>/latest.txt` and `<platform>/stem.txt`,
 plus the shared pointers under the rule above. It never writes another

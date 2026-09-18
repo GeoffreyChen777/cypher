@@ -8151,6 +8151,20 @@ impl Render for Shell {
                 let window_active = window.is_window_active();
                 if window_active && !self.was_window_active {
                     self.state.update(cx, |s, cx| s.probe_sync(cx));
+                    // Platforms release independently, so the build you want
+                    // may have shipped while you were away. The engine rate
+                    // limits this, so the rising edge is safe to forward every
+                    // time; it wakes the checker and never blocks on the
+                    // network.
+                    if let Some(engine) = self.state.read(cx).engine().cloned() {
+                        cx.background_spawn(async move {
+                            let _ = engine
+                                .client()
+                                .call(methods::UPDATE_ON_ACTIVATION, serde_json::json!({}))
+                                .await;
+                        })
+                        .detach();
+                    }
                 }
                 self.was_window_active = window_active;
                 // A run finishing while you're LOOKING at the session must not

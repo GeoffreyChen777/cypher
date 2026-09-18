@@ -39,7 +39,10 @@ pub const fn current_version() -> &'static str {
 }
 
 /// Background check cadence.
-const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// Platforms publish independently, so a release aimed at one platform should
+/// not sit unnoticed for most of a day. The manifest is small and the edge
+/// serves it with `max-age=60`, so checking hourly costs almost nothing.
+const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// Retry sooner after a failed check (offline boot, transient edge error).
 const CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// First check waits out engine boot (room joins, doc re-sync).
@@ -47,6 +50,11 @@ const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// While an auto-apply is deferred behind active sessions, re-probe idleness
 /// this often.
 const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Floor on how often *coming back to the app* may trigger a check. Focus
+/// changes are frequent and user-driven; without this, alt-tabbing would poll
+/// the release endpoint continuously.
+const ACTIVATION_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 // ---------------------------------------------------------------------------
 // Release metadata
@@ -982,6 +990,10 @@ pub struct Updater {
     /// cancellation lands at any await point (no tokio-util in this crate).
     shutdown_tx: Arc<watch::Sender<bool>>,
     check_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Epoch ms of the last activation-triggered wake, for [`ACTIVATION_COOLDOWN`].
+    /// Tracks the trigger rather than `checked_at` so a run of failing checks
+    /// cannot turn every focus change into a fresh request.
+    last_activation: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl Updater {
@@ -991,7 +1003,7 @@ impl Updater {
         // Create the loop's receivers synchronously. If they were subscribed
         // inside the spawned task, an immediate `check_now` could be lost and
         // an immediate `shutdown` could fail while no receiver existed,
-        // leaving shutdown waiting forever for the 6h loop.
+        // leaving shutdown waiting forever for the polling loop.
         let (check_tx, checks) = watch::channel(0);
         let (shutdown_tx, shutdown) = watch::channel(false);
         let updater = Self {
@@ -1002,6 +1014,7 @@ impl Updater {
             quiescent,
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
+            last_activation: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         };
         let for_loop = updater.clone();
         let task = tokio::spawn(async move { for_loop.check_loop(shutdown, checks).await });
@@ -1036,15 +1049,42 @@ impl Updater {
     }
 
     /// Run one release check immediately and return the resulting status.
-    /// Menu "Check for Updates" waits on this rather than the 6h cadence.
+    /// Menu "Check for Updates" waits on this rather than the polling cadence.
     pub async fn check(&self) -> UpdateStatus {
         let _ = self.check_once().await;
         self.status_tx.borrow().clone()
     }
 
+    /// The user came back to the app. Check now, so a release published while
+    /// they were away is visible when they return instead of on the next tick.
+    ///
+    /// Rate-limited by [`ACTIVATION_COOLDOWN`]: returns whether it actually
+    /// woke the checker, so callers can be wired to a noisy focus signal
+    /// without special-casing.
+    pub fn check_on_activation(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let now = now_ms();
+        let cooldown = ACTIVATION_COOLDOWN.as_millis() as i64;
+        let previous = self.last_activation.load(Ordering::Relaxed);
+        // A clock that moved backwards must not disable checking until it
+        // catches up, so treat any past-dated stamp as expired.
+        if previous != 0 && now >= previous && now - previous < cooldown {
+            return false;
+        }
+        if self
+            .last_activation
+            .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false; // Another activation won the race and is checking.
+        }
+        self.check_now();
+        true
+    }
+
     /// Credentials changed, but the public release endpoint does not need
     /// them. Only a new sign-in or recovery from a failed check merits an
-    /// early retry; ordinary token rotation must not bypass the 6h cadence.
+    /// early retry; ordinary token rotation must not bypass the cadence.
     pub fn check_after_auth_change(&self, signed_in: bool, recovered: bool) {
         if signed_in && (recovered || self.status_tx.borrow().error.is_some()) {
             self.check_now();

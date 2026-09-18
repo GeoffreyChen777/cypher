@@ -1329,6 +1329,7 @@ fn forwardable(method: &str) -> bool {
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
             | methods::CHECK_UPDATE
+            | methods::UPDATE_ON_ACTIVATION
             | methods::APPLY_UPDATE
             // Side Chats are owned by the parent chat's host device.
             | methods::START_SIDE_CHAT
@@ -2172,6 +2173,9 @@ impl RpcService for EngineRpc {
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::CHECK_UPDATE => RpcReply::value(&self.updater()?.check().await),
+            methods::UPDATE_ON_ACTIVATION => RpcReply::value(&serde_json::json!({
+                "woke": self.updater()?.check_on_activation(),
+            })),
             methods::APPLY_UPDATE => {
                 // `force` skips the idle guard (active runs / open terminals).
                 let force = params

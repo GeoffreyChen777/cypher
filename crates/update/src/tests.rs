@@ -66,6 +66,44 @@ async fn server(routes: Vec<(&str, u16, Vec<u8>)>) -> Server {
 }
 
 #[tokio::test]
+async fn returning_to_the_app_checks_once_then_holds_off() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let body = br#"{"version":"0.0.0","build":1,"files":{}}"#.to_vec();
+    let server = server(vec![(&channel_manifest(), 200, body)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let updater = Updater::spawn(server.url.clone(), None, dir.path().into());
+    let mut status = updater.watch();
+
+    // Coming back to the app surfaces a release published while away, instead
+    // of waiting out the polling cadence.
+    assert!(updater.check_on_activation(), "first activation must check");
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        status.wait_for(|s| s.checked_at.is_some()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let after_first = server.requests.load(SeqCst);
+    assert!(after_first >= 1);
+
+    // Alt-tabbing must not turn into a request per focus change.
+    for _ in 0..50 {
+        assert!(
+            !updater.check_on_activation(),
+            "activations inside the cooldown must not check"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        server.requests.load(SeqCst),
+        after_first,
+        "cooldown must hold the endpoint still"
+    );
+    updater.shutdown().await;
+}
+
+#[tokio::test]
 async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
     use std::sync::atomic::Ordering::SeqCst;
     let body = br#"{"version":"0.0.0","files":{}}"#.to_vec();

@@ -188,6 +188,11 @@ pub mod methods {
     pub const UPDATE_STATUS: &str = "UpdateStatus";
     /// Run one release check now and return the resulting UpdateStatus.
     pub const CHECK_UPDATE: &str = "CheckUpdate";
+    /// The user returned to the app. Wakes the release checker so a release
+    /// published while they were away is visible on return rather than at the
+    /// next tick. Rate-limited by the engine, so it is safe to call on every
+    /// window activation; replies `{woke}` and never blocks on the network.
+    pub const UPDATE_ON_ACTIVATION: &str = "UpdateOnActivation";
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
