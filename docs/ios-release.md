@@ -8,6 +8,29 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
+## Attempted build: 0.2.0 (11), 2026-09-18
+
+- Covers the three model-picker commits that landed after build 10:
+  `29c77e4` (group models by provider), `39a9197` (`-mock-providers` dev flag),
+  `54ac505` (center loading/empty states).
+- Build number bumped to 11 in `project.pbxproj` and `Development.xcconfig`.
+- Release build for `generic/platform=iOS Simulator` **succeeded** with
+  `CODE_SIGNING_ALLOWED=NO`, including `builtin-validationUtility
+  -validate-for-store`. Product Info.plist reports `ai.mvp-lab.cypher.ios`,
+  0.2.0, build 11.
+- **Archive failed; nothing was uploaded.** This Mac has no distribution
+  signing identity: `security find-identity -p codesigning` returns 0 valid
+  identities across every keychain in the search list, and the archive stops
+  with `No signing certificate "iOS Distribution" found: ... matching team ID
+  "999875MHT4" with a private key`.
+- The two App Store provisioning profiles are present and valid to
+  2027-09-08; only the certificate + private key are missing. No App Store
+  Connect API key (`AuthKey_*.p8`) or fastlane config exists here either, so
+  the upload step has no credentials regardless of signing.
+- Note: Xcode 27.0 is installed at `/Applications/Xcode.app`, but
+  `xcode-select -p` points at `/Library/Developer/CommandLineTools`; builds
+  require `DEVELOPER_DIR` (as the runbook already sets).
+
 ## Prepared build: 0.2.0 (10), 2026-09-17
 
 - Companion to the iOS notification-navigation fix and composer hardening
