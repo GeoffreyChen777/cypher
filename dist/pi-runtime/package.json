@@ -9,7 +9,7 @@
     "@lll9p/pi-better-compaction": "0.7.0",
     "@narumitw/pi-goal": "0.54.5",
     "gpt-fast-pi": "0.1.2",
-    "pi-agent-squad": "0.8.5",
+    "pi-agent-squad": "0.9.0",
     "pi-ask-user": "0.15.0",
     "pi-claude-bridge": "git+https://github.com/elidickinson/pi-claude-bridge.git#4a7920ac4f4449b546307b3a53d4a4867f8b6cb5",
     "pi-codex-tools": "0.3.0",
