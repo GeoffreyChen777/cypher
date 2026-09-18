@@ -1,0 +1,126 @@
+name: pi-runtime
+
+# Pushing a `pi-runtime-v<version>` tag publishes the Runtime channel ALONE:
+# devices poll `runtimes/pi/manifest.json` on their own, so a curated-package
+# refresh reaches them without an application release. The application manifest
+# and `latest.txt` are never written here, and the job needs no `contents:
+# write` because a Runtime release has no GitHub assets. Like release.yml,
+# workflow_dispatch is ALWAYS build/validate-only. The tag must match
+# `dist/pi-runtime/release.json`.
+on:
+  push:
+    tags: ["pi-runtime-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.context.outputs.version }}
+      publish: ${{ steps.context.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: validate tag/version and fail early on missing publication credential
+        id: context
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/ci/release.py runtime-context
+
+  pi-runtime:
+    needs: preflight
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: dist/pi-runtime/package-lock.json
+      - name: package Runtime with real RPC and negative extension tests
+        run: scripts/package-pi-runtime.sh
+      - run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
+      - name: full Runtime smoke on minimum Linux glibc
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD/target/package:/packages:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -v "$PWD/dist/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
+            ubuntu:20.04 sh -ec '
+              mkdir /runtime /agent
+              archive=$(find /packages -name "cypher-pi-runtime-*.tar.gz")
+              tar -xzf "$archive" -C /runtime --strip-components=1
+              cp /provider-service.test.mjs /runtime/provider-service.test.mjs
+              /runtime/bin/node /ci/pi-runtime-smoke.mjs /runtime
+              PI_CODING_AGENT_DIR=/agent PI_PACKAGE_DIR=/runtime/pi \
+                CYPHER_PROVIDER_HELPER=/runtime/provider-service.mjs \
+                /runtime/bin/node --test /runtime/provider-service.test.mjs
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pi-runtime-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/package/cypher-pi-runtime-*.tar.gz
+            target/package/cypher-pi-runtime-*.json
+          if-no-files-found: error
+
+  validate-artifacts:
+    needs: [preflight, pi-runtime]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
+          merge-multiple: true
+      - name: validate every artifact before any production write
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: python3 scripts/ci/release.py validate-runtime --dist target/release-dist --version "$VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: pi-runtime-manifest
+          path: target/release-plan/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/pi-runtime-v')
+    needs: [preflight, validate-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: cypher-production
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
+          merge-multiple: true
+      - name: validate, reject conflicts/rollback, upload immutable objects, move one pointer
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 1489e726fc5baa8ecc7a6e1a8c8ed3f8
+          CYPHER_PRODUCTION_LOCK: held
+        run: python3 scripts/ci/release.py publish-runtime --dist target/release-dist --version "$VERSION"

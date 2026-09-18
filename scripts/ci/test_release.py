@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
@@ -276,6 +277,98 @@ class Publication(Fixture):
                          ["manifest.json", "latest.txt"])
 
 
+class RuntimeOnly(Fixture):
+    """The decoupled Runtime release: one pointer moves, the application channel does not."""
+
+    def setUp(self):
+        super().setUp()
+        for name in release.app_files(self.v):
+            (self.dist / name).unlink()
+        self.operations = []
+        self.store = Store(self.operations)
+        self.published_app = release.json_bytes({"version": self.v, "files": {}})
+        self.store.objects["manifest.json"] = self.published_app
+        self.store.objects["latest.txt"] = self.v.encode()
+
+    def plan(self):
+        return release.validate_runtime(self.dist, self.rv, self.out, self.spec)
+
+    def publish(self):
+        release.publish_runtime(self.plan(), self.store)
+
+    def puts(self):
+        return [key for kind, key in self.operations if kind == "put"]
+
+    def test_plan_covers_every_platform_and_no_application_object(self):
+        plan = self.plan()
+        self.assertEqual(set(plan["runtime"]["files"]), set(release.PLATFORMS))
+        self.assertEqual(sorted(plan["objects"]), sorted(
+            ["runtimes/pi/cypher-pi-runtime-{}-{}.tar.gz".format(self.rv, p) for p in release.PLATFORMS]
+            + ["runtimes/pi/manifests/{}.json".format(self.rv)]))
+        self.assertFalse(list(self.out.glob("*.sha256")), "application checksums are not a Runtime concern")
+
+    def test_application_artifacts_are_not_accepted_here(self):
+        (self.dist / release.app_files(self.v)[0]).write_bytes(b"stale application build")
+        with self.assertRaisesRegex(release.ReleaseError, "Unexpected or missing Runtime artifacts"):
+            self.plan()
+        self.assertFalse(self.out.exists(), "validation failure must generate nothing")
+
+    def test_requested_version_must_match_the_pinned_definition(self):
+        with self.assertRaisesRegex(release.ReleaseError, "do not match the requested version"):
+            release.validate_runtime(self.dist, "9.9.9", self.out, self.spec)
+
+    def test_publication_moves_only_the_runtime_pointer(self):
+        self.publish()
+        self.assertEqual(self.puts()[-1], "runtimes/pi/manifest.json")
+        self.assertNotIn("manifest.json", self.puts())
+        self.assertNotIn("latest.txt", self.puts())
+        self.assertEqual(self.store.objects["manifest.json"], self.published_app)
+        self.assertEqual(self.store.objects["latest.txt"], self.v.encode())
+        self.assertEqual(json.loads(self.store.objects["runtimes/pi/manifest.json"])["version"], self.rv)
+        self.operations.clear()
+        self.publish()
+        self.assertEqual(self.puts(), [], "a retry of the same Runtime writes nothing")
+
+    def test_older_runtime_never_writes(self):
+        self.store.objects["runtimes/pi/manifest.json"] = b'{"version":"99.0.0"}'
+        with self.assertRaisesRegex(release.ReleaseError, "roll back"):
+            self.publish()
+        self.assertEqual(self.operations, [])
+
+    def test_same_version_metadata_cannot_be_rewritten(self):
+        stale = dict(self.plan()["runtime"], piVersion="0.0.1")
+        self.store.objects["runtimes/pi/manifest.json"] = release.json_bytes(stale)
+        with self.assertRaisesRegex(release.ReleaseError, "bump its version"):
+            self.publish()
+        self.assertEqual(self.operations, [])
+
+    def test_runtime_needs_a_published_application_it_can_run_on(self):
+        del self.store.objects["manifest.json"]
+        with self.assertRaisesRegex(release.ReleaseError, "No published application release"):
+            self.publish()
+        # A Runtime whose floor is above the published client would be fetched
+        # by nobody and refused by every engine that tried.
+        self.store.objects["manifest.json"] = release.json_bytes({"version": "0.1.0"})
+        with self.assertRaisesRegex(release.ReleaseError, "newer application"):
+            self.publish()
+        self.assertEqual(self.operations, [])
+
+    def test_immutable_artifacts_are_never_overwritten(self):
+        key = "runtimes/pi/cypher-pi-runtime-{}-{}.tar.gz".format(self.rv, release.PLATFORMS[0])
+        self.store.objects[key] = b"a different build under the same name"
+        with self.assertRaisesRegex(release.ReleaseError, "immutable"):
+            self.publish()
+        self.assertEqual(self.operations, [])
+
+    def test_out_of_band_application_release_stops_promotion(self):
+        def interfere(store, key):
+            store.objects["runtimes/pi/manifest.json"] = b'{"version":"0.0.1"}'
+        self.store.after_put = interfere
+        with self.assertRaisesRegex(release.ReleaseError, "Release channel changed during upload"):
+            self.publish()
+        self.assertNotIn("runtimes/pi/manifest.json", self.puts())
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.routes = {}
@@ -461,6 +554,46 @@ class Policies(unittest.TestCase):
             env["GITHUB_EVENT_NAME"] = "push"
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
             env["GITHUB_REF"] = "refs/tags/cypher-v" + values["version"]
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("NOT PUBLISHED", p.stderr)
+
+    def test_runtime_release_builds_exactly_what_the_application_release_builds(self):
+        def job(name, workflow):
+            lines = (release.ROOT / ".github/workflows" / workflow).read_text().splitlines()
+            start = lines.index("  {}:".format(name))
+            after = range(start + 1, len(lines))
+            end = next((i for i in after if re.fullmatch(r"  [a-z-]+:", lines[i])), len(lines))
+            return "\n".join(lines[start:end]).rstrip()
+
+        # Both channels must ship byte-identical Runtime archives, so the build
+        # and its smoke tests cannot drift between the two workflows.
+        self.assertEqual(job("pi-runtime", "pi-runtime.yml"), job("pi-runtime", "release.yml"))
+
+    def test_runtime_release_cannot_write_the_application_channel(self):
+        workflow = (release.ROOT / ".github/workflows/pi-runtime.yml").read_text()
+        self.assertIn("release.py publish-runtime", workflow)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("GITHUB_TOKEN", workflow)
+
+    def test_manual_runtime_tag_context_is_never_a_publish(self):
+        rv = json.loads((release.ROOT / "dist/pi-runtime/release.json").read_text())["version"]
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "outputs"
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "CLOUDFLARE_"))}
+            env.update(GITHUB_OUTPUT=str(output), GITHUB_EVENT_NAME="workflow_dispatch",
+                       GITHUB_REF="refs/tags/pi-runtime-v" + rv)
+            command = [sys.executable, str(Path(release.__file__)), "runtime-context"]
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("version=" + rv, output.read_text())
+            self.assertIn("publish=false", output.read_text())
+            env["GITHUB_EVENT_NAME"] = "push"
+            env["GITHUB_REF"] = "refs/tags/pi-runtime-v0.0.1"
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("must equal the pinned Runtime version", p.stderr)
+            env["GITHUB_REF"] = "refs/tags/pi-runtime-v" + rv
             p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("NOT PUBLISHED", p.stderr)

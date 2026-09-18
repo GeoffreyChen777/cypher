@@ -41,7 +41,7 @@ def check_queue(text):
 def main():
     root = Path(__file__).resolve().parents[2] / ".github/workflows"
     for path in root.glob("*.yml"):
-        expected = 1 if path.name in ("deploy.yml", "release.yml") else 0
+        expected = 1 if path.name in ("deploy.yml", "release.yml", "pi-runtime.yml") else 0
         if check_queue(path.read_text()) != expected:
             raise ValueError(path.name + " has an unexpected number of production locks")
     print("Production concurrency queue policy verified")

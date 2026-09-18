@@ -14,13 +14,17 @@
 - **`release.yml`**: pushes of `cypher-v<version>` build and publish. Manual runs
   are **always build/validate-only**, even when a tag is selected. The tag must
   match `[workspace.package].version` in `Cargo.toml`.
+- **`pi-runtime.yml`**: pushes of `pi-runtime-v<version>` publish the Runtime
+  channel **alone** (see below). Manual runs are build/validate-only on the same
+  terms. The tag must match `dist/pi-runtime/release.json`.
 
 The Rust toolchain is pinned in `rust-toolchain.toml`. Node is pinned to 24.19.0.
 Worker deployments use Wrangler from `edge/package-lock.json`, not a floating
 `npx wrangler@4`. Actions are pinned by commit.
 
-`deploy` and `release.publish` share the **`cypher-production`** concurrency
-group with `queue: max` and no cancellation of running jobs. GitHub.com supports
+`deploy`, `release.publish` and `pi-runtime.publish` share the
+**`cypher-production`** concurrency group with `queue: max` and no cancellation
+of running jobs. GitHub.com supports
 up to 100 pending entries; dispatch order is not a version-order guarantee.
 Publication therefore independently rejects version regressions.
 
@@ -124,6 +128,29 @@ claim a distributed transaction across independent manual actors.
 and Node version. The minimum version does not automatically increase on every
 application release. Bump the Runtime revision when changing bundle contents or
 its compatibility requirements.
+
+### Publishing a Runtime without an application release
+
+Devices poll `releases/runtimes/pi/manifest.json` on their own and install a
+newer Runtime whose `minimumCypherVersion` their client already satisfies, so a
+curated-package refresh does not need an application version to reach the fleet.
+Commit the new pin, then push `pi-runtime-v<version>` matching
+`dist/pi-runtime/release.json`.
+
+`release.py publish-runtime` is the application publisher minus the application:
+same artifact validation across all three platforms, same immutability and
+rollback refusals, same production lock — but its plan contains only the Runtime
+archives and `runtimes/pi/manifests/<version>.json`, and the only pointer it may
+move is `runtimes/pi/manifest.json`. It reads `manifest.json` and `latest.txt`
+to confirm they are unchanged before promotion and **never writes them**, needs
+no `contents: write`, and publishes no GitHub release. A Runtime whose
+`minimumCypherVersion` exceeds the published application version is refused: no
+installed client could load it.
+
+Keep the repository pin ahead of the channel. An application release republishes
+its own pinned Runtime, so cutting one from a commit whose
+`dist/pi-runtime/release.json` is older than the published Runtime is refused as
+a rollback — bump the pin on `main` rather than reverting it.
 
 `PI_RUNTIME_VERSION` remains a local packaging override; tagged publication must
 match the committed release definition. Runtime tarballs normalize owners and

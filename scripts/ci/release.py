@@ -118,16 +118,21 @@ def archive_metadata(path, root, required, json_member=None):
     return metadata
 
 
-def validate(dist, v, output, spec):
-    """Exact artifact set, platform coverage, bytes and archive/manifest agreement."""
-    version(v)
+def runtime_plan(dist, spec):
+    """Platform coverage, bytes and archive/manifest agreement for the Runtime set.
+
+    Shared by the application release and the standalone Runtime release, so a
+    decoupled Runtime is held to exactly the same checks. The only thing it
+    cannot judge here is which application versions may load the result:
+    a coupled release compares against the version being published, a
+    standalone one against the published application channel.
+    """
     definition = read_json(spec.with_name("release.json").read_bytes())
     spec = read_json(spec.read_bytes())["dependencies"]
     plugins = {k: val for k, val in spec.items() if not k.startswith("@earendil-works/")}
-    required_app = app_files(v)
     runtime_files = {}
     runtime = None
-    expected = set(required_app)
+    names = set()
     for platform in PLATFORMS:
         candidates = list(dist.glob("cypher-pi-runtime-*-{}.json".format(platform)))
         require(len(candidates) == 1, "Expected one Runtime metadata file for " + platform)
@@ -143,8 +148,7 @@ def validate(dist, v, output, spec):
         require(meta_path.name == name + ".json", "Runtime metadata filename/version mismatch")
         require(meta.get("piVersion") == spec["@earendil-works/pi-coding-agent"]
                 and meta.get("plugins") == plugins, "Runtime does not match the pinned package spec")
-        require(version(meta.get("minimumCypherVersion")) <= version(v),
-                "Runtime requires a newer application")
+        version(meta.get("minimumCypherVersion"))
         require(isinstance(meta.get("files"), dict) and set(meta["files"]) == {platform},
                 "Runtime platform must match its filename")
         entry = meta["files"][platform]
@@ -166,7 +170,18 @@ def validate(dist, v, output, spec):
         require(runtime is None or runtime == common, "Runtime metadata differs across platforms")
         runtime = common
         runtime_files[platform] = entry
-        expected.update((meta_path.name, archive.name))
+        names.update((meta_path.name, archive.name))
+    return runtime, runtime_files, names
+
+
+def validate(dist, v, output, spec):
+    """Exact artifact set, platform coverage, bytes and archive/manifest agreement."""
+    version(v)
+    runtime, runtime_files, runtime_names = runtime_plan(dist, spec)
+    require(version(runtime["minimumCypherVersion"]) <= version(v),
+            "Runtime requires a newer application")
+    required_app = app_files(v)
+    expected = set(required_app) | runtime_names
     require({p.name for p in dist.iterdir()} == expected, "Unexpected or missing release artifacts")
     sources = {}
     app = {"version": v, "files": {}}
@@ -202,6 +217,29 @@ def validate(dist, v, output, spec):
     return {"app": app, "runtime": runtime, "objects": sources, "assets": assets,
             "digests": {key: digest(path) for key, path in sources.items()},
             "asset_digests": {name: digest(path) for name, path in assets.items()}}
+
+
+def validate_runtime(dist, rv, output, spec):
+    """Runtime-only release: exactly the Runtime artifact set, no application.
+
+    Devices poll `runtimes/pi/manifest.json` independently of the application
+    channel, so a Runtime revision does not need an application release to
+    reach them. The application artifacts are therefore absent here rather than
+    stale, and an application artifact in this dist is an error, not extra.
+    """
+    version(rv)
+    runtime, runtime_files, runtime_names = runtime_plan(dist, spec)
+    require(runtime["version"] == rv, "Runtime artifacts do not match the requested version")
+    require({p.name for p in dist.iterdir()} == runtime_names, "Unexpected or missing Runtime artifacts")
+    # Nothing is generated until the ENTIRE input set passes.
+    output.mkdir(parents=True, exist_ok=True)
+    runtime["files"] = runtime_files
+    sources = {"runtimes/pi/" + entry["url"]: dist / entry["url"] for entry in runtime_files.values()}
+    path = output / "pi-runtime-manifest.json"
+    path.write_bytes(json_bytes(runtime))
+    sources["runtimes/pi/manifests/{}.json".format(rv)] = path
+    return {"runtime": runtime, "objects": sources,
+            "digests": {key: digest(value) for key, value in sources.items()}}
 
 
 def check_deploy(base):
@@ -423,6 +461,50 @@ def remote_preflight(plan, store):
     return pointers, missing
 
 
+def runtime_remote_preflight(plan, store):
+    """A Runtime release may move ONE pointer; the application channel is read-only here."""
+    pointers = {key: store.get(key) for key in
+                ("manifest.json", "latest.txt", "runtimes/pi/manifest.json")}
+    desired = plan["runtime"]
+    current = pointers["runtimes/pi/manifest.json"]
+    if current is not None:
+        old = read_json(current)
+        require(version(desired["version"]) >= version(old.get("version")),
+                "Refusing to roll back runtimes/pi/manifest.json")
+        if old["version"] == desired["version"]:
+            require(old == desired, "Existing version metadata differs; bump its version")
+    # No application release means no installed client that could load this.
+    require(pointers["manifest.json"] is not None, "No published application release")
+    published = read_json(pointers["manifest.json"]).get("version")
+    require(version(desired["minimumCypherVersion"]) <= version(published),
+            "Runtime requires a newer application than the published release")
+    missing = []
+    # Complete the conflict check for ALL objects before performing any write.
+    for key, path in plan["objects"].items():
+        require(digest(path) == plan["digests"][key], "Local artifact changed after validation")
+        existing = store.digest(key)
+        if existing is None:
+            missing.append(key)
+        else:
+            require(existing == plan["digests"][key], "Refusing to overwrite immutable artifact: " + key)
+    return pointers, missing
+
+
+def publish_runtime(plan, store):
+    pointers, missing = runtime_remote_preflight(plan, store)
+    for key in missing:
+        require(digest(plan["objects"][key]) == plan["digests"][key], "Local artifact changed during publication")
+        store.put(key, plan["objects"][key])
+        require(store.digest(key) == plan["digests"][key], "R2 upload verification failed")
+    # Detect out-of-band changes before promotion, including an application
+    # release that promoted its own Runtime while this one was uploading.
+    require(all(store.get(k) == v for k, v in pointers.items()), "Release channel changed during upload")
+    key, value = "runtimes/pi/manifest.json", json_bytes(plan["runtime"])
+    if pointers[key] != value:
+        store.put(key, value)
+    require(store.get(key) == value, "Release pointer verification failed")
+
+
 def publish(plan, store, github):
     pointers, missing = remote_preflight(plan, store)
     github.preflight(plan)
@@ -446,24 +528,46 @@ def publish(plan, store, github):
     github.promote()  # Public GitHub release is the final step.
 
 
+def require_ci_context(tag, credentials):
+    """Every remote write happens in a tag-push job holding the production lock."""
+    require(os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("GITHUB_EVENT_NAME") == "push"
+            and os.environ.get("GITHUB_REF") == "refs/tags/" + tag
+            and os.environ.get("CYPHER_PRODUCTION_LOCK") == "held",
+            "Publication requires a tag-push workflow holding cypher-production")
+    for key in credentials:
+        require(os.environ.get(key), "Missing required CI credential/context: " + key)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    event_commit = subprocess.check_output(
+        ["git", "rev-parse", os.environ["GITHUB_SHA"] + "^{commit}"], text=True).strip()
+    require(commit == event_commit, "Checkout does not match the workflow event")
+    return commit
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["context", "validate", "publish", "check-deploy"])
+    parser.add_argument("action", choices=["context", "validate", "publish", "check-deploy",
+                                           "runtime-context", "validate-runtime", "publish-runtime"])
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version")
     parser.add_argument("--out", type=Path, default=Path("target/release-plan"))
     parser.add_argument("--base-url", default="https://edge.letscypher.app")
     args = parser.parse_args()
-    if args.action == "context":
-        workspace = (ROOT / "Cargo.toml").read_text().split("[workspace.package]", 1)[1].split("\n[", 1)[0]
-        v = re.search(r'^version\s*=\s*"([^"]+)"', workspace, re.M).group(1)
+    if args.action in ("context", "runtime-context"):
+        if args.action == "context":
+            workspace = (ROOT / "Cargo.toml").read_text().split("[workspace.package]", 1)[1].split("\n[", 1)[0]
+            v = re.search(r'^version\s*=\s*"([^"]+)"', workspace, re.M).group(1)
+            prefix, source = "refs/tags/cypher-v", "the Cargo workspace version"
+        else:
+            v = read_json((ROOT / "dist/pi-runtime/release.json").read_bytes()).get("version")
+            prefix, source = "refs/tags/pi-runtime-v", "the pinned Runtime version"
         version(v)
         event = os.environ.get("GITHUB_EVENT_NAME")
         require(event in ("push", "workflow_dispatch"), "Unsupported release event")
         publishing = event == "push"
         if publishing:
-            require(os.environ.get("GITHUB_REF") == "refs/tags/cypher-v" + v,
-                    "Release tag must equal the Cargo workspace version")
+            require(os.environ.get("GITHUB_REF") == prefix + v,
+                    "Release tag must equal " + source)
             require(os.environ.get("CLOUDFLARE_API_TOKEN"),
                     "NOT PUBLISHED: configure CLOUDFLARE_API_TOKEN in repository Actions secrets")
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
@@ -472,20 +576,22 @@ def main():
     if args.action == "check-deploy":
         print("Installer prerequisites verified for " + check_deploy(args.base_url))
         return
-    plan = validate(args.dist, args.version, args.out, ROOT / "dist/pi-runtime/package.json")
+    spec = ROOT / "dist/pi-runtime/package.json"
+    if args.action in ("validate-runtime", "publish-runtime"):
+        plan = validate_runtime(args.dist, args.version, args.out, spec)
+        if args.action == "publish-runtime":
+            require_ci_context("pi-runtime-v" + args.version,
+                               ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "GITHUB_SHA"))
+            publish_runtime(plan, R2(os.environ["CLOUDFLARE_ACCOUNT_ID"],
+                                     os.environ["CLOUDFLARE_API_TOKEN"]))
+        print("{} complete: Runtime {} (application channel untouched)".format(
+            args.action, plan["runtime"]["version"]))
+        return
+    plan = validate(args.dist, args.version, args.out, spec)
     if args.action == "publish":
-        require(os.environ.get("GITHUB_ACTIONS") == "true"
-                and os.environ.get("GITHUB_EVENT_NAME") == "push"
-                and os.environ.get("GITHUB_REF") == "refs/tags/cypher-v" + args.version
-                and os.environ.get("CYPHER_PRODUCTION_LOCK") == "held",
-                "Publication requires a tag-push workflow holding cypher-production")
-        for key in ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
-                    "GITHUB_REPOSITORY", "GITHUB_SHA"):
-            require(os.environ.get(key), "Missing required CI credential/context: " + key)
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        event_commit = subprocess.check_output(
-            ["git", "rev-parse", os.environ["GITHUB_SHA"] + "^{commit}"], text=True).strip()
-        require(commit == event_commit, "Checkout does not match the workflow event")
+        commit = require_ci_context("cypher-v" + args.version,
+                                    ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
+                                     "GITHUB_REPOSITORY", "GITHUB_SHA"))
         publish(plan, R2(os.environ["CLOUDFLARE_ACCOUNT_ID"], os.environ["CLOUDFLARE_API_TOKEN"]),
                 GitHubRelease(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
                               "cypher-v" + args.version, commit))
