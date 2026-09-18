@@ -1283,7 +1283,9 @@ impl WorkspaceHost {
     /// Create a Cypher-hosted child subagent chat (`StartSubagent` bridge): a
     /// Pi-configured, titled chat row carrying the additive child metadata
     /// (parent chat id + parent run id + agent/task/mode + persisted profile).
-    /// Inherits the parent's space/device/cwd/sandbox. Deterministic +
+    /// Inherits the parent's space/device/sandbox, and its cwd unless `cwd`
+    /// overrides it — the override is PERSISTED on the row so the child's later
+    /// turns keep running where its first one did. Deterministic +
     /// idempotent by `(parent_chat_id, parent_run_id)` — a repeat start
     /// reports [`ChildChatOutcome::Existing`] with the existing child's id
     /// instead of minting a twin (the caller must then NOT queue a second
@@ -1301,6 +1303,7 @@ impl WorkspaceHost {
         tool_call_id: Option<String>,
         profile: ChildAgentProfile,
         title: &str,
+        cwd: Option<String>,
     ) -> Result<ChildChatOutcome, EngineError> {
         for chat in self.read_chats()? {
             if let Some(child) = &chat.child
@@ -1323,7 +1326,7 @@ impl WorkspaceHost {
                 device_id: parent.device_id.clone(),
                 title: Some(title.to_string()),
                 archived: false,
-                cwd: parent.cwd.clone(),
+                cwd: cwd.clone().or_else(|| parent.cwd.clone()),
                 branch: None,
                 checkout_id: None,
                 config: Some(ChatConfig {

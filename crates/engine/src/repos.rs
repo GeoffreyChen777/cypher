@@ -81,6 +81,21 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// `~` / `~/…` → this host's home directory. Anything else passes through.
+///
+/// A project-less chat stores the literal `~` (the creating device cannot know
+/// the host's home), so EVERY reader that turns a `Chat.cwd` into a real path —
+/// or compares one against a real path — has to expand it here, on the host.
+pub(crate) fn expand_home(cwd: &str) -> String {
+    match cwd.strip_prefix('~') {
+        Some("") => home_dir().to_string_lossy().into_owned(),
+        Some(rest) if rest.starts_with('/') => {
+            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
+        }
+        _ => cwd.to_string(),
+    }
+}
+
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `CYPHER_WORKTREES_DIR`
 /// overrides (test isolation); empty reads as unset.
@@ -1636,6 +1651,18 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_home_only_rewrites_a_leading_tilde() {
+        let home = home_dir().to_string_lossy().into_owned();
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/code"), format!("{home}/code"));
+        // Absolute paths, relative paths, and a `~user` form (which this host
+        // cannot resolve) all pass through untouched.
+        assert_eq!(expand_home("/tmp/repo"), "/tmp/repo");
+        assert_eq!(expand_home("~other/code"), "~other/code");
+        assert_eq!(expand_home(""), "");
+    }
 
     #[test]
     fn chat_worktree_name_is_stable_and_unique_per_chat() {

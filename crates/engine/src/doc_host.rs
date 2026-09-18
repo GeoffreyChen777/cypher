@@ -2925,7 +2925,7 @@ impl DocHost {
         // Reuse: the chat already runs inside a linked worktree of this repo.
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(cwd) = chat.cwd
+            && let Some(cwd) = chat.cwd.map(|cwd| crate::repos::expand_home(&cwd))
             && cwd != spec.repo_path
             && repos
                 .workspace_checkout(
@@ -2987,7 +2987,10 @@ impl DocHost {
                 .as_ref()
                 .map(|c| c.model_options.clone())
                 .unwrap_or_default(),
-            cwd: chat.cwd.unwrap_or_default(),
+            // Never an empty cwd: that would spawn the run in the ENGINE's own
+            // working directory instead of the chat's. A row with no cwd means
+            // project-less, which is the home directory (expanded at dispatch).
+            cwd: chat.cwd.unwrap_or_else(|| "~".into()),
             sandbox: config
                 .as_ref()
                 .map(|c| c.sandbox)

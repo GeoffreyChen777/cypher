@@ -218,6 +218,90 @@ async fn start_subagent_creates_child_and_queues_run() {
     rig.core.shutdown().await;
 }
 
+/// A `cwd` override belongs on the ROW, not just on the initial run: the child's
+/// later turns rebuild their request from the row, so persisting only the run's
+/// cwd would silently drop the child back into the parent's folder on turn two.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_subagent_persists_a_cwd_override_on_the_child_row() {
+    let rig = assemble();
+    rig.core
+        .workspace
+        .create_chat(
+            PARENT,
+            None,
+            Some(rig.core.device_id.as_str()),
+            None,
+            Some("/tmp/repo".into()),
+        )
+        .expect("parent chat");
+
+    let mut params = start_params("run-1", PARENT);
+    params["cwd"] = serde_json::json!("/tmp/other-checkout");
+    let reply = rig
+        .core
+        .rpc_service()
+        .handle(methods::START_SUBAGENT, params)
+        .await
+        .expect("start ok");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    let child_id = value["childChatId"].as_str().expect("childChatId");
+
+    let child = rig
+        .core
+        .workspace
+        .chat(child_id)
+        .expect("chat read")
+        .expect("child row exists");
+    assert_eq!(
+        child.cwd.as_deref(),
+        Some("/tmp/other-checkout"),
+        "the override is persisted, so every later child turn runs there too"
+    );
+    rig.core.shutdown().await;
+}
+
+/// A blank override is NOT an override — it falls back to the parent's cwd
+/// rather than persisting an empty cwd (which would spawn in the engine's own
+/// working directory).
+#[tokio::test(flavor = "multi_thread")]
+async fn start_subagent_blank_cwd_falls_back_to_the_parent() {
+    let rig = assemble();
+    rig.core
+        .workspace
+        .create_chat(
+            PARENT,
+            None,
+            Some(rig.core.device_id.as_str()),
+            None,
+            Some("/tmp/repo".into()),
+        )
+        .expect("parent chat");
+
+    let mut params = start_params("run-1", PARENT);
+    params["cwd"] = serde_json::json!("   ");
+    let reply = rig
+        .core
+        .rpc_service()
+        .handle(methods::START_SUBAGENT, params)
+        .await
+        .expect("start ok");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    let child_id = value["childChatId"].as_str().expect("childChatId");
+
+    let child = rig
+        .core
+        .workspace
+        .chat(child_id)
+        .expect("chat read")
+        .expect("child row exists");
+    assert_eq!(child.cwd.as_deref(), Some("/tmp/repo"), "parent cwd");
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn start_subagent_is_idempotent_by_parent_and_run() {
     let rig = assemble();
@@ -681,6 +765,7 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
                 thinking: None,
             },
             "planner · Plan the panel",
+            None,
         )
         .expect("orphan row created");
     let orphan_id = orphan.id().to_string();

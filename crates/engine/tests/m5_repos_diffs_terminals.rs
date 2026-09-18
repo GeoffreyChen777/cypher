@@ -1055,6 +1055,53 @@ async fn terminal_guards_input_size_and_cwd() {
     terminals.close(&session.id).expect("close");
 }
 
+/// A project-less chat stores the literal `~`, which is not a directory on any
+/// host: OpenTerminal has to expand it or the user gets "Session working
+/// directory is unavailable" instead of a shell in their home folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_terminal_expands_a_project_less_chats_tilde_cwd() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core = assemble(&tmp.path().join("data"));
+    let client = cypher_rpc::memory_client(core.rpc_service());
+
+    // No spaceId → the row is created with cwd `~`.
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": "chat-tilde",
+                "deviceId": core.device_id,
+            }),
+        )
+        .await
+        .expect("createChat");
+    let row = core
+        .workspace
+        .chat("chat-tilde")
+        .expect("chat read")
+        .expect("row");
+    assert_eq!(row.cwd.as_deref(), Some("~"), "project-less row stores `~`");
+
+    let session = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "chat-tilde", "cols": 80, "rows": 24 }),
+        )
+        .await
+        .expect("OpenTerminal opens in the expanded home directory");
+    let home = std::env::var("HOME").expect("HOME");
+    assert_eq!(session["cwd"], home);
+
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": session["id"] }),
+        )
+        .await
+        .expect("CloseTerminal");
+}
+
 // ---------------------------------------------------------------------------
 // RPC dispatch over the in-memory transport
 // ---------------------------------------------------------------------------

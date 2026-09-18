@@ -620,6 +620,7 @@ async fn child_chat_is_unavailable() {
                 thinking: None,
             },
             "child title",
+            None,
         )
         .unwrap();
     let child_id = child_outcome.id().to_string();

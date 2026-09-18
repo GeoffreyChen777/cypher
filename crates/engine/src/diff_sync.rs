@@ -328,7 +328,9 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
         if chat.device_id != inner.device_id {
             continue;
         }
-        let Some(cwd) = chat.cwd.clone() else {
+        // The identity is resolved by running git in this directory, so the
+        // row's `~` has to become the host's real home first.
+        let Some(cwd) = chat.cwd.as_deref().map(crate::repos::expand_home) else {
             continue;
         };
         let identity = match resolved.get(&cwd) {

@@ -377,10 +377,12 @@ impl SessionForks {
             .harness_session_id
             .as_deref()
             .is_some_and(|s| !s.is_empty())
-            && chat
-                .harness_session_cwd
-                .as_deref()
-                .is_none_or(|c| c.is_empty() || chat.cwd.as_deref() == Some(c));
+            && chat.harness_session_cwd.as_deref().is_none_or(|c| {
+                // The stored session cwd is the harness's REAL directory, so the
+                // row's `~` must be expanded before the two can compare equal.
+                c.is_empty()
+                    || chat.cwd.as_deref().map(crate::repos::expand_home) == Some(c.to_string())
+            });
         if !session_ok {
             return Ok(Err(unavailable(
                 SessionForkUnavailableReason::MissingSession,

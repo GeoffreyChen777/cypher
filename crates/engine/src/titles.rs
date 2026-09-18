@@ -130,7 +130,11 @@ impl TitleGenerator {
             match self
                 .inner
                 .repos
-                .rename_worktree_branch(std::path::Path::new(chat_cwd), branch, &title)
+                .rename_worktree_branch(
+                    std::path::Path::new(&crate::repos::expand_home(chat_cwd)),
+                    branch,
+                    &title,
+                )
                 .await
             {
                 Ok(renamed) if &renamed != branch => {

@@ -69,7 +69,7 @@ use crate::auth::Auth;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
-use crate::repos::{Repos, home_dir};
+use crate::repos::{Repos, expand_home, home_dir};
 use crate::session_forks::SessionForks;
 use crate::sessions::SessionsEngine;
 use crate::side_chats::SideChats;
@@ -634,7 +634,7 @@ impl EngineRpc {
                 }
                 let cwd = chat
                     .cwd
-                    .map(std::path::PathBuf::from)
+                    .map(|cwd| std::path::PathBuf::from(expand_home(&cwd)))
                     .ok_or_else(|| RpcError::Failed("chat has no workspace folder".into()))?;
                 let space_id = chat
                     .space_id
@@ -724,8 +724,11 @@ impl EngineRpc {
                 .as_deref()
                 .and_then(|id| diffs.iter().find(|diff| diff.checkout_id == id))
                 .or_else(|| {
+                    // `diff.cwd` is a real canonical checkout root, so the row's
+                    // `~` has to be expanded before it can ever match.
                     chat.cwd
                         .as_deref()
+                        .map(expand_home)
                         .and_then(|cwd| diffs.iter().find(|diff| diff.cwd == cwd))
                 });
             if let Some(diff) = diff {
@@ -833,6 +836,13 @@ impl EngineRpc {
             model: params.model.clone(),
             thinking: params.thinking.clone(),
         };
+        // One resolved cwd for BOTH the persisted row and the initial run, so a
+        // child's second turn never silently drifts back to the parent's folder.
+        let child_cwd = params
+            .cwd
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| parent.cwd.clone());
         let child_chat_id = self
             .workspace
             .create_child_chat(
@@ -844,6 +854,7 @@ impl EngineRpc {
                 params.tool_call_id.clone(),
                 profile,
                 &title,
+                child_cwd.clone(),
             )
             .map_err(|e| RpcError::Failed(e.to_string()))?;
         let child_id = child_chat_id.id().to_string();
@@ -886,12 +897,7 @@ impl EngineRpc {
                 model: params.model.clone(),
                 reasoning: None,
                 model_options: Default::default(),
-                cwd: params
-                    .cwd
-                    .clone()
-                    .filter(|c| !c.trim().is_empty())
-                    .or_else(|| parent.cwd.clone())
-                    .unwrap_or_else(|| "~".into()),
+                cwd: child_cwd.unwrap_or_else(|| "~".into()),
                 sandbox: parent
                     .config
                     .as_ref()
@@ -2680,13 +2686,15 @@ impl RpcService for EngineRpc {
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;
                 // The terminal runs in the chat's checkout; a chat with no cwd (or
-                // no row yet) gets the home directory.
+                // no row yet) gets the home directory. A project-less chat stores
+                // the literal `~` — expand it here or the shell never spawns.
                 let cwd = self
                     .workspace
                     .chat(&p.chat_id)
                     .ok()
                     .flatten()
                     .and_then(|chat| chat.cwd)
+                    .map(|cwd| expand_home(&cwd))
                     .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
                 let session = self
                     .terminals
@@ -2819,7 +2827,7 @@ impl RpcService for EngineRpc {
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|chat| chat.cwd)
-                    .map(std::path::PathBuf::from)
+                    .map(|cwd| std::path::PathBuf::from(expand_home(&cwd)))
                     .collect();
                 let chunk = self
                     .uploads
