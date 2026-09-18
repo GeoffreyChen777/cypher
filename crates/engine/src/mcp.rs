@@ -27,7 +27,9 @@ fn security<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> std::io::Result<std::proce
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    fn drain(
+        pipe: Option<impl std::io::Read + Send + 'static>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Some(mut pipe) = pipe {
@@ -54,7 +56,10 @@ fn security<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> std::io::Result<std::proce
                 let _ = child.kill();
                 let _ = child.wait();
                 tracing::warn!(
-                    verb = args.first().map(|a| a.as_ref().to_string_lossy().into_owned()).unwrap_or_default(),
+                    verb = args
+                        .first()
+                        .map(|a| a.as_ref().to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     "security timed out (unanswered Keychain prompt?)"
                 );
                 return Err(std::io::Error::new(
