@@ -2,11 +2,14 @@
 //! background checker + `ApplyUpdate`), the CLI (`cypher update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `cypher-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
-//! releases published before the manifest existed.
+//! Release layout (see `.github/workflows/{linux,macos}.yml` and
+//! `edge/src/install.sh`): artifacts live in the `cypher-releases` R2 bucket,
+//! served pre-auth at `{edge}/releases/*`. Platforms publish independently, so
+//! each has its own channel: `{platform}/manifest.json` carries that platform's
+//! version, build, per-artifact sha256 and the role→file-name mapping used to
+//! resolve a download. The shared `manifest.json` and `latest.txt` remain as
+//! fallbacks for clients and channels predating the per-platform split; they
+//! only ever name a version that every desktop platform covers at build 1.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.cypher/app/<ver>` + `current` symlink — the curl|sh
@@ -50,19 +53,56 @@ const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 // ---------------------------------------------------------------------------
 
 /// `{edge}/releases/manifest.json` — written by the release workflow.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
+    /// Per-platform build counter. Platforms share a version but publish
+    /// independently, so the same version may be re-cut for one platform
+    /// alone. Absent (1) on legacy and pre-manifest channels.
+    #[serde(default = "one")]
+    pub build: u32,
     /// Artifact file name → metadata. Empty for pre-manifest releases resolved
     /// via `latest.txt` — downloads then require the artifact's .sha256 sidecar.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
+    /// Role → artifact file name, written by the per-platform publisher. A
+    /// re-cut build does not use the historic name, so the name is read from
+    /// here rather than rebuilt from the version.
+    #[serde(default)]
+    pub roles: BTreeMap<String, String>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+impl Default for Manifest {
+    /// Build 1, matching the serde default: a channel that does not state a
+    /// build is the first cut of its version, never a zeroth one.
+    fn default() -> Self {
+        Self {
+            version: String::new(),
+            build: 1,
+            files: BTreeMap::new(),
+            roles: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileMeta {
     #[serde(default)]
     pub sha256: Option<String>,
+}
+
+/// Release channel for this platform: `linux` or `macos`. Each channel moves
+/// on its own, so a client only ever consults its own.
+pub fn channel() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
 }
 
 /// Artifact-name platform pair — `uname`-style strings matching the packaging
@@ -92,6 +132,33 @@ pub fn mac_app_artifact(version: &str) -> String {
     format!("cypher-{version}-macos-{arch}-app.tar.gz")
 }
 
+impl Manifest {
+    /// Resolve an artifact by role, falling back to the historic name.
+    ///
+    /// A per-platform manifest names its artifacts explicitly, which is what
+    /// lets a re-cut build ship under a name the version alone cannot produce.
+    /// The fallback keeps legacy and `latest.txt` channels working, where the
+    /// name has always been derived from the version.
+    fn artifact(&self, role: &str, fallback: impl FnOnce(&str) -> String) -> String {
+        self.roles
+            .get(role)
+            .cloned()
+            .unwrap_or_else(|| fallback(&self.version))
+    }
+
+    /// The headless/CLI tarball for this machine.
+    pub fn headless_file(&self) -> String {
+        let (_, arch) = platform_key();
+        self.artifact(&format!("headless-{arch}"), headless_artifact)
+    }
+
+    /// The macOS app update payload.
+    pub fn mac_app_file(&self) -> String {
+        let (_, arch) = platform_key();
+        self.artifact(&format!("app-{arch}"), mac_app_artifact)
+    }
+}
+
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
 /// Unparseable versions never count as newer — a garbage `latest.txt` must not
 /// trigger an update loop.
@@ -111,29 +178,38 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Fetch the newest release metadata: `manifest.json`, falling back to
-/// `latest.txt` (version only, no checksums) for pre-manifest releases.
+/// Fetch the newest release metadata for THIS platform.
+///
+/// Platforms publish independently, so the per-platform channel is the
+/// authoritative one: `{channel}/manifest.json`. The shared `manifest.json`
+/// and then `latest.txt` remain as fallbacks for channels published before
+/// decoupling, and for a client pointed at an older deployment.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     let base = edge_url.trim_end_matches('/');
     let client = http_client()?;
-    let manifest_url = format!("{base}/releases/manifest.json");
-    match client
-        .get(&manifest_url)
-        .send()
-        .await
-        .context("fetching manifest.json")?
-    {
-        resp if resp.status().is_success() => {
-            let manifest: Manifest =
-                serde_json::from_slice(&limited_body(resp, 1024 * 1024).await?)
-                    .context("parsing manifest.json")?;
-            validate_version(&manifest.version)?;
-            return Ok(manifest);
+    for path in [
+        format!("{}/manifest.json", channel()),
+        "manifest.json".to_string(),
+    ] {
+        let url = format!("{base}/releases/{path}");
+        match client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("fetching {path}"))?
+        {
+            resp if resp.status().is_success() => {
+                let manifest: Manifest =
+                    serde_json::from_slice(&limited_body(resp, 1024 * 1024).await?)
+                        .with_context(|| format!("parsing {path}"))?;
+                validate_version(&manifest.version)?;
+                return Ok(manifest);
+            }
+            resp if resp.status() == reqwest::StatusCode::NOT_FOUND => {
+                tracing::debug!(status = %resp.status(), %path, "release manifest unavailable")
+            }
+            resp => bail!("fetching {path} failed (HTTP {})", resp.status()),
         }
-        resp if resp.status() == reqwest::StatusCode::NOT_FOUND => {
-            tracing::debug!(status = %resp.status(), "manifest.json unavailable; trying latest.txt")
-        }
-        resp => bail!("fetching manifest.json failed (HTTP {})", resp.status()),
     }
     let latest_url = format!("{base}/releases/latest.txt");
     let response = client
@@ -149,7 +225,7 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     validate_version(&version)?;
     Ok(Manifest {
         version,
-        files: BTreeMap::new(),
+        ..Manifest::default()
     })
 }
 
@@ -394,7 +470,7 @@ pub async fn stage_headless(
             dest.display()
         );
     }
-    let file = headless_artifact(version);
+    let file = manifest.headless_file();
     std::fs::create_dir_all(app_root)?;
     let staging = tempfile::Builder::new()
         .prefix(".stage-")
@@ -753,7 +829,7 @@ pub async fn stage_mac_app(
     }
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file = mac_app_artifact(version);
+    let file = manifest.mac_app_file();
     let tarball = dir.join(&file);
     download_release_file(edge_url, manifest, &file, &tarball).await?;
     run(

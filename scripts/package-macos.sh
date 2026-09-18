@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS packaging: build the release binary for the host arch and produce
-#   target/package/cypher-<version>-macos-<arch>.dmg          (user download)
-#   target/package/cypher-<version>-macos-<arch>-app.tar.gz   (auto-updater)
+#   target/package/cypher-<version>[-b<build>]-macos-<arch>.dmg        (download)
+#   target/package/cypher-<version>[-b<build>]-macos-<arch>-app.tar.gz (updater)
 # containing Cypher.app (unsigned unless CODESIGN_IDENTITY is set).
 #
 # Usage: scripts/package-macos.sh
@@ -16,11 +16,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+# Per-platform build counter; see scripts/package-linux.sh. The Info.plist
+# keeps the marketing version: the build only distinguishes release artifacts.
+BUILD="${CYPHER_RELEASE_BUILD:-1}"
+case "$BUILD" in ([1-9]|[1-9][0-9]*) ;; (*) echo "invalid CYPHER_RELEASE_BUILD" >&2; exit 1 ;; esac
+STEM="$VERSION"
+[ "$BUILD" = 1 ] || STEM="$VERSION-b$BUILD"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Cypher.app"
-DMG="$OUT_DIR/cypher-$VERSION-macos-$ARCH.dmg"
-APP_TARBALL="$OUT_DIR/cypher-$VERSION-macos-$ARCH-app.tar.gz"
+DMG="$OUT_DIR/cypher-$STEM-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/cypher-$STEM-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
 # Reject stale/copied artwork before building or signing an app. Near-opaque

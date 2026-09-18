@@ -8,6 +8,28 @@ TestFlight/App Store distribution does **not** require a registered iPhone,
 UDID, or Development provisioning profile. Do not route cloud-Mac
 distribution through a device-development signing setup.
 
+## How a build ships
+
+Releases run in GitHub Actions (`.github/workflows/ios.yml`). There is no local
+archive/upload path any more: a developer Mac is not expected to hold the
+distribution private key, and one did not.
+
+1. Set the iOS version and build in the Xcode project. They must agree across
+   every build configuration; `release.py ios-context` refuses otherwise.
+2. Push `cypher-ios-v<version>-b<build>`. The tag must equal
+   `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`; a mismatched build number
+   would upload a package Apple rejects as a duplicate.
+3. CI imports the signing identity into an ephemeral keychain, archives,
+   exports, verifies the package (`scripts/ci/ios-verify.py`) and uploads to
+   TestFlight.
+
+iOS has its own version series, independent of the desktop app and the Runtime.
+The required secrets are listed in [ci-cd.md](ci-cd.md#ios--testflight-secrets);
+the only ones not already configured are the Apple **Distribution** identity and
+its provisioning profile.
+
+A `workflow_dispatch` run builds and verifies but never uploads.
+
 ## Attempted build: 0.2.0 (11), 2026-09-18
 
 - Covers the three model-picker commits that landed after build 10:
@@ -127,7 +149,11 @@ distribution through a device-development signing setup.
   privacy disclosures and real-device/remote execution acceptance still need
   separate verification. Upload acceptance is not TestFlight readiness.
 
-## Local archive and App Store export
+## Local archive and App Store export (reference only)
+
+**Publication no longer runs from a developer machine.** The commands below are
+kept because they are what CI performs and are useful for diagnosing a failing
+build locally; a local export is not a release and must not be uploaded by hand.
 
 Run from the repository root. Keep output directories private and outside git.
 Use a fresh archive/export path for each attempt.

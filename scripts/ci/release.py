@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Release validation, deployment compatibility gate and guarded publication.
 
-Only `publish` writes remotely. It requires a tag-push Actions context and the
-shared `cypher-production` concurrency lock in release.yml. No local credentials
-are read. Object GET/PUT uses the same R2 API as the lockfile-pinned Wrangler.
+Only the `publish-*` actions write remotely. Each requires a tag-push Actions
+context and the shared `cypher-production` concurrency lock held by linux.yml,
+macos.yml, pi-runtime.yml and deploy.yml. Every platform publishes on its own
+channel and may move only its own pointers. No local credentials are read.
+Object GET/PUT uses the same R2 API as the lockfile-pinned Wrangler.
 """
 import argparse
 import hashlib
@@ -69,14 +71,45 @@ def read_json(raw):
     return result
 
 
-def app_files(v):
+def build_number(value):
+    """Per-platform build counter. Desktop platforms share one version but
+    publish independently, so the same version may be re-cut for one platform
+    alone. Build 1 is the historic, legacy-compatible naming."""
+    require(isinstance(value, (int, str)), "Build must be an integer")
+    text = str(value)
+    require(re.fullmatch("[1-9][0-9]{0,4}", text), "Build must be a positive integer")
+    return int(text)
+
+
+# Desktop artifact roles. New clients resolve their download from the manifest
+# by role; only pre-decoupling clients reconstruct the file name themselves.
+DESKTOP_PLATFORMS = {
+    "linux": (("headless-x86_64", "cypher-{stem}-linux-x86_64.tar.gz"),
+              ("headless-aarch64", "cypher-{stem}-linux-aarch64.tar.gz")),
+    "macos": (("dmg-arm64", "cypher-{stem}-macos-arm64.dmg"),
+              ("app-arm64", "cypher-{stem}-macos-arm64-app.tar.gz")),
+}
+
+
+def version_stem(v, build):
+    """Build 1 keeps the historic name so already-installed clients, which build
+    the name from the version alone, still resolve it. A re-cut of the same
+    version changes bytes, so it must also change the immutable object name."""
     version(v)
-    return [
-        "cypher-{}-linux-x86_64.tar.gz".format(v),
-        "cypher-{}-linux-aarch64.tar.gz".format(v),
-        "cypher-{}-macos-arm64.dmg".format(v),
-        "cypher-{}-macos-arm64-app.tar.gz".format(v),
-    ]
+    return v if build_number(build) == 1 else "{}-b{}".format(v, build_number(build))
+
+
+def platform_files(v, build, platform):
+    require(platform in DESKTOP_PLATFORMS, "Unknown desktop platform: " + str(platform))
+    stem = version_stem(v, build)
+    return {role: name.format(stem=stem) for role, name in DESKTOP_PLATFORMS[platform]}
+
+
+def app_files(v):
+    """Legacy coupled artifact set: every desktop artifact at build 1."""
+    version(v)
+    return [name for platform in ("linux", "macos")
+            for name in platform_files(v, 1, platform).values()]
 
 
 def archive_metadata(path, root, required, json_member=None):
@@ -174,18 +207,22 @@ def runtime_plan(dist, spec):
     return runtime, runtime_files, names
 
 
-def validate(dist, v, output, spec):
-    """Exact artifact set, platform coverage, bytes and archive/manifest agreement."""
+def validate_platform(dist, v, build, platform, output):
+    """One desktop platform's artifact set — no other platform, no Runtime.
+
+    Decoupled publication means the absent artifacts are genuinely absent
+    rather than stale, so an artifact belonging to another platform is an
+    error here, not extra. The Runtime ships on its own channel and is never
+    republished by an application release.
+    """
     version(v)
-    runtime, runtime_files, runtime_names = runtime_plan(dist, spec)
-    require(version(runtime["minimumCypherVersion"]) <= version(v),
-            "Runtime requires a newer application")
-    required_app = app_files(v)
-    expected = set(required_app) | runtime_names
-    require({p.name for p in dist.iterdir()} == expected, "Unexpected or missing release artifacts")
+    build = build_number(build)
+    roles = platform_files(v, build, platform)
+    require({p.name for p in dist.iterdir()} == set(roles.values()),
+            "Unexpected or missing {} release artifacts".format(platform))
+    app = {"version": v, "build": build, "platform": platform, "files": {}, "roles": {}}
     sources = {}
-    app = {"version": v, "files": {}}
-    for name in required_app:
+    for role, name in roles.items():
         path = dist / name
         require(path.is_file() and not path.is_symlink(), "Missing application artifact")
         h, size = digest(path)
@@ -195,6 +232,7 @@ def validate(dist, v, output, spec):
             archive_metadata(path, "Cypher.app" if is_mac else name[:-7],
                              ["Contents/MacOS/cypher"] if is_mac else ["cypher"])
         app["files"][name] = {"sha256": h, "size": size}
+        app["roles"][role] = name
         sources[name] = path
     # Nothing is generated until the ENTIRE input set passes.
     output.mkdir(parents=True, exist_ok=True)
@@ -202,21 +240,14 @@ def validate(dist, v, output, spec):
         checksum = output / (name + ".sha256")
         checksum.write_text(entry["sha256"] + "\n")
         sources[checksum.name] = checksum
-    runtime["files"] = runtime_files
-    for entry in runtime_files.values():
-        sources["runtimes/pi/" + entry["url"]] = dist / entry["url"]
-    for name, value, key in [
-        ("manifest.json", app, "manifests/{}.json".format(v)),
-        ("pi-runtime-manifest.json", runtime, "runtimes/pi/manifests/{}.json".format(runtime["version"])),
-    ]:
-        path = output / name
-        path.write_bytes(json_bytes(value))
-        sources[key] = path
+    path = output / "{}-manifest.json".format(platform)
+    path.write_bytes(json_bytes(app))
+    sources["{}/manifests/{}.json".format(platform, version_stem(v, build))] = path
     assets = dict((p.name, p) for p in dist.iterdir())
     assets.update((p.name, p) for p in sources.values())
-    return {"app": app, "runtime": runtime, "objects": sources, "assets": assets,
-            "digests": {key: digest(path) for key, path in sources.items()},
-            "asset_digests": {name: digest(path) for name, path in assets.items()}}
+    return {"app": app, "platform": platform, "objects": sources, "assets": assets,
+            "digests": {key: digest(p) for key, p in sources.items()},
+            "asset_digests": {name: digest(p) for name, p in assets.items()}}
 
 
 def validate_runtime(dist, rv, output, spec):
@@ -264,16 +295,22 @@ def check_deploy(base):
         require(len(result.stdout) <= MAX_METADATA, "Release metadata exceeds limit")
         return result.stdout
 
-    manifest = read_json(get("manifest.json"))
+    # The installer resolves the Linux channel, so that is what gates its
+    # deployment; the shared pointers remain for pre-decoupling clients.
+    manifest = read_json(get("linux/manifest.json"))
     v = manifest.get("version")
     version(v)
-    require(get("latest.txt").decode().strip() == v, "Deployment blocked: release pointers disagree")
+    require(get("linux/latest.txt").decode().strip() == v,
+            "Deployment blocked: release pointers disagree")
+    stem = get("linux/stem.txt").decode().strip()
+    require(stem == version_stem(v, manifest.get("build", 1)),
+            "Deployment blocked: release stem disagrees with the manifest")
     installer = (ROOT / "edge/src/install.sh").read_text()
     floor = re.search(r"^MINIMUM_SETUP_VERSION=([0-9.]+)$", installer, re.M)
     if floor:
         require(version(v) >= version(floor.group(1)),
                 "Deployment blocked: publish a client release supporting guided setup first (>= " + floor.group(1) + ")")
-    for name in app_files(v)[:2]:
+    for name in platform_files(v, manifest.get("build", 1), "linux").values():
         expected = manifest.get("files", {}).get(name, {}).get("sha256")
         require(isinstance(expected, str) and re.fullmatch("[0-9a-fA-F]{64}", expected),
                 "Deployment blocked: missing Linux checksum in manifest")
@@ -369,16 +406,25 @@ class GitHubRelease:
     @staticmethod
     def marker(plan):
         return "<!-- cypher-release-plan:{} -->".format(sha256(json_bytes({
-            "app": plan["app"], "runtime": plan["runtime"], "assets": plan["asset_digests"],
+            "app": plan["app"], "assets": plan["asset_digests"],
         })))
 
     def preflight(self, plan):
         latest = self.api.request(self.prefix + "/releases/latest", missing=True)
         if latest:
             latest_tag = read_json(latest)["tag_name"]
-            require(latest_tag.startswith("cypher-v"), "Unexpected GitHub latest release")
-            require(version(plan["app"]["version"]) >= version(latest_tag[len("cypher-v"):]),
-                    "Refusing to regress GitHub latest release")
+            prefix = "cypher-{}-v".format(plan["platform"])
+            match = re.fullmatch(re.escape(prefix) + r"([0-9.]+)-b([1-9][0-9]{0,4})", latest_tag)
+            # Platforms release independently, so GitHub's single "latest" may
+            # belong to another platform. Only a same-platform release orders
+            # against this one; the channel check in R2 remains authoritative.
+            require(match is not None or re.fullmatch(r"cypher-[a-z]+-v[0-9.]+-b[0-9]+", latest_tag)
+                    or latest_tag.startswith("cypher-v"),
+                    "Unexpected GitHub latest release")
+            if match:
+                require((version(plan["app"]["version"]), plan["app"]["build"])
+                        >= (version(match.group(1)), build_number(match.group(2))),
+                        "Refusing to regress GitHub latest release")
         # Never let create-release implicitly create or reuse a moved tag.
         ref = read_json(self.api.request(self.prefix + "/git/ref/tags/" + self.tag))["object"]
         for _ in range(8):
@@ -437,34 +483,12 @@ class GitHubRelease:
                     "GitHub release promotion was not confirmed")
 
 
-def remote_preflight(plan, store):
-    pointers = {key: store.get(key) for key in
-                ("manifest.json", "latest.txt", "runtimes/pi/manifest.json")}
-    for key, value in pointers.items():
-        if value is None:
-            continue
-        desired = plan["runtime"] if key.startswith("runtimes/") else plan["app"]
-        old = {"version": value.decode().strip()} if key == "latest.txt" else read_json(value)
-        require(version(desired["version"]) >= version(old.get("version")),
-                "Refusing to roll back " + key)
-        if key != "latest.txt" and old["version"] == desired["version"]:
-            require(old == desired, "Existing version metadata differs; bump its version")
-    missing = []
-    # Complete the conflict check for ALL objects before performing any write.
-    for key, path in plan["objects"].items():
-        require(digest(path) == plan["digests"][key], "Local artifact changed after validation")
-        existing = store.digest(key)
-        if existing is None:
-            missing.append(key)
-        else:
-            require(existing == plan["digests"][key], "Refusing to overwrite immutable artifact: " + key)
-    return pointers, missing
-
-
 def runtime_remote_preflight(plan, store):
     """A Runtime release may move ONE pointer; the application channel is read-only here."""
-    pointers = {key: store.get(key) for key in
-                ("manifest.json", "latest.txt", "runtimes/pi/manifest.json")}
+    keys = ["manifest.json", "latest.txt", "runtimes/pi/manifest.json"]
+    keys += [p + "/manifest.json" for p in sorted(DESKTOP_PLATFORMS)]
+    keys += [p + "/latest.txt" for p in sorted(DESKTOP_PLATFORMS)]
+    pointers = {key: store.get(key) for key in keys}
     desired = plan["runtime"]
     current = pointers["runtimes/pi/manifest.json"]
     if current is not None:
@@ -473,10 +497,17 @@ def runtime_remote_preflight(plan, store):
                 "Refusing to roll back runtimes/pi/manifest.json")
         if old["version"] == desired["version"]:
             require(old == desired, "Existing version metadata differs; bump its version")
+    # Desktop platforms publish independently, so the binding constraint is the
+    # OLDEST published desktop channel: a client on either platform must be able
+    # to load this Runtime. Fall back to the legacy channel before decoupling.
+    published = [read_json(pointers[p + "/manifest.json"]).get("version")
+                 for p in sorted(DESKTOP_PLATFORMS)
+                 if pointers[p + "/manifest.json"] is not None]
+    if not published and pointers["manifest.json"] is not None:
+        published = [read_json(pointers["manifest.json"]).get("version")]
     # No application release means no installed client that could load this.
-    require(pointers["manifest.json"] is not None, "No published application release")
-    published = read_json(pointers["manifest.json"]).get("version")
-    require(version(desired["minimumCypherVersion"]) <= version(published),
+    require(published, "No published application release")
+    require(version(desired["minimumCypherVersion"]) <= min(version(p) for p in published),
             "Runtime requires a newer application than the published release")
     missing = []
     # Complete the conflict check for ALL objects before performing any write.
@@ -488,6 +519,100 @@ def runtime_remote_preflight(plan, store):
         else:
             require(existing == plan["digests"][key], "Refusing to overwrite immutable artifact: " + key)
     return pointers, missing
+
+
+def legacy_value(store, platform, app):
+    """Pointers for clients predating decoupled channels.
+
+    Such a client reads one global manifest and rebuilds the artifact name from
+    the version alone, so it can only be sent to a version that is fully
+    covered on BOTH desktop platforms at build 1, where the historic names
+    exist. The moment either platform re-cuts a version, those clients hold
+    still rather than being pointed at a superseded build; they resume at the
+    next fully covered version. This channel is never rolled back.
+    """
+    merged = {}
+    for other in sorted(DESKTOP_PLATFORMS):
+        current = app if other == platform else None
+        if current is None:
+            raw = store.get(other + "/manifest.json")
+            if raw is None:
+                return None
+            current = read_json(raw)
+        if current.get("version") != app["version"] or current.get("build") != 1:
+            return None
+        files = current.get("files")
+        require(isinstance(files, dict), "Invalid platform manifest")
+        merged.update(files)
+    if set(merged) != set(app_files(app["version"])):
+        return None
+    return {"version": app["version"], "files": merged}
+
+
+def platform_remote_preflight(plan, store):
+    """A desktop platform release may move only its OWN pointers, plus the
+    shared legacy pointers when a version becomes fully covered."""
+    platform = plan["platform"]
+    desired = plan["app"]
+    keys = (platform + "/manifest.json", platform + "/latest.txt",
+            platform + "/stem.txt", "manifest.json", "latest.txt")
+    pointers = {key: store.get(key) for key in keys}
+    current = pointers[platform + "/manifest.json"]
+    if current is not None:
+        old = read_json(current)
+        old_pair = (version(old.get("version")), build_number(old.get("build", 1)))
+        new_pair = (version(desired["version"]), desired["build"])
+        require(new_pair >= old_pair, "Refusing to roll back " + platform + "/manifest.json")
+        if old_pair == new_pair:
+            require(old == desired, "Existing version metadata differs; bump its build")
+    missing = []
+    # Complete the conflict check for ALL objects before performing any write.
+    for key, path in plan["objects"].items():
+        require(digest(path) == plan["digests"][key], "Local artifact changed after validation")
+        existing = store.digest(key)
+        if existing is None:
+            missing.append(key)
+        else:
+            require(existing == plan["digests"][key],
+                    "Refusing to overwrite immutable artifact: " + key)
+    return pointers, missing
+
+
+def publish_platform(plan, store, github):
+    platform = plan["platform"]
+    pointers, missing = platform_remote_preflight(plan, store)
+    github.preflight(plan)
+    github.stage(plan)  # Private draft only; no public release before validation.
+    for key in missing:
+        require(digest(plan["objects"][key]) == plan["digests"][key],
+                "Local artifact changed during publication")
+        store.put(key, plan["objects"][key])
+        require(store.digest(key) == plan["digests"][key], "R2 upload verification failed")
+    # Detect out-of-band changes before promotion, including the other desktop
+    # platform publishing while this one was uploading.
+    require(all(store.get(k) == v for k, v in pointers.items()),
+            "Release channel changed during upload")
+    values = {
+        platform + "/manifest.json": json_bytes(plan["app"]),
+        platform + "/latest.txt": plan["app"]["version"].encode(),
+        # The artifact stem the shell installer needs. `latest.txt` stays a bare
+        # version so it can still be compared numerically; a re-cut build is not
+        # reachable from the version alone, so it is published separately rather
+        # than parsed out of JSON in POSIX sh.
+        platform + "/stem.txt": version_stem(plan["app"]["version"],
+                                             plan["app"]["build"]).encode(),
+    }
+    legacy = legacy_value(store, platform, plan["app"])
+    if legacy is not None:
+        old = pointers["manifest.json"]
+        if old is None or version(legacy["version"]) >= version(read_json(old).get("version")):
+            values["manifest.json"] = json_bytes(legacy)
+            values["latest.txt"] = legacy["version"].encode()
+    for key, value in values.items():
+        if pointers.get(key) != value:
+            store.put(key, value)
+        require(store.get(key) == value, "Release pointer verification failed")
+    github.promote()  # Public GitHub release is the final step.
 
 
 def publish_runtime(plan, store):
@@ -503,29 +628,6 @@ def publish_runtime(plan, store):
     if pointers[key] != value:
         store.put(key, value)
     require(store.get(key) == value, "Release pointer verification failed")
-
-
-def publish(plan, store, github):
-    pointers, missing = remote_preflight(plan, store)
-    github.preflight(plan)
-    github.stage(plan)  # Private draft only; no public release before validation.
-    for key in missing:
-        require(digest(plan["objects"][key]) == plan["digests"][key], "Local artifact changed during publication")
-        store.put(key, plan["objects"][key])
-        require(store.digest(key) == plan["digests"][key], "R2 upload verification failed")
-    # Detect out-of-band changes before promotion. All supported CI publishers
-    # also hold the shared workflow lock. Manual concurrent R2 writes are unsupported.
-    require(all(store.get(k) == v for k, v in pointers.items()), "Release channel changed during upload")
-    values = {
-        "runtimes/pi/manifest.json": json_bytes(plan["runtime"]),
-        "manifest.json": json_bytes(plan["app"]),
-        "latest.txt": plan["app"]["version"].encode(),
-    }
-    for key, value in values.items():
-        if pointers[key] != value:
-            store.put(key, value)
-        require(store.get(key) == value, "Release pointer verification failed")
-    github.promote()  # Public GitHub release is the final step.
 
 
 def require_ci_context(tag, credentials):
@@ -544,34 +646,80 @@ def require_ci_context(tag, credentials):
     return commit
 
 
+def workspace_version():
+    workspace = (ROOT / "Cargo.toml").read_text().split("[workspace.package]", 1)[1].split("\n[", 1)[0]
+    return re.search(r'^version\s*=\s*"([^"]+)"', workspace, re.M).group(1)
+
+
+def ios_version():
+    """Marketing version and build from the Xcode project, which must agree
+    across every build configuration."""
+    project = (ROOT / "apps/ios/Cypher.xcodeproj/project.pbxproj").read_text()
+    found = {}
+    for key in ("MARKETING_VERSION", "CURRENT_PROJECT_VERSION"):
+        values = set(re.findall(r"^\s*" + key + r" = ([^;]+);", project, re.M))
+        require(len(values) == 1, "iOS " + key + " disagrees across build configurations")
+        found[key] = values.pop().strip()
+    return version(found["MARKETING_VERSION"]) and found["MARKETING_VERSION"], \
+        build_number(found["CURRENT_PROJECT_VERSION"])
+
+
+def emit_context(**values):
+    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+        for key, value in values.items():
+            output.write("{}={}\n".format(key, value))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["context", "validate", "publish", "check-deploy",
-                                           "runtime-context", "validate-runtime", "publish-runtime"])
+    parser.add_argument("action", choices=["platform-context", "validate-platform",
+                                           "publish-platform", "check-deploy",
+                                           "runtime-context", "validate-runtime", "publish-runtime",
+                                           "ios-context"])
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version")
+    parser.add_argument("--build", default="1")
+    parser.add_argument("--platform", choices=sorted(DESKTOP_PLATFORMS))
     parser.add_argument("--out", type=Path, default=Path("target/release-plan"))
     parser.add_argument("--base-url", default="https://edge.letscypher.app")
     args = parser.parse_args()
-    if args.action in ("context", "runtime-context"):
-        if args.action == "context":
-            workspace = (ROOT / "Cargo.toml").read_text().split("[workspace.package]", 1)[1].split("\n[", 1)[0]
-            v = re.search(r'^version\s*=\s*"([^"]+)"', workspace, re.M).group(1)
-            prefix, source = "refs/tags/cypher-v", "the Cargo workspace version"
-        else:
-            v = read_json((ROOT / "dist/pi-runtime/release.json").read_bytes()).get("version")
-            prefix, source = "refs/tags/pi-runtime-v", "the pinned Runtime version"
-        version(v)
+    if args.action in ("platform-context", "runtime-context", "ios-context"):
         event = os.environ.get("GITHUB_EVENT_NAME")
         require(event in ("push", "workflow_dispatch"), "Unsupported release event")
         publishing = event == "push"
+        build = 1
+        if args.action == "platform-context":
+            require(args.platform, "--platform is required")
+            v = workspace_version()
+            prefix = "refs/tags/cypher-{}-v".format(args.platform)
+            source = "the Cargo workspace version"
+            credential = "CLOUDFLARE_API_TOKEN"
+        elif args.action == "ios-context":
+            v, build = ios_version()
+            prefix, source = "refs/tags/cypher-ios-v", "the Xcode project version"
+            credential = "AC_API_KEY_P8"
+        else:
+            v = read_json((ROOT / "dist/pi-runtime/release.json").read_bytes()).get("version")
+            prefix, source = "refs/tags/pi-runtime-v", "the pinned Runtime version"
+            credential = "CLOUDFLARE_API_TOKEN"
+        version(v)
         if publishing:
-            require(os.environ.get("GITHUB_REF") == prefix + v,
-                    "Release tag must equal " + source)
-            require(os.environ.get("CLOUDFLARE_API_TOKEN"),
-                    "NOT PUBLISHED: configure CLOUDFLARE_API_TOKEN in repository Actions secrets")
-        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-            output.write("version={}\npublish={}\n".format(v, str(publishing).lower()))
+            ref = os.environ.get("GITHUB_REF", "")
+            if args.action == "runtime-context":
+                require(ref == prefix + v, "Release tag must equal " + source)
+            else:
+                # Desktop platforms share a version but carry their own build.
+                match = re.fullmatch(re.escape(prefix) + r"([0-9.]+)-b([1-9][0-9]{0,4})", ref)
+                require(match is not None,
+                        "Release tag must be {}<version>-b<build>".format(prefix.split("/")[-1]))
+                require(match.group(1) == v, "Release tag must equal " + source)
+                if args.action == "ios-context":
+                    require(build_number(match.group(2)) == build,
+                            "Release tag build must equal the Xcode build number")
+                build = build_number(match.group(2))
+            require(os.environ.get(credential),
+                    "NOT PUBLISHED: configure {} in repository Actions secrets".format(credential))
+        emit_context(version=v, build=build, publish=str(publishing).lower())
         return
     if args.action == "check-deploy":
         print("Installer prerequisites verified for " + check_deploy(args.base_url))
@@ -587,16 +735,20 @@ def main():
         print("{} complete: Runtime {} (application channel untouched)".format(
             args.action, plan["runtime"]["version"]))
         return
-    plan = validate(args.dist, args.version, args.out, spec)
-    if args.action == "publish":
-        commit = require_ci_context("cypher-v" + args.version,
+    require(args.platform, "--platform is required")
+    build = build_number(args.build)
+    plan = validate_platform(args.dist, args.version, build, args.platform, args.out)
+    if args.action == "publish-platform":
+        tag = "cypher-{}-v{}-b{}".format(args.platform, args.version, build)
+        commit = require_ci_context(tag,
                                     ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
                                      "GITHUB_REPOSITORY", "GITHUB_SHA"))
-        publish(plan, R2(os.environ["CLOUDFLARE_ACCOUNT_ID"], os.environ["CLOUDFLARE_API_TOKEN"]),
-                GitHubRelease(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
-                              "cypher-v" + args.version, commit))
-    print("{} complete: application {}, Runtime {}".format(
-        args.action, args.version, plan["runtime"]["version"]))
+        publish_platform(plan, R2(os.environ["CLOUDFLARE_ACCOUNT_ID"],
+                                  os.environ["CLOUDFLARE_API_TOKEN"]),
+                         GitHubRelease(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
+                                       tag, commit))
+    print("{} complete: {} {} build {} (other platforms and Runtime untouched)".format(
+        args.action, args.platform, args.version, build))
 
 
 if __name__ == "__main__":

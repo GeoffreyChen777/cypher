@@ -11,12 +11,63 @@
   `main` SHA once, tests it, checks installer compatibility, then deploys all
   three workers from that same SHA. It deliberately does not use per-push path
   deltas: skipped/pending pushes and `grep -q`/SIGPIPE must not omit changes.
-- **`release.yml`**: pushes of `cypher-v<version>` build and publish. Manual runs
-  are **always build/validate-only**, even when a tag is selected. The tag must
-  match `[workspace.package].version` in `Cargo.toml`.
+- **`linux.yml`** / **`macos.yml`**: pushes of `cypher-<platform>-v<version>-b<build>`
+  build and publish **that platform alone**. Manual runs are **always
+  build/validate-only**, even when a tag is selected. The version must match
+  `[workspace.package].version` in `Cargo.toml`.
+- **`ios.yml`**: pushes of `cypher-ios-v<version>-b<build>` build, verify and
+  upload to TestFlight. The tag must match `MARKETING_VERSION` and
+  `CURRENT_PROJECT_VERSION` in the Xcode project. Manual runs are
+  build/validate-only.
 - **`pi-runtime.yml`**: pushes of `pi-runtime-v<version>` publish the Runtime
   channel **alone** (see below). Manual runs are build/validate-only on the same
   terms. The tag must match `dist/pi-runtime/release.json`.
+
+## Independent platform releases
+
+Every platform builds, publishes and is checked for updates on its own. There is
+no workflow that releases two platforms together, and no release path that runs
+from a developer machine.
+
+| Platform | Tag | Channel | Update check |
+| --- | --- | --- | --- |
+| Linux | `cypher-linux-v<version>-b<build>` | `releases/linux/*` | client polls `linux/manifest.json` |
+| macOS | `cypher-macos-v<version>-b<build>` | `releases/macos/*` | client polls `macos/manifest.json` |
+| iOS | `cypher-ios-v<version>-b<build>` | TestFlight | the App Store, not our channel |
+| Runtime | `pi-runtime-v<version>` | `releases/runtimes/pi/*` | devices poll `runtimes/pi/manifest.json` |
+
+**Versions.** Linux and macOS are the same Rust binary and share one version,
+`[workspace.package].version`. They publish *independently in time*, each
+carrying its own **build number**, so `0.3.8 (1)` on Linux and `0.3.8 (2)` on
+macOS are a normal, expected state — as is Linux sitting on `0.3.8` while macOS
+has moved to `0.3.9`. iOS and the Runtime keep entirely independent version
+series, as they already did.
+
+**Artifact names.** Build 1 keeps the historic name (`cypher-0.3.8-linux-x86_64.tar.gz`).
+A re-cut changes the bytes, so it must change the immutable object name and
+becomes `cypher-0.3.8-b2-linux-x86_64.tar.gz`. Clients read the exact name from
+their channel manifest's `roles` map rather than rebuilding it from the version.
+
+**Already-installed clients.** A client released before the split polls the
+shared `manifest.json`/`latest.txt` and rebuilds the artifact name from the
+version alone. Those pointers are therefore only ever moved to a version that
+**every** desktop platform covers **at build 1**, where the historic names
+exist. The moment either platform re-cuts a version, the shared channel holds
+still rather than pointing at a superseded build; it resumes at the next fully
+covered version. The shared channel is never rolled back. This is enforced in
+`legacy_value()` and covered by tests.
+
+**Publisher isolation.** A platform publish may write only its own
+`<platform>/manifest.json`, `<platform>/latest.txt` and `<platform>/stem.txt`,
+plus the shared pointers under the rule above. It never writes another
+platform's channel and never republishes the Runtime. A Runtime publish moves
+only `runtimes/pi/manifest.json`, and its `minimumCypherVersion` is checked
+against the **oldest** published desktop channel, so a Runtime cannot reach a
+platform still sitting behind it.
+
+`<platform>/stem.txt` exists for the shell installer: `latest.txt` stays a bare
+version so it can be compared numerically, and the artifact stem is published
+separately rather than parsed out of JSON in POSIX `sh`.
 
 The Rust toolchain is pinned in `rust-toolchain.toml`. Node is pinned to 24.19.0.
 Worker deployments use Wrangler from `edge/package-lock.json`, not a floating
@@ -54,6 +105,44 @@ build/test jobs have only `contents: read`. Developer ID signing and Apple
 notarization remain optional and use the existing `MACOS_CERT_*` and `AC_API_*`
 secrets. Without these, the macOS package is ad-hoc signed, not notarized.
 
+### iOS / TestFlight secrets
+
+`ios.yml` needs an iOS **distribution** identity, which is a different
+certificate from the macOS Developer ID one. Configure in **Settings → Secrets
+and variables → Actions**:
+
+| Secret | What it is |
+| --- | --- |
+| `IOS_DIST_CERT_P12` | base64 of the **Apple Distribution** `.p12` (certificate **and** private key) |
+| `IOS_DIST_CERT_PASSWORD` | the password set when exporting that `.p12` |
+| `IOS_PROVISIONING_PROFILE` | base64 of `Cypher iOS App Store Distribution 2026.mobileprovision` |
+
+`AC_API_KEY_P8`, `AC_API_KEY_ID` and `AC_API_ISSUER_ID` are **already**
+configured for macOS notarization and are reused for the TestFlight upload; the
+same key authenticates both. No new App Store Connect key is needed.
+
+The macOS `MACOS_CERT_P12` is a Developer ID Application certificate and cannot
+sign an iOS App Store build. Export the Apple Distribution identity from
+Keychain Access on the Mac that holds its private key:
+
+```sh
+# On the Mac that already has the key (Keychain Access > My Certificates >
+# "Apple Distribution: ..." > Export as .p12), then:
+base64 -i dist.p12 | pbcopy        # paste into IOS_DIST_CERT_P12
+base64 -i profile.mobileprovision | pbcopy  # paste into IOS_PROVISIONING_PROFILE
+```
+
+The workflow imports the identity into an **ephemeral keychain** on the runner,
+verifies it really is an Apple Distribution identity, archives, exports, and
+runs `scripts/ci/ios-verify.py` over the resulting package before any upload:
+bundle id, version/build against the tag, arm64, production APNs,
+`get-task-allow` absent, `beta-reports-active`, a distribution profile with no
+device list, the privacy manifest, and a strict deep signature. The existence of
+an IPA is never taken as proof of correctness.
+
+Upload is where `ios.yml` stops. Export-compliance answers, tester groups,
+public links and App Store review submission remain separate, explicit actions.
+
 ## First deployment after the checksum migration
 
 The current embedded installer requires standalone `.sha256` files. Do **not**
@@ -61,12 +150,14 @@ deploy it against an older channel that lacks those files.
 
 1. Prepare a new application version; do not reuse the already released `0.2.2`.
 2. Configure the deployment credential in GitHub Settings.
-3. Publish a new matching `cypher-v<version>` tag and wait for release success.
+3. Publish a matching `cypher-linux-v<version>-b<build>` tag and wait for it to
+   succeed. The installer resolves the Linux channel, so that is the one the
+   deployment gate requires.
 4. Run `deploy` on `main` again.
 
-The deployment gate reads the public application manifest and `latest.txt`,
-requires them to agree, and verifies that both Linux archives and their matching
-checksum sidecars exist. Until ready, deployment fails and the existing workers
+The deployment gate reads `linux/manifest.json`, `linux/latest.txt` and
+`linux/stem.txt`, requires them to agree, and verifies that both Linux archives
+for the published build and their matching checksum sidecars exist. Until ready, deployment fails and the existing workers
 remain in place. This is intentional: the installer and release workflows are
 not made into a new download protocol or migrated to a different storage model.
 
@@ -144,13 +235,14 @@ archives and `runtimes/pi/manifests/<version>.json`, and the only pointer it may
 move is `runtimes/pi/manifest.json`. It reads `manifest.json` and `latest.txt`
 to confirm they are unchanged before promotion and **never writes them**, needs
 no `contents: write`, and publishes no GitHub release. A Runtime whose
-`minimumCypherVersion` exceeds the published application version is refused: no
-installed client could load it.
+`minimumCypherVersion` exceeds the **oldest** published desktop channel is
+refused: a client on the platform still sitting behind it could not load it.
 
-Keep the repository pin ahead of the channel. An application release republishes
-its own pinned Runtime, so cutting one from a commit whose
-`dist/pi-runtime/release.json` is older than the published Runtime is refused as
-a rollback — bump the pin on `main` rather than reverting it.
+Keep the repository pin ahead of the channel. The Runtime now ships from exactly
+one workflow — an application release no longer republishes it — so cutting a
+Runtime from a commit whose `dist/pi-runtime/release.json` is older than the
+published Runtime is refused as a rollback; bump the pin on `main` rather than
+reverting it.
 
 `PI_RUNTIME_VERSION` remains a local packaging override; tagged publication must
 match the committed release definition. Runtime tarballs normalize owners and

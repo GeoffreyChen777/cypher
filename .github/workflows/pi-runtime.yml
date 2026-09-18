@@ -4,7 +4,8 @@ name: pi-runtime
 # devices poll `runtimes/pi/manifest.json` on their own, so a curated-package
 # refresh reaches them without an application release. The application manifest
 # and `latest.txt` are never written here, and the job needs no `contents:
-# write` because a Runtime release has no GitHub assets. Like release.yml,
+# write` because a Runtime release has no GitHub assets. Like every other
+# release workflow,
 # workflow_dispatch is ALWAYS build/validate-only. The tag must match
 # `dist/pi-runtime/release.json`.
 on:

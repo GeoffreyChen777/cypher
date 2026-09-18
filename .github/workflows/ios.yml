@@ -1,0 +1,155 @@
+name: ios
+
+# Pushing a `cypher-ios-v<version>-b<build>` tag builds, verifies and uploads
+# the iOS build to TestFlight. iOS has its own version series: the tag must
+# match MARKETING_VERSION and CURRENT_PROJECT_VERSION in the Xcode project, and
+# nothing here reads or writes the desktop channels, the Runtime channel or R2 —
+# so it needs no production lock and no `contents: write`.
+#
+# Upload is where this workflow stops. Export-compliance answers, tester groups,
+# public links and App Store review submission remain separate, explicit actions
+# (docs/ios-release.md, "Publication boundary"). Like every other release
+# workflow, workflow_dispatch is ALWAYS build/validate-only.
+on:
+  push:
+    tags: ["cypher-ios-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.context.outputs.version }}
+      build: ${{ steps.context.outputs.build }}
+      publish: ${{ steps.context.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: validate tag against the Xcode project and require upload credentials
+        id: context
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: python3 scripts/ci/release.py ios-context
+
+  archive:
+    needs: preflight
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.app/Contents/Developer
+      IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+      IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+      IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: require distribution signing material
+        run: |
+          test -n "$IOS_DIST_CERT_P12" \
+            || { echo "NOT PUBLISHED: configure IOS_DIST_CERT_P12"; exit 1; }
+          test -n "$IOS_PROVISIONING_PROFILE" \
+            || { echo "NOT PUBLISHED: configure IOS_PROVISIONING_PROFILE"; exit 1; }
+      - name: import the Apple Distribution identity into an ephemeral keychain
+        run: |
+          set -euo pipefail
+          umask 077
+          keychain="$RUNNER_TEMP/ios-release.keychain-db"
+          pass="$(openssl rand -hex 16)"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          printf '%s' "$IOS_DIST_CERT_P12" | base64 -d >"$RUNNER_TEMP/ios.p12"
+          security import "$RUNNER_TEMP/ios.p12" -k "$keychain" \
+            -P "$IOS_DIST_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/ios.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" \
+            || { echo "imported certificate is not an Apple Distribution identity"; exit 1; }
+      - name: install the App Store provisioning profile
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$dir"
+          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 -d >"$dir/cypher-appstore.mobileprovision"
+          name="$(security cms -D -i "$dir/cypher-appstore.mobileprovision" \
+            | plutil -extract Name raw -)"
+          echo "installed provisioning profile: $name"
+      - name: archive for iOS distribution
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+        run: |
+          set -euo pipefail
+          xcodebuild -project apps/ios/Cypher.xcodeproj -scheme Cypher \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Cypher.xcarchive" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGN_STYLE=Manual 'CODE_SIGN_IDENTITY=Apple Distribution' \
+            'PROVISIONING_PROFILE_SPECIFIER=Cypher iOS App Store Distribution 2026' \
+            archive
+      - name: export the signed App Store package
+        run: |
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Cypher.xcarchive" \
+            -exportOptionsPlist apps/ios/ExportOptions-TestFlight.plist \
+            -exportPath "$RUNNER_TEMP/export"
+      - name: verify the exported IPA before it can be uploaded
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+        run: |
+          python3 scripts/ci/ios-verify.py --export "$RUNNER_TEMP/export" \
+            --version "$VERSION" --build "$BUILD"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+
+  upload:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-ios-v')
+    needs: [preflight, archive]
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ios-ipa
+          path: export
+      - name: re-verify the downloaded package
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+        run: |
+          python3 scripts/ci/ios-verify.py --export export \
+            --version "$VERSION" --build "$BUILD" --unsigned-ok
+      - name: upload to TestFlight
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private_keys"
+          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/private_keys/AuthKey_$AC_API_KEY_ID.p8"
+          export API_PRIVATE_KEYS_DIR="$RUNNER_TEMP/private_keys"
+          ipa="$(find export -name '*.ipa' | head -1)"
+          xcrun altool --upload-app -f "$ipa" -t ios \
+            --apiKey "$AC_API_KEY_ID" --apiIssuer "$AC_API_ISSUER_ID"
+          rm -rf "$RUNNER_TEMP/private_keys"
+      - name: state what was and was not done
+        run: |
+          echo "Uploaded. Apple processing, export-compliance answers, tester"
+          echo "groups, public links and review submission are NOT part of this"
+          echo "workflow and remain separate, explicit decisions."

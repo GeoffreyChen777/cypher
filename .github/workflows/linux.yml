@@ -1,0 +1,153 @@
+name: linux
+
+# Pushing a `cypher-linux-v<version>-b<build>` tag publishes the LINUX channel
+# alone: `linux/manifest.json` and `linux/latest.txt`. macOS, iOS and the
+# Runtime are untouched, and their channels are read-only here. The version
+# must match `[workspace.package].version`; the build is the per-platform
+# counter, so the same version can be re-cut for Linux without disturbing
+# macOS. Like every other release workflow, workflow_dispatch is ALWAYS
+# build/validate-only.
+on:
+  push:
+    tags: ["cypher-linux-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.context.outputs.version }}
+      build: ${{ steps.context.outputs.build }}
+      publish: ${{ steps.context.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: validate tag/version and fail early on missing publication credential
+        id: context
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/ci/release.py platform-context --platform linux
+
+  linux:
+    needs: preflight
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    # Do not build on the host's newer libc. No host Rust cache is imported.
+    container:
+      image: ubuntu:20.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: bootstrap glibc 2.31 build environment
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git build-essential pkg-config cmake binutils python3 systemd
+      - name: bootstrap rustup (toolchain version comes from rust-toolchain.toml)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - run: bash scripts/test-check-linux-abi.sh
+      - name: package headless application
+        env:
+          CYPHER_RELEASE_BUILD: ${{ needs.preflight.outputs.build }}
+        run: scripts/package-linux.sh
+      - name: isolated CLI and installer regressions
+        run: |
+          cargo test --locked --no-default-features -p cypher -p cypher-update --bins --lib
+          python3 scripts/test-linux-cli.py --binary target/release/cypher
+      - name: smoke extracted artifact and recheck ABI
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+        run: |
+          set -euo pipefail
+          stem="$VERSION"
+          test "$BUILD" = 1 || stem="$VERSION-b$BUILD"
+          archive="target/package/cypher-$stem-linux-$(uname -m).tar.gz"
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+          tar -xzf "$archive" -C "$stage" --strip-components=1
+          scripts/check-linux-abi.sh "$stage/cypher"
+          set +e
+          CYPHER_DATA_DIR="$stage/data" timeout 8 "$stage/cypher" headless
+          rc=$?
+          set -e
+          test "$rc" = 124 || { echo "headless smoke exited with $rc"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ runner.arch }}
+          path: target/package/*.tar.gz
+          if-no-files-found: error
+
+  validate-artifacts:
+    needs: [preflight, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
+          merge-multiple: true
+      - name: validate every artifact before any production write
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+        run: |
+          python3 scripts/ci/release.py validate-platform --platform linux \
+            --dist target/release-dist --version "$VERSION" --build "$BUILD"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: checksums-and-manifests
+          path: target/release-plan/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cypher-linux-v')
+    needs: [preflight, validate-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    concurrency:
+      group: cypher-production
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: target/release-dist
+          merge-multiple: true
+      - name: validate, reject conflicts/rollback, upload immutable objects, promote last
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          BUILD: ${{ needs.preflight.outputs.build }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 1489e726fc5baa8ecc7a6e1a8c8ed3f8
+          GITHUB_TOKEN: ${{ github.token }}
+          CYPHER_PRODUCTION_LOCK: held
+        run: |
+          python3 scripts/ci/release.py publish-platform --platform linux \
+            --dist target/release-dist --version "$VERSION" --build "$BUILD"

@@ -5,6 +5,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Routes = BTreeMap<String, (u16, Vec<u8>)>;
 
+/// This platform's own release channel — the path a client reaches for
+/// first now that platforms publish independently.
+fn channel_manifest() -> String {
+    format!("/releases/{}/manifest.json", channel())
+}
+
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,
@@ -63,7 +69,7 @@ async fn server(routes: Vec<(&str, u16, Vec<u8>)>) -> Server {
 async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
     use std::sync::atomic::Ordering::SeqCst;
     let body = br#"{"version":"0.0.0","files":{}}"#.to_vec();
-    let server = server(vec![("/releases/manifest.json", 200, body.clone())]).await;
+    let server = server(vec![(&channel_manifest(), 200, body.clone())]).await;
     let dir = tempfile::tempdir().unwrap();
     let updater = Updater::spawn(server.url.clone(), None, dir.path().into());
     let mut status = updater.watch();
@@ -98,7 +104,7 @@ async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
         .routes
         .lock()
         .unwrap()
-        .insert("/releases/manifest.json".into(), (503, vec![]));
+        .insert(channel_manifest(), (503, vec![]));
     updater.check_now();
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -120,7 +126,7 @@ async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
         .routes
         .lock()
         .unwrap()
-        .insert("/releases/manifest.json".into(), (200, body));
+        .insert(channel_manifest(), (200, body));
     updater.check_after_auth_change(true, false);
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -140,7 +146,7 @@ async fn auth_rotation_does_not_poll_releases_but_recovery_still_retries() {
 async fn check_fetches_the_manifest_immediately() {
     use std::sync::atomic::Ordering::SeqCst;
     let body = br#"{"version":"9.9.9","files":{}}"#.to_vec();
-    let server = server(vec![("/releases/manifest.json", 200, body)]).await;
+    let server = server(vec![(&channel_manifest(), 200, body)]).await;
     let dir = tempfile::tempdir().unwrap();
     let updater = Updater::spawn(server.url.clone(), None, dir.path().into());
     let status = updater.check().await;
@@ -161,6 +167,7 @@ fn manifest(file: &str, bytes: &[u8]) -> Manifest {
                 sha256: Some(format!("{:x}", Sha256::digest(bytes))),
             },
         )]),
+        ..Manifest::default()
     }
 }
 
@@ -193,13 +200,73 @@ async fn bad_manifest_must_not_downgrade_to_latest_txt() {
         (200, br#"{"version":"../../outside"}"#.to_vec()),
         (200, b"not json".to_vec()),
     ] {
-        let server = server(vec![
-            ("/releases/manifest.json", code, body),
+        let shared = server(vec![
+            ("/releases/manifest.json", code, body.clone()),
             ("/releases/latest.txt", 200, b"1.2.3".to_vec()),
         ])
         .await;
-        assert!(fetch_latest(&server.url).await.is_err());
+        assert!(fetch_latest(&shared.url).await.is_err());
+
+        // A broken per-platform channel must not quietly fall through to the
+        // shared one either: that would update from a channel this platform
+        // does not publish to.
+        let own = server(vec![
+            (&channel_manifest(), code, body),
+            (
+                "/releases/manifest.json",
+                200,
+                br#"{"version":"9.9.9","files":{}}"#.to_vec(),
+            ),
+            ("/releases/latest.txt", 200, b"9.9.9".to_vec()),
+        ])
+        .await;
+        assert!(fetch_latest(&own.url).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn the_platform_channel_wins_over_the_shared_one() {
+    let server = server(vec![
+        (
+            &channel_manifest(),
+            200,
+            br#"{"version":"2.0.0","build":3,"files":{},"roles":{}}"#.to_vec(),
+        ),
+        (
+            "/releases/manifest.json",
+            200,
+            br#"{"version":"1.0.0","files":{}}"#.to_vec(),
+        ),
+    ])
+    .await;
+    let release = fetch_latest(&server.url).await.unwrap();
+    assert_eq!(release.version, "2.0.0");
+    assert_eq!(release.build, 3);
+}
+
+#[tokio::test]
+async fn a_recut_build_downloads_the_name_the_manifest_states() {
+    // Build 2 does not use the historic name, so a client that rebuilt the
+    // name from the version alone would 404. The role mapping is what makes a
+    // per-platform re-cut reachable.
+    let (_, arch) = platform_key();
+    let file = format!("cypher-1.2.3-b2-linux-{arch}.tar.gz");
+    let manifest = Manifest {
+        version: "1.2.3".into(),
+        build: 2,
+        roles: BTreeMap::from([(format!("headless-{arch}"), file.clone())]),
+        ..Manifest::default()
+    };
+    assert_eq!(manifest.headless_file(), file);
+    assert_ne!(manifest.headless_file(), headless_artifact("1.2.3"));
+
+    // Without a role mapping the historic name is still what legacy channels
+    // resolve to.
+    let legacy = Manifest {
+        version: "1.2.3".into(),
+        ..Manifest::default()
+    };
+    assert_eq!(legacy.headless_file(), headless_artifact("1.2.3"));
 }
 
 #[tokio::test]

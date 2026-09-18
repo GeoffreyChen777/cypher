@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux packaging: build the release binary and produce
-#   target/package/cypher-<version>-linux-<arch>.tar.gz
+#   target/package/cypher-<version>[-b<build>]-linux-<arch>.tar.gz
 # containing the headless binary and a manual install.sh. No desktop launcher:
 # this build deliberately has no GUI.
 #
@@ -24,8 +24,15 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 PROFILE="${PROFILE:-release}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+# Per-platform build counter. Build 1 keeps the historic name so already
+# installed clients, which rebuild the name from the version alone, resolve it;
+# a re-cut must not collide with that immutable object.
+BUILD="${CYPHER_RELEASE_BUILD:-1}"
+case "$BUILD" in ([1-9]|[1-9][0-9]*) ;; (*) echo "invalid CYPHER_RELEASE_BUILD" >&2; exit 1 ;; esac
+STEM="$VERSION"
+[ "$BUILD" = 1 ] || STEM="$VERSION-b$BUILD"
 OUT_DIR="$ROOT/target/package"
-STAGE="$OUT_DIR/cypher-$VERSION-linux-$ARCH"
+STAGE="$OUT_DIR/cypher-$STEM-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"

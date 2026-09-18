@@ -36,7 +36,10 @@ done
 
 # Fetch separately: a pipeline ending in tr used to hide curl failures. Reject
 # path components / malformed pointers before constructing any local paths.
-ver="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/latest.txt")"
+# Linux publishes on its own channel; the shared pointer is the pre-decoupling
+# fallback and only ever names a fully covered build.
+ver="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/linux/latest.txt" 2>/dev/null)" ||
+  ver="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/latest.txt")"
 case "$ver" in
   '' | *[!0-9.]* | .* | *. | *..*) fail "invalid release version" ;;
 esac
@@ -46,7 +49,16 @@ awk -v actual="$ver" -v minimum="$MINIMUM_SETUP_VERSION" 'BEGIN {
   for(i=1;i<=a || i<=b;i++) {if(A[i]+0>B[i]+0) exit 0; if(A[i]+0<B[i]+0) exit 1}
   exit 0
 }' || fail "the release channel does not support guided setup yet; the existing installation was not changed"
-file="cypher-$ver-linux-$arch.tar.gz"
+# A re-cut of the same version ships under its own name, which cannot be
+# derived from the version. Fall back to the historic name when the channel
+# does not publish a stem.
+stem="$(curl --proto '=http,https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -fsSL "$BASE/releases/linux/stem.txt" 2>/dev/null)" || stem="$ver"
+case "$stem" in
+  "$ver" | "$ver"-b[1-9] | "$ver"-b[1-9][0-9]*) ;;
+  *) fail "invalid release build" ;;
+esac
+[ "${#stem}" -le 72 ] || fail "invalid release build"
+file="cypher-$stem-linux-$arch.tar.gz"
 root="${file%.tar.gz}"
 app_root="$HOME/.cypher/app"
 dest="$app_root/$ver"

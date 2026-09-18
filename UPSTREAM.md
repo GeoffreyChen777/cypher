@@ -1300,7 +1300,8 @@ a6f05de            Add GitHub FUNDING.yml
 
 Cypher disposition: **Do not port release bytes, tags, landing content,
 branding, bundle IDs, or credentials**. Cypher uses immutable namespaced
-`cypher-v*` releases and its own GitHub/R2/Cloudflare/WorkOS infrastructure.
+`cypher-<platform>-v*` releases and its own GitHub/R2/Cloudflare/WorkOS
+infrastructure.
 
 ## Recommended Cypher ordering
 
