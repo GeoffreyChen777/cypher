@@ -169,6 +169,15 @@ archive extraction, large directory removals, SQLite — goes through `spawn_blo
 (`cypher_engine::off_runtime`), never a runtime worker: a blocked worker on a small
 runtime stalls IPC, presence and sync together with no panic and no log line.
 
+Loro hook rule: a Loro subscription (`subscribe_local_update`, `subscribe_root`) only
+forwards data to a channel or a watch — it takes no engine lock and does no I/O. Loro runs
+hooks synchronously inside commit/export on the calling thread and parks every other
+thread committing to the same doc until the hook returns, so a lock inside a hook turns
+contention into a cross-thread stall and re-entry into a self-deadlock (the 2026-09-18
+headless hang: ACK → export → hook → client lock already held). The matching client-side
+contract is on `ChatDocSink`: the chat2 client never holds its state lock while calling a
+sink method that touches the document.
+
 ## 4. UI plan (gpui) — parity + smoothness
 
 Reference: `docs/research/gpui.md`, `docs/research/mugen-pretext.md`,

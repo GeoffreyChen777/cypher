@@ -365,6 +365,21 @@ impl ChatDocHandle {
         lock(&self.chat2).is_some()
     }
 
+    /// Hand one local commit to the chat2 client, or park it until the join
+    /// lands. Check-and-route happens under ONE client-lock critical section:
+    /// the join stores the client and drains the pending buffer under the
+    /// same lock, so a commit is either drained there or enqueued directly
+    /// here — never dropped between (verify pass). Called only from the feed
+    /// pump task, never from inside a Loro hook (see
+    /// [`DocHost::install_chat2_local_feed`]).
+    fn route_local_update(&self, bytes: Vec<u8>) {
+        let client_guard = lock(&self.chat2);
+        match &*client_guard {
+            Some(client) => client.enqueue_update(bytes),
+            None => lock(&self.chat2_pending_local).push(bytes),
+        }
+    }
+
     /// Write a complete user message entry, idempotent by id (the client-minted message
     /// id — a re-executed command or optimistic echo never duplicates the entry).
     pub fn write_user_message(
@@ -1001,24 +1016,7 @@ impl DocHost {
                 // commit lands in the client when connected, else in the
                 // pending buffer the join drains — nothing composed during
                 // (or before) the dial is lost to the room.
-                let weak_push = Arc::downgrade(&handle);
-                let sub = doc
-                    .doc()
-                    .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
-                        if let Some(handle) = weak_push.upgrade() {
-                            // The buffer push happens WHILE HOLDING the client
-                            // lock (verify pass: releasing it between the None
-                            // check and the push let the join's store+drain
-                            // slip between, orphaning the update forever).
-                            let client_guard = lock(&handle.chat2);
-                            match &*client_guard {
-                                Some(client) => client.enqueue_update(bytes.clone()),
-                                None => lock(&handle.chat2_pending_local).push(bytes.clone()),
-                            }
-                        }
-                        true
-                    }));
-                *lock(&handle.chat2_local_sub) = Some(sub);
+                self.install_chat2_local_feed(&handle);
                 // Re-queue survives the adopt: our own pending commands
                 // become fresh entries in the new lineage (the
                 // processed_commands ledger still guards double execution).
@@ -1194,21 +1192,7 @@ impl DocHost {
             // Subscription BEFORE the dial (review B3): every local commit
             // lands in the client when connected, else in the pending buffer
             // the join drains — nothing composed during the dial is lost.
-            let weak_push = Arc::downgrade(&handle);
-            let sub = handle
-                .doc
-                .doc()
-                .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
-                    if let Some(handle) = weak_push.upgrade() {
-                        let client_guard = lock(&handle.chat2);
-                        match &*client_guard {
-                            Some(client) => client.enqueue_update(bytes.clone()),
-                            None => lock(&handle.chat2_pending_local).push(bytes.clone()),
-                        }
-                    }
-                    true
-                }));
-            *lock(&handle.chat2_local_sub) = Some(sub);
+            self.install_chat2_local_feed(&handle);
             // First contact with the room: everything committed before the
             // subscription above must reach the room as the join's first
             // batch (peers import rows only after their causal deps land).
@@ -1229,6 +1213,39 @@ impl DocHost {
             self.spawn_chat2_join(edge.clone(), &handle, 0);
         }
         Ok(())
+    }
+
+    /// Feed local commits to the chat2 client through a channel.
+    ///
+    /// Rule for every Loro hook in this host: the hook only forwards data;
+    /// it takes no engine lock and does no I/O. Loro runs subscriptions
+    /// synchronously inside commit and export, on whichever thread caused
+    /// them, and while a hook runs Loro parks every OTHER thread that tries
+    /// to commit to the same doc (a 10ms spin in `loro-internal`
+    /// `utils/subscription.rs`). A lock taken inside a hook therefore turns
+    /// ordinary contention into a cross-thread stall, and a hook triggered by
+    /// the client's own sink (export on ACK) into a self-deadlock. That is
+    /// how the 2026-09-18 headless hang started: one blocked ACK, then the
+    /// agent run parked on the emitter guard, then every runtime worker.
+    /// The pump task below does the client/pending routing under the client
+    /// lock, outside any Loro hook.
+    fn install_chat2_local_feed(&self, handle: &Arc<ChatDocHandle>) {
+        let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let sub = handle
+            .doc
+            .doc()
+            .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
+                // `false` unsubscribes once the pump is gone (handle evicted).
+                feed_tx.send(bytes.clone()).is_ok()
+            }));
+        *lock(&handle.chat2_local_sub) = Some(sub);
+        let weak = Arc::downgrade(handle);
+        self.spawn_worker(async move {
+            while let Some(bytes) = feed_rx.recv().await {
+                let Some(handle) = weak.upgrade() else { return };
+                handle.route_local_update(bytes);
+            }
+        });
     }
 
     /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
@@ -3151,5 +3168,82 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 host.evict_over_budget();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod loro_hook_tests {
+    use super::*;
+
+    struct SignedOut;
+
+    #[async_trait::async_trait]
+    impl cypher_rpc::TokenSource for SignedOut {
+        async fn token(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn edge_host(dir: &std::path::Path) -> DocHost {
+        let store = Arc::new(DocsStore::open(dir).unwrap());
+        DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "dev".into(),
+                default_harness: HarnessId::Pi,
+                edge: Some(EdgeConfig {
+                    preview: None,
+                    url: "http://127.0.0.1:9".into(),
+                    token: Arc::new(SignedOut),
+                    device_id: "dev".into(),
+                }),
+            },
+        )
+    }
+
+    /// The 2026-09-18 hang, reduced: a thread that holds the chat2 client
+    /// lock must never stall a commit on the same doc. The Loro local-update
+    /// hook only forwards to the feed channel; the client/pending routing
+    /// happens on the pump task afterwards, under the lock but outside Loro.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_commit_never_waits_on_the_chat2_client_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = edge_host(dir.path());
+        let handle = host.open("chat-a").unwrap();
+        let parked_before = lock(&handle.chat2_pending_local).len();
+
+        // Park the client lock on a plain thread for the whole commit.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = handle.clone();
+        let parker = std::thread::spawn(move || {
+            let _guard = lock(&holder.chat2);
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().unwrap();
+
+        let doc = handle.doc_arc();
+        let commit = tokio::task::spawn_blocking(move || {
+            doc.doc().get_map("meta").insert("probe", "v").unwrap();
+            doc.doc().commit();
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), commit)
+            .await
+            .expect("a local commit must not wait on the chat2 client lock")
+            .unwrap();
+
+        release_tx.send(()).unwrap();
+        parker.join().unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lock(&handle.chat2_pending_local).len() <= parked_before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the feed pump never routed the commit into the pending buffer"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(handle);
+        host.shutdown_workers().await;
     }
 }

@@ -111,6 +111,15 @@ pub enum ChatEvent {
 /// Where remote bytes land. The engine implements this over its doc handle;
 /// every method persists doc content AND the room cursor in one transaction
 /// (`DocsStore::save_snapshot_with_cursor`) so they can never diverge.
+///
+/// Lock contract. The client never holds its internal state lock while
+/// calling a method that touches the document (`acknowledge_outbox`,
+/// `advance_cursor`, `apply_row`, `apply_checkpoint`, `load_outbox`,
+/// `contains_frontier`): exporting or importing a Loro doc runs its commit
+/// hooks synchronously on the calling thread, and the engine's local-update
+/// hook re-enters this client through [`ChatClient::enqueue_update`]. The
+/// storage-only outbox methods (`enqueue_outbox`, `update_outbox`) MAY be
+/// called under that lock and therefore must never touch the document.
 pub trait ChatDocSink: Send + Sync + 'static {
     fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         Ok(Vec::new())
@@ -397,29 +406,48 @@ impl Shared {
     }
 }
 
+/// Retire `batch_id` after the server acknowledged it at `seq`, persisting
+/// the cursor through the sink FIRST (a failed persist leaves the batch
+/// pending for retry on either transport).
+///
+/// The sink runs with `shared` UNLOCKED. The engine's sink exports the Loro
+/// document to persist it, and a Loro export runs the doc's commit hooks
+/// synchronously on this thread — including the local-update feed that ends
+/// in [`ChatClient::enqueue_update`], which takes `shared` itself. Holding
+/// the lock across that call was a self-deadlock, and because Loro parks
+/// every other thread committing to the same doc behind the running hook,
+/// it froze the agent run too and then the whole runtime (2026-09-18). The
+/// final phase re-derives against the live state: a row may have advanced
+/// the cursor while the sink ran, and the cursor only ever moves forward.
 fn acknowledge_durable(
-    shared: &mut Shared,
+    shared: &Mutex<Shared>,
     sink: &dyn ChatDocSink,
     batch_id: &str,
     seq: u64,
 ) -> Result<(), String> {
-    let Some(push) = shared.pending.iter().find(|p| p.batch_id == batch_id) else {
-        return Ok(());
-    };
-    if !push.persisted || !push.sent {
-        return Err("ACK for an unsent/unpersisted batch".into());
-    }
-    if seq == 0 {
-        return Err("invalid ACK sequence".into());
-    }
-    let cursor = if seq <= shared.cursor.saturating_add(1) {
-        shared.cursor.max(seq)
-    } else {
-        shared.cursor
+    let cursor = {
+        let shared = lock(shared);
+        let Some(push) = shared.pending.iter().find(|p| p.batch_id == batch_id) else {
+            return Ok(());
+        };
+        if !push.persisted || !push.sent {
+            return Err("ACK for an unsent/unpersisted batch".into());
+        }
+        if seq == 0 {
+            return Err("invalid ACK sequence".into());
+        }
+        if seq <= shared.cursor.saturating_add(1) {
+            shared.cursor.max(seq)
+        } else {
+            shared.cursor
+        }
     };
     sink.acknowledge_outbox(batch_id, cursor)?;
+    let mut shared = lock(shared);
     shared.gap_repair |= seq > shared.cursor.saturating_add(1);
-    shared.cursor = cursor;
+    if seq <= shared.cursor.saturating_add(1) {
+        shared.cursor = shared.cursor.max(seq);
+    }
     shared.acknowledge(batch_id);
     Ok(())
 }
@@ -682,6 +710,9 @@ impl ChatClient {
             return;
         }
         {
+            // The outbox writes below run under `shared`. That is allowed
+            // only because they are storage-only (see the `ChatDocSink`
+            // lock contract): nothing here may export or import the doc.
             let mut shared = lock(&self.shared);
             // Once in-flight, the batch is immutable. Before that point we
             // may replace its payload with a causal cumulative export.
@@ -1588,14 +1619,12 @@ impl Actor {
                 let Ok(ack) = serde_json::from_value::<wire::AckHeader>(frame.header) else {
                     return false;
                 };
-                let mut shared = lock(&self.shared);
                 if let Err(err) =
-                    acknowledge_durable(&mut shared, self.sink.as_ref(), &ack.batch_id, ack.seq)
+                    acknowledge_durable(&self.shared, self.sink.as_ref(), &ack.batch_id, ack.seq)
                 {
                     tracing::error!(error = %err, "chat2: ACK persistence failed; retaining batch");
                     return false;
                 }
-                drop(shared);
                 let _ = self.events.send(ChatEvent::Applied);
             }
             frame_type::PRESENCE => {
@@ -1718,8 +1747,7 @@ async fn http_sync_once(
             if ack_batch != batch_id {
                 return Err(SyncError::Protocol("chat push ack batchId mismatch".into()));
             }
-            acknowledge_durable(&mut lock(shared), sink, ack_batch, seq)
-                .map_err(SyncError::Protocol)?;
+            acknowledge_durable(shared, sink, ack_batch, seq).map_err(SyncError::Protocol)?;
         } else {
             return Err(SyncError::Protocol("chat push ack missing seq".into()));
         }

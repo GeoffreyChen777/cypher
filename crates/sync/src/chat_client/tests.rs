@@ -25,31 +25,217 @@ fn queued(id: &str, persisted: bool) -> PendingPush {
 #[test]
 fn failed_or_unrelated_ack_cannot_retire_new_updates_or_advance_cursor() {
     let sink = RecordingSink::default();
-    let mut shared = Shared {
+    let shared = Mutex::new(Shared {
         cursor: 5,
         ..Shared::default()
-    };
+    });
     let mut first = queued("first", true);
     first.sent = true;
     sink.enqueue_outbox(&first.batch_id, &first.bytes).unwrap();
     sink.enqueue_outbox("second", b"second").unwrap();
-    shared.pending.extend([first, queued("second", true)]);
-    acknowledge_durable(&mut shared, &sink, "unknown", 999).unwrap();
-    assert_eq!(shared.cursor, 5);
-    assert!(acknowledge_durable(&mut shared, &sink, "second", 6).is_err());
+    lock(&shared)
+        .pending
+        .extend([first, queued("second", true)]);
+    acknowledge_durable(&shared, &sink, "unknown", 999).unwrap();
+    assert_eq!(lock(&shared).cursor, 5);
+    assert!(acknowledge_durable(&shared, &sink, "second", 6).is_err());
     sink.ack_fails.store(true, Ordering::SeqCst);
-    assert!(acknowledge_durable(&mut shared, &sink, "first", 6).is_err());
-    assert_eq!(shared.cursor, 5);
-    assert_eq!(shared.pending.len(), 2);
+    assert!(acknowledge_durable(&shared, &sink, "first", 6).is_err());
+    assert_eq!(lock(&shared).cursor, 5);
+    assert_eq!(lock(&shared).pending.len(), 2);
     sink.ack_fails.store(false, Ordering::SeqCst);
-    acknowledge_durable(&mut shared, &sink, "first", 7).unwrap();
-    assert_eq!(shared.cursor, 5);
-    assert!(shared.gap_repair);
-    assert_eq!(shared.pending.front().unwrap().batch_id, "second");
+    acknowledge_durable(&shared, &sink, "first", 7).unwrap();
+    assert_eq!(lock(&shared).cursor, 5);
+    assert!(lock(&shared).gap_repair);
+    assert_eq!(lock(&shared).pending.front().unwrap().batch_id, "second");
     assert_eq!(
         sink.load_outbox().unwrap(),
         vec![("second".into(), b"second".to_vec())]
     );
+}
+
+/// Run `scenario` on its own runtime in a detached thread and fail unless it
+/// finishes within `secs`. A regression of the sink lock contract deadlocks
+/// the thread that handles the ACK; under `#[tokio::test]` that hangs the
+/// whole test process instead of failing one test. The stuck thread is
+/// leaked and dies with the process.
+fn must_finish_within(secs: u64, scenario: impl FnOnce() + Send + 'static) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        scenario();
+        let _ = done_tx.send(());
+    });
+    match done_rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("scenario did not finish within {secs}s: a lock is held across a sink call")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("scenario panicked (see the failure above)")
+        }
+    }
+}
+
+/// A sink that re-locks the client state from inside `acknowledge_outbox`,
+/// standing in for the engine's export-on-ack whose Loro commit hook
+/// re-enters `enqueue_update`.
+#[derive(Default)]
+struct RelockingSink {
+    inner: RecordingSink,
+    shared: Mutex<Option<Arc<Mutex<Shared>>>>,
+    relocked: AtomicUsize,
+}
+
+impl ChatDocSink for RelockingSink {
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.inner.load_outbox()
+    }
+    fn enqueue_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.inner.enqueue_outbox(id, bytes)
+    }
+    fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
+        let shared = lock(&self.shared).clone();
+        if let Some(shared) = shared {
+            let _probe = lock(&shared);
+            self.relocked.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.acknowledge_outbox(id, cursor)
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) {
+        self.inner.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.inner.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        self.inner.contains_frontier(frontier)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.inner.advance_cursor(cursor)
+    }
+}
+
+#[test]
+fn acknowledge_runs_the_sink_with_the_client_state_unlocked() {
+    must_finish_within(10, || {
+        let sink = RelockingSink::default();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        *lock(&sink.shared) = Some(shared.clone());
+        let mut batch = queued("b", true);
+        batch.sent = true;
+        sink.enqueue_outbox("b", b"b").unwrap();
+        lock(&shared).pending.push_back(batch);
+        acknowledge_durable(&shared, &sink, "b", 1).unwrap();
+        assert_eq!(sink.relocked.load(Ordering::SeqCst), 1);
+        assert_eq!(lock(&shared).cursor, 1);
+        assert!(lock(&shared).pending.is_empty());
+        assert!(sink.load_outbox().unwrap().is_empty());
+    });
+}
+
+/// A sink whose `acknowledge_outbox` enqueues a NEW update on the same
+/// client — exactly what the engine's Loro local-update hook does when the
+/// ack-time export commits a concurrent writer's pending ops.
+#[derive(Default)]
+struct ReenteringSink {
+    inner: RecordingSink,
+    client: Mutex<Option<Arc<ChatClient>>>,
+    reentered: AtomicUsize,
+}
+
+impl ChatDocSink for ReenteringSink {
+    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.inner.load_outbox()
+    }
+    fn enqueue_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.inner.enqueue_outbox(id, bytes)
+    }
+    fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
+        let client = lock(&self.client).clone();
+        if let Some(client) = client
+            && self.reentered.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            client.enqueue_update(b"reentrant".to_vec());
+            client.flush_pending();
+        }
+        self.inner.acknowledge_outbox(id, cursor)
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) {
+        self.inner.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.inner.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        self.inner.contains_frontier(frontier)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.inner.advance_cursor(cursor)
+    }
+}
+
+#[test]
+fn websocket_ack_survives_a_sink_that_reenters_the_client() {
+    must_finish_within(20, || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let sink = Arc::new(ReenteringSink::default());
+            let (pipe, mut end) = pipe_pair();
+            let (fetch, _) = fetcher(b"");
+            let server = tokio::spawn(async move {
+                serve_join(&mut end, serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}), &[], vec![], false).await;
+                let first = expect_kind(&mut end, frame_type::PUSH).await;
+                assert_eq!(first.payload, b"first");
+                send(
+                    &end,
+                    frame_type::ACK,
+                    serde_json::json!({"batchId":first.header["batchId"],"seq":1,"dup":false}),
+                    &[],
+                )
+                .await;
+                // The ack's sink call enqueued this; the session loop must
+                // still be alive to push it.
+                let second = expect_kind(&mut end, frame_type::PUSH).await;
+                assert_eq!(second.payload, b"reentrant");
+                send(
+                    &end,
+                    frame_type::ACK,
+                    serde_json::json!({"batchId":second.header["batchId"],"seq":2,"dup":false}),
+                    &[],
+                )
+                .await;
+            });
+            let client = Arc::new(
+                ChatClient::connect_with_tuned(
+                    connector(vec![pipe]),
+                    sink.clone(),
+                    fetch,
+                    "d",
+                    0,
+                    ChatTuning::default(),
+                )
+                .await
+                .unwrap(),
+            );
+            *lock(&sink.client) = Some(client.clone());
+            client.enqueue_update(b"first".to_vec());
+            client.flush_pending();
+            server.await.unwrap();
+            // The server returns right after sending the second ACK; wait for
+            // the client to process it before asserting on the sink.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !sink.load_outbox().unwrap().is_empty() {
+                assert!(tokio::time::Instant::now() < deadline, "second batch never retired");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(sink.reentered.load(Ordering::SeqCst), 2);
+        });
+        runtime.shutdown_background();
+    });
 }
 
 #[tokio::test]
