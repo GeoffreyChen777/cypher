@@ -147,8 +147,9 @@ impl WebSearchFallbackControl {
                 page.models = match models {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
                         Ok(mut models) => {
-                            // The fallback must be a model that can search:
-                            // a Claude Code model cannot, so it is never offered.
+                            // The fallback runs through pi-web-search, which
+                            // cannot call a claude-bridge API — so a Claude
+                            // Code model is never offered as the fallback.
                             models.retain(|model| !model.id.starts_with("claude-bridge/"));
                             models.sort_by(|a, b| {
                                 a.label
@@ -534,7 +535,7 @@ impl Render for WebSearchFallbackControl {
                                     .line_height(px(17.0))
                                     .text_color(theme.text_muted)
                                     .child(
-                                        "Claude Code models can't search the web. While one is selected, web search runs through the model below instead.",
+                                        "Cypher can't drive Claude Code's own web search yet. While a Claude Code model is selected, web search runs through the model below instead.",
                                     ),
                             ),
                     )

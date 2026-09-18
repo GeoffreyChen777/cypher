@@ -43,7 +43,9 @@ does not open a Runtime-local browser callback for those hosts.
 Claude Code installed, Runtime points the bridge at that executable; otherwise
 Providers prompts to install it.
 
-Claude Code models cannot run Pi's `web_search`. The bundled
+Claude Code has its own web search, but Cypher cannot drive it yet:
+`pi-claude-bridge` does not expose that builtin tool, and `pi-web-search`
+cannot call a `claude-bridge` API. The bundled
 **pi-web-search-claude-bridge** package routes that tool through a fallback
 model only while a `claude-bridge/*` model is selected (other models keep
 their own search). Claude → **Manage** carries the toggle and the search
