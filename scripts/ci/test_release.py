@@ -680,6 +680,21 @@ class GitHubPublication(Fixture):
         with self.assertRaisesRegex(release.ReleaseError, "tag moved"):
             release.publish_platform(self.plan_value, self.store, self.github)
 
+    def test_first_per_platform_release_accepts_the_old_coupled_latest(self):
+        # The bootstrap release runs while GitHub's latest is still a coupled
+        # `cypher-v<version>` tag. That must not be read as an unexpected
+        # release, and it cannot be version-compared against a platform tag.
+        self.api.latest = {"tag_name": "cypher-v9.9.9"}
+        release.publish_platform(self.plan_value, self.store, self.github)
+        self.assertFalse(self.api.release["draft"])
+
+    def test_another_platforms_release_does_not_order_against_this_one(self):
+        # Platforms move independently, so GitHub's single "latest" is often a
+        # different platform. Ordering against it would block valid releases.
+        self.api.latest = {"tag_name": "cypher-macos-v9.9.9-b1"}
+        release.publish_platform(self.plan_value, self.store, self.github)
+        self.assertFalse(self.api.release["draft"])
+
     def test_github_latest_cannot_regress_even_if_r2_is_older(self):
         self.api.latest = {"tag_name": "cypher-linux-v9.9.9-b1"}
         with self.assertRaisesRegex(release.ReleaseError, "regress"):
