@@ -47,10 +47,12 @@ fn stored_model(path: &Path) -> Option<String> {
 }
 
 pub fn load(paths: &PiRuntimePaths) -> WebSearchFallbackSettings {
+    let stored = stored_model(&config_path(paths));
     WebSearchFallbackSettings {
         available: pi_packages::bundled(paths, PACKAGE),
         enabled: pi_packages::enabled(paths, PACKAGE),
-        model: stored_model(&config_path(paths)).unwrap_or_else(|| DEFAULT_MODEL.into()),
+        configured: stored.is_some(),
+        model: stored.unwrap_or_else(|| DEFAULT_MODEL.into()),
     }
 }
 
@@ -130,6 +132,7 @@ mod tests {
         let initial = load(&paths);
         assert!(initial.available);
         assert!(!initial.enabled);
+        assert!(!initial.configured, "the built-in default is not a choice");
         assert_eq!(initial.model, DEFAULT_MODEL);
 
         let saved = save(
@@ -141,6 +144,7 @@ mod tests {
         )
         .unwrap();
         assert!(saved.enabled);
+        assert!(saved.configured);
         assert_eq!(saved.model, "openai-codex/gpt-5.5");
         let file: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(config_path(&paths)).unwrap()).unwrap();

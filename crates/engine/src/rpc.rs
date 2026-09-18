@@ -1919,6 +1919,28 @@ impl RpcService for EngineRpc {
                     object.remove("targetDeviceId");
                 }
                 let request: crate::web_search_fallback::SetWebSearchFallback = parse_params(body)?;
+                // Enabling points a real tool at this model: it must exist in
+                // THIS device's catalog (the same rule as the title model).
+                // A disabled save only remembers the preference.
+                if request.enabled {
+                    crate::web_search_fallback::validate_model(&request.model)
+                        .map_err(RpcError::BadParams)?;
+                    let harness = self
+                        .registry
+                        .resolve(HarnessId::Pi)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let models =
+                        tokio::time::timeout(std::time::Duration::from_secs(20), harness.models())
+                            .await
+                            .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if !models.iter().any(|model| model.id == request.model) {
+                        return Err(RpcError::BadParams(
+                            "Model is not in this device's Pi catalog; refresh and choose again"
+                                .into(),
+                        ));
+                    }
+                }
                 let paths = self.pi_runtime()?.paths();
                 let settings =
                     crate::web_search_fallback::save(paths, request).map_err(RpcError::Failed)?;

@@ -433,6 +433,10 @@ pub struct WebSearchFallbackSettings {
     pub available: bool,
     #[serde(default)]
     pub enabled: bool,
+    /// False while `model` is still the package's built-in default — nothing
+    /// on this device has chosen one yet.
+    #[serde(default)]
+    pub configured: bool,
     pub model: String,
 }
 

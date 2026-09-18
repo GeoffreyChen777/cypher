@@ -454,15 +454,32 @@ impl Render for WebSearchFallbackControl {
                 .into_any_element();
         }
         let writable = !self.busy && self.target.read(cx).can_write(cx);
-        let missing = settings.enabled
-            && self
-                .models
-                .ready()
-                .is_some_and(|models| !models.iter().any(|model| model.id == settings.model));
+        // A fallback is only usable if the model exists HERE — the package's
+        // built-in default names a provider most devices don't have, so an
+        // unusable value reads as "Select model" rather than a stale id.
+        let in_catalog = self
+            .models
+            .ready()
+            .is_some_and(|models| models.iter().any(|model| model.id == settings.model));
+        let catalog_loaded = self.models.ready().is_some();
+        // Turning it ON with a model this device can't run would break search;
+        // turning it OFF is always allowed.
+        let can_toggle = writable && (settings.enabled || in_catalog);
+        let hint: Option<&str> = match (catalog_loaded, in_catalog, settings.configured) {
+            (true, false, true) => {
+                Some("The saved model isn't in this device's catalog — pick another.")
+            }
+            (true, false, false) => Some("Pick the model web searches should run through."),
+            _ => None,
+        };
         let popup = self
             .menu_open
             .then(|| self.model_popup(&settings, &theme, cx));
-        let trigger_label = self.model_label(&settings.model);
+        let trigger_label = if in_catalog {
+            self.model_label(&settings.model)
+        } else {
+            "Select model".to_string()
+        };
         section(&theme)
             .child(
                 div()
@@ -494,64 +511,71 @@ impl Render for WebSearchFallbackControl {
                         div()
                             .id("web-search-fallback-toggle")
                             .flex_none()
-                            .when(writable, |el| el.cursor_pointer())
-                            .opacity(if writable { 1.0 } else { 0.5 })
+                            .when(can_toggle, |el| el.cursor_pointer())
+                            .opacity(if can_toggle { 1.0 } else { 0.5 })
                             .on_click(cx.listener(move |page, _, _, cx| {
-                                if writable {
+                                if can_toggle {
                                     page.toggle_enabled(cx);
                                 }
                             }))
                             .child(widgets::toggle_switch(&theme, settings.enabled)),
                     ),
             )
-            .when(settings.enabled, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(widgets::field_label(&theme, "Search model"))
-                        .child(
-                            widgets::ghost_action(&theme)
-                                .id("web-search-model-trigger")
-                                .aria_label("Web search fallback model")
-                                .track_focus(&self.trigger_focus)
-                                .relative()
-                                .w_full()
-                                .h(px(40.0))
-                                .px(px(12.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .hover(|s| widgets::ghost_hover(&theme, s))
-                                .on_click(cx.listener(|page, _, window, cx| {
-                                    page.toggle_menu(window, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(13.0))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(trigger_label)),
-                                )
-                                .child(
-                                    icons::icon(icons::ALT_ARROW_DOWN)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .children(popup),
-                        )
-                        .when(missing, |el| {
-                            el.child(
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(widgets::field_label(&theme, "Search model"))
+                    .child(
+                        widgets::ghost_action(&theme)
+                            .id("web-search-model-trigger")
+                            .aria_label("Web search fallback model")
+                            .track_focus(&self.trigger_focus)
+                            .relative()
+                            .w_full()
+                            .h(px(40.0))
+                            .px(px(12.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .hover(|s| widgets::ghost_hover(&theme, s))
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.toggle_menu(window, cx);
+                            }))
+                            .child(
                                 div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.warning_muted)
-                                    .child("Not in this device's catalog — pick another."),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.0))
+                                    .text_color(if in_catalog {
+                                        theme.text
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .child(SharedString::from(trigger_label)),
                             )
-                        }),
-                )
-            })
+                            .child(
+                                icons::icon(icons::ALT_ARROW_DOWN)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .children(popup),
+                    )
+                    .when_some(hint, |el, hint| {
+                        el.child(
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(15.0))
+                                .text_color(if settings.configured {
+                                    theme.warning_muted
+                                } else {
+                                    theme.text_muted
+                                })
+                                .child(SharedString::from(hint.to_string())),
+                        )
+                    }),
+            )
             .children(
                 self.error
                     .clone()
