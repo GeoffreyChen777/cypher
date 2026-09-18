@@ -201,7 +201,7 @@ mod tests {
         );
         assert!(
             !menus[0].items[1].is_disabled(),
-            "Check for Updates runs a release check"
+            "Check for Updates sweeps the release and the Pi Runtime"
         );
     }
 

@@ -1262,6 +1262,7 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_PI_PROVIDER_LOGIN
             | methods::CANCEL_PI_PROVIDER_LOGIN
             | methods::PI_UPDATE_STATUS
+            | methods::CHECK_PI_UPDATE
             | methods::APPLY_PI_UPDATES
             | methods::LIST_MCP_SERVERS
             | methods::ADD_MCP_SERVERS
@@ -2187,6 +2188,13 @@ impl RpcService for EngineRpc {
             methods::PI_UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(
                 self.pi_runtime()?.watch_updates(),
             ))),
+            // One manual sweep: the scheduled six-hour check on demand, with
+            // its auto-apply intact. `spawn_reload_on_install` reloads Pi for
+            // an install started here exactly as it does for the timer.
+            methods::CHECK_PI_UPDATE => {
+                self.pi_runtime()?.check_updates().await;
+                RpcReply::value(&self.pi_runtime()?.update_status())
+            }
             methods::APPLY_PI_UPDATES => {
                 self.pi_runtime()?
                     .install_latest()

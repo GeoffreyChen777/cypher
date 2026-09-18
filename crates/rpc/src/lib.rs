@@ -57,6 +57,11 @@ pub mod methods {
     /// Current Pi CLI + package update facts, then every six-hour refresh or
     /// apply transition.
     pub const PI_UPDATE_STATUS: &str = "PiUpdateStatus";
+    /// Run one Runtime manifest check NOW instead of waiting for the six-hour
+    /// sweep, and reply with the resulting `PiUpdateStatus`. Same semantics as
+    /// that sweep: a newer bundle installs itself, so the reply lands after the
+    /// install and live progress arrives on `PiUpdateStatus`.
+    pub const CHECK_PI_UPDATE: &str = "CheckPiUpdate";
     /// Explicit retry/repair of the latest isolated Pi runtime bundle.
     pub const APPLY_PI_UPDATES: &str = "ApplyPiUpdates";
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";

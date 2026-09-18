@@ -625,6 +625,42 @@ enum AboutCheck {
 
 struct AboutDialog {
     check: AboutCheck,
+    /// A manual check sweeps the Pi Runtime too. It runs independently of the
+    /// application check because a newer bundle installs itself, which can
+    /// take minutes — the dialog must not wait on it.
+    runtime_checking: bool,
+}
+
+/// Runtime line of the About dialog. The live `PiUpdateStatus` watch (not the
+/// manual call's reply) is the source, so a bundle installing in the
+/// background reports progress while the dialog is open.
+fn about_runtime_line(
+    status: Option<&cypher_engine::pi_packages::PiUpdateStatus>,
+    checking: bool,
+) -> Option<SharedString> {
+    let status = status?;
+    if status.applying {
+        return Some("Updating the Pi Runtime…".into());
+    }
+    if checking {
+        return Some("Checking the Pi Runtime…".into());
+    }
+    if let Some(error) = status.error.as_deref() {
+        return Some(format!("Pi Runtime check failed: {error}").into());
+    }
+    if !status.pi_installed {
+        return None;
+    }
+    let packages = status.package_updates.len();
+    Some(match (status.pi_update_available, packages) {
+        (false, 0) => "Pi Runtime is up to date.".into(),
+        (true, 0) => match status.latest_pi_version.as_deref() {
+            Some(version) => format!("Pi Runtime update available — Pi {version}").into(),
+            None => "Pi Runtime update available.".into(),
+        },
+        (_, 1) => "Pi Runtime update available — 1 plugin.".into(),
+        (_, count) => format!("Pi Runtime update available — {count} plugins.").into(),
+    })
 }
 
 fn install_kind_label(kind: &cypher_update::InstallKind) -> &'static str {
@@ -1067,6 +1103,7 @@ pub struct Shell {
     update_task: Option<Task<()>>,
     about: Option<AboutDialog>,
     about_task: Option<Task<()>>,
+    about_runtime_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
     update_dismissed: Option<String>,
@@ -1510,6 +1547,7 @@ impl Shell {
             update_task: None,
             about: None,
             about_task: None,
+            about_runtime_task: None,
             update_dismissed: None,
             pi_update_busy: false,
             pi_update_task: None,
@@ -5010,7 +5048,10 @@ impl Shell {
             self.state.read(cx).update.as_ref(),
             cypher_update::current_version(),
         );
-        self.about = Some(AboutDialog { check });
+        self.about = Some(AboutDialog {
+            check,
+            runtime_checking: false,
+        });
         cx.notify();
     }
 
@@ -5024,9 +5065,14 @@ impl Shell {
         let check = AboutCheck::Checking;
         if let Some(about) = &mut self.about {
             about.check = check;
+            about.runtime_checking = true;
         } else {
-            self.about = Some(AboutDialog { check });
+            self.about = Some(AboutDialog {
+                check,
+                runtime_checking: true,
+            });
         }
+        self.begin_runtime_update_check(cx);
         let engine = self.state.read(cx).engine().cloned();
         let edge_url = self.boot.edge_url.clone();
         let state = self.state.clone();
@@ -5102,6 +5148,50 @@ impl Shell {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The Runtime half of a manual "Check for Updates": one on-demand sweep
+    /// of the Runtime manifest, on its own task so a multi-minute bundle
+    /// download never holds up the application check's answer.
+    fn begin_runtime_update_check(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            if let Some(about) = &mut self.about {
+                about.runtime_checking = false;
+            }
+            return;
+        };
+        let state = self.state.clone();
+        self.about_runtime_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(methods::CHECK_PI_UPDATE, serde_json::json!({}))
+                .await;
+            match reply {
+                Ok(value) => {
+                    match serde_json::from_value::<cypher_engine::pi_packages::PiUpdateStatus>(
+                        value,
+                    ) {
+                        Ok(status) => {
+                            let _ = state.update(cx, |state, cx| {
+                                state.apply_pi_update(status);
+                                cx.notify();
+                            });
+                        }
+                        Err(err) => tracing::warn!(error = %err, "malformed CheckPiUpdate reply"),
+                    }
+                }
+                // The check keeps running in the engine; the live
+                // PiUpdateStatus watch stays the display authority.
+                Err(err) => tracing::warn!(error = %err, "Pi Runtime update check failed"),
+            }
+            this.update(cx, |shell, cx| {
+                if let Some(about) = &mut shell.about {
+                    about.runtime_checking = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Scope-aware sidebar identity and account menu. Local runtimes advertise
@@ -5963,6 +6053,10 @@ impl Shell {
         let version = cypher_update::current_version();
         let install = install_kind_label(&self.install);
         let checking = matches!(about.check, AboutCheck::Checking);
+        let runtime_line = about_runtime_line(
+            self.state.read(cx).pi_update.as_ref(),
+            about.runtime_checking,
+        );
         let status = match &about.check {
             AboutCheck::Idle => None,
             AboutCheck::Checking => Some("Checking for updates…".to_string()),
@@ -5994,6 +6088,14 @@ impl Shell {
             card = card.child(div().mt(px(12.0)).w_full().child(
                 popover::dialog_body(&theme, status).when(failed, |el| el.text_color(theme.danger)),
             ));
+        }
+        if let Some(line) = runtime_line {
+            card = card.child(
+                div()
+                    .mt(px(4.0))
+                    .w_full()
+                    .child(popover::dialog_body(&theme, line).text_color(theme.text_muted)),
+            );
         }
         card = card.child(
             div()
@@ -8682,6 +8784,68 @@ mod tests {
         let failed =
             pi_update_strip_view(Some(&status(false, 1, false, Some("network"))), false).unwrap();
         assert!(failed.failed && failed.clickable);
+    }
+
+    #[test]
+    fn about_runtime_line_reports_the_manual_runtime_check() {
+        use cypher_engine::pi_packages::{PiPackageUpdate, PiUpdateStatus};
+
+        let status =
+            |pi: bool, packages: usize, applying: bool, error: Option<&str>| PiUpdateStatus {
+                pi_installed: true,
+                current_pi_version: Some("0.85.1".into()),
+                latest_pi_version: Some("0.85.2".into()),
+                pi_update_available: pi,
+                package_updates: (0..packages)
+                    .map(|index| PiPackageUpdate {
+                        name: format!("plugin-{index}"),
+                        current_version: "1.0.0".into(),
+                        latest_version: "1.1.0".into(),
+                    })
+                    .collect(),
+                applying,
+                checked_at: None,
+                error: error.map(str::to_string),
+            };
+
+        // No Runtime facts yet, or no Runtime at all: the dialog stays quiet.
+        assert!(about_runtime_line(None, true).is_none());
+        let missing = PiUpdateStatus {
+            pi_installed: false,
+            ..status(false, 0, false, None)
+        };
+        assert!(about_runtime_line(Some(&missing), false).is_none());
+
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 0, false, None)), true).unwrap(),
+            "Checking the Pi Runtime…"
+        );
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 0, false, None)), false).unwrap(),
+            "Pi Runtime is up to date."
+        );
+        // An install found by the check outranks the checking label: it is the
+        // newer, more specific truth about the same sweep.
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 1, true, None)), true).unwrap(),
+            "Updating the Pi Runtime…"
+        );
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 1, false, None)), false).unwrap(),
+            "Pi Runtime update available — 1 plugin."
+        );
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 3, false, None)), false).unwrap(),
+            "Pi Runtime update available — 3 plugins."
+        );
+        assert_eq!(
+            about_runtime_line(Some(&status(true, 0, false, None)), false).unwrap(),
+            "Pi Runtime update available — Pi 0.85.2"
+        );
+        assert_eq!(
+            about_runtime_line(Some(&status(false, 0, false, Some("offline"))), false).unwrap(),
+            "Pi Runtime check failed: offline"
+        );
     }
 
     #[tokio::test]
