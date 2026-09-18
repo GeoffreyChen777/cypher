@@ -1168,7 +1168,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(self.render_card_glyph(group, card_icon, icon_tint, theme, cx))
+                    .child(self.render_card_glyph(group, card_icon, icon_tint, cx))
                     .child(
                         div()
                             .flex_1()
@@ -1242,7 +1242,6 @@ impl Shell {
         group: &GroupCard,
         asset: &'static str,
         tint: gpui::Hsla,
-        theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let glyph = icon(asset).size(px(13.0)).flex_none().text_color(tint);
