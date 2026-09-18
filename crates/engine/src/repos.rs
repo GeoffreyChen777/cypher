@@ -1072,8 +1072,54 @@ async fn disposable_worker<T: Send + 'static>(
     rx.await.ok()
 }
 
+/// macOS guards the Apple Music and Photos libraries behind their own TCC
+/// services, and a bare `stat()` inside one is enough to raise the consent
+/// prompt — no media framework required. Users reported Cypher asking for
+/// their Apple Music library for exactly that reason: the folder browser
+/// probes `<child>/.git` on every sibling, so browsing `~/Music` stats
+/// `~/Music/Music/.git` and trips the prompt.
+///
+/// These bundles can never be checkouts, so skipping the probe costs nothing
+/// but a badge. The match is deliberately conservative — a two-component path
+/// suffix rather than a home-anchored path, since the walk also runs on remote
+/// devices — because a missing badge is harmless while a stray prompt is not.
+/// The media folders themselves (`~/Music`, `~/Pictures`) are NOT gated and
+/// stay browsable; only these library roots inside them are.
+fn is_media_library(path: &Path) -> bool {
+    const BUNDLES: [&str; 6] = [
+        "photoslibrary",
+        "photolibrary",
+        "musiclibrary",
+        "tvlibrary",
+        "imovielibrary",
+        "aplibrary",
+    ];
+    const NESTED: [(&str, &str); 3] = [("Music", "Music"), ("Music", "iTunes"), ("Movies", "TV")];
+
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name == "Photo Booth Library" {
+        return true;
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && BUNDLES.iter().any(|known| ext.eq_ignore_ascii_case(known))
+    {
+        return true;
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|parent| parent.to_str())
+        .is_some_and(|parent| {
+            NESTED
+                .iter()
+                .any(|(outer, inner)| parent == *outer && name == *inner)
+        })
+}
+
 /// The blocking walk: ONE readdir of the target; `is_repo` is a cheap `.git`
-/// existence probe per directory entry.
+/// existence probe per directory entry — skipped inside media libraries, which
+/// would charge a TCC prompt for the privilege.
 fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
@@ -1087,8 +1133,10 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
         if name.starts_with('.') {
             continue;
         }
+        // `file_type()` reuses readdir's cached d_type, so it never stats.
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let is_repo = is_dir && entry.path().join(".git").exists();
+        let path = entry.path();
+        let is_repo = is_dir && !is_media_library(&path) && path.join(".git").exists();
         entries.push(FolderEntry {
             name,
             is_dir,
@@ -1274,7 +1322,11 @@ fn walk_file_index<F: Fn() -> bool + Sync>(
         .git_global(true)
         .git_exclude(true)
         .threads(threads)
-        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
+        // Depth 0 is the project root itself: if someone deliberately points a
+        // project at a library, that is their call.
+        .filter_entry(|entry| {
+            entry.depth() == 0 || (entry.file_name() != ".git" && !is_media_library(entry.path()))
+        })
         .build_parallel()
         .run(|| {
             const BATCH: usize = 512;
@@ -1626,6 +1678,80 @@ mod tests {
         assert!(nucleo_path_score("cmp rs", "crates/ui/src/composer.rs").is_some());
         assert!(nucleo_path_score("composer crates", "crates/ui/src/composer.rs").is_some());
         assert!(nucleo_path_score("xyzq", "crates/ui/src/composer.rs").is_none());
+    }
+
+    #[test]
+    fn media_library_detection_covers_bundles_and_nested_roots() {
+        for gated in [
+            "/Users/x/Music/Music",
+            "/Users/x/Music/iTunes",
+            "/Users/x/Movies/TV",
+            "/Users/x/Pictures/Photos Library.photoslibrary",
+            "/Users/x/Pictures/Old iPhoto.photolibrary",
+            "/Users/x/Pictures/Photo Booth Library",
+            "/Users/x/Movies/Holiday.imovielibrary",
+            "/Users/x/Music/Mixes.musiclibrary",
+        ] {
+            assert!(is_media_library(Path::new(gated)), "{gated}");
+        }
+        for browsable in [
+            // The media folders themselves are not gated.
+            "/Users/x/Music",
+            "/Users/x/Pictures",
+            // Real checkouts that merely live near them keep their badge.
+            "/Users/x/Music/Band Practice",
+            "/Users/x/code/Music",
+            "/Users/x/code/tvlibrary",
+        ] {
+            assert!(!is_media_library(Path::new(browsable)), "{browsable}");
+        }
+    }
+
+    #[test]
+    fn the_folder_browser_never_probes_inside_a_media_library() {
+        // A planted `.git` makes the skip observable: a probe would report it.
+        let home = tempfile::tempdir().unwrap();
+        let music = home.path().join("Music");
+        std::fs::create_dir_all(music.join("Music").join(".git")).unwrap();
+        std::fs::create_dir_all(music.join("Band Practice").join(".git")).unwrap();
+
+        let listing = list_folders_blocking(&music).unwrap();
+        let entry = |name: &str| {
+            listing
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from {listing:?}"))
+        };
+        // The library is still listed and still navigable...
+        assert!(entry("Music").is_dir);
+        // ...but was never stat'ed for `.git`, which is what raised the prompt.
+        assert!(!entry("Music").is_repo);
+        // A neighbouring checkout is unaffected.
+        assert!(entry("Band Practice").is_repo);
+    }
+
+    #[test]
+    fn the_file_index_skips_media_libraries() {
+        let root = tempfile::tempdir().unwrap();
+        let library = root.path().join("Music").join("Music");
+        std::fs::create_dir_all(library.join("Media.localized")).unwrap();
+        std::fs::write(library.join("Media.localized").join("track.m4a"), "").unwrap();
+        std::fs::write(root.path().join("Music").join("notes.md"), "").unwrap();
+        let cache: FileIndexCache = std::sync::Mutex::new(HashMap::new());
+
+        assert!(
+            search_files_cached(&cache, root.path(), "track", &[], || false)
+                .unwrap()
+                .is_empty(),
+            "the walk descended into the media library"
+        );
+        assert!(
+            !search_files_cached(&cache, root.path(), "notes", &[], || false)
+                .unwrap()
+                .is_empty(),
+            "ordinary files beside it still index"
+        );
     }
 
     #[test]
