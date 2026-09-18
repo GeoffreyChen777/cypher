@@ -528,6 +528,7 @@ pub fn overlay(
             device_id: String::new(),
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
+            completed_at: None,
         });
     }
 }

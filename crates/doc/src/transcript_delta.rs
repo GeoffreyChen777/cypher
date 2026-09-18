@@ -82,6 +82,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.device_id != next.device_id
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
+        || prev.completed_at != next.completed_at
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -266,6 +267,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         }
     }
 

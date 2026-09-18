@@ -522,6 +522,13 @@ pub enum RowKind {
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
     },
+    /// The settled turn's work rule: a hairline labelled "Worked for 1m 32s",
+    /// sitting between the turn's tool/chip activity and the answer text it
+    /// produced. Only on entries that actually did work (see
+    /// [`worked_rule_at`]).
+    Worked {
+        label: SharedString,
+    },
     InputChip {
         /// First question's header (the passive chip is only rendered after
         /// the answer has resolved; the live question is rendered by the
@@ -1051,6 +1058,27 @@ pub fn rows_for_entry(
         group_last_part_ix,
     );
 
+    // The work rule goes in BEFORE the turn-start/timestamp bookkeeping: it is
+    // never the entry's first or last row (it separates work from the answer
+    // that followed it), so neither marker can land on it.
+    if !streaming
+        && let Some(at) = worked_rule_at(&rows)
+        && let Some(label) = worked_label(entry.created_at, entry.completed_at)
+    {
+        rows.insert(
+            at,
+            Row {
+                id: format!("{}#worked", entry.id).into(),
+                version: fnv1a(label.as_bytes()),
+                turn_start: false,
+                kind: RowKind::Worked { label },
+                entry_id: entry_id.clone(),
+                role: entry.role,
+                timestamp: None,
+            },
+        );
+    }
+
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
@@ -1377,6 +1405,37 @@ pub fn format_elapsed(secs: i64) -> String {
     } else {
         format!("{}m {}s", secs / 60, secs % 60)
     }
+}
+
+/// Turns shorter than this carry no work rule: the label is a record of time
+/// spent, and sub-second work reads as noise ("Worked for 0s").
+const WORKED_MIN_SECS: i64 = 1;
+
+/// The settled turn's "Worked for …" label, from the entry's own span
+/// (`createdAt` → `completedAt`, the latter stamped when the segment reached a
+/// terminal status). `None` while a turn is still open, on entries written
+/// before the stamp existed, on a clock that ran backwards, and on turns under
+/// [`WORKED_MIN_SECS`].
+pub fn worked_label(created_at: i64, completed_at: Option<i64>) -> Option<SharedString> {
+    let secs = completed_at?.checked_sub(created_at)?.div_euclid(1000);
+    (secs >= WORKED_MIN_SECS)
+        .then(|| SharedString::from(format!("Worked for {}", format_elapsed(secs))))
+}
+
+/// Where the work rule goes: the start of the entry's TRAILING run of answer
+/// text. `None` when the turn ended on a tool/chip (no answer to separate) or
+/// never left the text (a plain reply is not a work log).
+fn worked_rule_at(rows: &[Row]) -> Option<usize> {
+    let is_md = |r: &Row| {
+        matches!(
+            r.kind,
+            RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }
+        )
+    };
+    if !rows.last().is_some_and(is_md) {
+        return None;
+    }
+    Some(rows.iter().rposition(|r| !is_md(r))? + 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -3359,6 +3418,7 @@ impl Transcript {
                 header, resolved, ..
             } => input_chip(header.clone(), *resolved, &theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::Worked { label } => worked_rule(label.clone(), &theme),
         };
 
         // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
@@ -4438,6 +4498,36 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The settled turn's work rule: the "Worked for 1m 32s" label followed by a
+/// hairline that runs out to the content column's edge — the quiet seam
+/// between what the turn DID (tool chips, questions, errors) and the answer it
+/// finished with.
+fn worked_rule(label: SharedString, theme: &Theme) -> AnyElement {
+    div()
+        .py(px(4.0))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(11.0))
+                // Quieter than the timestamp strip: the rule is a seam, not a
+                // thing to read.
+                .text_color(theme.text_faint.opacity(0.8))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h(px(1.0))
+                .bg(crate::theme::hairline(0.05)),
+        )
+        .into_any_element()
+}
+
 /// A passive one-line chip marking a question the agent asked — the
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
@@ -5112,6 +5202,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(status),
             continuation_of: None,
+            completed_at: None,
         }
     }
 
@@ -5372,6 +5463,87 @@ mod tests {
         };
         assert_eq!(tools.len(), 2);
         assert!(rows[0].turn_start && !rows[1].turn_start);
+    }
+
+    #[test]
+    fn settled_turn_rules_off_its_work_before_the_answer() {
+        let mut entry = assistant(
+            "m4",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "before"),
+                tool_part("a", "ls"),
+                text_part("t1", "after"),
+            ],
+        );
+        entry.created_at = 1_000;
+        entry.completed_at = Some(93_400);
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, ["m4#t0.0", "m4#g0", "m4#worked", "m4#t1.0"]);
+        let RowKind::Worked { label } = &rows[2].kind else {
+            panic!("work rule expected before the answer")
+        };
+        assert_eq!(label.as_ref(), "Worked for 1m 32s");
+        // Interior by construction: the entry's turn-start and timestamp
+        // markers stay on real content rows.
+        assert!(rows[0].turn_start && !rows[2].turn_start);
+        assert!(rows[2].timestamp.is_none());
+        assert!(rows[3].timestamp.is_some());
+    }
+
+    #[test]
+    fn work_rule_only_where_work_preceded_an_answer() {
+        let span = |status, parts| {
+            let mut entry = assistant("m5", status, parts);
+            entry.created_at = 0;
+            entry.completed_at = Some(5_000);
+            entry
+        };
+        let has_rule = |entry: &SessionMessageEntry| {
+            rows_for_entry(entry, false, &mut parse)
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Worked { .. }))
+        };
+        let worked = vec![
+            text_part("t0", "before"),
+            tool_part("a", "ls"),
+            text_part("t1", "after"),
+        ];
+        assert!(has_rule(&span(MessageStatus::Complete, worked.clone())));
+        // A live turn hasn't worked for anything yet.
+        assert!(!has_rule(&span(MessageStatus::Streaming, worked.clone())));
+        // Nothing to separate: a plain reply, and a turn that ended on a tool.
+        assert!(!has_rule(&span(
+            MessageStatus::Complete,
+            vec![text_part("t0", "just an answer")]
+        )));
+        assert!(!has_rule(&span(
+            MessageStatus::Complete,
+            vec![text_part("t0", "before"), tool_part("a", "ls")]
+        )));
+        // Entries written before the stamp existed, and sub-second turns.
+        let mut unstamped = span(MessageStatus::Complete, worked.clone());
+        unstamped.completed_at = None;
+        assert!(!has_rule(&unstamped));
+        let mut brief = span(MessageStatus::Complete, worked);
+        brief.completed_at = Some(400);
+        assert!(!has_rule(&brief));
+    }
+
+    #[test]
+    fn worked_label_reads_the_entry_span() {
+        assert_eq!(
+            worked_label(1_000, Some(4_000)).as_deref(),
+            Some("Worked for 3s")
+        );
+        assert_eq!(
+            worked_label(0, Some(3_600_000)).as_deref(),
+            Some("Worked for 60m 0s")
+        );
+        assert_eq!(worked_label(0, None), None);
+        // A clock that ran backwards labels nothing.
+        assert_eq!(worked_label(9_000, Some(1_000)), None);
     }
 
     #[test]
@@ -5904,6 +6076,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -6126,6 +6299,7 @@ mod tests {
                 device_id: "dev".into(),
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
+                completed_at: None,
             };
             let rows = rows_for_entry(&entry, false, &mut parse);
             assert!(!rows.is_empty(), "{id} renders a row");
@@ -6144,6 +6318,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         };
         let rows = rows_for_entry(&tool_entry, false, &mut parse);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));

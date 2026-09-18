@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         device_id: host.device_id.clone(),
         status: Some(MessageStatus::Complete),
         continuation_of: None,
+        completed_at: None,
     })?;
     std::fs::write(
         &control,

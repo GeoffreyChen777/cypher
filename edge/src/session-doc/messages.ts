@@ -125,6 +125,11 @@ export interface SessionMessageEntry {
   /** Set on continuation entries produced by the segment split cap; points at
    * the root entry's id. Renderers concatenate parts in list order. */
   readonly continuationOf?: string;
+  /** Epoch millis the entry reached a terminal status, stamped by the host
+   * when it finishes the segment. With `createdAt` this is the durable span
+   * of a settled turn (the transcript's "Worked for …" label); absent while
+   * streaming and on entries written before the field existed. */
+  readonly completedAt?: number;
 }
 
 const encoder = new TextEncoder();
@@ -211,7 +216,13 @@ export const joinContinuations = (
       const at = rootIndex.get(entry.continuationOf);
       if (at !== undefined) {
         const root = order[at]!;
-        order[at] = { ...root, parts: [...root.parts, ...entry.parts] };
+        // The join spans the root's start to the LAST segment's finish — a
+        // still-streaming continuation clears the root's stamp.
+        order[at] = {
+          ...root,
+          parts: [...root.parts, ...entry.parts],
+          completedAt: entry.completedAt
+        };
         continue;
       }
       // Orphan continuation (root trimmed or not yet synced): surface as-is

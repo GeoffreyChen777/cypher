@@ -3,7 +3,8 @@
 //! Container layout (MUST stay shape-compatible with the TS edge/tail materializer):
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
-//!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf? }
+//!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
+//!   completedAt? }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -50,6 +51,13 @@ pub struct SessionMessageEntry {
     pub status: Option<MessageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_of: Option<String>,
+    /// Epoch millis the segment reached a terminal status — stamped by
+    /// [`SegmentWriter::finish`] (additive: absent on old rows, old writers,
+    /// and every entry that is still streaming). With `created_at` this is
+    /// the only durable record of how long a settled turn took, so the
+    /// transcript can label it after a reload or on another device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -440,6 +448,12 @@ impl SessionDoc {
                 );
                 if id_matches {
                     map.insert("status", status_str(status))?;
+                    // Crash recovery closes a streaming entry here rather
+                    // than through the writer: stamp the same completion
+                    // instant so the settled turn still carries a span.
+                    if status != MessageStatus::Streaming && map.get("completedAt").is_none() {
+                        map.insert("completedAt", chrono::Utc::now().timestamp_millis())?;
+                    }
                     self.doc.commit();
                     return Ok(true);
                 }
@@ -630,6 +644,9 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(continuation_of) = &entry.continuation_of {
         map.insert("continuationOf", continuation_of.as_str())?;
     }
+    if let Some(completed_at) = entry.completed_at {
+        map.insert("completedAt", completed_at)?;
+    }
     Ok(())
 }
 
@@ -704,6 +721,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         status: Option<MessageStatus>,
         #[serde(default)]
         continuation_of: Option<String>,
+        #[serde(default)]
+        completed_at: Option<i64>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -714,6 +733,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             device_id: raw.device_id,
             status: raw.status,
             continuation_of: raw.continuation_of,
+            completed_at: raw.completed_at,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -778,6 +798,7 @@ fn salvage_entry(
             .get("status")
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
+        completed_at: obj.get("completedAt").and_then(|x| x.as_i64()),
     })
 }
 
@@ -848,6 +869,11 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
         match &entry.continuation_of {
             Some(root_id) => {
                 if let Some(&at) = root_index.get(root_id) {
+                    // The join's span is the root's start to the LAST
+                    // segment's finish — a continuation that is still
+                    // streaming clears the root's stamp, so a joined entry is
+                    // never labelled complete while it is still being written.
+                    out[at].completed_at = entry.completed_at;
                     out[at].parts.extend(entry.parts);
                 } else {
                     // Orphan continuation — surface as its own entry rather than dropping.
@@ -904,6 +930,7 @@ impl<'a> SegmentWriter<'a> {
                 device_id: device_id.into(),
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
+                completed_at: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -993,11 +1020,14 @@ impl<'a> SegmentWriter<'a> {
         Ok(())
     }
 
-    /// Finish the stream: sync final parts and stamp a terminal status.
+    /// Finish the stream: sync final parts and stamp a terminal status plus
+    /// the completion instant (the settled turn's elapsed base — `createdAt`
+    /// is the segment's start).
     pub fn finish(mut self, folded: &[MessagePart], status: MessageStatus) -> Result<(), DocError> {
         self.sync(folded)?;
         let map = self.entry_map()?;
         map.insert("status", status_str(status))?;
+        map.insert("completedAt", chrono::Utc::now().timestamp_millis())?;
         self.doc.preview_commit(&self.entry_id, folded, true)?;
         self.doc.doc.commit();
         Ok(())
@@ -1119,6 +1149,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         }
     }
 
@@ -1156,6 +1187,7 @@ mod tests {
             // The orphan case: the run died and recovery stamped the entry.
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
+            completed_at: None,
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -1429,6 +1461,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();
@@ -1459,6 +1492,63 @@ mod tests {
         );
         let entries = doc.read_entries().unwrap();
         assert_eq!(entries[0].status, Some(MessageStatus::Aborted));
+        // Crash recovery closes the entry here: it still gets a span.
+        assert!(
+            entries[0]
+                .completed_at
+                .is_some_and(|at| at >= entry.created_at)
+        );
+    }
+
+    /// A finished segment carries its own span: `createdAt` → `completedAt`.
+    /// That pair is the only durable record of how long a settled turn took
+    /// (the transcript's "Worked for …" rule), so it must survive a reload of
+    /// the doc, not just the live session.
+    #[test]
+    fn finish_stamps_the_completion_instant() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let started = chrono::Utc::now().timestamp_millis();
+        let writer = SegmentWriter::begin(&doc, "m1", "dev", started).unwrap();
+        let folded = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "hello".into(),
+        }];
+        // Streaming entries carry no completion — the turn is still open.
+        assert_eq!(doc.read_entries().unwrap()[0].completed_at, None);
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+
+        let reopened = LoroDoc::new();
+        reopened.import(&doc.export_snapshot().unwrap()).unwrap();
+        let entry = SessionDoc::from_doc(reopened)
+            .read_entries()
+            .unwrap()
+            .remove(0);
+        assert_eq!(entry.status, Some(MessageStatus::Complete));
+        assert!(entry.completed_at.is_some_and(|at| at >= started));
+    }
+
+    /// The join spans the root's start to the LAST segment's finish — and a
+    /// continuation still streaming leaves the joined entry unstamped.
+    #[test]
+    fn continuation_join_takes_the_last_segments_completion() {
+        let mut root = user_entry("m1", "a");
+        root.role = MessageRole::Assistant;
+        root.created_at = 1_000;
+        root.completed_at = Some(2_000);
+        let mut tail = user_entry("m1#c1", "b");
+        tail.role = MessageRole::Assistant;
+        tail.continuation_of = Some("m1".into());
+        tail.completed_at = Some(9_000);
+
+        let joined = join_continuation_entries(vec![root.clone(), tail.clone()]);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].created_at, 1_000);
+        assert_eq!(joined[0].completed_at, Some(9_000));
+
+        let mut live_tail = tail;
+        live_tail.completed_at = None;
+        let joined = join_continuation_entries(vec![root, live_tail]);
+        assert_eq!(joined[0].completed_at, None, "still being written");
     }
 
     #[test]

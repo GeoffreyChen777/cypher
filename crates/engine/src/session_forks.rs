@@ -736,6 +736,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         }
     }
 
@@ -751,6 +752,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         }
     }
 

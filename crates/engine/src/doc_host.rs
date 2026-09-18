@@ -402,6 +402,7 @@ impl ChatDocHandle {
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         })
     }
 

@@ -6582,6 +6582,7 @@ impl Composer {
             device_id: "local".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         };
         self.state.update(cx, |s, cx| {
             if is_new {
@@ -6836,6 +6837,7 @@ impl Composer {
                         device_id: "local".into(),
                         status: None,
                         continuation_of: None,
+                        completed_at: None,
                     };
                     let echo_chat_id = chat_id.clone();
                     this.update(cx, |composer, cx| {
@@ -7064,6 +7066,7 @@ impl Composer {
                                 device_id: "local".into(),
                                 status: None,
                                 continuation_of: None,
+                                completed_at: None,
                             };
                             let echo_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
@@ -9691,6 +9694,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         };
         let stripped = strip_attachment_trailer(&user);
         let MessagePart::Text { text, .. } = &stripped.parts[0] else {
@@ -9712,6 +9716,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         };
         assert_eq!(strip_attachment_trailer(&assistant), assistant);
     }
@@ -10174,6 +10179,7 @@ mod tests {
             device_id: "d".into(),
             status,
             continuation_of: None,
+            completed_at: None,
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -10210,6 +10216,7 @@ mod tests {
                 device_id: "d".into(),
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
+                completed_at: None,
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -10242,6 +10249,7 @@ mod tests {
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            completed_at: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),
@@ -10264,6 +10272,7 @@ mod tests {
             device_id: "d".into(),
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
+            completed_at: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Complete), vec![input_part.clone()]),

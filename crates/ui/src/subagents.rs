@@ -1154,6 +1154,7 @@ mod tests {
             device_id: "d".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         }
     }
 

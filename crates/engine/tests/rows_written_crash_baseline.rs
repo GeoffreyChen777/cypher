@@ -33,6 +33,7 @@ fn entry(id: &str) -> SessionMessageEntry {
         device_id: "p0-host".into(),
         status: Some(MessageStatus::Complete),
         continuation_of: None,
+        completed_at: None,
     }
 }
 fn contains(doc: &SessionDoc) -> bool {

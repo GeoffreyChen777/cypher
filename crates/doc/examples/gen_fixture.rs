@@ -26,6 +26,7 @@ fn main() {
         device_id: "device-rust".into(),
         status: Some(MessageStatus::Complete),
         continuation_of: None,
+        completed_at: None,
     })
     .expect("push user message");
 

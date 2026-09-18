@@ -786,6 +786,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         }
     }
 
@@ -943,6 +944,7 @@ mod tests {
                 device_id: "dev".into(),
                 status: None,
                 continuation_of: None,
+                completed_at: None,
             },
         ];
         let out = bounded_transcript_context(&entries, None).unwrap();

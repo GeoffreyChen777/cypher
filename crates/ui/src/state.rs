@@ -3141,6 +3141,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         }
     }
 
@@ -3974,6 +3975,7 @@ mod tests {
             device_id: "local".into(),
             status: None,
             continuation_of: None,
+            completed_at: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.
