@@ -133,6 +133,13 @@ struct ReopenState {
 
 impl gpui::Global for ReopenState {}
 
+/// Worker threads for the app-owned engine runtime (see [`run_app`]).
+const ENGINE_WORKER_THREADS: usize = 4;
+
+/// The app-owned tokio runtime every `Tokio::spawn` / `tokio::spawn` in this
+/// process lands on. Set once in [`run_app`], never dropped.
+static ENGINE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
@@ -142,6 +149,23 @@ pub fn run_app(config: UiConfig) {
     // rustls cannot choose automatically and panics on the first TLS request.
     // Select ring once before either client can open a connection.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // The engine runtime is owned by the app, not by gpui_tokio. `gpui_tokio::init`
+    // hardcodes two unnamed workers, and the embedded engine (IPC server, presence
+    // heartbeats, sync, agent runs, updates) shares them with the UI's own tokio
+    // work. Two blocked workers meant a silent engine hang: presence went dark and
+    // the IPC handshake timed out while the process stayed alive. Four named
+    // workers give headroom for the blocking work that still slips through and
+    // make the workers identifiable in a `sample` of a hung process.
+    let engine_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(ENGINE_WORKER_THREADS)
+        .thread_name("cypher-engine")
+        .enable_all()
+        .build()
+        .expect("failed to build the engine tokio runtime");
+    let engine_handle = engine_runtime.handle().clone();
+    // Lives for the whole process. The quit path (`on_app_quit` below) awaits the
+    // engine's own shutdown; the runtime itself never needs to be dropped.
+    let _ = ENGINE_RUNTIME.set(engine_runtime);
     // A real HTTP client for gpui's `img()` element — the GitHub/WorkOS
     // profile-picture avatar is a remote URL, and gpui's default null client
     // would fail every fetch (the avatar always falls back to the initial).
@@ -164,8 +188,9 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
-        // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
-        gpui_tokio::init(cx);
+        // NB: pinned-rev API — free function, not `Tokio::init`. `init_from_handle`
+        // (not `init`) so `Tokio::spawn` targets the app-owned runtime above.
+        gpui_tokio::init_from_handle(cx, engine_handle);
         register_fonts(cx);
         // Appearance before anything paints: the theme global has to be the
         // final one on the very first frame, or the window flashes the wrong

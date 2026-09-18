@@ -1804,8 +1804,14 @@ impl RpcService for EngineRpc {
                 }
                 RpcReply::value(&status)
             }
+            // MCP helpers shell out to `security` and rewrite config files:
+            // blocking work, so each runs on the blocking pool.
             methods::LIST_MCP_SERVERS => {
-                RpcReply::value(&crate::mcp::list(&self.pi_runtime()?.paths().agent_dir))
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
+                let snapshot = crate::off_runtime(move || crate::mcp::list(&agent_dir))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&snapshot)
             }
             methods::ADD_MCP_SERVERS => {
                 let mut body = params;
@@ -1814,15 +1820,21 @@ impl RpcService for EngineRpc {
                 }
                 let request = serde_json::from_value::<crate::mcp::AddMcpServers>(body)
                     .map_err(|_| RpcError::BadParams("Invalid MCP configuration.".into()))?;
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
                 let snapshot =
-                    crate::mcp::add_servers(&self.pi_runtime()?.paths().agent_dir, request)
+                    crate::off_runtime(move || crate::mcp::add_servers(&agent_dir, request))
+                        .await
+                        .and_then(|result| result)
                         .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
             }
             methods::SET_MCP_SERVER_ENABLED => {
                 let p: crate::mcp::SetMcpServerEnabled = parse_params(params)?;
-                let snapshot = crate::mcp::set_enabled(&self.pi_runtime()?.paths().agent_dir, p)
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
+                let snapshot = crate::off_runtime(move || crate::mcp::set_enabled(&agent_dir, p))
+                    .await
+                    .and_then(|result| result)
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)
@@ -1841,8 +1853,11 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 self.sessions.recycle_idle_sessions().await;
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
                 let result =
-                    crate::mcp::remove_server(&self.pi_runtime()?.paths().agent_dir, request);
+                    crate::off_runtime(move || crate::mcp::remove_server(&agent_dir, request))
+                        .await
+                        .and_then(|result| result);
                 self.registry.invalidate_discovery(HarnessId::Pi);
                 RpcReply::value(&result.map_err(RpcError::Failed)?)
             }
@@ -1905,7 +1920,10 @@ impl RpcService for EngineRpc {
             }
             methods::LOGOUT_MCP_SERVER => {
                 let p: crate::mcp::McpServerName = parse_params(params)?;
-                let snapshot = crate::mcp::logout(&self.pi_runtime()?.paths().agent_dir, &p.name)
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
+                let snapshot = crate::off_runtime(move || crate::mcp::logout(&agent_dir, &p.name))
+                    .await
+                    .and_then(|result| result)
                     .map_err(RpcError::Failed)?;
                 self.reload_pi_runtime().await;
                 RpcReply::value(&snapshot)

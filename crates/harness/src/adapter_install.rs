@@ -189,31 +189,40 @@ pub(crate) async fn ensure_installed(
     ));
     let cache_dir = root.join(".npm-cache");
     let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name).await;
-    if let Err(e) = install {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(e);
-    }
-    if bin_entry(&tmp_dir, &pin, bin_name).is_none() {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        return Err(HarnessError::Install(format!(
-            "npm install {} completed but the package has no runnable bin entry",
-            pin.spec()
-        )));
-    }
-    std::fs::write(tmp_dir.join(OK_MARKER), pin.version)?;
-    if let Some(parent) = final_dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
-        // Lost a cross-process race (or a stale dir): keep whatever is in
-        // place if it's complete, else replace it.
-        if installed_entry(&pin, bin_name).is_none() {
-            let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
-        } else {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
+    // Removing a node_modules tree and moving the install into place are
+    // blocking; keep them off the runtime workers.
+    let bin = bin_name.to_string();
+    let (tmp, dest) = (tmp_dir.clone(), final_dir.clone());
+    tokio::task::spawn_blocking(move || -> Result<(), HarnessError> {
+        if let Err(e) = install {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(e);
         }
-    }
+        if bin_entry(&tmp, &pin, &bin).is_none() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(HarnessError::Install(format!(
+                "npm install {} completed but the package has no runnable bin entry",
+                pin.spec()
+            )));
+        }
+        std::fs::write(tmp.join(OK_MARKER), pin.version)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(&tmp, &dest).is_err() {
+            // Lost a cross-process race (or a stale dir): keep whatever is in
+            // place if it's complete, else replace it.
+            if installed_entry(&pin, &bin).is_none() {
+                let _ = std::fs::remove_dir_all(&dest);
+                std::fs::rename(&tmp, &dest)?;
+            } else {
+                let _ = std::fs::remove_dir_all(&tmp);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| HarnessError::Install(format!("adapter install task failed: {err}")))??;
     installed_entry(&pin, bin_name).ok_or_else(|| {
         HarnessError::Install(format!(
             "install of {} finished but its bin entry did not resolve",

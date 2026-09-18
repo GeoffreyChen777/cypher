@@ -162,8 +162,12 @@ cypher/
 ```
 
 Engine async runtime: **tokio** throughout; the UI bridges via `gpui_tokio` (`Tokio::spawn`
-futures surfaced as gpui `Task`s). In-process mode runs the engine on its own tokio runtime
-thread; the UI never blocks on it.
+futures surfaced as gpui `Task`s). In-process mode runs the engine on an app-owned
+multi-thread runtime (4 workers named `cypher-engine`, handed to gpui via
+`gpui_tokio::init_from_handle`); the UI never blocks on it. Blocking work — subprocesses,
+archive extraction, large directory removals, SQLite — goes through `spawn_blocking`
+(`cypher_engine::off_runtime`), never a runtime worker: a blocked worker on a small
+runtime stalls IPC, presence and sync together with no panic and no log line.
 
 ## 4. UI plan (gpui) — parity + smoothness
 

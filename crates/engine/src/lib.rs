@@ -1159,6 +1159,23 @@ pub async fn shutdown_signal() -> std::io::Result<()> {
 /// Serve an embedded engine to same-user viewports over private Unix IPC.
 /// The caller must own its data-directory lock. Binding/validation failures
 /// are fatal; there is no TCP or unserved embedded-engine fallback.
+/// Run blocking work (subprocesses, archive extraction, large directory
+/// removals, SQLite) on tokio's blocking pool instead of a runtime worker.
+///
+/// The headed app embeds this engine in a small runtime shared with the IPC
+/// server, presence heartbeats, sync and agent runs. A synchronous call on a
+/// worker thread stalls every other task on that worker; enough of them at
+/// once stall the engine entirely with no panic and no log line (presence
+/// goes dark, `cypher sync` times out in the WebSocket handshake). Anything
+/// that can take more than a few milliseconds goes through here.
+pub(crate) async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|err| format!("background task failed: {err}"))
+}
+
 pub async fn serve_ipc(
     path: &std::path::Path,
     service: std::sync::Arc<dyn cypher_rpc::RpcService>,

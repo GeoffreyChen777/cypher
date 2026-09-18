@@ -792,8 +792,10 @@ impl Repos {
                 )
                 .await;
             if removed.is_err() {
-                // git refused (or the dir is half-gone) — delete the folder directly.
-                let _ = std::fs::remove_dir_all(worktree_path);
+                // git refused (or the dir is half-gone) — delete the folder directly
+                // (off the runtime workers: a worktree can be a large tree).
+                let path = worktree_path.to_path_buf();
+                let _ = crate::off_runtime(move || std::fs::remove_dir_all(path)).await;
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
@@ -887,7 +889,10 @@ impl Repos {
         // and start over. Prune dangling admin records too.
         if path.exists() {
             tracing::warn!(path = %path.display(), "removing stale half-created chat worktree");
-            std::fs::remove_dir_all(&path)?;
+            let stale = path.to_path_buf();
+            crate::off_runtime(move || std::fs::remove_dir_all(stale))
+                .await
+                .map_err(EngineError::Other)??;
         }
         self.git(&["worktree", "prune"], Some(repo_path)).await?;
         std::fs::create_dir_all(&base)?;

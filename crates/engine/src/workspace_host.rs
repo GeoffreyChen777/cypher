@@ -1842,7 +1842,10 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
                 let Some(inner) = weak.upgrade() else { break };
-                inner.save_snapshot();
+                // SQLite (5s busy timeout) off the runtime worker: this task
+                // also drives the presence heartbeat. Awaited so snapshots
+                // never overtake each other.
+                let _ = tokio::task::spawn_blocking(move || inner.save_snapshot()).await;
             }
             _ = presence.tick() => {
                 let Some(inner) = weak.upgrade() else { break };

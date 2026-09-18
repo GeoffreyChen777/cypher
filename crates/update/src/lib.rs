@@ -439,6 +439,17 @@ pub async fn download_release_file(
     Ok(())
 }
 
+/// Run blocking work (`tar`, `ditto`, bundle moves) on tokio's blocking pool.
+/// The headed app embeds the engine in a small runtime; a synchronous call on
+/// one of its workers stalls every other task there.
+async fn off_runtime<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .context("update task failed")?
+}
+
 fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -483,39 +494,44 @@ pub async fn stage_headless(
     let staging = tempfile::Builder::new()
         .prefix(".stage-")
         .tempdir_in(app_root)?;
-    let stage = staging.path();
+    let stage = staging.path().to_path_buf();
     let tarball = stage.join(&file);
     download_release_file(edge_url, manifest, &file, &tarball).await?;
-    validate_headless_archive(&tarball, file.trim_end_matches(".tar.gz"))?;
-    let unpacked = stage.join("unpacked");
-    std::fs::create_dir_all(&unpacked)?;
-    // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
-    // strip it exactly as install.sh does.
-    run(
-        "tar",
-        &[
-            "-xzf",
-            &tarball.to_string_lossy(),
-            "-C",
-            &unpacked.to_string_lossy(),
-            "--strip-components=1",
-            "--no-same-owner",
-        ],
-    )?;
-    if !headless_binary_ready(&unpacked) {
-        bail!("tarball {file} did not contain a runnable cypher binary");
-    }
-    match std::fs::rename(&unpacked, &dest) {
-        Ok(()) => {}
-        // Lost a race with another stager — the staged copy is equivalent.
-        Err(err) => {
-            if headless_binary_ready(&dest) {
-                return Ok(dest);
-            }
-            return Err(err).with_context(|| format!("moving {} into place", dest.display()));
+    // Archive validation and extraction shell out to `tar`: blocking pool.
+    // `staging` outlives the await, so the temp dir is still there.
+    off_runtime(move || {
+        validate_headless_archive(&tarball, file.trim_end_matches(".tar.gz"))?;
+        let unpacked = stage.join("unpacked");
+        std::fs::create_dir_all(&unpacked)?;
+        // Tarball root is the versioned stage dir (see scripts/package-linux.sh);
+        // strip it exactly as install.sh does.
+        run(
+            "tar",
+            &[
+                "-xzf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &unpacked.to_string_lossy(),
+                "--strip-components=1",
+                "--no-same-owner",
+            ],
+        )?;
+        if !headless_binary_ready(&unpacked) {
+            bail!("tarball {file} did not contain a runnable cypher binary");
         }
-    }
-    Ok(dest)
+        match std::fs::rename(&unpacked, &dest) {
+            Ok(()) => {}
+            // Lost a race with another stager — the staged copy is equivalent.
+            Err(err) => {
+                if headless_binary_ready(&dest) {
+                    return Ok(dest);
+                }
+                return Err(err).with_context(|| format!("moving {} into place", dest.display()));
+            }
+        }
+        Ok(dest)
+    })
+    .await
 }
 
 fn headless_binary_ready(dir: &Path) -> bool {
@@ -835,26 +851,36 @@ pub async fn stage_mac_app(
     if staged.join("Contents/MacOS/cypher").exists() {
         return Ok(staged);
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    {
+        let dir = dir.clone();
+        off_runtime(move || {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))
+        })
+        .await?;
+    }
     let file = manifest.mac_app_file();
     let tarball = dir.join(&file);
     download_release_file(edge_url, manifest, &file, &tarball).await?;
-    run(
-        "tar",
-        &[
-            "-xzf",
-            &tarball.to_string_lossy(),
-            "-C",
-            &dir.to_string_lossy(),
-        ],
-    )?;
-    std::fs::remove_file(&tarball).ok();
-    let binary = staged.join("Contents/MacOS/cypher");
-    if !binary.exists() {
-        bail!("app tarball {file} did not contain Cypher.app");
-    }
-    Ok(staged)
+    // Extracting the whole app bundle takes seconds: blocking pool, not a worker.
+    off_runtime(move || {
+        run(
+            "tar",
+            &[
+                "-xzf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &dir.to_string_lossy(),
+            ],
+        )?;
+        std::fs::remove_file(&tarball).ok();
+        let binary = staged.join("Contents/MacOS/cypher");
+        if !binary.exists() {
+            bail!("app tarball {file} did not contain Cypher.app");
+        }
+        Ok(staged)
+    })
+    .await
 }
 
 /// Swap the installed bundle for the staged one: `ditto` the staged copy next to
@@ -1215,7 +1241,10 @@ impl Updater {
         match detect_install() {
             InstallKind::Managed { app_root } => {
                 stage_headless(&self.edge_url, &manifest, &app_root).await?;
-                apply_headless(&app_root, &manifest.version)?;
+                {
+                    let (app_root, version) = (app_root.clone(), manifest.version.clone());
+                    off_runtime(move || apply_headless(&app_root, &version)).await?;
+                }
                 let data_dir = self.data_dir.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -1227,7 +1256,10 @@ impl Updater {
             }
             InstallKind::MacApp { bundle } => {
                 let staged = stage_mac_app(&self.edge_url, &manifest, &self.data_dir).await?;
-                apply_mac_app(&staged, &bundle)?;
+                {
+                    let bundle = bundle.clone();
+                    off_runtime(move || apply_mac_app(&staged, &bundle)).await?;
+                }
                 relaunch_app_after_exit(&bundle);
                 self.status_tx
                     .send_modify(|status| status.relaunch_pending = true);

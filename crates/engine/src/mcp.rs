@@ -13,6 +13,64 @@ pub mod login;
 pub use config::{AddMcpServers, RemoveMcpServer, add_servers, remove_server};
 static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hard bound for every `security` subprocess. An unanswered Keychain consent
+/// dialog blocks `security` indefinitely (see the keychain notes in
+/// `agent_accounts.rs`); without a bound that was a thread pinned for the life
+/// of the process, and on the embedded engine's small runtime, half of it.
+const SECURITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Run `security` with [`SECURITY_TIMEOUT`]: spawn, drain the pipes on helper
+/// threads, poll `try_wait`, kill on the deadline. Blocking by design — every
+/// caller runs on the blocking pool via [`crate::off_runtime`], never on a
+/// runtime worker.
+fn security<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> std::io::Result<std::process::Output> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+
+    let mut child = Command::new("security")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + SECURITY_TIMEOUT;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!(
+                    verb = args.first().map(|a| a.as_ref().to_string_lossy().into_owned()).unwrap_or_default(),
+                    "security timed out (unanswered Keychain prompt?)"
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "security timed out; unlock the Keychain and retry",
+                ));
+            }
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum McpAuthKind {
@@ -154,10 +212,7 @@ fn keychain_payload(agent_dir: &Path, account: &str) -> Option<String> {
         "-w".into(),
     ];
     args.push(app_keychain_path(agent_dir).display().to_string());
-    let output = std::process::Command::new("security")
-        .args(&args)
-        .output()
-        .ok()?;
+    let output = security(args.as_slice()).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -322,10 +377,7 @@ fn app_keychain_pass_path(agent_dir: &Path) -> PathBuf {
 }
 
 fn security_ok(args: &[&str]) -> Result<(), String> {
-    let output = std::process::Command::new("security")
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = security(args).map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(());
     }
@@ -386,10 +438,7 @@ fn ensure_app_keychain(agent_dir: &Path) -> Result<(PathBuf, String), String> {
 }
 
 fn prepend_keychain_search(path: &PathBuf) -> Result<(), String> {
-    let listed = std::process::Command::new("security")
-        .args(["list-keychains", "-d", "user"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let listed = security(&["list-keychains", "-d", "user"]).map_err(|e| e.to_string())?;
     let existing: Vec<String> = String::from_utf8_lossy(&listed.stdout)
         .lines()
         .map(|line| line.trim().trim_matches('"').to_string())
@@ -407,10 +456,7 @@ fn prepend_keychain_search(path: &PathBuf) -> Result<(), String> {
         ours,
     ];
     args.extend(existing);
-    let status = std::process::Command::new("security")
-        .args(&args)
-        .status()
-        .map_err(|e| e.to_string())?;
+    let status = security(args.as_slice()).map_err(|e| e.to_string())?.status;
     if status.success() {
         Ok(())
     } else {
@@ -457,26 +503,22 @@ fn persist_secret_keychain(
 
 pub fn logout(agent_dir: &Path, name: &str) -> Result<McpSnapshot, String> {
     let account = oauth_account(name);
-    let _ = std::process::Command::new("security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            "pi-mcp-adapter.oauth",
-            "-a",
-            &account,
-        ])
-        .output();
+    let _ = security(&[
+        "delete-generic-password",
+        "-s",
+        "pi-mcp-adapter.oauth",
+        "-a",
+        &account,
+    ]);
     let kc = app_keychain_path(agent_dir);
-    let _ = std::process::Command::new("security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            "pi-mcp-adapter.oauth",
-            "-a",
-            &account,
-            kc.to_str().unwrap_or_default(),
-        ])
-        .output();
+    let _ = security(&[
+        "delete-generic-password",
+        "-s",
+        "pi-mcp-adapter.oauth",
+        "-a",
+        &account,
+        kc.to_str().unwrap_or_default(),
+    ]);
     let _ = std::fs::remove_dir_all(agent_dir.join("mcp-oauth").join(&account));
     Ok(list(agent_dir))
 }
@@ -486,23 +528,40 @@ pub async fn authenticate(
     name: &str,
     harness: &dyn Harness,
 ) -> Result<McpSnapshot, String> {
-    let name = name.trim();
+    let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Server name is required.".into());
     }
-    let dump = auth_dump_path(agent_dir);
-    let _ = std::fs::remove_file(&dump);
-    // Drop a leftover keychain item first. `@napi-rs/keyring` cannot always
-    // overwrite an entry created by a different parent process (TUI vs GUI).
-    let _ = logout(agent_dir, name);
+    let agent_dir = agent_dir.to_path_buf();
+    let dump = auth_dump_path(&agent_dir);
+    // Keychain and config-file work runs on the blocking pool, never on a
+    // runtime worker (see `crate::off_runtime`).
+    {
+        let (agent_dir, name, dump) = (agent_dir.clone(), name.clone(), dump.clone());
+        crate::off_runtime(move || {
+            let _ = std::fs::remove_file(&dump);
+            // Drop a leftover keychain item first. `@napi-rs/keyring` cannot always
+            // overwrite an entry created by a different parent process (TUI vs GUI).
+            let _ = logout(&agent_dir, &name);
+        })
+        .await?;
+    }
     let slash = harness.run_slash(&format!("/mcp-auth {name}")).await;
-    let dumped = persist_auth_dump(agent_dir, &dump);
-    let _ = std::fs::remove_file(&dump);
+    let dumped = {
+        let (agent_dir, dump) = (agent_dir.clone(), dump.clone());
+        crate::off_runtime(move || {
+            let dumped = persist_auth_dump(&agent_dir, &dump);
+            let _ = std::fs::remove_file(&dump);
+            dumped
+        })
+        .await?
+    };
+    let snapshot = move || crate::off_runtime(move || list(&agent_dir));
     match (slash, dumped) {
-        (_, Ok(n)) if n > 0 => Ok(list(agent_dir)),
+        (_, Ok(n)) if n > 0 => snapshot().await,
         (Err(err), _) => Err(err.to_string()),
         (Ok(_), Err(err)) => Err(err),
-        (Ok(_), Ok(_)) => Ok(list(agent_dir)),
+        (Ok(_), Ok(_)) => snapshot().await,
     }
 }
 

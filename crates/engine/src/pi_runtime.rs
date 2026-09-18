@@ -396,55 +396,71 @@ impl PiRuntimeManager {
             let archive = stage.join("runtime.tar.gz");
             let install_result = async {
                 self.download(&manifest, file, &archive).await?;
-                verify_sha256(&archive, &file.sha256)?;
-                validate_archive_paths(&archive)?;
-                let unpacked = stage.join("unpacked");
-                std::fs::create_dir_all(&unpacked).map_err(|err| err.to_string())?;
-                extract_archive(&archive, &unpacked)?;
-                validate_runtime_dir(&unpacked)?;
-                let installed = read_installed_dir(&unpacked)?;
-                if installed.version != manifest.version
-                    || installed.pi_version != manifest.pi_version
-                    || installed.plugins != manifest.plugins
-                {
-                    return Err("Pi Runtime metadata does not match its manifest.".into());
-                }
-                probe_runtime(&unpacked, &self.inner.paths.agent_dir)?;
-                // A process killed during an older install can leave a
-                // same-version directory behind with only part of the
-                // archive extracted. Do not let that tombstone block every
-                // future retry: the staged directory has already passed all
-                // validation, so replace the invalid destination atomically
-                // under the install mutex.
-                if destination.exists() && validate_runtime_dir(&destination).is_err() {
-                    std::fs::remove_dir_all(&destination)
-                        .map_err(|err| format!("Could not remove incomplete Pi Runtime: {err}"))?;
-                }
-                match std::fs::rename(&unpacked, &destination) {
-                    Ok(()) => {}
-                    Err(err) if destination.is_dir() => {
-                        validate_runtime_dir(&destination)?;
-                        tracing::debug!(error = %err, "Pi Runtime install lost an equivalent race");
+                // Hashing, `tar`, the `pi --version` probe and the directory
+                // moves are all blocking: keep them off the runtime workers.
+                let expected = manifest.clone();
+                let sha256 = file.sha256.clone();
+                let agent_dir = self.inner.paths.agent_dir.clone();
+                let (archive, stage, destination) =
+                    (archive.clone(), stage.clone(), destination.clone());
+                crate::off_runtime(move || {
+                    verify_sha256(&archive, &sha256)?;
+                    validate_archive_paths(&archive)?;
+                    let unpacked = stage.join("unpacked");
+                    std::fs::create_dir_all(&unpacked).map_err(|err| err.to_string())?;
+                    extract_archive(&archive, &unpacked)?;
+                    validate_runtime_dir(&unpacked)?;
+                    let installed = read_installed_dir(&unpacked)?;
+                    if installed.version != expected.version
+                        || installed.pi_version != expected.pi_version
+                        || installed.plugins != expected.plugins
+                    {
+                        return Err("Pi Runtime metadata does not match its manifest.".into());
                     }
-                    Err(err) => return Err(err.to_string()),
-                }
-                Ok::<_, String>(())
+                    probe_runtime(&unpacked, &agent_dir)?;
+                    // A process killed during an older install can leave a
+                    // same-version directory behind with only part of the
+                    // archive extracted. Do not let that tombstone block every
+                    // future retry: the staged directory has already passed all
+                    // validation, so replace the invalid destination atomically
+                    // under the install mutex.
+                    if destination.exists() && validate_runtime_dir(&destination).is_err() {
+                        std::fs::remove_dir_all(&destination).map_err(|err| {
+                            format!("Could not remove incomplete Pi Runtime: {err}")
+                        })?;
+                    }
+                    match std::fs::rename(&unpacked, &destination) {
+                        Ok(()) => {}
+                        Err(err) if destination.is_dir() => {
+                            validate_runtime_dir(&destination)?;
+                            tracing::debug!(error = %err, "Pi Runtime install lost an equivalent race");
+                        }
+                        Err(err) => return Err(err.to_string()),
+                    }
+                    Ok::<_, String>(())
+                })
+                .await?
             }
             .await;
-            let _ = std::fs::remove_dir_all(&stage);
+            let stage_cleanup = stage.clone();
+            let _ = crate::off_runtime(move || std::fs::remove_dir_all(stage_cleanup)).await;
             install_result?;
         }
 
-        initialize_agent(&self.inner.paths, &destination)?;
-        activate(&self.inner.paths, &destination)?;
-        if let Err(err) = prune_stale_managed_packages(&self.inner.paths, &destination) {
-            tracing::warn!(error = %err, "could not prune retired Pi runtime packages");
-        }
-        if let Err(err) = reconcile_bundled_packages(&self.inner.paths, &destination) {
-            tracing::warn!(error = %err, "could not enable new Pi runtime packages");
-        }
-        read_installed(&self.inner.paths)
-            .ok_or_else(|| "Pi Runtime activation completed without valid metadata.".into())
+        let paths = self.inner.paths.clone();
+        crate::off_runtime(move || {
+            initialize_agent(&paths, &destination)?;
+            activate(&paths, &destination)?;
+            if let Err(err) = prune_stale_managed_packages(&paths, &destination) {
+                tracing::warn!(error = %err, "could not prune retired Pi runtime packages");
+            }
+            if let Err(err) = reconcile_bundled_packages(&paths, &destination) {
+                tracing::warn!(error = %err, "could not enable new Pi runtime packages");
+            }
+            read_installed(&paths)
+                .ok_or_else(|| "Pi Runtime activation completed without valid metadata.".into())
+        })
+        .await?
     }
 
     async fn fetch_manifest(&self) -> Result<PiRuntimeManifest, String> {
