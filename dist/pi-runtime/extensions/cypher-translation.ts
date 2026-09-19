@@ -4,6 +4,13 @@
  * Translation is deliberately implemented as an extension rather than in the
  * harness bridge: it therefore applies to every Pi entry point (TUI, RPC and
  * SDK sessions) while keeping the main model's tool/thinking transcript intact.
+ *
+ * Each message is translated against a short reference block of earlier turns.
+ * A word with several readings — 接口 as interface or endpoint, commit as git or
+ * promise — is settled by what was already being discussed, and quoting both
+ * languages of a turn keeps the second mention of a term rendered the way the
+ * first one was. The block is text only: user messages and the model's final
+ * answers, never tool calls, tool output or thinking.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -41,6 +48,24 @@ const DEFAULTS: TranslationSettings = {
 
 const SETTINGS_FILE = "translation.json";
 const MAX_TRANSLATION_CHARS = 24_000;
+
+/** How many earlier exchanges the reference block may quote. Word sense
+ *  saturates almost immediately — one or two turns fix the domain, and
+ *  everything after that is paid for on every message for nothing. */
+const CONTEXT_EXCHANGES = 2;
+/** Per quoted turn. The referent of an ambiguous word lives in the opening
+ *  sentences, not in the tail of a long answer. */
+const CONTEXT_CHARS_PER_TURN = 250;
+/** Sized so a single exchange — four clipped quotes with their labels, ~1.1k —
+ *  always fits whole. The budget therefore only ever drops OLDER turns, and the
+ *  newest one can never be squeezed out by its own length. */
+const CONTEXT_MAX_CHARS = 1_600;
+/** A message this long carries its own referents, so context would cost the
+ *  most exactly where it buys the least. */
+const CONTEXT_SKIP_SOURCE_CHARS = 800;
+const HISTORY_LIMIT = CONTEXT_EXCHANGES + 1;
+
+type Direction = "input" | "output";
 
 function settings(): TranslationSettings {
   const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -219,6 +244,150 @@ let warnedError: string | undefined;
  *  an `auto` source still knows where to translate answers back to. */
 let lastUserLanguage: string | undefined;
 
+/** One side of an earlier turn, in both languages once it has been translated.
+ *  Keeping both is what makes the block a translation memory rather than mere
+ *  topic: the pair shows which word was already chosen for which term, so the
+ *  next turn reuses it instead of alternating synonyms. */
+interface TurnText {
+  original: string;
+  translated?: string;
+}
+
+/** A user message and the answer it drew. Text only — tool calls, tool output
+ *  and thinking are deliberately never recorded: they are the bulk of a coding
+ *  transcript's tokens, they carry no word sense, and the translation model is
+ *  frequently a different provider than the coding model. */
+interface Exchange {
+  user?: TurnText;
+  assistant?: TurnText;
+}
+
+let historySession: string | undefined;
+let history: Exchange[] = [];
+
+function sessionId(ctx: ExtensionContext): string | undefined {
+  try {
+    return ctx.sessionManager?.getSessionId();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Scoped to one session: a switch, a fork or a new session must not inherit
+ *  the previous branch's words. */
+function historyFor(ctx: ExtensionContext): Exchange[] {
+  const id = sessionId(ctx);
+  if (id !== historySession) {
+    historySession = id;
+    history = [];
+  }
+  return history;
+}
+
+function remember(entries: Exchange[], exchange: Exchange): void {
+  entries.push(exchange);
+  while (entries.length > HISTORY_LIMIT) entries.shift();
+}
+
+function recordUserTurn(ctx: ExtensionContext, original: string, translated?: string): void {
+  remember(historyFor(ctx), { user: { original, translated } });
+}
+
+function recordAssistantTurn(ctx: ExtensionContext, original: string, translated?: string): void {
+  const entries = historyFor(ctx);
+  const last = entries[entries.length - 1];
+  const turn: TurnText = { original, translated };
+  if (last && !last.assistant) last.assistant = turn;
+  else remember(entries, { assistant: turn });
+}
+
+/** Collapsed to one line per turn: the block is reference, not layout, and a
+ *  multi-line quote would read like a second payload to translate. */
+function clip(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= CONTEXT_CHARS_PER_TURN
+    ? flat
+    : `${flat.slice(0, CONTEXT_CHARS_PER_TURN).trimEnd()}…`;
+}
+
+function quote(role: string, language: string | undefined, text: string | undefined): string[] {
+  const body = text?.trim();
+  if (!body) return [];
+  return [`${role}${language ? ` (${language})` : ""}: ${clip(body)}`];
+}
+
+/** The recent conversation as plain text, newest last.
+ *
+ *  Which language sits on which side flips with the direction, and getting it
+ *  wrong is the difference between fixing terminology and scrambling it: on the
+ *  way in the pair runs user language → working language, on the way out it runs
+ *  back, so the same stored turn has to be labelled from the current pair. */
+export function referenceBlock(
+  exchanges: readonly Exchange[],
+  direction: Direction,
+  pair: LanguagePair,
+): string | undefined {
+  const userName = direction === "input" ? pair.fromName : pair.toName;
+  const workingName = direction === "input" ? pair.toName : pair.fromName;
+  const blocks: string[] = [];
+  let budget = CONTEXT_MAX_CHARS;
+  for (const exchange of exchanges.slice(-CONTEXT_EXCHANGES).reverse()) {
+    const lines = [
+      ...quote("User", userName, exchange.user?.original),
+      ...quote("User", workingName, exchange.user?.translated),
+      ...quote("Assistant", workingName, exchange.assistant?.original),
+      ...quote("Assistant", userName, exchange.assistant?.translated),
+    ];
+    if (!lines.length) continue;
+    const block = lines.join("\n");
+    // Whole turns only: half an exchange can strand a term away from its
+    // translation, which is the pairing the block exists to show.
+    if (block.length > budget) break;
+    budget -= block.length;
+    blocks.unshift(block);
+  }
+  return blocks.length ? blocks.join("\n") : undefined;
+}
+
+/** The instructions. Separate from the payload on purpose: the message sent to
+ *  the model holds the text to translate and nothing else, so there is no
+ *  second body for it to translate, answer, or splice into its output. */
+export function translationSystemPrompt(
+  direction: Direction,
+  pair: LanguagePair,
+  reference?: string,
+): string {
+  const subject = direction === "input" ? "a user's request" : "an assistant's answer";
+  const lines = [
+    "You are a precise translation engine.",
+    pair.fromName
+      ? `The next message is ${subject} written in ${pair.fromName}. Translate it into ${pair.toName}.`
+      : `The next message is ${subject}. Translate it into ${pair.toName}.`,
+    "Output the translation itself and nothing else: no preamble, no explanation, no commentary, no notes, no label, no surrounding quotation marks and no code fence around the answer.",
+    "Preserve Markdown, code fences, inline code, URLs, file paths, identifiers and formatting exactly as they appear.",
+    `If the message is already in ${pair.toName}, output it unchanged.`,
+  ];
+  if (reference) {
+    lines.push(
+      "",
+      "Earlier turns of the conversation follow, for reference only. Use them to settle words that have several meanings and to stay consistent with terminology already chosen. Never translate them, never answer them and never mention them.",
+      reference,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** The prompt forbids a wrapping fence, but a model that adds one anyway would
+ *  otherwise publish ``` lines straight into the transcript. Only a fence that
+ *  wraps the WHOLE answer is stripped, and only when the source is not itself a
+ *  code block — a message that is one must translate to one. */
+export function unwrapTranslation(text: string, source: string): string {
+  const trimmed = text.trim();
+  if (source.trimStart().startsWith("```")) return trimmed;
+  const fenced = /^```[^\n]*\n([\s\S]*?)\n?```$/.exec(trimmed);
+  return fenced ? fenced[1].trim() : trimmed;
+}
+
 /** Translation is a mechanical rewrite, so reasoning models should not think.
  *
  *  Requesting an effort level is the wrong lever and actively harmful: the
@@ -253,27 +422,9 @@ function hasToolCall(message: AssistantMessage): boolean {
   return message.content.some((part) => part?.type === "toolCall");
 }
 
-function extractJson(text: string): unknown {
-  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const start = trimmed.indexOf("{");
-    const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(trimmed.slice(start, end + 1));
-      } catch {
-        return undefined;
-      }
-    }
-    return undefined;
-  }
-}
-
 async function translate(
   value: string,
-  direction: "input" | "output",
+  direction: Direction,
   pair: LanguagePair,
   ctx: ExtensionContext,
   config: TranslationSettings,
@@ -291,27 +442,18 @@ async function translate(
   }
   warnedModel = undefined;
 
-  const subject = direction === "input" ? "a user's request" : "an assistant's answer";
-  const prompt = [
-    "You are a precise translation helper.",
-    pair.fromName
-      ? `Translate ${subject} from ${pair.fromName} into ${pair.toName}.`
-      : `Translate ${subject} into ${pair.toName}.`,
-    "Return JSON only with this exact shape:",
-    '{"shouldTranslate":true,"translation":"..."}',
-    pair.fromName
-      ? `Set shouldTranslate to false when the text is not primarily in ${pair.fromName}.`
-      : `Set shouldTranslate to false when the text is already in ${pair.toName}.`,
-    "Preserve Markdown, code fences, inline code, URLs, file paths, identifiers, and formatting.",
-    "Do not explain the translation or add commentary.",
-    "Text:",
-    source,
-  ].join("\n");
+  const reference =
+    source.length > CONTEXT_SKIP_SOURCE_CHARS
+      ? undefined
+      : referenceBlock(historyFor(ctx), direction, pair);
 
   try {
     const result = await ctx.modelRegistry.complete(
       model,
-      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      {
+        systemPrompt: translationSystemPrompt(direction, pair, reference),
+        messages: [{ role: "user", content: source, timestamp: Date.now() }],
+      },
       noThinkingOptions(model),
     );
     // `complete()` resolves with a failed message instead of throwing, so an
@@ -325,11 +467,11 @@ async function translate(
       return undefined;
     }
     warnedError = undefined;
-    const parsed = extractJson(textOf(result.content)) as
-      | { shouldTranslate?: boolean; translation?: string }
-      | undefined;
-    if (!parsed?.shouldTranslate || typeof parsed.translation !== "string") return undefined;
-    const translation = parsed.translation.trim();
+    // No JSON envelope to unpack: the model answers with the translation and
+    // nothing else. The skip signal that `shouldTranslate` used to carry is
+    // the instruction to echo a message that is already in the destination
+    // language, which lands here as an unchanged answer.
+    const translation = unwrapTranslation(textOf(result.content), source);
     return translation && translation !== source ? translation : undefined;
   } catch (error) {
     ctx.ui.notify(`Translation skipped: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -348,10 +490,17 @@ async function transformInput(event: InputEvent, ctx: ExtensionContext, config: 
   if (detected?.reliable && typeof detected.language === "string") {
     lastUserLanguage = detected.language;
   }
-  if (!config.translateUserMessages || !config.translationModel.trim()) return;
   const pair = inputPair(config);
-  if (!translationDecision(detected, pair)) return;
-  const translated = await translate(event.text, "input", pair, ctx, config);
+  const wanted = config.translateUserMessages && Boolean(config.translationModel.trim());
+  const translated =
+    wanted && translationDecision(detected, pair)
+      ? await translate(event.text, "input", pair, ctx, config)
+      : undefined;
+  // Recorded after the request, so the reference block a message is translated
+  // against holds only turns that came before it — and recorded even when
+  // nothing was translated, because an untranslated turn still fixes what the
+  // words in the next one refer to.
+  recordUserTurn(ctx, text, translated);
   if (translated) {
     return { action: "transform" as const, text: translated, images: event.images };
   }
@@ -363,21 +512,21 @@ async function transformFinalMessage(
   config: TranslationSettings,
 ): Promise<MessageEndEventResult | undefined> {
   const message = event.message as AgentMessage;
-  if (
-    !config.translateFinalResponses ||
-    !config.translationModel.trim() ||
-    !enabledForSession(ctx, config) ||
-    message.role !== "assistant" ||
-    hasToolCall(message)
-  ) {
+  // An intermediate message with a tool call is not the answer: only the final
+  // text, after the tool calling and the thinking, is translated or recorded.
+  if (!enabledForSession(ctx, config) || message.role !== "assistant" || hasToolCall(message)) {
     return undefined;
   }
   const assistant = message as AssistantMessage;
   const original = responseText(assistant);
   if (!original.trim()) return undefined;
   const pair = outputPair(config, lastUserLanguage);
-  if (!translationDecision(await detectLanguage(original), pair)) return undefined;
-  const translated = await translate(original, "output", pair, ctx, config);
+  const wanted = config.translateFinalResponses && Boolean(config.translationModel.trim());
+  const translated =
+    wanted && translationDecision(await detectLanguage(original), pair)
+      ? await translate(original, "output", pair, ctx, config)
+      : undefined;
+  recordAssistantTurn(ctx, original.trim(), translated);
   if (!translated) return undefined;
 
   // Cypher has already streamed the original text into its transcript. Send a
