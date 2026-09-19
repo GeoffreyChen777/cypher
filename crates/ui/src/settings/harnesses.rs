@@ -11,6 +11,7 @@ use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
 use super::titles::TitlesPage;
+use super::translation::TranslationSettings;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
 use crate::state::AppState;
@@ -19,6 +20,7 @@ use crate::theme::Theme;
 pub struct HarnessesPage {
     state: Entity<AppState>,
     titles: Entity<TitlesPage>,
+    translation: Entity<TranslationSettings>,
     packages: Loadable<PiPackagesSnapshot>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -54,9 +56,11 @@ impl HarnessesPage {
             cx.notify();
         });
         let titles = cx.new(|cx| TitlesPage::new_embedded(state.clone(), target.clone(), cx));
+        let translation = cx.new(|cx| TranslationSettings::new(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
             titles,
+            translation,
             packages: Loadable::Idle,
             target,
             generation,
@@ -347,6 +351,7 @@ impl Render for HarnessesPage {
                         ))
                     })
                     .child(body)
+                    .child(self.translation.clone())
                     .child(div().mt(px(24.0)).child(self.titles.clone())),
             )
     }

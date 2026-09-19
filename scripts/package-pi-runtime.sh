@@ -53,6 +53,7 @@ mkdir -p \
   "$STAGE/defaults" \
   "$STAGE/extensions"
 cp "$SPEC/extensions/cypher-provider-auth.ts" "$STAGE/extensions/"
+cp "$SPEC/extensions/cypher-translation.ts" "$STAGE/extensions/"
 cp "$SPEC/provider-service.mjs" "$STAGE/"
 
 # A private production dependency tree: Pi and every Cypher-curated extension
@@ -161,6 +162,9 @@ PI_PACKAGE_DIR="$STAGE/pi" CYPHER_PROVIDER_HELPER="$STAGE/provider-service.mjs" 
   "$STAGE/bin/node" --test "$SPEC/provider-service.test.mjs"
 PI_PACKAGE_DIR="$STAGE/pi" \
   "$STAGE/bin/node" --test "$ROOT/crates/harness/src/pi/engine-client.test.mjs"
+# Language gating decides whether a message costs a translation request at all,
+# so it is covered here rather than only through a live session.
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
 
 # The archive has one root directory; the installer validates every listed
 # path, then extracts with --strip-components=1.

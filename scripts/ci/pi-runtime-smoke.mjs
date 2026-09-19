@@ -46,7 +46,10 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       packages.push(name === "pi-permission-control" ? { source, extensions: ["-index.ts"] } : source);
     }
     assert.ok(packages.length > 0, "Runtime must register its curated packages");
-    const extensions = [join(runtime, "extensions/cypher-provider-auth.ts")];
+    const extensions = [
+      join(runtime, "extensions/cypher-provider-auth.ts"),
+      join(runtime, "extensions/cypher-translation.ts"),
+    ];
     if (brokenExtension) {
       const path = join(root, "broken.ts");
       await writeFile(path, 'throw new Error("CYPHER_EXPECTED_EXTENSION_FAILURE");\n');

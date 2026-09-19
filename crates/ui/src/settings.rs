@@ -24,6 +24,7 @@ pub mod providers;
 pub mod setup;
 pub mod shortcuts;
 pub mod titles;
+pub mod translation;
 pub mod web_search;
 pub mod widgets;
 

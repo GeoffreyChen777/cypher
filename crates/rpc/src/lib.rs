@@ -45,6 +45,9 @@ pub mod methods {
     pub const SET_PI_PACKAGE_ENABLED: &str = "SetPiPackageEnabled";
     /// Download/install state for Cypher's isolated Pi runtime.
     pub const PI_RUNTIME_STATUS: &str = "PiRuntimeStatus";
+    pub const GET_PI_TRANSLATION_SETTINGS: &str = "GetPiTranslationSettings";
+    pub const SET_PI_TRANSLATION_SETTINGS: &str = "SetPiTranslationSettings";
+    pub const DETECT_PI_LANGUAGE: &str = "DetectPiLanguage";
     pub const LIST_PI_PROVIDERS: &str = "ListPiProviders";
     pub const SAVE_PI_PROVIDER: &str = "SavePiProvider";
     pub const REFRESH_PI_PROVIDER: &str = "RefreshPiProvider";

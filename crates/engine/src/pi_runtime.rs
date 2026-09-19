@@ -697,7 +697,13 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
         .join("extensions/cypher-provider-auth.ts")
         .display()
         .to_string();
+    let translation_extension = paths
+        .current
+        .join("extensions/cypher-translation.ts")
+        .display()
+        .to_string();
     let provider_auth_available = runtime.join("extensions/cypher-provider-auth.ts").is_file();
+    let translation_available = runtime.join("extensions/cypher-translation.ts").is_file();
     if !settings.exists() {
         let description = read_installed_dir(runtime)?;
         let packages = description
@@ -722,11 +728,10 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
             .collect::<Vec<_>>();
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "packages": packages,
-            "extensions": if provider_auth_available {
-                vec![provider_auth_extension.clone()]
-            } else {
-                Vec::new()
-            }
+            "extensions": ([
+                provider_auth_available.then_some(provider_auth_extension.clone()),
+                translation_available.then_some(translation_extension.clone()),
+            ].into_iter().flatten().collect::<Vec<_>>())
         }))
         .map_err(|err| err.to_string())?;
         std::fs::write(&settings, bytes).map_err(|err| err.to_string())?;
@@ -741,17 +746,17 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .ok_or_else(|| "Pi settings extensions must be an array.".to_string())?;
-        if provider_auth_available
-            && !extensions
-                .iter()
-                .any(|entry| entry.as_str().is_some_and(|source| {
-                    source == provider_auth_extension || (Path::new(source).is_absolute() && matches!(
-                        (std::fs::canonicalize(source), std::fs::canonicalize(&provider_auth_extension)),
-                        (Ok(existing), Ok(expected)) if existing == expected
-                    ))
-                }))
-        {
-            extensions.push(Value::String(provider_auth_extension));
+        let mut added = false;
+        if provider_auth_available {
+            added |= register_extension(extensions, provider_auth_extension);
+        }
+        if translation_available {
+            added |= register_extension(extensions, translation_extension);
+        }
+        // Only a real addition earns a rewrite: this runs on every engine
+        // start, and rewriting settings.json each time would churn a file the
+        // user also edits.
+        if added {
             let bytes = serde_json::to_vec_pretty(&root).map_err(|err| err.to_string())?;
             let temporary = settings.with_extension("json.tmp");
             std::fs::write(&temporary, bytes).map_err(|err| err.to_string())?;
@@ -768,6 +773,27 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
         .map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+/// Add one Cypher-curated extension to `extensions` unless it is already
+/// registered, reporting whether it was added. An absolute entry is compared
+/// through `canonicalize` as well, so an alias of the same file — the runtime
+/// directory reached through its `current` symlink — is never listed twice.
+fn register_extension(extensions: &mut Vec<Value>, path: String) -> bool {
+    let registered = extensions.iter().any(|entry| {
+        entry.as_str().is_some_and(|source| {
+            source == path
+                || (Path::new(source).is_absolute()
+                    && matches!(
+                        (std::fs::canonicalize(source), std::fs::canonicalize(&path)),
+                        (Ok(existing), Ok(expected)) if existing == expected
+                    ))
+        })
+    });
+    if !registered {
+        extensions.push(Value::String(path));
+    }
+    !registered
 }
 
 /// Bundled plugin names this agent directory has already been offered.

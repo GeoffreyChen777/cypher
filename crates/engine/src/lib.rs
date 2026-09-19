@@ -27,6 +27,7 @@ mod notification_events;
 pub mod pi_packages;
 pub mod pi_providers;
 pub mod pi_runtime;
+pub mod pi_translation;
 pub mod profile;
 pub mod registry;
 pub mod repos;

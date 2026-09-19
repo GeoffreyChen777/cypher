@@ -56,7 +56,8 @@ use tokio::sync::mpsc;
 
 use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, UserInputQuestion,
+    SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, TranslationMode,
+    UserInputQuestion,
 };
 
 use crate::acp::normalize::{OUTPUT_CAP, cap_text, parse_commands};
@@ -159,6 +160,10 @@ const PROGRESS_THROTTLE: Duration = Duration::from_millis(500);
 /// publishes `setStatus("cypher.subagents.v1", JSON.stringify({version:1,
 /// runs:[…]}))`. Every other key stays ignored transient TUI furniture.
 pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
+/// Final-answer translation emitted by the Cypher translation extension.
+pub(crate) const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
+/// Whole-snapshot byte cap for one translation frame.
+const TRANSLATION_STATUS_MAX_BYTES: usize = 64 * 1024;
 /// Whole-snapshot byte cap (the extension caps at 64KiB; the harness
 /// re-checks so a misbehaving publisher can't smuggle an unbounded blob).
 const SUBAGENTS_STATUS_MAX_BYTES: usize = 64 * 1024;
@@ -235,6 +240,37 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         }
     }
     Some(out)
+}
+
+/// Parse a `cypher.translation.v1` `statusText` into the rendered replacement.
+///
+/// The whole-snapshot byte cap is the only size bound: a translation is
+/// routinely longer than its source (CJK expands severalfold into English), so
+/// a second cap measured against the extension's *source* limit would silently
+/// drop exactly the long answers that are hardest to read untranslated.
+fn parse_translation_status(text: &str) -> Option<(String, TranslationMode)> {
+    if text.len() > TRANSLATION_STATUS_MAX_BYTES {
+        tracing::warn!(
+            target: "cypher_harness::pi",
+            bytes = text.len(),
+            "translation status snapshot over 64KiB; ignoring"
+        );
+        return None;
+    }
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.get("version").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let translated = value.get("text").and_then(Value::as_str)?.trim();
+    if translated.is_empty() {
+        return None;
+    }
+    let mode = match value.get("mode").and_then(Value::as_str)? {
+        "replace" => TranslationMode::Replace,
+        "append" => TranslationMode::Append,
+        _ => return None,
+    };
+    Some((translated.to_owned(), mode))
 }
 
 /// Strict per-run parse of one `cypher.subagents.v1` run object. `None` on
@@ -2519,6 +2555,21 @@ async fn run_session(session: Session) {
                                     break 'main;
                                 }
                             }
+                            if key == TRANSLATION_STATUS_KEY {
+                                let text = payload
+                                    .get("statusText")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                if let Some((text, mode)) = parse_translation_status(text)
+                                    && !send(
+                                        &event_tx,
+                                        AgentEvent::Translation { text, mode },
+                                    )
+                                    .await
+                                {
+                                    break 'main;
+                                }
+                            }
                             // Any other key stays TUI furniture (ignored).
                         }
                         // Deliberate: setWidget/setTitle/set_editor_text (and
@@ -3179,5 +3230,60 @@ mod tests {
         let question = q(&select);
         assert_eq!(question.options, vec!["A", "B"]);
         assert!(!question.multi_select);
+    }
+
+    #[test]
+    fn parse_translation_status_accepts_the_v1_frame() {
+        let (text, mode) = parse_translation_status(
+            &json!({ "version": 1, "text": "  译文  ", "mode": "append" }).to_string(),
+        )
+        .expect("valid frame");
+        assert_eq!(text, "译文", "surrounding whitespace is trimmed");
+        assert_eq!(mode, TranslationMode::Append);
+        assert_eq!(
+            parse_translation_status(
+                &json!({ "version": 1, "text": "hi", "mode": "replace" }).to_string()
+            )
+            .map(|(_, mode)| mode),
+            Some(TranslationMode::Replace)
+        );
+    }
+
+    #[test]
+    fn parse_translation_status_rejects_wrong_versions_junk_and_empty_text() {
+        for bad in [
+            json!({ "version": 2, "text": "hi", "mode": "replace" }).to_string(),
+            json!({ "text": "hi", "mode": "replace" }).to_string(),
+            json!({ "version": 1, "mode": "replace" }).to_string(),
+            json!({ "version": 1, "text": "hi", "mode": "rewrite" }).to_string(),
+            json!({ "version": 1, "text": "hi" }).to_string(),
+            // Whitespace-only would blank the rendered answer.
+            json!({ "version": 1, "text": "   ", "mode": "replace" }).to_string(),
+            "not json".to_owned(),
+            String::new(),
+        ] {
+            assert!(
+                parse_translation_status(&bad).is_none(),
+                "must reject {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_translation_status_bounds_only_on_the_snapshot_byte_cap() {
+        // A translation is routinely longer than its source; only the 64KiB
+        // frame cap may drop one, never a source-sized character limit.
+        let long = "译".repeat(20_000);
+        let frame = json!({ "version": 1, "text": long, "mode": "replace" }).to_string();
+        assert!(frame.len() < TRANSLATION_STATUS_MAX_BYTES);
+        assert_eq!(
+            parse_translation_status(&frame).map(|(text, _)| text.chars().count()),
+            Some(20_000)
+        );
+
+        let oversized =
+            json!({ "version": 1, "text": "x".repeat(TRANSLATION_STATUS_MAX_BYTES), "mode": "replace" })
+                .to_string();
+        assert!(parse_translation_status(&oversized).is_none());
     }
 }

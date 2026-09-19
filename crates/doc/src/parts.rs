@@ -314,6 +314,21 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
+        AgentEvent::Translation { text, mode } => {
+            if let Some(MessagePart::Text { text: current, .. }) = out
+                .iter_mut()
+                .rev()
+                .find(|part| matches!(part, MessagePart::Text { .. }))
+            {
+                match mode {
+                    cypher_proto::TranslationMode::Replace => *current = text.clone(),
+                    cypher_proto::TranslationMode::Append => {
+                        current.push_str("\n\n---\n\n");
+                        current.push_str(text);
+                    }
+                }
+            }
+        }
         AgentEvent::ToolResult {
             id,
             is_error,
@@ -1003,6 +1018,59 @@ mod tests {
             } => assert_eq!(output, "final"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn translation_updates_only_the_latest_rendered_text_part() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::TextDelta {
+                text: "first".into(),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::Exec {
+                    command: "true".into(),
+                },
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::TextDelta {
+                text: "final".into(),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Translation {
+                text: "translated".into(),
+                mode: cypher_proto::TranslationMode::Replace,
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { text, .. } if text == "first"
+        ));
+        assert!(matches!(
+            &parts[2],
+            MessagePart::Text { text, .. } if text == "translated"
+        ));
+
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Translation {
+                text: "追加".into(),
+                mode: cypher_proto::TranslationMode::Append,
+            },
+        );
+        assert!(matches!(
+            &parts[2],
+            MessagePart::Text { text, .. } if text == "translated\n\n---\n\n追加"
+        ));
     }
 
     #[test]

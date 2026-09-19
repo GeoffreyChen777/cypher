@@ -410,6 +410,14 @@ pub enum AgentEvent {
         /// fold tails it again before anything persists.
         output: String,
     },
+    /// Render-only translation for the completed final assistant statement.
+    /// Pi keeps its original assistant message/context; Cypher applies this
+    /// side-band event to the displayed transcript after streaming completes.
+    #[serde(rename_all = "camelCase")]
+    Translation {
+        text: String,
+        mode: TranslationMode,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -456,6 +464,13 @@ pub enum AgentEvent {
     SubagentStatus {
         runs: Vec<SubagentRun>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TranslationMode {
+    Replace,
+    Append,
 }
 
 #[cfg(test)]

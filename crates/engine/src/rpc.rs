@@ -94,6 +94,12 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DetectPiLanguageParams {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
@@ -1258,6 +1264,9 @@ fn forwardable(method: &str) -> bool {
             | methods::INSTALL_PI_PACKAGE
             | methods::SET_PI_PACKAGE_ENABLED
             | methods::PI_RUNTIME_STATUS
+            | methods::GET_PI_TRANSLATION_SETTINGS
+            | methods::SET_PI_TRANSLATION_SETTINGS
+            | methods::DETECT_PI_LANGUAGE
             | methods::LIST_PI_PROVIDERS
             | methods::SAVE_PI_PROVIDER
             | methods::REFRESH_PI_PROVIDER
@@ -1727,6 +1736,66 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
             methods::PI_RUNTIME_STATUS => RpcReply::value(&self.pi_runtime()?.status()),
+            methods::GET_PI_TRANSLATION_SETTINGS => {
+                let paths = self.pi_runtime()?.paths().clone();
+                let settings = crate::off_runtime(move || crate::pi_translation::load(&paths))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&settings)
+            }
+            methods::SET_PI_TRANSLATION_SETTINGS => {
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let settings: crate::pi_translation::PiTranslationSettings = parse_params(body)?;
+                settings.validate().map_err(RpcError::BadParams)?;
+                let paths = self.pi_runtime()?.paths().clone();
+                let previous_paths = paths.clone();
+                let previous =
+                    crate::off_runtime(move || crate::pi_translation::load(&previous_paths))
+                        .await
+                        .map_err(RpcError::Failed)?;
+                // Language/display changes and deselection need no model
+                // discovery. Only newly selected ids require catalog validation.
+                let added = settings.new_model_selections(&previous);
+                if !added.is_empty() {
+                    let harness = self
+                        .registry
+                        .resolve(HarnessId::Pi)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let available = tokio::time::timeout(Duration::from_secs(10), harness.models())
+                        .await
+                        .map_err(|_| RpcError::Failed("Model catalog timed out".into()))?
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .into_iter()
+                        .map(|model| model.id)
+                        .collect::<HashSet<_>>();
+                    if added.iter().any(|model| !available.contains(*model)) {
+                        return Err(RpcError::BadParams(
+                            "Selected model is not in this device's Pi catalog; refresh and choose again"
+                                .into(),
+                        ));
+                    }
+                }
+                let saved =
+                    crate::off_runtime(move || crate::pi_translation::save(&paths, settings))
+                        .await
+                        .and_then(|result| result)
+                        .map_err(RpcError::Failed)?;
+                // The extension reads translation.json on every input/message
+                // hook. Do not invalidate model discovery or recycle sessions.
+                RpcReply::value(&saved)
+            }
+            methods::DETECT_PI_LANGUAGE => {
+                let p: DetectPiLanguageParams = parse_params(params)?;
+                if p.text.chars().count() > 24_000 {
+                    return Err(RpcError::BadParams(
+                        "Text is too long for offline language detection".into(),
+                    ));
+                }
+                RpcReply::value(&crate::pi_translation::detect_language(&p.text))
+            }
             methods::LIST_PI_PROVIDERS
             | methods::SAVE_PI_PROVIDER
             | methods::REFRESH_PI_PROVIDER
