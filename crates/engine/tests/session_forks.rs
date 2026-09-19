@@ -527,15 +527,19 @@ async fn first_user_fork_is_empty_with_no_harness_session() {
 
     // The backend saw the empty-context boundary (BeforeUser(0)) with the
     // source session + stripped prompts.
-    let reqs = rig.fork_requests.lock().unwrap();
-    let req = reqs.last().expect("one fork request");
-    assert_eq!(req.boundary, PiForkBoundary::BeforeUser(0));
-    assert_eq!(req.source_session_path, "hs-source");
-    assert_eq!(
-        req.visible_user_prompts,
-        vec!["first question", "second question"]
-    );
-    drop(reqs);
+    // Scoped rather than `drop`ped: the guard must not be live across the
+    // retry's await below, and a block is what proves it (clippy reads the
+    // scope, not the explicit drop).
+    {
+        let reqs = rig.fork_requests.lock().unwrap();
+        let req = reqs.last().expect("one fork request");
+        assert_eq!(req.boundary, PiForkBoundary::BeforeUser(0));
+        assert_eq!(req.source_session_path, "hs-source");
+        assert_eq!(
+            req.visible_user_prompts,
+            vec!["first question", "second question"]
+        );
+    }
 
     // Retry: idempotent — the SAME chat, no second backend call, and the
     // session-less target validates as a legit first-user fork (not a
@@ -755,7 +759,7 @@ async fn remote_host_is_unavailable() {
         .create_chat(
             SOURCE,
             None,
-            Some("other-device".into()),
+            Some("other-device"),
             Some(ChatConfig {
                 harness: HarnessId::Pi,
                 model: None,
@@ -1054,10 +1058,9 @@ async fn backend_io_error_is_engine_error() {
         rig.core.doc_host.clone(),
         rig.core.workspace.clone(),
         rig.pi_sessions_root.clone(),
-        Arc::new(FailingBackend::new(HarnessError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "boom",
-        )))),
+        Arc::new(FailingBackend::new(HarnessError::Io(
+            std::io::Error::other("boom"),
+        ))),
     );
     let err = forks
         .fork(SessionForkRequest {
@@ -1339,7 +1342,7 @@ async fn forwardable_marks_fork_session() {
     .await;
     // No links attached: forwarding is unavailable (offline), NOT UnknownMethod
     // — proving the method is recognized and routed as forwardable.
-    let err = reply.err().expect("forward attempt fails without links");
+    let err = reply.expect_err("forward attempt fails without links");
     assert!(
         err.to_string().contains("remote routing unavailable")
             || err.to_string().contains("cannot reach device"),

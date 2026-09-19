@@ -406,6 +406,9 @@ impl NavHistory {
         Some(self.current().clone())
     }
 
+    /// Never zero: the history always holds the route it is currently on, so
+    /// there is no empty state for an `is_empty` to report.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -2155,7 +2158,7 @@ impl Shell {
     fn fork_request_id_retained(
         result: &Result<cypher_proto::SessionForkResponse, cypher_rpc::RpcError>,
     ) -> bool {
-        matches!(result, Err(_))
+        result.is_err()
     }
 
     /// User-facing notice text for a failed `ForkSession` RPC.
@@ -2599,15 +2602,15 @@ impl Shell {
                     // and carry any unconfirmed optimistic echoes over.
                     s.transcript = fork_transcript;
                     for echo in fork_echoes {
-                        s.push_echo(&chat_id, echo);
+                        s.push_echo(chat_id, echo);
                     }
                     cx.notify();
                 });
                 // Hand the side composer's unsent draft + staged attachments
                 // off to the main composer (keyed by the promoted chat id).
                 this.composer.update(cx, |composer, cx| {
-                    composer.seed_draft(&chat_id, draft, cx);
-                    composer.seed_attachments(&chat_id, staged, cx);
+                    composer.seed_draft(chat_id, draft, cx);
+                    composer.seed_attachments(chat_id, staged, cx);
                 });
             }
             crate::side_chats::SideChatEvent::Close { side_chat_id } => {
@@ -4950,7 +4953,7 @@ impl Shell {
                     value.clone(),
                 ) {
                     Ok(status) => {
-                        let _ = state.update(cx, |state, cx| {
+                        state.update(cx, |state, cx| {
                             state.apply_pi_update(status);
                             cx.notify();
                         });
@@ -5131,7 +5134,7 @@ impl Shell {
                         },
                     },
                 };
-            let _ = state.update(cx, |state, cx| {
+            state.update(cx, |state, cx| {
                 state.apply_update(status.clone());
                 cx.notify();
             });
@@ -5172,7 +5175,7 @@ impl Shell {
                         value,
                     ) {
                         Ok(status) => {
-                            let _ = state.update(cx, |state, cx| {
+                            state.update(cx, |state, cx| {
                                 state.apply_pi_update(status);
                                 cx.notify();
                             });
@@ -6777,7 +6780,7 @@ impl Shell {
                 RightSurface::SideChat(id) if self.side_chats.contains_key(&id)
             );
         let panel_bg = crate::chat_style::panel_background(
-            &crate::chat_style::settings(cx),
+            crate::chat_style::settings(cx),
             &theme,
             is_side_chat,
         );
@@ -8229,7 +8232,7 @@ impl Render for Shell {
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let card_bg = crate::chat_style::panel_background(
-                    &crate::chat_style::settings(cx),
+                    crate::chat_style::settings(cx),
                     Theme::of(cx),
                     on_chat,
                 );

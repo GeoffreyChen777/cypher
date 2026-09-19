@@ -1525,7 +1525,7 @@ impl Changes {
         // UI may exist — without touching the just-begun selection. A cleared
         // selection hides only THIS pane's pill (scoped dismissal).
         let dismiss_popup = popup.clone();
-        let started: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+        let started: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = dismiss_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
                     popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
@@ -1533,21 +1533,14 @@ impl Changes {
             }
         });
         let clear_popup = popup.clone();
-        let cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+        let cleared: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = clear_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
                     popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
-        let settled: Rc<
-            dyn Fn(
-                crate::markdown::selection::SelectionSnapshot,
-                gpui::Point<gpui::Pixels>,
-                &mut Window,
-                &mut gpui::App,
-            ),
-        > = {
+        let settled: crate::markdown::render::SelectionSettledHandler = {
             let popup = popup.clone();
             Rc::new(move |snapshot, anchor, _window, cx| {
                 // Capture the selected chat at SETTLE time — the saved

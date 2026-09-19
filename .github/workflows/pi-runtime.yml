@@ -24,7 +24,7 @@ jobs:
       version: ${{ steps.context.outputs.version }}
       publish: ${{ steps.context.outputs.publish }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: validate tag/version and fail early on missing publication credential
@@ -42,10 +42,10 @@ jobs:
         runner: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.19.0
           cache: npm
@@ -70,7 +70,7 @@ jobs:
                 CYPHER_PROVIDER_HELPER=/runtime/provider-service.mjs \
                 /runtime/bin/node --test /runtime/provider-service.test.mjs
             '
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: pi-runtime-${{ runner.os }}-${{ runner.arch }}
           path: |
@@ -83,10 +83,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
@@ -94,7 +94,7 @@ jobs:
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: python3 scripts/ci/release.py validate-runtime --dist target/release-dist --version "$VERSION"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: github.event_name == 'workflow_dispatch'
         with:
           name: pi-runtime-manifest
@@ -111,10 +111,10 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true

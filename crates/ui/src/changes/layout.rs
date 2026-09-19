@@ -116,13 +116,9 @@ pub fn align(lines: &[DiffLine]) -> Vec<Pair> {
     let mut rows = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].kind == LineKind::Context {
-            rows.push(Pair {
-                old: Some(i as u32),
-                new: Some(i as u32),
-            });
-            i += 1;
-        } else if lines[i].kind == LineKind::Meta {
+        // Context and Meta both sit on the same row in both panes; only a
+        // change run below needs the pairing walk.
+        if matches!(lines[i].kind, LineKind::Context | LineKind::Meta) {
             rows.push(Pair {
                 old: Some(i as u32),
                 new: Some(i as u32),

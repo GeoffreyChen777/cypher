@@ -293,10 +293,8 @@ async fn resolve_identity(
     cwd: &str,
     fresh: bool,
 ) -> Option<CheckoutIdentity> {
-    if !fresh {
-        if let Some(identity) = lock(&inner.identities).get(cwd).cloned() {
-            return Some(identity);
-        }
+    if !fresh && let Some(identity) = lock(&inner.identities).get(cwd).cloned() {
+        return Some(identity);
     }
     match inner.repos.checkout_identity(Path::new(cwd)).await {
         Ok(identity) => {

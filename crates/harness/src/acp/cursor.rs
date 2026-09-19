@@ -27,26 +27,25 @@ pub(crate) fn clean_label(name: &str) -> (String, Option<String>) {
     let bytes = name.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'<' {
-            if let Some(end) = name[i..].find('>') {
-                let tag = &name[i..i + end + 1];
-                let lower = tag.to_ascii_lowercase();
-                if lower.starts_with("<span") {
-                    let content_start = i + end + 1;
-                    if let Some(close) = name[content_start..].to_ascii_lowercase().find("</span>")
-                    {
-                        let badge = name[content_start..content_start + close].trim();
-                        if !badge.is_empty() {
-                            badges.push(badge.to_owned());
-                        }
-                        i = content_start + close + "</span>".len();
-                        continue;
+        if bytes[i] == b'<'
+            && let Some(end) = name[i..].find('>')
+        {
+            let tag = &name[i..i + end + 1];
+            let lower = tag.to_ascii_lowercase();
+            if lower.starts_with("<span") {
+                let content_start = i + end + 1;
+                if let Some(close) = name[content_start..].to_ascii_lowercase().find("</span>") {
+                    let badge = name[content_start..content_start + close].trim();
+                    if !badge.is_empty() {
+                        badges.push(badge.to_owned());
                     }
+                    i = content_start + close + "</span>".len();
+                    continue;
                 }
-                // Drop any other tag wholesale.
-                i += end + 1;
-                continue;
             }
+            // Drop any other tag wholesale.
+            i += end + 1;
+            continue;
         }
         out.push(bytes[i] as char);
         i += 1;
@@ -341,7 +340,7 @@ fn looks_parameterized(models: &[Model]) -> bool {
     }
     let exploded = models
         .iter()
-        .filter(|m| parse_params(&m.id).len() > 0)
+        .filter(|m| !parse_params(&m.id).is_empty())
         .count();
     exploded * 2 < models.len()
 }

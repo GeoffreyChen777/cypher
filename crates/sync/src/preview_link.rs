@@ -216,24 +216,25 @@ impl PreviewLink {
                 changed = true;
             } else if age >= 60
                 && let Some(view) = s.view.as_mut()
+                && !view.interrupted
             {
-                if !view.interrupted {
-                    view.interrupted = true;
-                    changed = true;
-                }
+                view.interrupted = true;
+                changed = true;
             }
         }
         if s.starting_at.is_some_and(|at| at.elapsed().as_secs() >= 5) {
             s.starting = false;
             s.starting_at = None;
         }
-        if !self.is_publisher() && s.authorized && s.awaiting_snapshot {
-            if let Some(g) = s.grant.clone() {
-                let revision = s.view.as_ref().map_or(0, |v| v.coverage.revision);
-                if !s.controls.iter().any(|b| b[0] == wire::RESUME) {
-                    let bytes = wire::encode(wire::RESUME, &json!({"chatId":self.chat,"runId":g.run_id,"segmentId":g.segment_id,"epoch":g.epoch,"revision":revision,"baseSeq":cursor}), "").unwrap();
-                    Self::queue(&mut s, bytes);
-                }
+        if !self.is_publisher()
+            && s.authorized
+            && s.awaiting_snapshot
+            && let Some(g) = s.grant.clone()
+        {
+            let revision = s.view.as_ref().map_or(0, |v| v.coverage.revision);
+            if !s.controls.iter().any(|b| b[0] == wire::RESUME) {
+                let bytes = wire::encode(wire::RESUME, &json!({"chatId":self.chat,"runId":g.run_id,"segmentId":g.segment_id,"epoch":g.epoch,"revision":revision,"baseSeq":cursor}), "").unwrap();
+                Self::queue(&mut s, bytes);
             }
         }
         drop(s);

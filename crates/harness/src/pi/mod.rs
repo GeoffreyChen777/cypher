@@ -1161,12 +1161,11 @@ impl PiHarness {
                             // wins that race and aborts sign-in. Leave the
                             // dialog unanswered; the callback completes it.
                             "select" | "input" | "editor" | "confirm" => {
-                                if let Some(ui) = &ui {
-                                    if method != "input" || ui.requests.try_send((id, payload)).is_err() {
+                                if let Some(ui) = &ui
+                                    && (method != "input" || ui.requests.try_send((id, payload)).is_err()) {
                                         error = Some("Unsupported MCP sign-in dialog.".into());
                                         break;
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -1229,10 +1228,11 @@ impl Harness for PiHarness {
             return Ok(models);
         }
         let discovered = self.discover_models().await?;
-        if discovered.from_catalog && !discovered.models.is_empty() {
-            if let Ok(mut slot) = self.models_cache.lock() {
-                *slot = Some(discovered.models.clone());
-            }
+        if discovered.from_catalog
+            && !discovered.models.is_empty()
+            && let Ok(mut slot) = self.models_cache.lock()
+        {
+            *slot = Some(discovered.models.clone());
         }
         Ok(discovered.models)
     }

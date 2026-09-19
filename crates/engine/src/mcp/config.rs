@@ -343,6 +343,57 @@ impl AddMcpServers {
     }
 }
 
+pub(super) fn read_for_update(agent_dir: &Path) -> Result<Value, String> {
+    let path = mcp_path(agent_dir);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(_) => return Err("Could not read the existing MCP configuration.".into()),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_FILE {
+        return Err("MCP configuration must be a regular file no larger than 1 MiB.".into());
+    }
+    let bytes =
+        std::fs::read(path).map_err(|_| "Could not read the existing MCP configuration.")?;
+    let root: Value = serde_json::from_slice(&bytes).map_err(
+        |_| "Existing mcp.json is invalid. Repair it before adding servers; it was not modified.",
+    )?;
+    if !root.is_object() || root.get("mcpServers").is_some_and(|v| !v.is_object()) {
+        return Err(
+            "Existing mcp.json must contain an object with an optional mcpServers object.".into(),
+        );
+    }
+    Ok(root)
+}
+
+pub fn add_servers(agent_dir: &Path, params: AddMcpServers) -> Result<McpSnapshot, String> {
+    params.validate()?;
+    let _guard = CONFIG_WRITE
+        .lock()
+        .map_err(|_| "MCP configuration is busy.")?;
+    let mut root = read_for_update(agent_dir)?;
+    let servers = root
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .unwrap();
+    if params.servers.keys().any(|name| servers.contains_key(name)) {
+        return Err("An MCP server with this name already exists. Choose a different name; no servers were added.".into());
+    }
+    for (name, mut entry) in params.servers {
+        // The adapter chooses its transport from command/url, not type.
+        entry.as_object_mut().unwrap().remove("type");
+        servers.insert(name, entry);
+    }
+    if serde_json::to_vec_pretty(&root).map_or(true, |v| v.len() as u64 > MAX_FILE) {
+        return Err("The resulting MCP configuration exceeds 1 MiB.".into());
+    }
+    write_mcp_root(agent_dir, &root)?;
+    Ok(list(agent_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,55 +626,4 @@ mod tests {
         });
         assert_eq!(list(dir.path()).servers.len(), 2);
     }
-}
-
-pub(super) fn read_for_update(agent_dir: &Path) -> Result<Value, String> {
-    let path = mcp_path(agent_dir);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
-        Err(_) => return Err("Could not read the existing MCP configuration.".into()),
-    };
-    if !metadata.is_file() || metadata.len() > MAX_FILE {
-        return Err("MCP configuration must be a regular file no larger than 1 MiB.".into());
-    }
-    let bytes =
-        std::fs::read(path).map_err(|_| "Could not read the existing MCP configuration.")?;
-    let root: Value = serde_json::from_slice(&bytes).map_err(
-        |_| "Existing mcp.json is invalid. Repair it before adding servers; it was not modified.",
-    )?;
-    if !root.is_object() || root.get("mcpServers").is_some_and(|v| !v.is_object()) {
-        return Err(
-            "Existing mcp.json must contain an object with an optional mcpServers object.".into(),
-        );
-    }
-    Ok(root)
-}
-
-pub fn add_servers(agent_dir: &Path, params: AddMcpServers) -> Result<McpSnapshot, String> {
-    params.validate()?;
-    let _guard = CONFIG_WRITE
-        .lock()
-        .map_err(|_| "MCP configuration is busy.")?;
-    let mut root = read_for_update(agent_dir)?;
-    let servers = root
-        .as_object_mut()
-        .unwrap()
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .unwrap();
-    if params.servers.keys().any(|name| servers.contains_key(name)) {
-        return Err("An MCP server with this name already exists. Choose a different name; no servers were added.".into());
-    }
-    for (name, mut entry) in params.servers {
-        // The adapter chooses its transport from command/url, not type.
-        entry.as_object_mut().unwrap().remove("type");
-        servers.insert(name, entry);
-    }
-    if serde_json::to_vec_pretty(&root).map_or(true, |v| v.len() as u64 > MAX_FILE) {
-        return Err("The resulting MCP configuration exceeds 1 MiB.".into());
-    }
-    write_mcp_root(agent_dir, &root)?;
-    Ok(list(agent_dir))
 }

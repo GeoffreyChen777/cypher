@@ -318,10 +318,10 @@ impl Auth {
             let cleaned = sanitize_avatar_url(session.user.avatar_url.clone());
             if session.user.avatar_url != cleaned {
                 session.user.avatar_url = cleaned;
-                if let Ok(bytes) = serde_json::to_vec(&session) {
-                    if let Err(err) = write_private(&session_file, &bytes) {
-                        tracing::warn!(error = %err, "auth: failed to persist cleaned session");
-                    }
+                if let Ok(bytes) = serde_json::to_vec(&session)
+                    && let Err(err) = write_private(&session_file, &bytes)
+                {
+                    tracing::warn!(error = %err, "auth: failed to persist cleaned session");
                 }
             }
             session
@@ -2306,7 +2306,7 @@ mod tests {
         let port: u16 = callback
             .split('/')
             .nth(2)
-            .and_then(|host| host.rsplit_once(':').map(|(_, p)| p.parse().ok()).flatten())
+            .and_then(|host| host.rsplit_once(':').and_then(|(_, p)| p.parse().ok()))
             .expect("loopback port");
 
         async fn callback_get(port: u16, code: &str, state: &str) -> String {

@@ -834,7 +834,10 @@ mod tests {
         // Anchored: through the anchor, still capped at 8.
         let anchored = bounded_transcript_context(&entries, Some("m10")).unwrap();
         assert_eq!(anchored.lines().filter(|l| !l.is_empty()).count(), 8);
-        assert!(anchored.lines().filter(|l| !l.is_empty()).last() == Some("user: msg 10"));
+        assert_eq!(
+            anchored.lines().rfind(|l| !l.is_empty()),
+            Some("user: msg 10")
+        );
     }
 
     #[test]

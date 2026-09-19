@@ -19,156 +19,6 @@ async fn login_call(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::settings::setup::tests::pump_until;
-    use gpui::AppContext;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct Fixture(Mutex<Vec<(String, serde_json::Value)>>);
-    #[async_trait::async_trait]
-    impl cypher_rpc::RpcService for Fixture {
-        async fn handle(
-            &self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> Result<cypher_rpc::RpcReply, cypher_rpc::RpcError> {
-            let mut calls = self.0.lock().unwrap();
-            calls.push((method.into(), params));
-            let completed = calls.iter().any(|(m, _)| m == methods::COMPLETE_MCP_LOGIN);
-            let value = match method {
-                methods::ENGINE_INFO => {
-                    serde_json::json!({"deviceId":"viewer","workspaceScope":"local"})
-                }
-                methods::ENGINE_READY => serde_json::json!({}),
-                methods::LIST_MCP_SERVERS => {
-                    serde_json::json!({"adapterInstalled":true,"servers":[]})
-                }
-                methods::BEGIN_MCP_LOGIN
-                | methods::MCP_LOGIN_STATUS
-                | methods::COMPLETE_MCP_LOGIN
-                | methods::CANCEL_MCP_LOGIN => serde_json::json!({
-                    "attemptId":"remote-attempt", "phase":if completed {"succeeded"} else {"awaiting_callback"},
-                    "authorizationUrl":if completed { None } else {Some("https://auth.example/authorize?state=fixture")},"error":null
-                }),
-                _ => return Err(cypher_rpc::RpcError::UnknownMethod(method.into())),
-            };
-            Ok(cypher_rpc::RpcReply::Value(value))
-        }
-    }
-
-    #[gpui::test]
-    fn remote_mcp_login_keeps_callback_on_original_device_and_clears_input(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.background_executor.allow_parking();
-        let data = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let fixture = Arc::new(Fixture::default());
-        let dir = data.path().join("engine");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("device-id"), "viewer").unwrap();
-        let socket = cypher_env::ipc_socket(&dir).unwrap();
-        let listener = runtime
-            .block_on(cypher_rpc::LocalListener::bind(&socket))
-            .unwrap();
-        runtime.spawn(listener.serve(fixture.clone()));
-        let state = cx.update(|cx| {
-            gpui_tokio::init(cx);
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-            crate::composer::init(cx);
-            let state = cx.new(|_| AppState::new());
-            AppState::bootstrap(
-                state.clone(),
-                data.path().join("preferences"),
-                crate::state::EngineBootConfig {
-                    data_dir: dir,
-                    ipc_socket: socket,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: cypher_proto::HarnessId::Mock,
-                },
-                cx,
-            );
-            state
-        });
-        pump_until(cx, || cx.update(|cx| state.read(cx).engine().is_some()));
-        let (target,page) = cx.update(|cx| {
-            state.update(cx, |s,_| s.devices.push(serde_json::from_value(serde_json::json!({"id":"remote","name":"Remote host","platform":"linux","lastSeenAt":chrono::Utc::now()})).unwrap()));
-            let target = cx.new(|cx| DeviceTarget::new(state.clone(),cx));
-            target.update(cx, |t,cx| t.select(Some("remote".into()),cx).unwrap());
-            let page = cx.new(|cx| McpPage::new(state,target.clone(),cx));
-            (target,page)
-        });
-        pump_until(cx, || {
-            cx.update(|cx| matches!(page.read(cx).snapshot, Loadable::Ready(_)))
-        });
-        page.update(cx, |page, cx| page.start_mcp_login("wiki".into(), cx));
-        pump_until(cx, || {
-            cx.update(|cx| {
-                page.read(cx)
-                    .login
-                    .as_ref()
-                    .is_some_and(|f| f.status.is_some())
-            })
-        });
-        cx.update(|cx| assert!(target.read(cx).locked()));
-        page.update(cx, |page, cx| {
-            page.login.as_ref().unwrap().callback.update(cx, |i, cx| {
-                i.set_text(
-                    "http://localhost:8976/callback?state=fixture&code=fixture-code",
-                    cx,
-                )
-            });
-            page.submit_mcp_callback(cx);
-            assert!(
-                page.login
-                    .as_ref()
-                    .unwrap()
-                    .callback
-                    .read(cx)
-                    .text()
-                    .is_empty()
-            );
-        });
-        pump_until(cx, || {
-            cx.update(|cx| page.read(cx).login.as_ref().is_some_and(|f| !f.submitting))
-        });
-        cx.background_executor
-            .advance_clock(std::time::Duration::from_secs(1));
-        pump_until(cx, || {
-            cx.update(|cx| page.read(cx).login.is_none() && !target.read(cx).locked())
-        });
-        cx.update(|cx| {
-            assert_eq!(
-                page.read(cx).notice.as_deref(),
-                Some("Signed in on Remote host.")
-            )
-        });
-        let calls = fixture.0.lock().unwrap();
-        for (method, params) in calls.iter().filter(|(m, _)| {
-            matches!(
-                m.as_str(),
-                methods::BEGIN_MCP_LOGIN
-                    | methods::MCP_LOGIN_STATUS
-                    | methods::COMPLETE_MCP_LOGIN
-                    | methods::CANCEL_MCP_LOGIN
-            )
-        }) {
-            assert_eq!(params["targetDeviceId"], "remote", "{method}");
-            if method != methods::BEGIN_MCP_LOGIN {
-                assert_eq!(params["attemptId"], "remote-attempt");
-            }
-        }
-        assert!(calls.iter().any(|(m, p)| m == methods::COMPLETE_MCP_LOGIN
-            && p["callbackUrl"].as_str().unwrap().contains("fixture-code")));
-    }
-}
-
 pub(super) struct LoginForm {
     ticket: DeviceTicket,
     status: Option<LoginStatus>,
@@ -380,5 +230,155 @@ impl McpPage {
                 })),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::setup::tests::pump_until;
+    use gpui::AppContext;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Fixture(Mutex<Vec<(String, serde_json::Value)>>);
+    #[async_trait::async_trait]
+    impl cypher_rpc::RpcService for Fixture {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<cypher_rpc::RpcReply, cypher_rpc::RpcError> {
+            let mut calls = self.0.lock().unwrap();
+            calls.push((method.into(), params));
+            let completed = calls.iter().any(|(m, _)| m == methods::COMPLETE_MCP_LOGIN);
+            let value = match method {
+                methods::ENGINE_INFO => {
+                    serde_json::json!({"deviceId":"viewer","workspaceScope":"local"})
+                }
+                methods::ENGINE_READY => serde_json::json!({}),
+                methods::LIST_MCP_SERVERS => {
+                    serde_json::json!({"adapterInstalled":true,"servers":[]})
+                }
+                methods::BEGIN_MCP_LOGIN
+                | methods::MCP_LOGIN_STATUS
+                | methods::COMPLETE_MCP_LOGIN
+                | methods::CANCEL_MCP_LOGIN => serde_json::json!({
+                    "attemptId":"remote-attempt", "phase":if completed {"succeeded"} else {"awaiting_callback"},
+                    "authorizationUrl":if completed { None } else {Some("https://auth.example/authorize?state=fixture")},"error":null
+                }),
+                _ => return Err(cypher_rpc::RpcError::UnknownMethod(method.into())),
+            };
+            Ok(cypher_rpc::RpcReply::Value(value))
+        }
+    }
+
+    #[gpui::test]
+    fn remote_mcp_login_keeps_callback_on_original_device_and_clears_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let fixture = Arc::new(Fixture::default());
+        let dir = data.path().join("engine");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("device-id"), "viewer").unwrap();
+        let socket = cypher_env::ipc_socket(&dir).unwrap();
+        let listener = runtime
+            .block_on(cypher_rpc::LocalListener::bind(&socket))
+            .unwrap();
+        runtime.spawn(listener.serve(fixture.clone()));
+        let state = cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            crate::composer::init(cx);
+            let state = cx.new(|_| AppState::new());
+            AppState::bootstrap(
+                state.clone(),
+                data.path().join("preferences"),
+                crate::state::EngineBootConfig {
+                    data_dir: dir,
+                    ipc_socket: socket,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: cypher_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            state
+        });
+        pump_until(cx, || cx.update(|cx| state.read(cx).engine().is_some()));
+        let (target,page) = cx.update(|cx| {
+            state.update(cx, |s,_| s.devices.push(serde_json::from_value(serde_json::json!({"id":"remote","name":"Remote host","platform":"linux","lastSeenAt":chrono::Utc::now()})).unwrap()));
+            let target = cx.new(|cx| DeviceTarget::new(state.clone(),cx));
+            target.update(cx, |t,cx| t.select(Some("remote".into()),cx).unwrap());
+            let page = cx.new(|cx| McpPage::new(state,target.clone(),cx));
+            (target,page)
+        });
+        pump_until(cx, || {
+            cx.update(|cx| matches!(page.read(cx).snapshot, Loadable::Ready(_)))
+        });
+        page.update(cx, |page, cx| page.start_mcp_login("wiki".into(), cx));
+        pump_until(cx, || {
+            cx.update(|cx| {
+                page.read(cx)
+                    .login
+                    .as_ref()
+                    .is_some_and(|f| f.status.is_some())
+            })
+        });
+        cx.update(|cx| assert!(target.read(cx).locked()));
+        page.update(cx, |page, cx| {
+            page.login.as_ref().unwrap().callback.update(cx, |i, cx| {
+                i.set_text(
+                    "http://localhost:8976/callback?state=fixture&code=fixture-code",
+                    cx,
+                )
+            });
+            page.submit_mcp_callback(cx);
+            assert!(
+                page.login
+                    .as_ref()
+                    .unwrap()
+                    .callback
+                    .read(cx)
+                    .text()
+                    .is_empty()
+            );
+        });
+        pump_until(cx, || {
+            cx.update(|cx| page.read(cx).login.as_ref().is_some_and(|f| !f.submitting))
+        });
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(1));
+        pump_until(cx, || {
+            cx.update(|cx| page.read(cx).login.is_none() && !target.read(cx).locked())
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                page.read(cx).notice.as_deref(),
+                Some("Signed in on Remote host.")
+            )
+        });
+        let calls = fixture.0.lock().unwrap();
+        for (method, params) in calls.iter().filter(|(m, _)| {
+            matches!(
+                m.as_str(),
+                methods::BEGIN_MCP_LOGIN
+                    | methods::MCP_LOGIN_STATUS
+                    | methods::COMPLETE_MCP_LOGIN
+                    | methods::CANCEL_MCP_LOGIN
+            )
+        }) {
+            assert_eq!(params["targetDeviceId"], "remote", "{method}");
+            if method != methods::BEGIN_MCP_LOGIN {
+                assert_eq!(params["attemptId"], "remote-attempt");
+            }
+        }
+        assert!(calls.iter().any(|(m, p)| m == methods::COMPLETE_MCP_LOGIN
+            && p["callbackUrl"].as_str().unwrap().contains("fixture-code")));
     }
 }

@@ -1683,7 +1683,7 @@ mod tests {
         assert_eq!(
             named,
             "fix-the-panel-".to_string()
-                + &chat_worktree_name("chat-abc", None)
+                + chat_worktree_name("chat-abc", None)
                     .rsplit('-')
                     .next()
                     .unwrap()

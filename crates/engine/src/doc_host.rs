@@ -2129,16 +2129,14 @@ impl DocHost {
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
-        if is_message {
-            if let Some(workspace) = self.workspace() {
-                match workspace.chat(chat_id) {
-                    Ok(Some(chat)) if chat.archived => {
-                        if let Err(err) = workspace.set_chat_archived(chat_id, false) {
-                            tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
-                        }
+        if is_message && let Some(workspace) = self.workspace() {
+            match workspace.chat(chat_id) {
+                Ok(Some(chat)) if chat.archived => {
+                    if let Err(err) = workspace.set_chat_archived(chat_id, false) {
+                        tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
         // §7 durable delivery: when another device hosts this chat, nudge its device
@@ -2439,10 +2437,10 @@ impl DocHost {
     /// ACK rules remain unchanged.
     pub(crate) fn flush_chat_sync(&self, chat: &str) {
         let handle = lock(&self.inner.handles).get(chat).cloned();
-        if let Some(handle) = handle {
-            if let Some(client) = lock(&handle.chat2).as_ref() {
-                client.flush_pending();
-            }
+        if let Some(handle) = handle
+            && let Some(client) = lock(&handle.chat2).as_ref()
+        {
+            client.flush_pending();
         }
     }
 

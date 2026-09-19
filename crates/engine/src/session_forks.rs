@@ -24,7 +24,7 @@
 //! unrepresentable boundaries answer a typed [`SessionForkUnavailable`].
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -435,6 +435,10 @@ impl SessionForks {
     /// (real pi persists that file only on the target's first send), so a
     /// session-less target is valid there — and an unexpectedly materialized
     /// first-user path is still required to differ from the source.
+    // The `Err` here IS the protocol reply the caller returns verbatim, so its
+    // size is fixed by `SessionForkResponse`; boxing would only move the same
+    // bytes behind a pointer one frame earlier.
+    #[allow(clippy::result_large_err)]
     fn validate_existing_target(
         &self,
         existing: &Chat,
@@ -514,9 +518,9 @@ fn classify_backend_error(err: &HarnessError) -> Result<SessionForkResponse, Eng
 /// and symlinks), then the remaining components are appended lexically.
 /// `None` when the result would escape `root` (a symlinked ancestor, `..`
 /// traversal, or an unresolvable prefix) — the deletion is then refused.
-fn canonicalize_under_root(path: &PathBuf, root: &PathBuf) -> Option<PathBuf> {
+fn canonicalize_under_root(path: &Path, root: &Path) -> Option<PathBuf> {
     let root = std::fs::canonicalize(root).ok()?;
-    let mut existing = path.clone();
+    let mut existing = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     while !existing.exists() {
         let name = existing.file_name()?.to_os_string();

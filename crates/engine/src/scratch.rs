@@ -57,10 +57,11 @@ pub fn delete(chat_id: &str, path: &str) -> Result<bool, String> {
 
 /// Recreate a quick chat's scratch folder before a run spawns in it.
 pub fn ensure_for_run(chat_id: &str, cwd: &str) {
-    if is_scratch_cwd_for(cwd, chat_id) && !Path::new(cwd).is_dir() {
-        if let Err(err) = std::fs::create_dir_all(cwd) {
-            tracing::warn!(chat = %chat_id, cwd, error = %err, "could not recreate the scratch folder");
-        }
+    if is_scratch_cwd_for(cwd, chat_id)
+        && !Path::new(cwd).is_dir()
+        && let Err(err) = std::fs::create_dir_all(cwd)
+    {
+        tracing::warn!(chat = %chat_id, cwd, error = %err, "could not recreate the scratch folder");
     }
 }
 
@@ -80,16 +81,16 @@ mod tests {
         assert!(delete("chat-1", temp.path().to_str().unwrap()).is_err());
         assert!(delete("chat-1", &format!("{path}/../chat-1")).is_err());
         assert!(dir.is_dir());
-        assert_eq!(delete("chat-1", &path).unwrap(), true);
+        assert!(delete("chat-1", &path).unwrap());
         assert!(!dir.exists());
-        assert_eq!(delete("chat-1", &path).unwrap(), false);
+        assert!(!delete("chat-1", &path).unwrap());
         // A symlink in the scratch slot is unlinked, never followed.
         let victim = temp.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
         std::fs::write(victim.join("keep"), "x").unwrap();
         std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&victim, &dir).unwrap();
-        assert_eq!(delete("chat-1", &path).unwrap(), true);
+        assert!(delete("chat-1", &path).unwrap());
         assert!(victim.join("keep").is_file());
         assert!(!dir.exists());
     }

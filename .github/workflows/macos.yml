@@ -23,7 +23,7 @@ jobs:
       build: ${{ steps.context.outputs.build }}
       publish: ${{ steps.context.outputs.publish }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: validate tag/version and fail early on missing publication credential
@@ -43,7 +43,7 @@ jobs:
       AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - run: test "$(uname -m)" = arm64
@@ -90,7 +90,7 @@ jobs:
           codesign --verify --strict target/package/Cypher.app
           test "$(target/package/Cypher.app/Contents/MacOS/cypher --version)" = "cypher $VERSION"
           hdiutil verify "target/package/cypher-$stem-macos-arm64.dmg"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: macos-${{ runner.arch }}
           path: |
@@ -103,10 +103,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true
@@ -117,7 +117,7 @@ jobs:
         run: |
           python3 scripts/ci/release.py validate-platform --platform macos \
             --dist target/release-dist --version "$VERSION" --build "$BUILD"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: github.event_name == 'workflow_dispatch'
         with:
           name: checksums-and-manifests
@@ -136,10 +136,10 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: target/release-dist
           merge-multiple: true

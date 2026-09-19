@@ -283,26 +283,23 @@ async fn real_socket_text_pongs_cannot_hide_a_missing_push_ack() {
                 WsMessage::Binary(bytes) => {
                     let frame = decode(&bytes).unwrap();
                     match frame.kind {
-                        frame_type::HELLO => Some(WsMessage::Binary(
-                            encode(frame_type::STATE, &state(0), &[]).into(),
-                        )),
-                        frame_type::ROWS_REQ => Some(WsMessage::Binary(
-                            encode(
-                                frame_type::ROWS_DONE,
-                                &serde_json::json!({"headSeq": 0}),
-                                &[],
-                            )
-                            .into(),
-                        )),
+                        frame_type::HELLO => {
+                            Some(WsMessage::Binary(encode(frame_type::STATE, &state(0), &[])))
+                        }
+                        frame_type::ROWS_REQ => Some(WsMessage::Binary(encode(
+                            frame_type::ROWS_DONE,
+                            &serde_json::json!({"headSeq": 0}),
+                            &[],
+                        ))),
                         _ => None, // PUSH deliberately gets no ACK
                     }
                 }
                 _ => None,
             };
-            if let Some(response) = response {
-                if ws.send(response).await.is_err() {
-                    break;
-                }
+            if let Some(response) = response
+                && ws.send(response).await.is_err()
+            {
+                break;
             }
         }
     });

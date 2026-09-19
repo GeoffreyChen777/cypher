@@ -40,6 +40,10 @@ pub enum SessionCommandStatus {
     Cancelled,
 }
 
+// One durable command per user action, matched in ~85 places across the
+// engine and UI. Boxing the big `Run` variant would touch every one of them to
+// save stack bytes on a type that is already heap-owned by the command queue.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionCommandPayload {

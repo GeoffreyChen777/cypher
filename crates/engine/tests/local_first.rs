@@ -140,6 +140,9 @@ impl Drop for ActiveSocket {
     }
 }
 
+// The WebSocket handshake callback below returns tungstenite's own response
+// type in its `Err`; its size is the dependency's, not this fixture's.
+#[allow(clippy::result_large_err)]
 async fn serve_daemon_edge(
     mut stream: tokio::net::TcpStream,
     active: Arc<Mutex<HashMap<String, usize>>>,
@@ -243,11 +246,7 @@ async fn serve_daemon_edge(
                     "rows": [],
                     "presence": {}
                 });
-                if sink
-                    .send(WsMessage::Text(state.to_string().into()))
-                    .await
-                    .is_err()
-                {
+                if sink.send(WsMessage::Text(state.to_string())).await.is_err() {
                     return;
                 }
             }

@@ -437,8 +437,8 @@ pub fn set_package_enabled(
     });
     if params.enabled {
         if index.is_none() {
-            let setting = bundled_setting(paths, &params.source)
-                .unwrap_or_else(|| Value::String(params.source));
+            let setting =
+                bundled_setting(paths, &params.source).unwrap_or(Value::String(params.source));
             list.push(setting);
         }
     } else if let Some(index) = index {

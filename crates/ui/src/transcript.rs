@@ -34,8 +34,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, ListAlignment,
-    ListOffset, ListScrollEvent, ListState, ObjectFit, Point, SharedString, StyledImage as _,
-    StyledText, Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
+    ListOffset, ListScrollEvent, ListState, ObjectFit, SharedString, StyledImage as _, StyledText,
+    Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
 use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
@@ -2394,8 +2394,7 @@ impl Transcript {
             }
             self.own_turn_last_tick = None;
         } else if anchored
-            && err <= OWN_SEND_GLIDE_SNAP_PX
-            && err >= -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+            && (-(OWN_SEND_SCROLL_SLACK_PX + 2.0)..=OWN_SEND_GLIDE_SNAP_PX).contains(&err)
         {
             // At the hold — or resting inside the slack under it (a restick
             // that fired at the true bottom): land WITHOUT pulling the view
@@ -3701,7 +3700,7 @@ impl Transcript {
             .map(|(_, ix)| *ix);
         let row_key = row_id.clone();
         let entity = cx.weak_entity();
-        let handler: Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)> =
+        let handler: crate::markdown::render::CopyHandler =
             Rc::new(move |ix, code, _window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
                 let row_key = row_key.clone();
@@ -3747,7 +3746,7 @@ impl Transcript {
         // may exist — without touching the just-begun selection. A cleared
         // selection hides only the TRANSCRIPT pill (scoped dismissal).
         let dismiss_popup = popup.clone();
-        let started: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+        let started: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = dismiss_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
                     popup.selection_started(crate::comments::CommentOwner::Markdown(scope), cx)
@@ -3755,21 +3754,14 @@ impl Transcript {
             }
         });
         let clear_popup = popup.clone();
-        let cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)> = Rc::new(move |_window, cx| {
+        let cleared: crate::markdown::render::WindowHandler = Rc::new(move |_window, cx| {
             if let Some(popup) = clear_popup.upgrade() {
                 popup.update(cx, |popup, cx| {
                     popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
                 });
             }
         });
-        let settled: Rc<
-            dyn Fn(
-                crate::markdown::selection::SelectionSnapshot,
-                Point<gpui::Pixels>,
-                &mut Window,
-                &mut gpui::App,
-            ),
-        > = {
+        let settled: crate::markdown::render::SelectionSettledHandler = {
             let popup = popup.clone();
             Rc::new(move |snapshot, anchor, _window, cx| {
                 // Capture the selected chat at SETTLE time — the saved
@@ -3813,7 +3805,7 @@ impl Transcript {
                             Some(crate::comments::CommentHead {
                                 key: snapshot.head_key.clone(),
                                 ix: snapshot.head_ix,
-                                scope: scope,
+                                scope,
                             }),
                             clear,
                             Some(cypher_proto::SideChatSource::Transcript { anchor_message_id }),

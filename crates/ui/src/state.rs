@@ -3853,7 +3853,7 @@ mod tests {
         assert_eq!(row.config, parent.config);
         // It is its OWN row — no public row exists until promotion.
         assert_ne!(row.id, parent.id);
-        assert!(row.archived == false && row.last_message_at.is_none());
+        assert!(!row.archived && row.last_message_at.is_none());
     }
 
     #[test]
@@ -4285,7 +4285,7 @@ mod tests {
         // Pending first attempt = Queued.
         let queued = run_command("c1", "m1", 1, SessionCommandStatus::Pending);
         assert_eq!(
-            command_send_status(&[queued.clone()], "m1"),
+            command_send_status(std::slice::from_ref(&queued), "m1"),
             Some(CommandSendStatus::Queued)
         );
         // Applied is resolved — nothing for the UI to show.
@@ -4294,7 +4294,7 @@ mod tests {
         // Rejected / Expired = Failed.
         let rejected = run_command("c1", "m1", 1, SessionCommandStatus::Rejected);
         assert_eq!(
-            command_send_status(&[rejected.clone()], "m1"),
+            command_send_status(std::slice::from_ref(&rejected), "m1"),
             Some(CommandSendStatus::Failed)
         );
         let expired = run_command("c1", "m1", 1, SessionCommandStatus::Expired);

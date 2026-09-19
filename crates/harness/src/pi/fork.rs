@@ -135,6 +135,10 @@ pub(crate) fn matches_prompt(entry_text: &str, visible: &str) -> bool {
 /// long as the SEQUENCE pins a unique alignment (e.g. `["hi","hi"]` over
 /// `["hi","hi"]` → `[0,1]`). Returns the indices into `active_users` for each
 /// prompt.
+// The DP below indexes `ways`, `prefix` and `active_users` by the SAME `i` and
+// reads row `j - 1` while writing row `j`. Iterator forms of those loops would
+// need zips and splits that obscure the recurrence this comment describes.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn map_prompts_to_entries(
     active_users: &[PiEntry],
     visible_prompts: &[String],

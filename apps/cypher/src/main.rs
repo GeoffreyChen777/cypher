@@ -625,6 +625,39 @@ mod log_file_tests {
     }
 }
 
+/// Delete `cypher-{mode}.{pid}.log` overflow files older than a week — they
+/// only exist when a second instance raced a live one for the canonical log.
+#[cfg(unix)]
+fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("cypher-{mode}.");
+    let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(middle) = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        if !middle.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > week);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod workos_resolver_tests {
     use super::{DEFAULT_WORKOS_CLIENT_ID, PRODUCTION_EDGE_URL, workos_client_id_from_env};
@@ -717,39 +750,6 @@ mod workos_resolver_tests {
         ] {
             assert_eq!(resolve(edge, None), None, "custom edge {edge}");
             assert_eq!(resolve(edge, Some("dev-token")), None, "custom edge {edge}");
-        }
-    }
-}
-
-/// Delete `cypher-{mode}.{pid}.log` overflow files older than a week — they
-/// only exist when a second instance raced a live one for the canonical log.
-#[cfg(unix)]
-fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let prefix = format!("cypher-{mode}.");
-    let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(middle) = name
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(".log"))
-        else {
-            continue;
-        };
-        if !middle.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > week);
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

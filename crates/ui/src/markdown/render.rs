@@ -93,22 +93,29 @@ pub struct RenderOptions {
 /// listeners ([`register_selection_listeners`]) so the owning surface can
 /// show and clear the Comment pill. Cloneable `Rc` closures — one instance
 /// rides every `RenderOptions` of a transcript.
+/// A window-scoped callback with no payload of its own.
+pub type WindowHandler = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+/// A settled selection plus the mouse-up position that anchors its pill.
+pub type SelectionSettledHandler = Rc<
+    dyn Fn(
+        super::selection::SelectionSnapshot,
+        gpui::Point<gpui::Pixels>,
+        &mut Window,
+        &mut gpui::App,
+    ),
+>;
+/// One row's code-block copy handler: block index and the code to write.
+pub type CopyHandler = Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)>;
+
 #[derive(Clone)]
 pub struct SelectionUi {
     /// A new drag / double / triple-click selection began (mouse-down).
-    pub on_started: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    pub on_started: WindowHandler,
     /// The settled selection was cleared by a mouse-down outside it.
-    pub on_cleared: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    pub on_cleared: WindowHandler,
     /// A non-empty selection settled on mouse-up, with the mouse-up position
     /// in WINDOW coordinates (the pill's anchor).
-    pub on_settled: Rc<
-        dyn Fn(
-            super::selection::SelectionSnapshot,
-            gpui::Point<gpui::Pixels>,
-            &mut Window,
-            &mut gpui::App,
-        ),
-    >,
+    pub on_settled: SelectionSettledHandler,
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -116,7 +123,7 @@ pub struct SelectionUi {
 /// transcript entity; `copied_ix` is the block currently showing feedback.
 #[derive(Clone)]
 pub struct CopyUi {
-    pub handler: Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)>,
+    pub handler: CopyHandler,
     pub copied_ix: Option<usize>,
 }
 
@@ -524,8 +531,8 @@ fn render_table(
         .into_any_element()
 }
 
-/// Flattened inline runs: one string + gpui `TextRun`s + clickable link ranges
-/// + inline-code ranges (their rounded washes are painted by a canvas UNDER
+/// Flattened inline runs: one string, gpui `TextRun`s, clickable link ranges
+/// and inline-code ranges (their rounded washes are painted by a canvas UNDER
 /// the text — `TextRun::background_color` can only paint square boxes).
 /// `text` is a `SharedString` so cached reuse across frames is an Arc clone.
 pub struct FlatText {

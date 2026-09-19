@@ -25,6 +25,18 @@ uuid.workspace = true
 # infrastructure for this crate's tests and cypher-engine's integration tests.
 mock-server = []
 
+# These two drive the in-process registry server, which only exists behind
+# `mock-server`. Declaring it keeps `--all-targets` (clippy, cargo test)
+# working without the feature instead of failing to resolve the import, and
+# names what the target actually needs.
+[[test]]
+name = "registry_client"
+required-features = ["mock-server"]
+
+[[test]]
+name = "registry_transport"
+required-features = ["mock-server"]
+
 [dev-dependencies]
 chrono.workspace = true
 # chat2_live example only (live checkpoint fetch against a deployed worker).

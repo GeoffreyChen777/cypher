@@ -617,14 +617,16 @@ fn empty_chat_pull(head_seq: u64) -> Vec<u8> {
 // ── server-side script helpers ──────────────────────────────────────────────
 
 async fn expect_kind(end: &mut ServerEnd, kind: u8) -> wire::WireFrame {
-    loop {
-        let bytes = end.rx.recv().await.expect("client hung up");
-        let frame = decode(&bytes).expect("client sent undecodable frame");
-        if frame.kind == kind {
-            return frame;
-        }
+    // Reads exactly ONE frame and requires it to be `kind` — it never skipped
+    // ahead, because the panic below was unconditional. The `loop` that used to
+    // wrap this could not reach a second iteration (clippy::never_loop, which
+    // is deny-by-default and failed the whole workspace lint).
+    let bytes = end.rx.recv().await.expect("client hung up");
+    let frame = decode(&bytes).expect("client sent undecodable frame");
+    if frame.kind != kind {
         panic!("expected frame {kind:#x}, got {:#x}", frame.kind);
     }
+    frame
 }
 
 async fn send(end: &ServerEnd, kind: u8, header: serde_json::Value, payload: &[u8]) {

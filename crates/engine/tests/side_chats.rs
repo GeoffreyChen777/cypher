@@ -522,7 +522,7 @@ async fn dispose_tears_down_without_remnants() {
                 .sessions
                 .session_status(&side)
                 .is_some_and(|s| s.status == SessionStatus::Working)
-                || rig.requests.lock().unwrap().len() >= 1
+                || !rig.requests.lock().unwrap().is_empty()
         },
         "side run to start",
     );
@@ -590,7 +590,7 @@ async fn shutdown_reaps_unpromoted_side_chats() {
     .await
     .expect("SendSideChat ok");
     wait_for(
-        || rig.requests.lock().unwrap().len() >= 1,
+        || !rig.requests.lock().unwrap().is_empty(),
         "side run to start",
     );
 

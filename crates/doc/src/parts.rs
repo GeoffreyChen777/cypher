@@ -132,6 +132,11 @@ pub enum MessageStatus {
 }
 
 /// One rendered part of an assistant message.
+// `Tool` is much wider than the other variants, but this type is constructed
+// and matched in ~200 places and is the doc's persisted shape. Boxing that one
+// variant would ripple through every fold, render and test for a stack-size
+// win that never showed up in a profile.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {

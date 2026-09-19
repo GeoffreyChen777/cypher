@@ -596,7 +596,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
             .ok()
             .flatten()
             .filter(|c| c.branch.as_deref() == Some("cypher/fix-login-flow"))
-            .map(|c| ())
+            .map(|_c| ())
     })
     .await;
     let head = tokio::process::Command::new("git")

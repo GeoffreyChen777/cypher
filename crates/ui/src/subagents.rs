@@ -532,7 +532,7 @@ impl SubagentsPanel {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let _state_observation = cx.observe(&state, |this, state, cx| {
             // Chat switch closes the old inspector (never the new chat's).
-            let open = this.popup.get().map(|id| id.clone());
+            let open = this.popup.get().cloned();
             let selected = state.read(cx).selected_chat.clone();
             if chat_switch_closes(open.as_deref(), selected.as_deref()) && this.popup.begin_close()
             {

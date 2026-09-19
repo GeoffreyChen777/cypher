@@ -442,7 +442,7 @@ fn ensure_app_keychain(agent_dir: &Path) -> Result<(PathBuf, String), String> {
     Ok((path, password))
 }
 
-fn prepend_keychain_search(path: &PathBuf) -> Result<(), String> {
+fn prepend_keychain_search(path: &Path) -> Result<(), String> {
     let listed = security(&["list-keychains", "-d", "user"]).map_err(|e| e.to_string())?;
     let existing: Vec<String> = String::from_utf8_lossy(&listed.stdout)
         .lines()

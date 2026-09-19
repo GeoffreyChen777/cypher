@@ -33,14 +33,14 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || {
             echo "::error::NOT DEPLOYED: configure CLOUDFLARE_API_TOKEN in repository Actions secrets."; exit 1;
           }
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: main
           persist-credentials: false
       - id: source
         name: record the snapshot all workers will deploy
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.19.0
           cache: npm
@@ -66,11 +66,11 @@ jobs:
           - apps/landing/wrangler.jsonc
           - apps/www-redirect/wrangler.jsonc
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24.19.0
           cache: npm

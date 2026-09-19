@@ -555,7 +555,7 @@ async fn start_subagent_refuses_a_parent_hosted_elsewhere() {
     let rig = assemble();
     rig.core
         .workspace
-        .create_chat(PARENT, None, Some("remote-device".into()), None, None)
+        .create_chat(PARENT, None, Some("remote-device"), None, None)
         .expect("parent chat");
     let err = start(&rig.core, "run-1", PARENT).await.unwrap_err();
     assert!(

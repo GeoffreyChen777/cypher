@@ -285,7 +285,7 @@ async fn pump(
         tokio::select! {
             frame = out_rx.recv() => match frame {
                 Some(bytes) => {
-                    if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
+                    if sink.send(WsMessage::Binary(bytes)).await.is_err() {
                         break;
                     }
                 }
@@ -722,16 +722,16 @@ impl ChatClient {
                 && !last.sent
             {
                 let old = last.bytes.clone();
-                if let Some(merged) = merge_loro_updates(&[old, bytes.clone()]) {
-                    if self.sink.update_outbox(&last.batch_id, &merged).is_ok() {
-                        last.bytes = merged;
-                        shared.flush_at.get_or_insert_with(|| {
-                            tokio::time::Instant::now() + Duration::from_secs(2)
-                        });
-                        drop(shared);
-                        let _ = self.nudge.try_send(());
-                        return;
-                    }
+                if let Some(merged) = merge_loro_updates(&[old, bytes.clone()])
+                    && self.sink.update_outbox(&last.batch_id, &merged).is_ok()
+                {
+                    last.bytes = merged;
+                    shared.flush_at.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_secs(2)
+                    });
+                    drop(shared);
+                    let _ = self.nudge.try_send(());
+                    return;
                 }
             }
             let batch_id = uuid::Uuid::new_v4().to_string();
@@ -1241,9 +1241,7 @@ impl Actor {
         let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
             loop {
                 let bytes = pipe.rx.recv().await?;
-                let Some(frame) = wire::decode(&bytes) else {
-                    return None;
-                };
+                let frame = wire::decode(&bytes)?;
                 match frame.kind {
                     frame_type::ROWS_DONE => {
                         let done: wire::RowsDoneHeader =
@@ -1324,9 +1322,8 @@ impl Actor {
                 _ = preview_notify.notified(), if preview.is_some() => {
                     let p = preview.as_ref().unwrap();
                     let cursor = lock(&self.shared).cursor;
-                    if let Some(bytes) = p.next_frame(cursor) {
-                        if pipe.tx.try_send(bytes).is_err() { p.send_failed(); }
-                    }
+                    if let Some(bytes) = p.next_frame(cursor)
+                        && pipe.tx.try_send(bytes).is_err() { p.send_failed(); }
                 }
                 frame = pipe.rx.recv() => {
                     let Some(bytes) = frame else {

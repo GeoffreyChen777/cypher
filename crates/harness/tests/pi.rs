@@ -1342,8 +1342,7 @@ async fn fork_refuses_mismatched_prompts() {
             boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
         })
         .await
-        .err()
-        .expect("mismatch must fail");
+        .expect_err("mismatch must fail");
     assert!(err.to_string().contains("no pi user entry"), "{err}");
     // The failed mapping still cleaned up its scratch snapshot.
     assert!(
@@ -1391,8 +1390,7 @@ async fn clone_leaf_refuses_when_snapshot_lags_the_active_branch() {
             boundary: cypher_proto::PiForkBoundary::CloneLeaf,
         })
         .await
-        .err()
-        .expect("stale snapshot must fail");
+        .expect_err("stale snapshot must fail");
     assert!(
         err.to_string().contains("refusing to clone a newer leaf"),
         "{err}"
@@ -1415,8 +1413,7 @@ async fn fork_rejects_source_outside_managed_root() {
             boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
         })
         .await
-        .err()
-        .expect("outside-root source must fail");
+        .expect_err("outside-root source must fail");
     assert!(
         err.to_string().contains("outside managed session root"),
         "{err}"
@@ -1436,8 +1433,7 @@ async fn fork_rejects_missing_source() {
             boundary: cypher_proto::PiForkBoundary::BeforeUser(0),
         })
         .await
-        .err()
-        .expect("missing source must fail");
+        .expect_err("missing source must fail");
     assert!(
         err.to_string().contains("source session unavailable"),
         "{err}"
@@ -1511,8 +1507,7 @@ async fn fork_before_later_user_requires_a_materialized_session() {
             boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
         })
         .await
-        .err()
-        .expect("non-first fork with a missing new file must fail");
+        .expect_err("non-first fork with a missing new file must fail");
     assert!(err.to_string().contains("not materialized"), "{err}");
     assert!(scratch_leftovers(&root).is_empty());
 }
@@ -1531,8 +1526,7 @@ async fn clone_leaf_requires_a_materialized_session() {
             boundary: cypher_proto::PiForkBoundary::CloneLeaf,
         })
         .await
-        .err()
-        .expect("clone with a missing new file must fail");
+        .expect_err("clone with a missing new file must fail");
     assert!(err.to_string().contains("not materialized"), "{err}");
     assert!(scratch_leftovers(&root).is_empty());
 }

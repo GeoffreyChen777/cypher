@@ -946,7 +946,7 @@ impl AgentAccounts {
         }
         #[cfg(target_os = "macos")]
         {
-            return keychain::read_credentials().await;
+            keychain::read_credentials().await
         }
         #[cfg(not(target_os = "macos"))]
         (None, None)

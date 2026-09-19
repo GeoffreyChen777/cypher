@@ -871,8 +871,8 @@ mod tests {
 
     #[test]
     fn upload_chunks_are_bounded_and_cover_the_payload() {
-        assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);
-        assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
+        const { assert!(UPLOAD_CHUNK_B64_CHARS.is_multiple_of(4)) };
+        const { assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576) };
         let ranges = chunk_ranges(UPLOAD_CHUNK_B64_CHARS + 7);
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].0, 0);

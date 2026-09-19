@@ -145,7 +145,7 @@ pub const CARET_BLINK_MS: u64 = 500;
 /// through the first half-period (typing bursts never blink — each keystroke
 /// resets the phase), then alternating.
 pub fn caret_visible(ms_since_activity: u64) -> bool {
-    (ms_since_activity / CARET_BLINK_MS) % 2 == 0
+    (ms_since_activity / CARET_BLINK_MS).is_multiple_of(2)
 }
 
 /// Auto-grow: content height for a wrapped-line count.
@@ -539,7 +539,7 @@ fn session_reference_block(sessions: &[SessionReference]) -> String {
             })
             .collect();
         let json = format!("{{\"sessions\":[{}]}}", body.join(","));
-        if json.chars().count() <= MAX_SESSION_REFERENCE_CHARS || !chosen.iter().any(|&f| f == 1) {
+        if json.chars().count() <= MAX_SESSION_REFERENCE_CHARS || !chosen.contains(&1) {
             return json;
         }
         if let Some(oldest_full) = chosen.iter().position(|&f| f == 1) {
@@ -1369,7 +1369,7 @@ fn mention_links(text: &str) -> Vec<MentionLink> {
                     && chat_id.chars().count() <= MAX_SESSION_ID_CHARS
                     && !chat_id.chars().any(|c| c.is_control() || c.is_whitespace());
                 (safe && percent_encode_path(&chat_id) == encoded)
-                    .then(|| MentionKind::Session { chat_id })
+                    .then_some(MentionKind::Session { chat_id })
             })
         } else {
             search = end;
@@ -1412,10 +1412,10 @@ fn session_ref_chat_ids(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for link in mention_links(text) {
-        if let MentionKind::Session { chat_id } = link.kind {
-            if seen.insert(chat_id.clone()) {
-                out.push(chat_id);
-            }
+        if let MentionKind::Session { chat_id } = link.kind
+            && seen.insert(chat_id.clone())
+        {
+            out.push(chat_id);
         }
     }
     out
@@ -3372,16 +3372,16 @@ impl ComposerInput {
     /// Keep the cursor visible when content exceeds the element height.
     fn clamp_scroll(&mut self, element_height: f32) -> bool {
         let previous = self.scroll_top;
-        if self.follow_cursor {
-            if let Some(cursor) = self.point_for_index(self.cursor_offset()) {
-                self.scroll_top = input_scroll_offset_for_cursor(
-                    self.scroll_top,
-                    f32::from(cursor.y),
-                    f32::from(self.line_height),
-                    self.content_height,
-                    element_height,
-                );
-            }
+        if self.follow_cursor
+            && let Some(cursor) = self.point_for_index(self.cursor_offset())
+        {
+            self.scroll_top = input_scroll_offset_for_cursor(
+                self.scroll_top,
+                f32::from(cursor.y),
+                f32::from(self.line_height),
+                self.content_height,
+                element_height,
+            );
         }
         self.scroll_top = self
             .scroll_top
@@ -4036,6 +4036,9 @@ impl ComposerSideChat {
     /// The RunRequest for a side-chat turn: inherited harness/model/reasoning/
     /// options from the fork's synthetic row (the parent's config), the
     /// inherited cwd, and the inherited sandbox. Pure — unit-tested.
+    // One argument per `RunRequest` field: a params struct here would just be
+    // `RunRequest` again, one construction earlier.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_request(
         prompt: String,
         cwd: String,
@@ -4095,9 +4098,7 @@ fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
         .rev()
         .find_map(|(at, ch)| ch.is_whitespace().then_some(at + ch.len_utf8()))
         .unwrap_or(0);
-    let Some(relative_at) = text[token_start..cursor].rfind('@') else {
-        return None;
-    };
+    let relative_at = text[token_start..cursor].rfind('@')?;
     let at = token_start + relative_at;
     let valid_boundary = at == 0
         || text[..at]
@@ -4960,9 +4961,9 @@ impl Composer {
         for (ix, comment) in rows.iter().enumerate() {
             let editing = self.comment_edit.as_ref().is_some_and(|e| e.index == ix);
             let row = if editing {
-                self.render_comment_edit_row(ix, &comment, cx)
+                self.render_comment_edit_row(ix, comment, cx)
             } else {
-                self.render_comment_row(ix, &comment, &theme, cx)
+                self.render_comment_row(ix, comment, &theme, cx)
             };
             list = list.child(
                 div()
@@ -5580,7 +5581,7 @@ impl Composer {
             state
                 .spaces
                 .iter()
-                .find(|s| &s.id == id)
+                .find(|s| s.id == id)
                 .map(|s| s.display_name().to_string())
         });
         let device = state

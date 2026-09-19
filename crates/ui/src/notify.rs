@@ -24,6 +24,11 @@
 //! - failures are logged and swallowed — a missing notifier must never
 //!   bother the session flow.
 
+// Every ObjC call here goes through `msg_send!`, which expands an obsolete
+// `feature = "cargo-clippy"` gate that rustc now flags. The warning belongs to
+// the objc crate's macro, not to these call sites.
+#![allow(unexpected_cfgs)]
+
 /// Post a desktop banner. Call from the main thread (the macOS native path
 /// talks to AppKit); slow paths (spawning a CLI) hop to a background thread.
 /// Silently a no-op when disabled or no notifier is available.
@@ -214,7 +219,13 @@ mod identity {
             ORIGINAL.store(method_getImplementation(method) as usize, Ordering::Relaxed);
             let replacement: extern "C" fn(&Object, Sel) -> *mut Object =
                 bundle_identifier_override;
-            method_setImplementation(method, std::mem::transmute::<_, Imp>(replacement));
+            // Both sides spelled out: an inferred source type would silently
+            // follow `replacement` if its signature ever changed, which is
+            // exactly the mistake a method-swizzle transmute must not make.
+            method_setImplementation(
+                method,
+                std::mem::transmute::<extern "C" fn(&Object, Sel) -> *mut Object, Imp>(replacement),
+            );
             true
         })
     }

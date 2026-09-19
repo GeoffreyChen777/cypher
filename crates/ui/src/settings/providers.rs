@@ -67,9 +67,10 @@ impl CustomProviderKind {
     }
 
     fn from_provider(provider: Option<&PiProviderInfo>) -> Self {
-        match provider.map(|p| p.provider_type.as_str()) {
-            Some("newapi") | _ => Self::NewApi,
-        }
+        // Only one provider type exists today, and an unknown one still gets
+        // the NewApi form rather than a blank panel.
+        let _ = provider;
+        Self::NewApi
     }
 }
 
@@ -618,17 +619,16 @@ impl ProvidersPage {
                 match result {
                     Ok(value) => match serde_json::from_value::<PiProvidersSnapshot>(value) {
                         Ok(snapshot) => {
-                            if method == methods::SAVE_PI_PROVIDER {
-                                if let Some(p) = snapshot
+                            if method == methods::SAVE_PI_PROVIDER
+                                && let Some(p) = snapshot
                                     .providers
                                     .iter()
                                     .find(|p| Some(&p.id) == provider.as_ref())
-                                {
-                                    page.notice = Some(format!(
-                                        "{} connected. {} models available.",
-                                        p.id, p.model_count
-                                    ));
-                                }
+                            {
+                                page.notice = Some(format!(
+                                    "{} connected. {} models available.",
+                                    p.id, p.model_count
+                                ));
                             }
                             page.snapshot = Loadable::Ready(snapshot);
                             if writing {
@@ -1086,10 +1086,10 @@ impl ProvidersPage {
                         }
                     }
                     "enter" | "space" => {
-                        if let Some(menu) = page.add_menu.as_open().cloned() {
-                            if let Some(&kind) = CustomProviderKind::ALL.get(menu.active) {
-                                page.add_custom_kind(kind, window, cx);
-                            }
+                        if let Some(menu) = page.add_menu.as_open().cloned()
+                            && let Some(&kind) = CustomProviderKind::ALL.get(menu.active)
+                        {
+                            page.add_custom_kind(kind, window, cx);
                         }
                     }
                     _ => return,
@@ -1182,14 +1182,13 @@ impl ProvidersPage {
                 handles.push(form.url.focus_handle(cx));
                 handles.push(form.key.focus_handle(cx));
             }
-            if let Some(oauth) = &self.oauth {
-                if oauth
+            if let Some(oauth) = &self.oauth
+                && oauth
                     .status
                     .as_ref()
                     .is_some_and(|s| s.phase == "awaiting_callback")
-                {
-                    handles.push(oauth.callback.focus_handle(cx));
-                }
+            {
+                handles.push(oauth.callback.focus_handle(cx));
             }
             handles.push(self.cancel_focus.clone());
             handles.push(self.submit_focus.clone());

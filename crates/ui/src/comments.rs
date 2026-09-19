@@ -188,6 +188,9 @@ impl CommentPopup {
     /// (re-resolved each frame) — terminal selections pass `None` (fixed
     /// window anchor). `clear_selection` drops the source surface's
     /// selection wash on save/cancel/dismiss-and-clear.
+    // Populates `CommentOffer` field by field; grouping them would only move
+    // the same list into a struct literal at every call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
         chat_id: String,

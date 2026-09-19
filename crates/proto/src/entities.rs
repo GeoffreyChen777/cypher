@@ -66,7 +66,7 @@ pub struct ChildChat {
 }
 
 /// The persisted subagent agent profile (the `agents/<name>.md` frontmatter
-/// + body the parent extension reads): system prompt + tool allowlist +
+/// and body the parent extension reads): system prompt, tool allowlist and
 /// model/thinking. Deliberately a bounded struct, never an arbitrary env map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

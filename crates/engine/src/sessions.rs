@@ -927,17 +927,17 @@ impl SessionsEngine {
             let statuses = lock(&self.inner.statuses);
             lock(&self.inner.runs)
                 .iter()
-                .filter_map(|(id, handle)| {
+                .filter(|&(id, _handle)| {
                     statuses
                         .get(id)
                         .is_some_and(|session| session.status == SessionStatus::Idle)
-                        .then(|| {
-                            (
-                                id.clone(),
-                                handle.interrupt_token.clone(),
-                                handle.run_id.clone(),
-                            )
-                        })
+                })
+                .map(|(id, handle)| {
+                    (
+                        id.clone(),
+                        handle.interrupt_token.clone(),
+                        handle.run_id.clone(),
+                    )
                 })
                 .collect()
         };
