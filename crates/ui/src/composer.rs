@@ -27,8 +27,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use cypher_doc::{
-    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
-    TranscriptFrame,
+    MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry, TranscriptFrame,
 };
 use cypher_proto::{
     Chat, FileSearchMatch, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SlashCommand,
@@ -83,14 +82,29 @@ fn compact_height_for_line(line_height: f32) -> f32 {
 }
 /// Single-select questions auto-advance after this long.
 pub const AUTO_ADVANCE_MS: u64 = 220;
-/// Backstop for an ANSWERED question panel that is holding the composer for a
-/// follow-up request (see [`handoff_pending`], which is the real condition).
-/// Deliberately NOT a guess at engine latency: the handoff ends the moment
-/// anything lands after the answered question, however long that takes. This
-/// only bounds the pathological case where the turn wedges mid-stream with
-/// nothing behind the question, so an inert card can't own the composer
-/// forever.
-pub const WIZARD_HANDOFF_BACKSTOP_MS: u64 = 6_000;
+/// How long after an answer a panel↔composer swap still counts as the SAME
+/// interaction and so renders with no entrance fade.
+///
+/// An answered card leaves at once (user requirement), so pi-ask-user's second
+/// stage — the optional comment, a separate input request one engine round trip
+/// behind the first — arrives as a NEW card. Crossfading the composer in and
+/// that card back over it within a few hundred milliseconds is exactly what
+/// reads as a flicker; swapping them instantly does not.
+///
+/// Both sides decide this ONCE, as they mount, and never mid-life:
+/// `with_animation` replays from zero whenever its element reappears, so a fade
+/// that switched itself back on partway through would be the very flash this
+/// avoids.
+pub const WIZARD_HANDOFF_QUIET_MS: u64 = 1_500;
+/// A queued answer the host never applied: this long after the command was
+/// accepted, a question STILL pending is one whose answer demonstrably didn't
+/// take, so the card comes back rather than leaving it unanswerable. Set far
+/// past any follow-up stage, so an ordinary two-stage handoff never trips it.
+pub const WIZARD_STUCK_ANSWER_MS: u64 = 6_000;
+// The net exists for an answer the host dropped, never for one still in
+// flight: it must sit well outside the window in which a follow-up stage
+// legitimately arrives, or it brings back the card the user just answered.
+const _: () = assert!(WIZARD_STUCK_ANSWER_MS > WIZARD_HANDOFF_QUIET_MS);
 /// Keep a question panel with many options inside the composer instead of
 /// letting its content push past the bottom edge of the window.
 const WIZARD_CONTENT_MAX_HEIGHT: f32 = 360.0;
@@ -795,46 +809,17 @@ pub fn input_request_resolved(transcript: &[SessionMessageEntry], request_id: &s
     })
 }
 
-/// Whether an ANSWERED question may still be handed over to a follow-up
-/// request, so its card holds the composer instead of unmounting.
+/// Whether a card mounting now is the FOLLOW-UP stage of the question just
+/// answered — the read behind [`WIZARD_HANDOFF_QUIET_MS`], and the one place
+/// that window is interpreted.
 ///
-/// pi-ask-user asks a two-stage question — pick an option, then the optional
-/// comment — as two SEPARATE input requests, and the gap between them is one
-/// engine round trip wide. This is the deterministic "is another one coming?"
-/// read, in place of guessing at that latency. All three must hold:
-///
-/// - the turn is still streaming (a settled turn asks nothing more),
-/// - NOTHING has landed after the question we just answered — the next
-///   question, the assistant's answer text or a tool chip all end the handoff,
-/// - and the tool that asked is still RUNNING. A returned tool cannot ask
-///   again, so its card must not sit there waiting out the model's thinking
-///   time (user report: the panel lingered after the last answer).
-///
-/// A request this transcript has never heard of never holds.
-pub fn handoff_pending(transcript: &[SessionMessageEntry], request_id: &str) -> bool {
-    for entry in transcript.iter().rev() {
-        let Some(ix) = entry.parts.iter().position(|part| {
-            matches!(
-                part,
-                MessagePart::Input { request_id: rid, .. } if rid == request_id
-            )
-        }) else {
-            continue;
-        };
-        if entry.status != Some(MessageStatus::Streaming) || ix + 1 != entry.parts.len() {
-            return false;
-        }
-        return entry.parts.iter().any(|part| {
-            matches!(
-                part,
-                MessagePart::Tool {
-                    resolved: false,
-                    ..
-                }
-            )
-        });
-    }
-    false
+/// Time is the honest measure here, unlike the release decision it replaces:
+/// this only chooses whether a swap animates, so being wrong costs one fade,
+/// never a card that lingers or a click that goes nowhere.
+pub fn handoff_quiet(answered_at: Option<Instant>, now: Instant) -> bool {
+    answered_at.is_some_and(|at| {
+        now.saturating_duration_since(at) < Duration::from_millis(WIZARD_HANDOFF_QUIET_MS)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -861,13 +846,12 @@ pub struct Wizard {
     /// When set, this picker came from a slash-command extension (e.g.
     /// `/subagent-config`), not an in-turn agent question.
     pub slash: Option<SharedString>,
+    /// Mounted right behind an answer (the follow-up stage of a two-stage
+    /// question): the swap is instant, with no entrance fade. Decided once, at
+    /// mount — see [`WIZARD_HANDOFF_QUIET_MS`].
+    pub quiet_entry: bool,
     picked: Vec<Vec<usize>>,
     typed: Vec<String>,
-    /// Set the moment the answers go out. The card stays mounted but inert
-    /// through the handoff to a follow-up request instead of unmounting and
-    /// fading back in; cleared again only if the answer demonstrably didn't
-    /// take (the dead-session safety net below).
-    submitted_at: Option<Instant>,
 }
 
 impl Wizard {
@@ -878,27 +862,20 @@ impl Wizard {
             questions,
             page: 0,
             slash: None,
+            quiet_entry: false,
             picked: vec![Vec::new(); n],
             typed: vec![String::new(); n],
-            submitted_at: None,
         }
-    }
-
-    /// Whether these answers are already on their way (the card is inert).
-    pub fn is_submitted(&self) -> bool {
-        self.submitted_at.is_some()
-    }
-
-    /// Whether an answered card has held the composer past the backstop — the
-    /// only time-based release, for a turn that wedged with nothing behind its
-    /// question.
-    pub fn handoff_backstop_passed(&self) -> bool {
-        self.submitted_at
-            .is_some_and(|at| at.elapsed() >= Duration::from_millis(WIZARD_HANDOFF_BACKSTOP_MS))
     }
 
     pub fn for_slash(mut self, command: impl Into<SharedString>) -> Self {
         self.slash = Some(command.into());
+        self
+    }
+
+    /// Mount without the entrance fade (this card follows an answer).
+    pub fn quietly(mut self) -> Self {
+        self.quiet_entry = true;
         self
     }
 
@@ -1055,18 +1032,6 @@ fn split_question_context(prompt: &str) -> (String, Option<String>) {
     } else {
         (prompt.trim().to_owned(), None)
     }
-}
-
-/// Whether answering this question ENDS its ask_user call, so the card should
-/// close at once instead of holding the composer for a handoff.
-///
-/// pi-ask-user's optional comment is terminal by construction: it is the stage
-/// that carries the question, its context and the already-chosen option back
-/// for a remark, and the tool returns on its answer. Holding the card there
-/// made Skip/Submit feel stuck while the model started composing its reply
-/// (user report).
-fn is_terminal_stage(question: &UserInputQuestion) -> bool {
-    optional_comment_copy(&question.header, &question.question).is_some()
 }
 
 fn optional_comment_copy(header: &str, prompt: &str) -> Option<OptionalCommentCopy> {
@@ -4378,9 +4343,15 @@ pub struct Composer {
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
-    /// Retires an answered card once [`WIZARD_HANDOFF_MS`] passes with no
-    /// follow-up request.
-    handoff_task: Option<Task<()>>,
+    /// When the last answer went out. A card mounting within
+    /// [`WIZARD_HANDOFF_QUIET_MS`] of it is the follow-up stage, and swaps in
+    /// without an entrance fade.
+    answered_at: Option<Instant>,
+    /// The composer came back from an answer, so it too swaps in with no fade.
+    /// Only ever flipped while the composer is UNMOUNTED (a question panel is
+    /// up), because `with_animation` replays from zero the moment its element
+    /// reappears — toggling this under a live composer would flash it.
+    input_swap_instant: bool,
     send_task: Option<Task<()>>,
     /// Where turns go: the normal chat surface, or a temporary Side Chat's
     /// private RPC transport (same render path, branched transport only).
@@ -4639,7 +4610,8 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             advance_task: None,
-            handoff_task: None,
+            answered_at: None,
+            input_swap_instant: false,
             send_task: None,
             transport,
             comments: Vec::new(),
@@ -6310,12 +6282,20 @@ impl Composer {
                     if let Some(cmd) = slash {
                         wizard = wizard.for_slash(cmd);
                     }
+                    // Straight behind an answer this is stage two of a
+                    // two-stage question (pi-ask-user's optional comment):
+                    // swap it in, don't fade it in over the composer that
+                    // just came back.
+                    if handoff_quiet(self.answered_at, Instant::now()) {
+                        wizard = wizard.quietly();
+                    }
                     self.wizard = Some(wizard);
                     self.advance_task = None;
-                    // Replacing an answered card IS the handoff (stage two of a
-                    // two-stage question): the panel never unmounted, so the
-                    // expiry timer has nothing left to retire.
-                    self.handoff_task = None;
+                    // The composer is unmounting now, so this is the safe
+                    // moment to arm its next entrance: a card the user
+                    // cancels or the turn supersedes brings it back with the
+                    // ordinary fade; answering re-arms the instant swap.
+                    self.input_swap_instant = false;
                     self.input.update(cx, |input, cx| {
                         let placeholder = if pick_only {
                             ""
@@ -6341,20 +6321,16 @@ impl Composer {
                     // assistant entry took over). Never on run death: the
                     // question stays answerable until answered — the engine
                     // delivers a dead run's answer as a resumed turn.
+                    //
+                    // An ANSWERED card never reaches here — `wizard_finish`
+                    // retires it on the click itself (user requirement: the
+                    // panel must go the moment you answer, not one engine
+                    // round trip later).
                     let transcript = self.state.read(cx).transcript.clone();
                     let released = input_request_resolved(&transcript, &wizard.request_id)
                         || (!transcript.is_empty()
                             && !self.answered_requests.contains(&wizard.request_id));
-                    // An answered card holds its place while a follow-up request
-                    // may still be coming: resolving the FIRST stage of a
-                    // two-stage question must not unmount the panel in the round
-                    // trip before the second stage arrives. This reads the
-                    // transcript rather than waiting out a guessed delay, so a
-                    // slow engine pages in place just as a fast one does.
-                    let holding = wizard.is_submitted()
-                        && !wizard.handoff_backstop_passed()
-                        && handoff_pending(&transcript, &wizard.request_id);
-                    if released && !holding {
+                    if released {
                         self.wizard = None;
                         self.advance_task = None;
                         self.input
@@ -6422,12 +6398,11 @@ impl Composer {
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
         if self.wizard.is_some() {
-            // Enter inside the panel's free-text input submits the page. An
-            // ANSWERED card swallows it: the keystroke must not re-answer the
-            // page, and it must not fall through and send a chat message under
-            // a panel that is still on screen.
+            // Enter inside the panel's free-text input submits the page — it
+            // must never fall through and send a chat message under a panel
+            // that is still on screen.
             let typed = self.input.read(cx).text().trim().to_string();
-            if let Some(w) = self.wizard.as_mut().filter(|w| !w.is_submitted()) {
+            if let Some(w) = self.wizard.as_mut() {
                 w.set_typed(typed);
             }
             self.wizard_advance(cx);
@@ -7384,7 +7359,7 @@ impl Composer {
     // ---- wizard glue ----
 
     fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.as_mut().filter(|w| !w.is_submitted()) else {
+        let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
         let pick_only = wizard
@@ -7425,7 +7400,9 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.as_mut().filter(|w| !w.is_submitted()) else {
+        // A late auto-advance timer can land after its card is gone (the
+        // answer already went out); there is nothing left to advance.
+        let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
         match wizard.advance() {
@@ -7439,35 +7416,16 @@ impl Composer {
     }
 
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
-        if let Some(wizard) = self.wizard.as_mut().filter(|w| !w.is_submitted()) {
+        if let Some(wizard) = self.wizard.as_mut() {
             wizard.back();
             cx.notify();
         }
     }
 
-    /// Backstop only: retire an answered card that has held the composer past
-    /// [`WIZARD_HANDOFF_BACKSTOP_MS`]. The ordinary release is the transcript
-    /// read in the panel lifecycle, which needs no timer at all.
-    fn release_answered_wizard(&mut self, cx: &mut Context<Self>) {
-        if !self
-            .wizard
-            .as_ref()
-            .is_some_and(|wizard| wizard.handoff_backstop_passed())
-        {
-            return;
-        }
-        self.wizard = None;
-        self.advance_task = None;
-        self.handoff_task = None;
-        self.input
-            .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
-        cx.notify();
-    }
-
     /// Dismiss a slash-command picker: empty answers map to Pi's
     /// `cancelled: true`, so the extension handler returns and the run ends.
     fn wizard_cancel(&mut self, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.as_ref().filter(|w| !w.is_submitted()) else {
+        let Some(wizard) = self.wizard.as_ref() else {
             return;
         };
         let answers = wizard
@@ -7481,39 +7439,36 @@ impl Composer {
         self.wizard_finish(answers, cx);
     }
 
-    /// Submit RespondInput and either retire the card at once or hand it over.
+    /// Submit RespondInput and retire the card on the spot.
     ///
-    /// A question that can still be followed by another (stage one of a
-    /// two-stage ask_user) keeps the card mounted but inert, so stage two pages
-    /// in place instead of the panel unmounting and fading back in. The LAST
-    /// stage — the optional comment — has nothing behind it, so Skip/Submit
-    /// there closes the panel immediately rather than making the user watch it
-    /// wait for the model to start answering (user report).
+    /// Answering ENDS the card, always (user requirement). An answered card
+    /// used to stay mounted but inert while the engine came back — which is
+    /// how pi-ask-user's second stage (the optional comment, a separate input
+    /// request one round trip behind the first) paged in without the panel
+    /// unmounting. Inert is indistinguishable from frozen: the click landed on
+    /// a card that then just sat there greyed out. So the panel goes now, the
+    /// composer comes straight back, and a follow-up stage arrives as its own
+    /// card — swapped in, not faded in, so the pair doesn't read as a flicker
+    /// (see [`WIZARD_HANDOFF_QUIET_MS`]).
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
         let Some(request_id) = self
             .wizard
             .as_ref()
+            .map(|wizard| wizard.request_id.clone())
             // Already on its way: a late click, key or auto-advance timer must
             // never answer the same request twice.
-            .filter(|wizard| !wizard.is_submitted())
-            .map(|wizard| wizard.request_id.clone())
+            .filter(|request_id| !self.answered_requests.contains(request_id))
         else {
             return;
         };
-        let terminal = self
-            .wizard
-            .as_ref()
-            .and_then(|wizard| wizard.current())
-            .is_some_and(is_terminal_stage);
-        // Nothing to send the answer through — retire the card as before
-        // rather than leaving an inert one on screen forever.
+        // The card leaves either way; only the send below needs an engine.
+        self.wizard = None;
+        self.advance_task = None;
         let (engine, chat_id) = {
             let state = self.state.read(cx);
             match (state.engine().cloned(), state.selected_chat.clone()) {
                 (Some(engine), Some(chat_id)) => (engine, chat_id),
                 _ => {
-                    self.wizard = None;
-                    self.advance_task = None;
                     self.input
                         .update(cx, |input, cx| input.set_placeholder("Do anything…", cx));
                     cx.notify();
@@ -7521,27 +7476,9 @@ impl Composer {
                 }
             }
         };
-        self.advance_task = None;
         self.answered_requests.insert(request_id.clone());
-        if terminal {
-            // Nothing can follow: give the composer straight back.
-            self.wizard = None;
-            self.handoff_task = None;
-        } else {
-            if let Some(wizard) = self.wizard.as_mut() {
-                wizard.submitted_at = Some(Instant::now());
-            }
-            // The card now holds the composer until the transcript shows the
-            // handoff is over (the panel lifecycle above). This timer is only
-            // the backstop for a turn that wedges behind its question.
-            self.handoff_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(WIZARD_HANDOFF_BACKSTOP_MS))
-                    .await;
-                this.update(cx, |composer, cx| composer.release_answered_wizard(cx))
-                    .ok();
-            }));
-        }
+        self.answered_at = Some(Instant::now());
+        self.input_swap_instant = true;
         self.input.update(cx, |input, cx| {
             input.set_text("", cx);
             // The panel borrowed the composer input; hand back its identity.
@@ -7605,25 +7542,23 @@ impl Composer {
             // but the host may still REJECT it (e.g. the run's resolver is
             // gone). If the very same request is still the live pending input
             // once the host has had ample time to execute and the resolved
-            // flag to sync back, the answer demonstrably didn't take —
-            // un-hide the panel instead of leaving the question unanswerable.
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            // flag to sync back, the answer demonstrably didn't take — bring
+            // the panel back instead of leaving the question unanswerable.
+            //
+            // [`WIZARD_STUCK_ANSWER_MS`], not a couple of seconds: this must
+            // never race a slow-but-healthy round trip, or the card the user
+            // just answered reappears for a moment before the resolved flag
+            // lands — the flash this whole path is trying to avoid.
+            cx.background_executor()
+                .timer(Duration::from_millis(WIZARD_STUCK_ANSWER_MS))
+                .await;
             this.update(cx, |composer, cx| {
                 let transcript = composer.state.read(cx).transcript.clone();
                 let still_pending = pending_input_request(&transcript)
                     .is_some_and(|(pending_id, _)| pending_id == request_id);
+                // The panel lifecycle rebuilds the card from the pending
+                // request as soon as it stops being suppressed.
                 if still_pending && composer.answered_requests.remove(&request_id) {
-                    // The card may still be sitting there inert (or be gone
-                    // already, in which case the panel lifecycle rebuilds it):
-                    // make it answerable again either way.
-                    if let Some(wizard) = composer
-                        .wizard
-                        .as_mut()
-                        .filter(|wizard| wizard.request_id == request_id)
-                    {
-                        wizard.submitted_at = None;
-                    }
-                    composer.handoff_task = None;
                     cx.notify();
                 }
             })
@@ -7633,10 +7568,6 @@ impl Composer {
     }
 
     fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
-        // An answered card is inert while it waits out the handoff.
-        if self.wizard.as_ref().is_some_and(Wizard::is_submitted) {
-            return;
-        }
         // Keys bubbling out of the free-text input must not double-handle:
         // digits select options only while the input is empty, and Enter is the
         // input's own Submit action when it has focus.
@@ -7687,9 +7618,6 @@ impl Composer {
         };
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
-        // Answered and waiting out the handoff: still on screen (so a two-stage
-        // question pages in place) but no longer interactive.
-        let submitted = wizard.is_submitted();
         let typed_empty = self.input.read(cx).is_empty();
         let pick_only = !question.options.is_empty() && !question.multi_select;
         let optional_comment = optional_comment_copy(&question.header, &question.question);
@@ -7725,8 +7653,6 @@ impl Composer {
                 })
                 .bg(if picked {
                     crate::theme::ink(0.08)
-                } else if submitted {
-                    crate::theme::ink(0.02)
                 } else {
                     motion::hover_blend(
                         &format!("wizard-option-{ix}"),
@@ -7734,11 +7660,9 @@ impl Composer {
                         crate::theme::ink(0.05),
                     )
                 })
-                .when(!submitted, |el| {
-                    el.on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
-                })
+                .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
                 .child(
                     div()
                         .flex_1()
@@ -7746,11 +7670,7 @@ impl Composer {
                         .text_size(px(13.0))
                         .line_height(px(18.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if submitted && !picked {
-                            theme.text_muted
-                        } else {
-                            theme.text
-                        })
+                        .text_color(theme.text)
                         .child(SharedString::from(label.clone())),
                 )
                 .when(ix < 9, |el| {
@@ -8413,11 +8333,19 @@ impl Render for Composer {
         });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
-            return container.child(motion::fade_quick(
-                "composer-wizard",
-                div().w_full().min_w_0().child(wizard),
-            ));
+            // A card that follows an answer swaps straight in: the composer
+            // came back a moment ago, and fading this one over it is what the
+            // eye reads as a flicker (see [`WIZARD_HANDOFF_QUIET_MS`]).
+            let quiet = self
+                .wizard
+                .as_ref()
+                .is_some_and(|wizard| wizard.quiet_entry);
+            let wizard = div().w_full().min_w_0().child(self.render_wizard(cx));
+            return container.child(if quiet {
+                wizard.into_any_element()
+            } else {
+                motion::fade_quick("composer-wizard", wizard).into_any_element()
+            });
         }
 
         // New chats always use the expanded layout: the repo/branch pickers
@@ -8619,7 +8547,13 @@ impl Render for Composer {
         let container = container.child(crate::frost::frosted(
             PILL_RADIUS,
             16.0,
-            motion::fade_quick("composer-input", body),
+            // Handed back by an answer, the composer returns instantly — the
+            // same swap, from the other side.
+            if self.input_swap_instant {
+                body.into_any_element()
+            } else {
+                motion::fade_quick("composer-input", body).into_any_element()
+            },
         ));
         // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
         // checkout-kind selector + ref picker for new sessions, read-only
@@ -9952,19 +9886,6 @@ mod tests {
 
         assert!(optional_comment_copy("Your answer", "plain prompt").is_none());
 
-        // The same read decides which stage ENDS the call: answering the
-        // optional comment closes the card at once, while an ordinary question
-        // may still be followed by that comment.
-        let comment = UserInputQuestion {
-            id: "c".into(),
-            header: "Optional comment".into(),
-            question: "Which mode?\n\nSelected option:\n- Safe mode".into(),
-            options: Vec::new(),
-            multi_select: false,
-        };
-        assert!(is_terminal_stage(&comment));
-        assert!(!is_terminal_stage(&question("q", &["a", "b"], false)));
-
         let (question, context) =
             split_question_context("Which source?\n\nContext:\nThe catalog is stale.");
         assert_eq!(question, "Which source?");
@@ -10370,109 +10291,35 @@ mod tests {
         );
     }
 
-    /// Regression (user report): pi-ask-user asks a two-stage question as two
-    /// SEPARATE input requests, so retiring the card the instant stage one was
-    /// answered made the panel fade out, show the composer, and fade back in
-    /// with stage two. The card holds the composer across that gap — decided by
-    /// reading the transcript, NOT by waiting out a guessed round trip.
+    /// Regression (user report): an answered card used to stay mounted but
+    /// inert until the transcript showed the handoff was over, which read as
+    /// the panel freezing on the click. It now goes at once, and pi-ask-user's
+    /// second stage arrives as its own card — INSTANT, not faded, so the
+    /// composer coming back and that card landing on top of it is one swap
+    /// rather than a flicker.
     #[test]
-    fn an_answered_card_holds_the_composer_only_until_something_follows() {
-        let answered = MessagePart::Input {
-            id: "in-r1".into(),
-            request_id: "r1".into(),
-            questions: vec![question("q", &["a"], false)],
-            resolved: true,
-        };
-        let asking = |resolved: bool| MessagePart::Tool {
-            id: "call-1".into(),
-            call: cypher_proto::ToolCall::Unknown {
-                name: "ask_user".into(),
-                input: None,
-            },
-            is_error: false,
-            resolved,
-            output: None,
-            progress: None,
-            diff: None,
-            output_ref: None,
-            output_bytes: None,
-            diff_ref: None,
-            diff_stats: None,
-        };
-        let streaming = |parts: Vec<MessagePart>| SessionMessageEntry {
-            id: "m".into(),
-            role: MessageRole::Assistant,
-            parts,
-            created_at: 0,
-            device_id: "d".into(),
-            status: Some(MessageStatus::Streaming),
-            continuation_of: None,
-            completed_at: None,
-        };
-
-        // THE GAP: stage one answered, the asking tool still running, nothing
-        // behind it yet. However long the engine takes to come back with stage
-        // two, the card keeps the composer.
-        let t = vec![streaming(vec![asking(false), answered.clone()])];
-        assert!(handoff_pending(&t, "r1"));
-
-        // The tool RETURNED on that answer: nothing can follow, so the card
-        // must not sit there waiting out the model's thinking time.
-        let t = vec![streaming(vec![asking(true), answered.clone()])];
-        assert!(!handoff_pending(&t, "r1"));
-
-        // Stage two arrived: the handoff is over and the lifecycle pages the
-        // card onto the new request in place.
-        let t = vec![streaming(vec![
-            asking(false),
-            answered.clone(),
-            MessagePart::Input {
-                id: "in-r2".into(),
-                request_id: "r2".into(),
-                questions: vec![question("comment", &[], false)],
-                resolved: false,
-            },
-        ])];
-        assert!(!handoff_pending(&t, "r1"));
-
-        // The turn moved on instead (an ordinary single-stage question).
-        let moved_on = vec![streaming(vec![
-            asking(false),
-            answered.clone(),
-            MessagePart::Text {
-                id: "t1".into(),
-                text: "on with it".into(),
-            },
-        ])];
-        assert!(!handoff_pending(&moved_on, "r1"));
-
-        // A settled turn asks nothing more; an unknown request never holds.
-        let mut settled = streaming(vec![asking(false), answered.clone()]);
-        settled.status = Some(MessageStatus::Complete);
-        assert!(!handoff_pending(&[settled], "r1"));
-        assert!(!handoff_pending(&moved_on, "nope"));
-        assert!(!handoff_pending(&[], "r1"));
-    }
-
-    /// The backstop is the ONLY time-based release: it exists so a turn that
-    /// wedges mid-stream behind its question cannot leave an inert card owning
-    /// the composer forever.
-    #[test]
-    fn the_handoff_backstop_bounds_a_wedged_turn() {
-        let mut w = Wizard::new("req".into(), vec![question("q", &["a", "b"], false)]);
-        assert!(!w.is_submitted());
+    fn a_card_behind_an_answer_swaps_in_without_a_fade() {
+        let now = Instant::now();
         assert!(
-            !w.handoff_backstop_passed(),
-            "a card nobody answered never hits the backstop"
+            !handoff_quiet(None, now),
+            "the first question of a turn follows nothing — it fades in"
         );
 
-        w.submitted_at = Some(Instant::now());
-        assert!(w.is_submitted());
-        assert!(!w.handoff_backstop_passed());
+        // Stage two: one engine round trip behind the answer.
+        let answered_at = now - Duration::from_millis(250);
+        assert!(handoff_quiet(Some(answered_at), now));
 
-        w.submitted_at =
-            Some(Instant::now() - Duration::from_millis(WIZARD_HANDOFF_BACKSTOP_MS + 1));
-        assert!(w.handoff_backstop_passed());
+        // Long past the answer, a new question is a new interaction and gets
+        // its ordinary entrance.
+        let stale = now - Duration::from_millis(WIZARD_HANDOFF_QUIET_MS + 1);
+        assert!(!handoff_quiet(Some(stale), now));
+
+        // Whichever way it was decided, the card carries that decision for its
+        // whole life: `with_animation` replays from zero on remount, so a fade
+        // that switched on later would itself be a flash.
+        let quiet = Wizard::new("r2".into(), vec![question("comment", &[], false)]).quietly();
+        assert!(quiet.quiet_entry);
+        assert!(!Wizard::new("r1".into(), vec![question("q", &["a"], false)]).quiet_entry);
     }
 
     #[test]
