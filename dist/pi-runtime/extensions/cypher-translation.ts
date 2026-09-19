@@ -122,18 +122,15 @@ async function detectLanguage(value: string): Promise<LanguageDetection | undefi
 }
 
 /** Names and codes accepted for a configured language, mapped to ISO 639-3 —
- *  the code space the offline detector reports. */
+ *  the code space the offline detector reports.
+ *
+ *  These are exactly the languages the detector is built with (`LANGUAGES` in
+ *  `cypher_engine::pi_translation`) and exactly the ones the settings card
+ *  offers. A name outside this table is not rejected, it simply carries no
+ *  local decision, which keeps its messages going to the translation model. */
 const LANGUAGE_ALIASES: Record<string, string> = {
   english: "eng", en: "eng", eng: "eng",
   chinese: "cmn", mandarin: "cmn", zh: "cmn", zho: "cmn", cmn: "cmn",
-  japanese: "jpn", ja: "jpn", jpn: "jpn",
-  korean: "kor", ko: "kor", kor: "kor",
-  french: "fra", fr: "fra", fra: "fra", fre: "fra",
-  german: "deu", de: "deu", deu: "deu", ger: "deu",
-  spanish: "spa", es: "spa", spa: "spa",
-  portuguese: "por", pt: "por", por: "por",
-  russian: "rus", ru: "rus", rus: "rus",
-  italian: "ita", it: "ita", ita: "ita",
 };
 
 /** `undefined` means "no local decision": either `auto`, or a language this
@@ -210,6 +207,13 @@ export function translationDecision(
   pair: LanguagePair,
 ): boolean {
   if (!pair.toName) return false;
+  // A named origin the alias table does not know is one the detector was not
+  // built with, and a detector asked about a language it does not know answers
+  // with the nearest one it does: French comes back as confident English. Its
+  // verdict cannot be allowed to skip anything, so such a message always goes
+  // to the translation model. This is what keeps a language saved before the
+  // supported set was trimmed working instead of silently going untranslated.
+  if (pair.fromName && !pair.fromCode) return true;
   if (!detected?.reliable || typeof detected.language !== "string") return true;
   const language = detected.language;
   // Already in the destination language: nothing to do.

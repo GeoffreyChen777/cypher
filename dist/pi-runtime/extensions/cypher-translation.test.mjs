@@ -18,7 +18,11 @@ const reliable = (language) => ({ language, confidence: 1, reliable: true });
 test("configured languages map onto the detector's ISO 639-3 codes", () => {
   assert.equal(languageCode("Chinese"), "cmn");
   assert.equal(languageCode("  english "), "eng");
-  assert.equal(languageCode("ja"), "jpn");
+  // Every spelling of Chinese lands on Mandarin's code, which is what the
+  // detector reports for Lingua's Chinese.
+  for (const value of ["zh", "zho", "cmn", "Mandarin"]) {
+    assert.equal(languageCode(value), "cmn", value);
+  }
 });
 
 test("auto, blank and unknown languages carry no local decision", () => {
@@ -28,6 +32,27 @@ test("auto, blank and unknown languages carry no local decision", () => {
   // Regression: an unmapped name used to be compared raw against an ISO code,
   // so it could never match and silently disabled translation altogether.
   assert.equal(languageCode("Dutch"), undefined);
+  // Languages the detector is no longer built with are unmapped too, including
+  // ones the settings card used to offer.
+  for (const value of ["Japanese", "French", "Russian"]) {
+    assert.equal(languageCode(value), undefined, value);
+  }
+});
+
+// The detector knows Chinese and English only. Asked about French it does not
+// answer "unknown" — French is Latin script, so it comes back as confident
+// English, and rule 1 would then skip the message as "already in the
+// destination language". A named origin the table cannot map must therefore
+// never skip, which is what keeps a language configured before the supported
+// set was trimmed translating instead of silently passing through.
+test("a configured language the detector cannot judge never skips the model", () => {
+  const pair = { fromName: "French", toCode: "eng", toName: "English" };
+  assert.equal(translationDecision(reliable("eng"), pair), true);
+  assert.equal(translationDecision(reliable("cmn"), pair), true);
+  assert.equal(translationDecision(undefined, pair), true);
+  // A supported origin still gates normally.
+  const supported = { fromCode: "cmn", fromName: "Chinese", toCode: "eng", toName: "English" };
+  assert.equal(translationDecision(reliable("eng"), supported), false);
 });
 
 test("detected codes can be named for the prompt", () => {

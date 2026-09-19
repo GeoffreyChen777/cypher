@@ -112,7 +112,21 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 ignore = "0.4"
 # fuzzy path ranking for file mentions (match_paths mode is tuned for source trees)
 nucleo-matcher = "0.3"
-whatlang = "0.16"
+# Offline language detection for translation gating, built with exactly the two
+# languages the translation settings offer.
+#
+# Each language embeds its model into the binary through `include_dir!`, and the
+# European Latin models are enormous next to the rest: all ten languages the
+# first draft carried cost 31MB (17.7MB compressed, against a 27.6MB macOS
+# DMG), of which Chinese and English are 4.4MB. The candidate set is also what
+# makes an answer trustworthy — a detector that has never heard of Turkish
+# cannot report a mixed zh/en message as Turkish, which is what whatlang did.
+# Adding a language here means adding it to LANGUAGE_OPTIONS (the settings
+# card) and LANGUAGE_ALIASES (the extension) in the same change.
+lingua = { version = "1.8", default-features = false, features = [
+    "chinese",
+    "english",
+] }
 
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat

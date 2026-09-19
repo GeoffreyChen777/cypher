@@ -21,18 +21,20 @@ use crate::{
     theme::Theme,
 };
 
+/// Offering a language the offline detector cannot judge is worse than not
+/// offering it: asked about a language it was not built with, the detector does
+/// not answer "unknown", it answers with whichever language it does know, and a
+/// confident wrong answer is what lets a message be skipped as "already in the
+/// destination language". This list therefore tracks `LANGUAGES` in
+/// `cypher_engine::pi_translation` and `LANGUAGE_ALIASES` in the extension.
+///
+/// A language saved before this list was trimmed still shows its stored name
+/// here (the label falls back to the raw value) and still translates — the
+/// extension never lets an unrecognized language skip the model.
 const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
     ("Auto detect", "auto"),
     ("English", "English"),
     ("Chinese", "Chinese"),
-    ("Japanese", "Japanese"),
-    ("Korean", "Korean"),
-    ("Spanish", "Spanish"),
-    ("French", "French"),
-    ("German", "German"),
-    ("Portuguese", "Portuguese"),
-    ("Russian", "Russian"),
-    ("Italian", "Italian"),
 ];
 
 pub struct TranslationSettings {

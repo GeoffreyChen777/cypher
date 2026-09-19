@@ -4,8 +4,10 @@
 //! engine only persists the small, non-secret configuration that the Settings
 //! → Agents page edits.
 
+use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::pi_runtime::PiRuntimePaths;
 
@@ -145,14 +147,73 @@ pub struct PiLanguageDetection {
     pub reliable: bool,
 }
 
+/// The only languages the detector may answer with, each paired with the ISO
+/// 639-3 code the extension compares against.
+///
+/// This list IS the contract with `LANGUAGE_OPTIONS` in the settings card and
+/// `LANGUAGE_ALIASES` in `dist/pi-runtime/extensions/cypher-translation.ts`.
+/// Gating compares a detected code against the code a configured language name
+/// maps to, so the three lists have to name the same languages: a detector
+/// asked to judge a language it was not built with does not answer "unknown",
+/// it answers with whichever of these two fits better, and a confident wrong
+/// answer is what licenses a wrong skip.
+const LANGUAGES: [(Language, &str); 2] = [
+    (Language::English, "eng"),
+    // Lingua's ISO 639-3 for Chinese is the `zho` macrolanguage, but the alias
+    // table maps every spelling of Chinese onto Mandarin's `cmn`, which is what
+    // the detector reported before and what stored settings compare against.
+    (Language::Chinese, "cmn"),
+];
+
+/// Built once and shared: the models are memory-mapped FSTs and the builder
+/// walks every one of them.
+fn detector() -> &'static LanguageDetector {
+    static DETECTOR: OnceLock<LanguageDetector> = OnceLock::new();
+    DETECTOR.get_or_init(|| {
+        let languages: Vec<Language> = LANGUAGES.iter().map(|(language, _)| *language).collect();
+        // High accuracy is the default; `with_low_accuracy_mode` is the opt-out
+        // and it degrades exactly the texts this feature sees — chat messages
+        // well under the ~120 characters where the cheap mode holds up.
+        LanguageDetectorBuilder::from_languages(&languages).build()
+    })
+}
+
+fn code_of(language: Language) -> &'static str {
+    LANGUAGES
+        .iter()
+        .find(|(candidate, _)| *candidate == language)
+        .map(|(_, code)| *code)
+        .unwrap_or_default()
+}
+
+/// A detection may only skip a paid translation when it is this sure, and this
+/// far clear of the runner-up.
+///
+/// Both halves earn their place. The floor alone would trust a three-way split
+/// that happens to lean one way; the margin alone would trust a confident-
+/// looking 0.4 against 0.1. Skipping is the irreversible half of the decision —
+/// a message wrongly judged "already in the target language" is delivered
+/// untranslated with no second chance — so anything short of both falls through
+/// to the translation model, which costs a request and gets it right.
+const RELIABLE_CONFIDENCE: f64 = 0.70;
+const RELIABLE_MARGIN: f64 = 0.40;
+
 pub fn detect_language(text: &str) -> PiLanguageDetection {
-    match whatlang::detect(text) {
-        Some(info) => PiLanguageDetection {
-            language: Some(info.lang().code().into()),
-            confidence: info.confidence(),
-            reliable: info.is_reliable(),
-        },
-        None => PiLanguageDetection {
+    let values = detector().compute_language_confidence_values(text);
+    // Sorted by confidence, and normalized to sum to 1 — except for input with
+    // no usable tokens (punctuation, digits, an emoji), which comes back as all
+    // zeroes rather than as an empty vector.
+    match values.first() {
+        Some(&(language, confidence)) if confidence > 0.0 => {
+            let runner_up = values.get(1).map_or(0.0, |&(_, value)| value);
+            PiLanguageDetection {
+                language: Some(code_of(language).to_owned()),
+                confidence,
+                reliable: confidence >= RELIABLE_CONFIDENCE
+                    && confidence - runner_up >= RELIABLE_MARGIN,
+            }
+        }
+        _ => PiLanguageDetection {
             language: None,
             confidence: 0.0,
             reliable: false,
@@ -246,5 +307,96 @@ mod tests {
             edited.new_model_selections(&previous),
             vec!["provider/c", "provider/new-translator"]
         );
+    }
+
+    /// The motivating case for moving off whatlang: a Chinese sentence carrying
+    /// English technical words. whatlang scored these as Turkish, Portuguese,
+    /// Estonian and French — always unreliable, so every one of them spent a
+    /// translation request and none of them could ever teach the extension
+    /// which language the user writes in.
+    #[test]
+    fn a_chinese_message_holding_english_terms_is_reliably_chinese() {
+        for text in [
+            "帮我 fix 一下这个 bug",
+            "这个 function 的 return value 不对",
+            "把 interface 改成 endpoint，然后 commit",
+            "在 parser.rs 里加一个 test，跑一下 cargo test 看看",
+            "commit 一下",
+        ] {
+            let detected = detect_language(text);
+            assert_eq!(detected.language.as_deref(), Some("cmn"), "{text}");
+            assert!(detected.reliable, "{text}");
+        }
+    }
+
+    #[test]
+    fn every_supported_language_is_detected_under_its_own_code() {
+        for (text, code) in [
+            ("帮我修一下这个解析器的错误", "cmn"),
+            ("这是一段中文文本，用于测试离线语言识别。", "cmn"),
+            ("Why doesn't the adapter need to inherit?", "eng"),
+            (
+                "Fix the crash in the markdown parser before the release.",
+                "eng",
+            ),
+        ] {
+            let detected = detect_language(text);
+            assert_eq!(detected.language.as_deref(), Some(code), "{text}");
+            assert!(detected.reliable, "{text}");
+        }
+    }
+
+    /// The contract with `LANGUAGE_ALIASES` in the extension. Chinese is the
+    /// one that would silently break gating: Lingua's own ISO 639-3 for it is
+    /// `zho`, which no configured language name maps to.
+    #[test]
+    fn detected_codes_are_the_codes_the_extension_compares_against() {
+        let codes: Vec<&str> = LANGUAGES.iter().map(|(_, code)| *code).collect();
+        assert_eq!(codes, ["eng", "cmn"]);
+        assert_eq!(code_of(Language::Chinese), "cmn");
+    }
+
+    /// Text in a script neither language uses is filtered out by Lingua before
+    /// scoring, so it arrives here as all-zero rather than as a confident
+    /// wrong answer. That is the behaviour that makes a two-language detector
+    /// safe for everyone else: Japanese, Korean, Russian and Arabic carry no
+    /// decision at all, so the extension sends them to the translation model
+    /// instead of skipping them.
+    #[test]
+    fn a_script_neither_language_uses_carries_no_decision() {
+        for text in [
+            "パーサーのバグを直して",
+            "파서의 버그를 고쳐줘",
+            "исправь ошибку в парсере",
+            "أصلح الخطأ في المحلل",
+        ] {
+            let detected = detect_language(text);
+            assert_eq!(detected.language, None, "{text}");
+            assert!(!detected.reliable, "{text}");
+        }
+    }
+
+    /// The known limitation of trimming to two languages, pinned so it reads as
+    /// a decision rather than a bug: another Latin-script language has nothing
+    /// to lose to, so it comes back as confident English. Nothing downstream
+    /// can recover from that, which is why the settings card and the
+    /// extension's alias table must offer exactly the languages named in
+    /// [`LANGUAGES`] — and why a configured language the table does not know
+    /// never skips the model (`translationDecision`).
+    #[test]
+    fn an_unsupported_latin_language_reads_as_english() {
+        let detected = detect_language("corrige le bug dans le parseur de markdown");
+        assert_eq!(detected.language.as_deref(), Some("eng"));
+        assert!(detected.reliable);
+    }
+
+    #[test]
+    fn input_with_no_words_carries_no_decision() {
+        for text in ["400", "", "   ", "!!!"] {
+            let detected = detect_language(text);
+            assert_eq!(detected.language, None, "{text:?}");
+            assert!(!detected.reliable, "{text:?}");
+            assert_eq!(detected.confidence, 0.0, "{text:?}");
+        }
     }
 }
