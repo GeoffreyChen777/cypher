@@ -30,6 +30,32 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (14), 2026-09-19
+
+- Fixes the notification-tap crash reported twice through TestFlight feedback
+  by the same tester: `betaFeedbackCrashSubmissions` on 2026-09-10 (0.1.5 b2)
+  and 2026-09-19 (0.2.0 b13), both `EXC_CRASH (SIGABRT)` from an
+  `NSAssertionHandler` failure in `-[UIApplication
+  _performBlockAfterCATransactionCommitSynchronizes:]`, frame 6
+  `@objc closure #1 in PushAppDelegate.userNotificationCenter(_:didReceive:)`.
+- Cause: both `UNUserNotificationCenterDelegate` methods were `nonisolated`
+  `async`, so the bridged ObjC thunk invoked UIKit's completion handler from
+  the cooperative pool. The early `guard ... else { return }` returned off-main
+  too, so every tap crashed, not only ones carrying a parsable payload.
+- Fix: both methods are `@MainActor`, with `@preconcurrency` on the delegate
+  conformance. Because `NotificationController` is `@MainActor`, the now-direct
+  calls only compile while the isolation holds — a revert breaks the build.
+- `CypherTests/PushDelegateIsolationTests.swift` drives the real ObjC selectors
+  from a background thread and asserts the completion handler returns on the
+  main thread. Verified to fail against the pre-fix code (`Optional(false)`)
+  and pass after. 186 Development simulator unit tests pass, 1 skipped.
+- No live tap test on device or simulator: the dev edge reports
+  `notifications/settings -> available:false`, so the Dev app cannot request
+  iOS notification authorization and `simctl push` has nothing to display.
+- Upload is left to `.github/workflows/ios.yml` via the
+  `cypher-ios-v0.2.0-b14` tag. Export compliance, tester groups, public links
+  and review submission remain separate explicit actions.
+
 ## Attempted build: 0.2.0 (11), 2026-09-18
 
 - Covers the three model-picker commits that landed after build 10:

@@ -1,7 +1,7 @@
 import UIKit
 import UserNotifications
 
-final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+final class PushAppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate {
     @MainActor var controller: NotificationController? {
         didSet {
             if let token { controller?.receivedToken(token); self.token = nil }
@@ -24,28 +24,28 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         controller?.registrationFailed()
     }
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+    // Both delegate methods must stay @MainActor. Swift bridges them to their
+    // ObjC `...withCompletionHandler:` selectors, and the generated thunk calls
+    // UIKit's completion handler on whichever executor the method returns on.
+    // Under `nonisolated` that is the cooperative pool, and UIKit's handler
+    // asserts main thread: tapping a notification cold-launched the app and
+    // killed it with SIGABRT (TestFlight 0.1.5 b2, 0.2.0 b13).
+    @MainActor func userNotificationCenter(_ center: UNUserNotificationCenter,
                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let info = notification.request.content.userInfo
-        let badge = NotificationBadge.parse(info)
-        let payload = PushPayload.parse(info)
-        await MainActor.run {
-            if let badge { self.controller?.receiveBadge(badge) }
-            if let payload { self.controller?.receive(payload, tapped: false) }
-        }
+        if let badge = NotificationBadge.parse(info) { controller?.receiveBadge(badge) }
+        if let payload = PushPayload.parse(info) { controller?.receive(payload, tapped: false) }
         // Foreground notifications use our small in-app banner, never a
         // second system banner/sound (including when viewing the same chat).
         return []
     }
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+    @MainActor func userNotificationCenter(_ center: UNUserNotificationCenter,
                                            didReceive response: UNNotificationResponse) async {
         guard let payload = PushPayload.parse(response.notification.request.content.userInfo) else { return }
-        await MainActor.run {
-            if let controller = self.controller { controller.receive(payload, tapped: true) }
-            else { self.pendingTap = payload }
-            // Tapping an old delivered alert is not an authoritative unread
-            // count. Refresh from the authenticated server after navigation.
-            if let controller { Task { await controller.refresh() } }
-        }
+        if let controller { controller.receive(payload, tapped: true) }
+        else { pendingTap = payload }
+        // Tapping an old delivered alert is not an authoritative unread
+        // count. Refresh from the authenticated server after navigation.
+        if let controller { Task { await controller.refresh() } }
     }
 }
