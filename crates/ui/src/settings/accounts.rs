@@ -25,7 +25,7 @@ use cypher_rpc::methods;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 // ---------------------------------------------------------------------------
 // Pure: usage meters + labels
@@ -961,7 +961,7 @@ impl AccountsPage {
                     .child(
                         div().mt(px(12.0)).child(
                             popover::dialog_field(self.code_input.clone().into_any_element())
-                                .font_family(theme.font_mono.clone())
+                                .mono(&theme)
                                 .text_size(px(13.0)),
                         ),
                     )

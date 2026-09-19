@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListScrollEvent,
-    ListState, SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
+    ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 
 use cypher_proto::{Chat, CheckoutDiff, GitHistoryCommit};
@@ -42,7 +42,7 @@ use crate::markdown::render;
 use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 use cypher_syntax::LanguageId as Lang;
 
 pub mod layout;
@@ -1234,7 +1234,7 @@ impl Changes {
         let spans = highlights
             .map(|h| h.spans_for_side(line, side))
             .unwrap_or(&[]);
-        let mono = font(theme.font_mono.clone());
+        let mono = theme.mono();
         let runs = render::runs_for_syntax_line_with_plain(
             &line.text,
             spans,
@@ -1254,7 +1254,7 @@ impl Changes {
                 .pr(px(8.0))
                 .flex()
                 .justify_end()
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_size(px(11.0))
                 .text_color(theme.regions.git_line_number.unwrap_or(number_color))
                 .child(number.map(|n| n.to_string()).unwrap_or_default()),
@@ -1280,7 +1280,7 @@ impl Changes {
                         .left(px(-offset))
                         .w(px(width))
                         .h(px(DIFF_LINE_HEIGHT))
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(DIFF_TEXT_SIZE))
                         .line_height(px(DIFF_LINE_HEIGHT))
                         .whitespace_nowrap()
@@ -2559,7 +2559,7 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
-        let mono = font(theme.font_mono.clone());
+        let mono = theme.mono();
         let font_id = window.text_system().resolve_font(&mono);
         self.mono_advance = window
             .text_system()
@@ -2762,7 +2762,7 @@ impl Changes {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_family(theme.font_mono.clone())
+                    .mono(theme)
                     .text_size(px(12.0))
                     .text_color(theme.text_dim)
                     .child(SharedString::from(file.path.clone())),
@@ -2780,7 +2780,7 @@ impl Changes {
                 el.child(
                     div()
                         .flex_none()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.0))
                         .text_color(add_color(theme))
                         .child(SharedString::from(format!("+{adds}"))),
@@ -2790,7 +2790,7 @@ impl Changes {
                 el.child(
                     div()
                         .flex_none()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.0))
                         .text_color(del_color(theme))
                         .child(SharedString::from(format!("−{dels}"))),
@@ -2861,7 +2861,7 @@ impl Changes {
                         .flex()
                         .items_center()
                         .bg(crate::theme::ink(0.05))
-                        .font_family(theme.font_mono.clone())
+                        .mono(&theme)
                         .text_size(px(10.5))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(short)),
@@ -3088,7 +3088,7 @@ impl Changes {
                 div()
                     .min_w_0()
                     .truncate()
-                    .font_family(theme.font_mono.clone())
+                    .mono(theme)
                     .text_size(px(11.5))
                     .text_color(theme.text)
                     .child(SharedString::from(base)),
@@ -3126,7 +3126,7 @@ impl Changes {
                         .min_w_0()
                         .flex_shrink(branch_weight)
                         .truncate()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.5))
                         .text_color(theme.text_dim)
                         .child(SharedString::from(branch)),
@@ -3201,7 +3201,7 @@ impl Changes {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_family(theme.font_mono.clone())
+                            .mono(theme)
                             .text_size(px(12.0))
                             .child(SharedString::from(label)),
                     )
@@ -3253,14 +3253,14 @@ impl Changes {
                 )
                 .child(
                     div()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.0))
                         .text_color(add_color(theme))
                         .child(SharedString::from(format!("+{}", parsed.additions))),
                 )
                 .child(
                     div()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.0))
                         .text_color(del_color(theme))
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
@@ -3319,7 +3319,7 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .items_center()
         .px(px(Theme::SPACE_LG))
         .bg(theme.diff_hunk_bg)
-        .font_family(theme.font_mono.clone())
+        .mono(theme)
         .text_size(px(11.0))
         .text_color(theme.text_faint)
         .child(SharedString::from(header.to_string()))
@@ -3400,7 +3400,7 @@ fn diff_line_row(
         div()
             .w(px(gutter_px))
             .flex_none()
-            .font_family(theme.font_mono.clone())
+            .mono(theme)
             .text_size(px(11.0))
             .text_color(theme.regions.git_line_number.unwrap_or(color))
             .flex()
@@ -3410,7 +3410,7 @@ fn diff_line_row(
                 no.map(|n| n.to_string()).unwrap_or_default(),
             ))
     };
-    let mono = font(theme.font_mono.clone());
+    let mono = theme.mono();
     let runs = render::runs_for_syntax_line_with_plain(
         &line.text,
         spans,
@@ -3459,7 +3459,7 @@ fn diff_line_row(
                 .justify_center()
                 .text_size(px(DIFF_TEXT_SIZE))
                 .text_color(marker_color)
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .child(SharedString::from(marker)),
         )
         .child(
@@ -3468,7 +3468,7 @@ fn diff_line_row(
                 .min_w_0()
                 .overflow_hidden()
                 .pl(px(12.0))
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_size(px(DIFF_TEXT_SIZE))
                 .whitespace_nowrap()
                 .child(diff_text_element(line, runs, theme, select)),

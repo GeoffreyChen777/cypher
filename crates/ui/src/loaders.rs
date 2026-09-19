@@ -13,7 +13,7 @@ use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, 
 
 use crate::icons::cypher_app_icon;
 use crate::motion::{self, CYPHER_PULSE, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT};
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 // Shared with the terminal viewport (`cypher_proto::motion`) so both animate the
 // same loaders from the same numbers.
@@ -198,13 +198,8 @@ fn loading_wordmark(theme: &Theme) -> AnyElement {
         .flex()
         .flex_col()
         .items_start()
-        .font_family(theme.font_mono.clone())
-        // Preserve one advance per ASCII character.
-        .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![
-            ("liga".into(), 0),
-            ("calt".into(), 0),
-            ("dlig".into(), 0),
-        ])))
+        // `.mono` preserves one advance per ASCII character.
+        .mono(theme)
         .text_size(px(FONT))
         .line_height(px(LINE))
         // `theme.text` IS near-white on dark; on light it flips to the ink

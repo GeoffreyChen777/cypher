@@ -457,7 +457,54 @@ pub struct Theme {
     pub font_mono_fallback: SharedString,
 }
 
+/// Font features for every monospace run: coding ligatures OFF.
+///
+/// Not a taste call — the bundled Geist Mono 1.700 ships its coding ligatures
+/// as a plain many-to-one `liga` substitution (`= = =` → one
+/// `equal_equal_equal.liga`), but the glyph is drawn for the *spacer*
+/// construction: advance 600 (one cell) with ink from x=-1138 to x=538, i.e.
+/// meant to sit in the LAST of three cells and paint backwards over the first
+/// two. Upstream drives that from `ss11`, which first substitutes two blank
+/// `SPC` glyphs to hold the cells; 1.700 also exposed the bare ligature through
+/// default-on `liga`, so shaping `model.api === a` yields 13 glyphs instead of
+/// 15: the three-bar glyph lands on the first `=`, overlaps the text to its
+/// left, and the rest of the line slides two cells back. `calt`/`dlig` go off
+/// with it because a user-chosen code font (Fira Code and friends) drives the
+/// same ligatures from those features instead.
+pub fn mono_features() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![
+        ("liga".into(), 0),
+        ("calt".into(), 0),
+        ("dlig".into(), 0),
+    ]))
+}
+
+/// A [`gpui::Font`] for the given monospace family with [`mono_features`]
+/// applied — the only way code text should build a `TextRun` font.
+pub fn mono_font(family: SharedString) -> gpui::Font {
+    let mut font = gpui::font(family);
+    font.features = mono_features();
+    font
+}
+
+/// `.mono(theme)` on any styled element: the mono family plus ligatures off.
+/// Inherited by child text, but a `TextRun` carrying its own [`gpui::Font`]
+/// overrides it — those build through [`mono_font`].
+pub trait MonoStyled: gpui::Styled + Sized {
+    fn mono(self, theme: &Theme) -> Self {
+        self.font_family(theme.font_mono.clone())
+            .font_features(mono_features())
+    }
+}
+
+impl<T: gpui::Styled> MonoStyled for T {}
+
 impl Theme {
+    /// The code [`gpui::Font`] for this theme — see [`mono_font`].
+    pub fn mono(&self) -> gpui::Font {
+        mono_font(self.font_mono.clone())
+    }
+
     // ---- numbers drive layout (px) ----
     /// Frost translucency over the blurred window background (macOS vibrancy).
     /// Opaque elsewhere: Linux/Windows get no compositor-blur guarantee, and a
@@ -1192,6 +1239,22 @@ mod tests {
             (c[1] * 255.0).round() as u8,
             (c[2] * 255.0).round() as u8,
         ]
+    }
+
+    /// Geist Mono 1.700's `===`/`--`/`->` ligature glyphs paint backwards over
+    /// the characters they replace, so every code run must ship these three
+    /// features OFF — see [`mono_features`].
+    #[test]
+    fn mono_font_disables_coding_ligatures() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let features = theme.mono().features;
+            for tag in ["liga", "calt", "dlig"] {
+                assert!(
+                    features.0.iter().any(|(t, v)| t == tag && *v == 0),
+                    "{tag} must be disabled for code text"
+                );
+            }
+        }
     }
 
     #[test]

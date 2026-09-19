@@ -19,7 +19,7 @@ use cypher_rpc::methods;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 /// A device that pinged within this window shows a presence dot (engines
 /// heartbeat every 15s; 70s tolerates a couple of missed beats).
@@ -699,7 +699,7 @@ impl Render for DevicesPage {
                 let id_chip = div()
                     .id(("device-id", ix))
                     .flex_none()
-                    .font_family(theme.font_mono.clone())
+                    .mono(&theme)
                     .text_size(px(10.5))
                     .text_color(if id_copied {
                         theme.success_muted.opacity(0.9)

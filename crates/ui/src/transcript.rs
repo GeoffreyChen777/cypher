@@ -48,7 +48,7 @@ use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _, RESIZE};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 use cypher_syntax::LanguageId as Lang;
 
 // ---------------------------------------------------------------------------
@@ -4375,7 +4375,7 @@ fn user_bubble_text(
     };
     let chip_run = |len: usize| TextRun {
         len,
-        font: gpui::font(theme.font_mono.clone()),
+        font: theme.mono(),
         color: theme.code_text,
         background_color: None,
         underline: None,
@@ -4623,7 +4623,7 @@ fn detail_body(
             .into_any_element(),
         ToolDetail::Stats { stats } => body
             .py(px(6.0))
-            .font_family(theme.font_mono.clone())
+            .mono(theme)
             .text_size(px(11.5))
             .children(stats.iter().map(|stat| {
                 div()
@@ -4661,7 +4661,7 @@ fn detail_body(
             truncated_by,
         } => body
             .py(px(6.0))
-            .font_family(theme.font_mono.clone())
+            .mono(theme)
             .text_size(px(11.5))
             .children(lines.iter().map(|line| {
                 div()

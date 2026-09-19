@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::settings::{KeymapConfig, ShortcutId, combo_from_keystroke, display_combo};
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +209,7 @@ impl Render for ShortcutsPage {
                         .border_1()
                         .flex()
                         .justify_center()
-                        .font_family(theme.font_mono.clone())
+                        .mono(&theme)
                         .text_size(px(12.0))
                         .cursor_pointer()
                         .map(|el| {

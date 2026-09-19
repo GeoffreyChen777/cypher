@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 const HISTORY_PAGE_SIZE: usize = 100;
 const HISTORY_ROW_HEIGHT: f32 = 36.0;
@@ -320,7 +320,7 @@ impl Render for HistoryRefTooltip {
                     .min_w_0()
                     .truncate()
                     .whitespace_nowrap()
-                    .font_family(theme.font_mono.clone())
+                    .mono(theme)
                     .child(description)
             }))
     }
@@ -482,7 +482,7 @@ impl Render for GitHistoryCount {
                     div()
                         .min_w_0()
                         .truncate()
-                        .font_family(theme.font_mono.clone())
+                        .mono(theme)
                         .text_size(px(11.5))
                         .text_color(theme.text_dim)
                         .child(SharedString::from(branch)),
@@ -1166,7 +1166,7 @@ impl GitHistory {
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .hover(|style| style.bg(crate::theme::ink(0.07)))
-                    .font_family(theme.font_mono.clone())
+                    .mono(&theme)
                     .text_size(px(10.5))
                     .text_color(if copied {
                         theme.accent

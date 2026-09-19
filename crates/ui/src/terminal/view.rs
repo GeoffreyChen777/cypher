@@ -15,7 +15,7 @@
 
 use gpui::{
     App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, Modifiers, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, size,
+    SharedString, Style, TextRun, Window, fill, outline, point, px, relative, size,
 };
 
 use crate::theme::{Appearance, Theme, current_appearance, rgb_to_hsl};
@@ -551,13 +551,8 @@ impl gpui::Element for TerminalElement {
         // --yolo` → `codex--yolo` report: the space is in the grid and went
         // to the pty (the command runs), only the painted run lost a cell.
         // The landing page disables the same three features on its ASCII art
-        // for the same reason.
-        let mut mono = font(theme.font_mono.clone());
-        mono.features = gpui::FontFeatures(std::sync::Arc::new(vec![
-            ("liga".into(), 0),
-            ("calt".into(), 0),
-            ("dlig".into(), 0),
-        ]));
+        // for the same reason; `Theme::mono` carries them for every code run.
+        let mono = theme.mono();
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(TERM_FONT_SIZE);

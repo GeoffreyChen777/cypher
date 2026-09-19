@@ -21,7 +21,7 @@ use gpui::{
     size,
 };
 
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil};
@@ -601,7 +601,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         let start = text.len();
         text.push_str(&run.text);
         let mut f = if run.style.code {
-            font(theme.font_mono.clone())
+            theme.mono()
         } else {
             font(theme.font_sans.clone())
         };
@@ -1208,7 +1208,7 @@ fn code_block_theme(theme: &Theme) -> Theme {
 /// but literal newlines (including blank lines) belong in the model so partial
 /// copy/annotations preserve the source rather than joining non-empty rows.
 fn flatten_code(code: &str, highlight: CodeHighlight, theme: &Theme) -> FlatText {
-    let mono = font(theme.font_mono.clone());
+    let mono = theme.mono();
     let mut runs = Vec::new();
     for (li, line) in code.split_inclusive('\n').enumerate() {
         let body = line.strip_suffix('\n').unwrap_or(line);
@@ -1344,7 +1344,7 @@ fn render_code_block(
                 .overflow_x_scroll()
                 .px(px(CODE_PADDING_X))
                 .py(px(CODE_PADDING_Y))
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_size(px(theme.markdown.code_size))
                 .line_height(px(theme.markdown.code_line_height))
                 .whitespace_nowrap()
@@ -1720,7 +1720,7 @@ mod tests {
                     kind: HighlightKind::String,
                 },
             ];
-            let mono = font(theme.font_mono.clone());
+            let mono = theme.mono();
             let runs = runs_for_syntax_line("abc def ghi", &spans, &mono, &code);
             assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), 11);
             assert_eq!(
@@ -1791,7 +1791,7 @@ mod tests {
     #[test]
     fn code_line_runs_cover_exactly() {
         let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
+        let mono = theme.mono();
         let line = r#"let x = "hi"; // done"#;
         let document = cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source: line,
@@ -1813,7 +1813,7 @@ mod tests {
     #[test]
     fn tree_sitter_runs_are_rich_and_paint_only() {
         let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
+        let mono = theme.mono();
         let line = "let widget = build!(42);";
         let document = cypher_syntax::highlight(cypher_syntax::HighlightRequest {
             source: line,
@@ -1833,7 +1833,7 @@ mod tests {
     #[test]
     fn code_line_runs_with_no_tokens_are_one_plain_run() {
         let theme = Theme::dark();
-        let mono = font(theme.font_mono.clone());
+        let mono = theme.mono();
         let runs = runs_for_syntax_line("plain text", &[], &mono, &theme);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].len, 10);

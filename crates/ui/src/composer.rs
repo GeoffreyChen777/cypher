@@ -40,7 +40,7 @@ use crate::attachments::{self, StagedAttachment};
 use crate::motion;
 use crate::pickers::Pickers;
 use crate::state::{AppState, EngineHandle, Indicator};
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
@@ -3282,7 +3282,7 @@ impl ComposerInput {
         // + `code_text` emerald) over the rounded `code_wash` painted beneath.
         let (chip_font, chip_color) = {
             let theme = self.text_theme(cx);
-            (gpui::font(theme.font_mono.clone()), theme.code_text)
+            (theme.mono(), theme.code_text)
         };
         let run_for = |len: usize, underline: bool, chip: bool| TextRun {
             len,
@@ -3579,7 +3579,7 @@ impl Render for MentionPathTooltip {
                 .border_1()
                 .border_color(theme.border_strong)
                 .bg(theme.surface_raised)
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_size(px(11.0))
                 .text_color(theme.text_muted)
                 .child(label),

@@ -40,7 +40,7 @@ use cypher_proto::{
 use crate::motion;
 use crate::popover::{self, Popup};
 use crate::state::AppState;
-use crate::theme::Theme;
+use crate::theme::{MonoStyled, Theme};
 
 /// A running/async-started entry whose freshness went quiet is stale past
 /// this (matches the session staleness window).
@@ -962,7 +962,7 @@ fn inspector_row(
                     .pl(px(26.0))
                     .min_w_0()
                     .truncate()
-                    .font_family(theme.font_mono.clone())
+                    .mono(theme)
                     .text_size(px(10.5))
                     .text_color(theme.text_faint)
                     .child(SharedString::from(tail)),

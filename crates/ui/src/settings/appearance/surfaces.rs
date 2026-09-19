@@ -3,7 +3,7 @@ use crate::chat_style::{ColorPreset, normalize_hex};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::settings::widgets;
 use crate::surface_style::{self, FIELDS, Field, Palette, Region, SurfaceAppearanceState};
-use crate::theme::{Appearance, Theme};
+use crate::theme::{Appearance, MonoStyled, Theme};
 use gpui::{
     AnyElement, Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
@@ -380,7 +380,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
                 .p(px(12.0))
                 .rounded(px(8.0))
                 .bg(view::background(t))
-                .font_family(t.font_mono.clone())
+                .mono(t)
                 .text_size(px(view::TERM_FONT_SIZE))
                 .line_height(px(view::TERM_LINE_HEIGHT))
                 .text_color(view::resolve_color(CellColor::Foreground, t))

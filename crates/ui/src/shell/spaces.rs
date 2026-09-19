@@ -13,6 +13,7 @@
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use crate::state::SidebarGroupKind;
+use crate::theme::MonoStyled;
 use cypher_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
 use std::collections::HashMap;
@@ -560,7 +561,7 @@ impl Shell {
                 .gap(px(2.0))
                 .bg(crate::theme::ink(0.05))
                 .text_size(px(11.0))
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_color(theme.text_muted.opacity(0.7))
         };
         let header = div()
@@ -1990,7 +1991,7 @@ impl Shell {
                 .gap(px(2.0))
                 .bg(crate::theme::ink(0.05))
                 .text_size(px(11.0))
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_color(theme.text_muted.opacity(0.7))
         };
 
@@ -2093,7 +2094,7 @@ impl Shell {
                     .pt(px(10.0))
                     .pb(px(2.0))
                     .text_size(px(11.0))
-                    .font_family(theme.font_mono.clone())
+                    .mono(&theme)
                     .child({
                         let crumb = div()
                             .id("add-space-crumb-device")

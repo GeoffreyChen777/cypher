@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::motion::{self, CYPHER_PULSE};
-use crate::theme::{Theme, hairline, ink};
+use crate::theme::{MonoStyled, Theme, hairline, ink};
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -834,7 +834,7 @@ pub fn key_hint_text(theme: &Theme, cap: &'static str, label: &'static str) -> g
         .child(
             key_cap(theme)
                 .text_size(px(11.0))
-                .font_family(theme.font_mono.clone())
+                .mono(theme)
                 .text_color(theme.text_muted.opacity(0.7))
                 .child(SharedString::from(cap)),
         )
@@ -880,7 +880,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .rounded(px(5.0))
         .bg(ink(0.05))
         .text_size(px(10.0))
-        .font_family(theme.font_mono.clone())
+        .mono(theme)
         .text_color(theme.text_muted.opacity(0.6))
         .child(SharedString::from(label.to_string()))
 }
