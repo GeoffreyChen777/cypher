@@ -26,14 +26,16 @@ enum NumberSetting {
     LineSpacing,
     ParagraphSpacing,
     MessageSpacing,
+    ToolCallLimit,
 }
 impl NumberSetting {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::BodySize,
         Self::CodeSize,
         Self::LineSpacing,
         Self::ParagraphSpacing,
         Self::MessageSpacing,
+        Self::ToolCallLimit,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -42,6 +44,17 @@ impl NumberSetting {
             Self::LineSpacing => "Line spacing",
             Self::ParagraphSpacing => "Paragraph spacing",
             Self::MessageSpacing => "Message spacing",
+            Self::ToolCallLimit => "Tool calls shown per group",
+        }
+    }
+    /// Second line under the title, for settings whose unit isn't obvious.
+    fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ToolCallLimit => Some(
+                "Keep the most recent calls of an expanded tool group visible; \
+                 earlier ones fold behind a button.",
+            ),
+            _ => None,
         }
     }
     fn range(self) -> (f32, f32, f32) {
@@ -51,6 +64,7 @@ impl NumberSetting {
             Self::LineSpacing => (80.0, 200.0, 5.0),
             Self::ParagraphSpacing => (0.0, 40.0, 2.0),
             Self::MessageSpacing => (4.0, 64.0, 2.0),
+            Self::ToolCallLimit => (0.0, chat_style::MAX_TOOL_CALL_LIMIT as f32, 1.0),
         }
     }
     fn get(self, s: &ChatAppearance) -> f32 {
@@ -60,6 +74,7 @@ impl NumberSetting {
             Self::LineSpacing => s.line_spacing * 100.0,
             Self::ParagraphSpacing => s.paragraph_spacing,
             Self::MessageSpacing => s.message_spacing,
+            Self::ToolCallLimit => s.tool_call_limit as f32,
         }
     }
     fn set(self, s: &mut ChatAppearance, value: f32) {
@@ -69,11 +84,19 @@ impl NumberSetting {
             Self::LineSpacing => s.line_spacing = value / 100.0,
             Self::ParagraphSpacing => s.paragraph_spacing = value,
             Self::MessageSpacing => s.message_spacing = value,
+            Self::ToolCallLimit => s.tool_call_limit = value.max(0.0).round() as u32,
         }
     }
     fn display(self, value: f32) -> String {
         if matches!(self, Self::LineSpacing) {
             return format!("{value:.0}%");
+        }
+        if matches!(self, Self::ToolCallLimit) {
+            return if value < 0.5 {
+                "Show all".to_string()
+            } else {
+                format!("{value:.0}")
+            };
         }
         if value.fract().abs() < 0.01 {
             format!("{value:.0} px")
@@ -366,10 +389,25 @@ impl ChatStyleEditor {
         let plus = buttons.pop().unwrap();
         let minus = buttons.pop().unwrap();
         super::setting_row()
-            .child(div().flex_1().child(widgets::row_title(theme, key.label())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, key.label()))
+                    .when_some(key.hint(), |el, hint| {
+                        el.child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(hint),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(6.0))
                     .child(minus)

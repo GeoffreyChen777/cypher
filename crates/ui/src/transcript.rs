@@ -1303,6 +1303,24 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
 /// open detail whose full payload lives in the sidecar (chat2-sync A3).
 pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 
+/// Height of the "Show N earlier tool calls" row that stands in for the chips
+/// a group's cap keeps folded (and for the "Show fewer" row once revealed).
+pub const OVERFLOW_ROW_HEIGHT: f32 = 26.0;
+
+/// How many leading chips a group folds away: the cap keeps the LAST `limit`
+/// calls (the ones the agent just ran), `limit == 0` keeps every call, and a
+/// revealed group (`revealed`) hides nothing. One chip is never worth a row of
+/// its own — folding it would trade 38px of content for 26px of button.
+pub fn hidden_tool_count(total: usize, limit: u32, revealed: bool) -> usize {
+    if revealed || limit == 0 {
+        return 0;
+    }
+    match total.saturating_sub(limit as usize) {
+        1 => 0,
+        hidden => hidden,
+    }
+}
+
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
 /// the harness bounds outputs at 4KiB, so this is rarely reached).
 const FULL_OUTPUT_MAX_LINES: usize = 400;
@@ -1639,6 +1657,10 @@ pub struct Transcript {
     /// group fold. Render-local like `folds` — never part of the row
     /// fingerprint.
     tool_details: HashMap<SharedString, FoldState>,
+    /// Tool groups whose capped-away chips the user revealed, by row id. The
+    /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
+    /// per-row override, render-local like `folds`.
+    tool_overflow: std::collections::HashSet<SharedString>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -1833,6 +1855,7 @@ impl Transcript {
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
             tool_details: HashMap::new(),
+            tool_overflow: std::collections::HashSet::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -2582,6 +2605,7 @@ impl Transcript {
             self.live_parsers.clear();
             self.tree_cache.clear();
             self.folds.clear();
+            self.tool_overflow.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -3958,6 +3982,17 @@ impl Transcript {
     ) -> AnyElement {
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
         let open = fold.open.unwrap_or(auto_open);
+        // Cap: an open group renders its LAST `limit` chips, with the older
+        // ones behind one "Show N earlier tool calls" row. A long agent run
+        // then costs a bounded slice of the transcript instead of pushing the
+        // answer off-screen. Revealing is per row and survives re-renders.
+        let revealed = self.tool_overflow.contains(row_id);
+        let limit = crate::chat_style::settings(cx).tool_call_limit;
+        let hidden = hidden_tool_count(tools.len(), limit, revealed);
+        // The row stays after revealing (as "Show fewer") so the same click
+        // target puts the chips back.
+        let overflow_row =
+            hidden > 0 || (revealed && hidden_tool_count(tools.len(), limit, false) > 0);
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -4058,24 +4093,31 @@ impl Transcript {
                 (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(false)
             })
             .collect();
+        // Hidden chips are not rendered, so their diffs are not tokenized.
         let detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>> = details
             .iter()
             .enumerate()
             .map(|(ix, detail)| {
                 detail
                     .as_deref()
-                    .filter(|_| detail_opens[ix])
+                    .filter(|_| detail_opens[ix] && ix >= hidden)
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
-        let open_height = chips_height(tools.len())
+        let open_height = chips_height(tools.len() - hidden)
+            + if overflow_row {
+                OVERFLOW_ROW_HEIGHT
+            } else {
+                0.0
+            }
             + details
                 .iter()
                 .zip(&invocations)
                 .zip(&affordances)
                 .zip(&detail_opens)
-                .filter(|(_, open)| **open)
-                .map(|(((detail, invocation), affordance), _)| {
+                .enumerate()
+                .filter(|(ix, (_, open))| **open && *ix >= hidden)
+                .map(|(_, (((detail, invocation), affordance), _))| {
                     invocation.as_deref().map_or(0.0, detail_height)
                         + detail.as_deref().map_or(0.0, detail_height)
                         + if affordance.is_some() {
@@ -4113,6 +4155,9 @@ impl Transcript {
                 cx.notify();
             }))
             .child(
+                // The group header keeps its chevron TILE (the chips' icons
+                // and their own chevrons are bare): it is the row's only
+                // affordance, and the tile centers the guide rail below it.
                 div()
                     .size(px(18.0))
                     .flex_none()
@@ -4132,12 +4177,68 @@ impl Transcript {
                     .child(SharedString::from(summary)),
             );
 
+        let overflow = overflow_row.then(|| {
+            let label = if hidden > 0 {
+                format!(
+                    "Show {hidden} earlier tool call{}",
+                    if hidden == 1 { "" } else { "s" }
+                )
+            } else {
+                "Show fewer tool calls".to_string()
+            };
+            let key = row_id.clone();
+            div()
+                .id(SharedString::from(format!("{row_id}-overflow")))
+                .h(px(OVERFLOW_ROW_HEIGHT))
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .hover(|s| s.text_color(theme.text_muted))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.tool_overflow.remove(&key) {
+                        this.tool_overflow.insert(key.clone());
+                    }
+                    // Same trick as a detail toggle: arm the group body's
+                    // height tween (open state untouched) so the chips slide
+                    // in and the content below tracks them instead of
+                    // teleporting. `open_height` is the pre-click height,
+                    // i.e. exactly the tween's start.
+                    let group = this.folds.entry(key.clone()).or_default();
+                    group.from = open_height;
+                    group.epoch += 1;
+                    group.toggled_at = Some(Instant::now());
+                    cx.notify();
+                }))
+                // The guide rail runs through this row like it does through
+                // the chips, so the fold reads as part of the same stack.
+                .child(
+                    div()
+                        .ml(px(12.0))
+                        .h_full()
+                        .w(px(1.0))
+                        .flex_none()
+                        .bg(crate::theme::ink(0.08)),
+                )
+                .child(
+                    div()
+                        .ml(px(12.0))
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+        });
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
             .flex_col()
             .gap(px(CHIP_GAP))
-            .children(tools.iter().enumerate().map(|(ix, tool)| {
+            .children(overflow)
+            .children(tools.iter().enumerate().skip(hidden).map(|(ix, tool)| {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
@@ -4461,8 +4562,6 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
                     div()
                         .flex_none()
                         .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(danger.opacity(0.12))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -4554,8 +4653,6 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                     div()
                         .flex_none()
                         .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(crate::theme::ink(0.09))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -4716,13 +4813,11 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
         .px(px(8.0))
         .text_size(px(12.0))
         .child(
-            // Icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
-            // icon size-3).
+            // Bare icon (size-3), centered in the tile's former 18px box so
+            // the chip's text columns stay where they were.
             div()
                 .size(px(18.0))
                 .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.08))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4754,14 +4849,12 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                 .child(SharedString::from(detail)),
         )
         .when_some(chevron, |row, open| {
-            // Output/diff affordance: a chevron tile matching the group
-            // header's, flipped while the detail body is open.
+            // Output/diff affordance: a bare chevron in the tile's former
+            // 18px box, flipped while the detail body is open.
             row.child(
                 div()
                     .size(px(18.0))
                     .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.06))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -6104,6 +6197,23 @@ mod tests {
         assert_eq!(single_line("plain"), "plain");
         assert_eq!(single_line(""), "");
         assert_eq!(single_line("\n\n"), "");
+    }
+
+    #[test]
+    fn tool_group_cap_keeps_the_last_calls() {
+        // Under the cap nothing folds; over it, the LAST `limit` chips stay.
+        assert_eq!(hidden_tool_count(5, 5, false), 0);
+        assert_eq!(hidden_tool_count(12, 5, false), 7);
+        // Folding a single chip would cost more height than it saves.
+        assert_eq!(hidden_tool_count(6, 5, false), 0);
+        assert_eq!(hidden_tool_count(7, 5, false), 2);
+        // Revealed rows and the "show all" setting hide nothing.
+        assert_eq!(hidden_tool_count(12, 5, true), 0);
+        assert_eq!(hidden_tool_count(12, 0, false), 0);
+        // A capped group is bounded in height no matter how long the run is.
+        let capped = chips_height(12 - hidden_tool_count(12, 5, false)) + OVERFLOW_ROW_HEIGHT;
+        assert_eq!(capped, chips_height(5) + OVERFLOW_ROW_HEIGHT);
+        assert!(capped < chips_height(12));
     }
 
     #[test]

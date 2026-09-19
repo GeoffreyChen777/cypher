@@ -13,6 +13,10 @@ use crate::theme::{Appearance, MarkdownMetrics, Theme};
 pub const FILE_NAME: &str = "chat-appearance.json";
 pub const CONTENT_WIDTH: f32 = 736.0;
 pub const COMPOSER_WIDTH: f32 = 768.0;
+/// Most chips an open tool group shows before the older ones fold behind a
+/// "Show N earlier tool calls" row. `0` means no cap.
+pub const DEFAULT_TOOL_CALL_LIMIT: u32 = 5;
+pub const MAX_TOOL_CALL_LIMIT: u32 = 50;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -39,6 +43,9 @@ pub struct ChatAppearance {
     pub paragraph_spacing: f32,
     pub message_spacing: f32,
     pub wide: bool,
+    /// Tool chips kept visible per open tool group — the most recent ones.
+    /// `0` shows every call.
+    pub tool_call_limit: u32,
     pub light: ChatColors,
     pub dark: ChatColors,
 }
@@ -54,6 +61,7 @@ impl Default for ChatAppearance {
             paragraph_spacing: 12.0,
             message_spacing: 14.0,
             wide: false,
+            tool_call_limit: DEFAULT_TOOL_CALL_LIMIT,
             light: ChatColors::default(),
             dark: ChatColors::default(),
         }
@@ -97,6 +105,7 @@ impl ChatAppearance {
         self.line_spacing = bounded(self.line_spacing, 0.8, 2.0, 1.0);
         self.paragraph_spacing = bounded(self.paragraph_spacing, 0.0, 40.0, 12.0);
         self.message_spacing = bounded(self.message_spacing, 4.0, 64.0, 14.0);
+        self.tool_call_limit = self.tool_call_limit.min(MAX_TOOL_CALL_LIMIT);
         self.font_family = clean_font(self.font_family);
         self.code_font_family = clean_font(self.code_font_family);
         for palette in [&mut self.light, &mut self.dark] {
@@ -421,6 +430,24 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_limit_defaults_to_five_and_stays_bounded() {
+        let defaults = ChatAppearance::default();
+        assert_eq!(defaults.tool_call_limit, 5);
+        assert_eq!(defaults.clone().sanitized().tool_call_limit, 5);
+        let unbounded = ChatAppearance {
+            tool_call_limit: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(unbounded.sanitized().tool_call_limit, MAX_TOOL_CALL_LIMIT);
+        // 0 is the deliberate "show all" setting, not an invalid value.
+        let uncapped = ChatAppearance {
+            tool_call_limit: 0,
+            ..Default::default()
+        };
+        assert_eq!(uncapped.sanitized().tool_call_limit, 0);
+    }
+
+    #[test]
     fn sparse_settings_and_missing_file_use_defaults() {
         let temp = tempfile::tempdir().unwrap();
         assert_eq!(ChatAppearance::load(temp.path()), ChatAppearance::default());
@@ -428,6 +455,8 @@ mod tests {
             serde_json::from_str(r##"{"wide":true,"dark":{"accent":"#aabbcc"}}"##).unwrap();
         assert!(sparse.wide);
         assert_eq!(sparse.font_size, 14.0);
+        // A file written before this setting existed keeps the new default.
+        assert_eq!(sparse.tool_call_limit, DEFAULT_TOOL_CALL_LIMIT);
         assert_eq!(sparse.sanitized().dark.accent.as_deref(), Some("#AABBCC"));
     }
 
