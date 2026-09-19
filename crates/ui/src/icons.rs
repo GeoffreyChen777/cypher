@@ -127,6 +127,10 @@ icon_assets![
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has no info-circle.
     (INFO_CIRCLE, "info-circle"),
+    // Drawn as a family with INFO_CIRCLE (same circle, same round-capped
+    // dot) — the set has no question-circle either. Marks a session parked on
+    // the user's answer in the sessions sidebar.
+    (QUESTION_CIRCLE, "question-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/

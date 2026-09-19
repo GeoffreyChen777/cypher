@@ -4480,9 +4480,10 @@ impl Shell {
     }
 
     /// One compact session row: agent mark + title on the left, status corner
-    /// on the right (mini spinner while working, emerald check for unseen
-    /// finished turns, relative time otherwise). The row is inset from the
-    /// project-card edge; click selects and right-click opens the context
+    /// on the right (mini spinner while working, amber question mark while the
+    /// run waits on an answer, emerald check for unseen finished turns,
+    /// relative time otherwise). The row is inset from the project-card
+    /// edge; click selects and right-click opens the context
     /// menu. The branch is NOT repeated per row — it lives in the
     /// branch/worktree group header above (see [`spaces`](crate::shell::spaces)).
     #[allow(clippy::too_many_arguments)]
@@ -4499,9 +4500,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Status corner shares the relative-time slot so the compact row's
-        // width stays stable: spinner while working, emerald check for an
-        // unseen finished turn ("ready for you"), time otherwise. The pulse
-        // clock drives the spinner while it stays mounted.
+        // width stays stable: spinner while working, amber question mark while
+        // the agent waits on the user, emerald check for an unseen finished
+        // turn ("ready for you"), time otherwise. The pulse clock drives the
+        // spinner while it stays mounted.
         let corner: AnyElement = match status {
             ChatIndicator::Working => div()
                 .flex_none()
@@ -4511,6 +4513,16 @@ impl Shell {
                     cx.entity_id(),
                     cx,
                 ))
+                .into_any_element(),
+            // The turn is parked on a question, so the spinner has stopped —
+            // without a corner of its own the row fell back to the relative
+            // time and read exactly like an idle session (user report). Amber
+            // is the tone the theme reserves for awaiting-input; the glyph is
+            // slightly larger than the check because it carries inner detail.
+            ChatIndicator::AwaitingInput => icon(icons::QUESTION_CIRCLE)
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.warning)
                 .into_any_element(),
             ChatIndicator::Completed => icon(icons::CHECK)
                 .size(px(11.0))
