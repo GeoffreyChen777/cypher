@@ -20,6 +20,7 @@ pub mod chat_style;
 pub mod comments;
 pub mod composer;
 pub mod edge_fade;
+pub mod files;
 pub mod frost;
 pub mod history;
 pub mod icons;
@@ -206,6 +207,7 @@ pub fn run_app(config: UiConfig) {
         chat_style::init(data_dir, cx);
         composer::init(cx);
         terminal::panel::init(cx);
+        files::editor::init(cx);
         app_menus::init(cx);
 
         let state = cx.new(|_| state::AppState::new());

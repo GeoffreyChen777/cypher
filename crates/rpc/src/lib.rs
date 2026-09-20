@@ -155,6 +155,10 @@ pub mod methods {
     /// assigned checkout, and path is relative with no symlink traversal.
     pub const LIST_WORKSPACE_FILES: &str = "ListWorkspaceFiles";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
+    /// Replace the text of an EXISTING regular file; {chatId, cwd, path,
+    /// text}. Same checkout/path rules as the reads (no creation, no symlink
+    /// traversal, bounded size).
+    pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Quick-chat scratch folders live on the chat's host device.

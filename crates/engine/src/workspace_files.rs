@@ -1,12 +1,19 @@
-//! Bounded, read-only filesystem access anchored to a verified checkout.
-//! No shell, no ambient relative paths, no symlink traversal (including during
-//! rename races). Each component is opened relative to a held directory fd.
+//! Bounded filesystem access anchored to a verified checkout: directory
+//! listings, text reads, and whole-file text replacement of existing regular
+//! files. No shell, no ambient relative paths, no symlink traversal (including
+//! during rename races). Each component is opened relative to a held
+//! directory fd.
 
-use cypher_proto::{WorkspaceDirectory, WorkspaceFileContent, WorkspaceFileEntry};
+use cypher_proto::{
+    WorkspaceDirectory, WorkspaceFileContent, WorkspaceFileEntry, WorkspaceFileWritten,
+};
 use std::io;
 use std::path::Path;
 
 const TEXT_LIMIT: usize = 256 * 1024;
+/// The editor never loads more than `TEXT_LIMIT`, so a save can only be
+/// somewhat larger than a full read (the user typed into it).
+const WRITE_LIMIT: usize = 1024 * 1024;
 const ENTRY_LIMIT: usize = 1000;
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
@@ -27,6 +34,29 @@ pub async fn read(
         } else {
             serde_json::to_value(text(&root, &path)?).map_err(io::Error::other)
         }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Replace the whole text of an existing regular file. Never creates files,
+/// never follows links, never writes through a directory or special file.
+pub async fn write(
+    root: std::path::PathBuf,
+    path: String,
+    text: String,
+) -> io::Result<serde_json::Value> {
+    if text.len() > WRITE_LIMIT {
+        return Err(io::Error::other(
+            "file is too large to save from the file browser",
+        ));
+    }
+    let permit = READ_SLOTS
+        .try_acquire()
+        .map_err(|_| io::Error::other("file browser busy; retry"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        serde_json::to_value(replace(&root, &path, &text)?).map_err(io::Error::other)
     })
     .await
     .map_err(io::Error::other)?
@@ -59,12 +89,19 @@ mod anchored {
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 
     fn child(parent: &File, name: &str, directory: bool) -> io::Result<File> {
+        child_with(
+            parent,
+            name,
+            libc::O_RDONLY | if directory { libc::O_DIRECTORY } else { 0 },
+        )
+    }
+
+    /// `openat` one path component below `parent` with `access` (the access
+    /// mode plus any of O_DIRECTORY); the safety flags — never follow a link,
+    /// never block on a FIFO, never leak across exec — are always added.
+    fn child_with(parent: &File, name: &str, access: libc::c_int) -> io::Result<File> {
         let name = CString::new(name).map_err(io::Error::other)?;
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
-            | libc::O_NONBLOCK
-            | if directory { libc::O_DIRECTORY } else { 0 };
+        let flags = access | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
         // SAFETY: name is NUL-terminated; parent owns the fd throughout openat.
         let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
@@ -75,6 +112,22 @@ mod anchored {
     }
 
     pub(super) fn open(root: &Path, path: &str, directory: bool) -> io::Result<File> {
+        open_with(root, path, directory, libc::O_RDONLY)
+    }
+
+    /// The write-side twin of [`open`]: the final component opens for
+    /// writing (no O_CREAT — the file must already exist; no O_TRUNC — the
+    /// caller truncates only after confirming it is a regular file).
+    pub(super) fn open_for_write(root: &Path, path: &str) -> io::Result<File> {
+        open_with(root, path, false, libc::O_WRONLY)
+    }
+
+    fn open_with(
+        root: &Path,
+        path: &str,
+        directory: bool,
+        leaf_access: libc::c_int,
+    ) -> io::Result<File> {
         let parts = components(path)?;
         if !root.is_absolute() || (!directory && parts.is_empty()) {
             return Err(io::Error::other("expected a workspace file"));
@@ -99,7 +152,12 @@ mod anchored {
             }
         }
         for (i, part) in parts.iter().enumerate() {
-            fd = child(&fd, part, directory || i + 1 < parts.len())?;
+            let last = i + 1 == parts.len();
+            fd = if last && !directory {
+                child_with(&fd, part, leaf_access)?
+            } else {
+                child(&fd, part, true)?
+            };
         }
         Ok(fd)
     }
@@ -192,6 +250,23 @@ fn list(root: &Path, path: &str) -> io::Result<WorkspaceDirectory> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+fn replace(root: &Path, path: &str, text: &str) -> io::Result<WorkspaceFileWritten> {
+    use std::io::Write;
+    let mut file = anchored::open_for_write(root, path)?;
+    // O_NOFOLLOW already refused a link; a FIFO/device would have opened
+    // (non-blocking) — refuse to write through anything but a regular file.
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    file.set_len(0)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_data()?;
+    Ok(WorkspaceFileWritten {
+        bytes: text.len() as u64,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn text(root: &Path, path: &str) -> io::Result<WorkspaceFileContent> {
     use std::io::Read;
     let file = anchored::open(root, path, false)?;
@@ -240,6 +315,12 @@ fn list(_: &Path, _: &str) -> io::Result<WorkspaceDirectory> {
 fn text(_: &Path, _: &str) -> io::Result<WorkspaceFileContent> {
     Err(io::Error::other(
         "workspace file reading is unsupported on this host",
+    ))
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn replace(_: &Path, _: &str, _: &str) -> io::Result<WorkspaceFileWritten> {
+    Err(io::Error::other(
+        "workspace file editing is unsupported on this host",
     ))
 }
 
@@ -303,6 +384,47 @@ mod tests {
         let fifo = std::ffi::CString::new(root.join("fifo").to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(text(&root, "fifo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_rewrites_only_existing_regular_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "a much longer original body\n").unwrap();
+        std::os::unix::fs::symlink(root.join("src/main.rs"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("escape")).unwrap();
+
+        // Shorter text must not leave the old tail behind.
+        assert_eq!(
+            replace(&root, "src/main.rs", "fn main() {}").unwrap().bytes,
+            12
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "fn main() {}"
+        );
+        assert_eq!(
+            text(&root, "src/main.rs").unwrap().text.as_deref(),
+            Some("fn main() {}")
+        );
+
+        // No creation, no links, no directories, no escaping the root.
+        assert!(replace(&root, "src/new.rs", "x").is_err());
+        assert!(!root.join("src/new.rs").exists());
+        assert!(replace(&root, "link", "x").is_err());
+        assert!(replace(&root, "escape/passwd", "x").is_err());
+        assert!(replace(&root, "src", "x").is_err());
+        assert!(replace(&root, "", "x").is_err());
+        assert!(replace(&root, "../outside", "x").is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "fn main() {}"
+        );
+        let fifo = std::ffi::CString::new(root.join("fifo").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(replace(&root, "fifo", "x").is_err());
     }
 
     #[test]
