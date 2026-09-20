@@ -58,7 +58,7 @@ cp "$SPEC/provider-service.mjs" "$STAGE/"
 
 # A private production dependency tree: Pi and every Cypher-curated extension
 # are exact-version locked. npm runs only at build time, never on first launch.
-cp "$SPEC/package.json" "$SPEC/package-lock.json" "$STAGE/npm/"
+cp "$SPEC/package.json" "$SPEC/package-lock.json" "$SPEC/.npmrc" "$STAGE/npm/"
 npm ci --prefix "$STAGE/npm" --omit=dev --ignore-scripts
 
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently

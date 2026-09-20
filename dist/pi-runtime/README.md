@@ -113,6 +113,9 @@ rather than overwriting them. See [MCP settings](../../docs/mcp-settings.md).
 
 1. Change exact dependency versions in `package.json`.
 2. Run `npm install --package-lock-only --ignore-scripts` in this directory.
+   `.npmrc` sets `legacy-peer-deps=true` because curated plugins declare
+   incompatible `@earendil-works/pi-ai` peer ranges. `pi-ai` and `pi-tui` are
+   pinned next to Pi so plugins and `provider-service.mjs` can resolve them.
 3. Update `release.json`: bump the bundle revision when its contents change,
    and explicitly set the minimum compatible Cypher and pinned Node version.
    A local-only packaging override is also available:
