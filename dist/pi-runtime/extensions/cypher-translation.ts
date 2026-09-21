@@ -11,6 +11,18 @@
  * languages of a turn keeps the second mention of a term rendered the way the
  * first one was. The block is text only: user messages and the model's final
  * answers, never tool calls, tool output or thinking.
+ *
+ * An answer's translation is STREAMED, and that is a correctness property
+ * before it is a cosmetic one. Translating the final answer is the one step
+ * that runs AFTER the visible answer has finished streaming, so for as long as
+ * it takes, the session's event stream is otherwise completely silent — and
+ * Cypher parks a turn whose stream falls silent (after only 20s, once that turn
+ * has been parked and resumed once) and DROPS everything that arrives after the
+ * park. A translation published in one piece at the end therefore loses that
+ * race whenever it is slower than the window, and is thrown away whole with no
+ * sign of it. Publishing frames as the translation arrives keeps the stream
+ * audible, which is what makes the feature reliable; rendering progressively is
+ * the part you can see.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,6 +60,29 @@ const DEFAULTS: TranslationSettings = {
 
 const SETTINGS_FILE = "translation.json";
 const MAX_TRANSLATION_CHARS = 24_000;
+
+/** Status key of the side-band translation channel Cypher's harness consumes. */
+const TRANSLATION_STATUS_KEY = "cypher.translation.v1";
+/** Minimum gap between two published frames. Cypher commits the chat doc on a
+ *  120ms tick, so a faster cadence buys no visible smoothness and costs one
+ *  whole-text snapshot per frame. */
+const FRAME_MS = 150;
+/** A frame is re-published at least this often even when the translation model
+ *  has produced nothing new, so the turn's stream is never quiet for long
+ *  enough to be parked. Sized well inside the 20s window a parked-and-resumed
+ *  turn gets, which is the tightest one Cypher applies. */
+const KEEPALIVE_MS = 4_000;
+/** The whole translation, including connect and time-to-first-token. The
+ *  keepalive above is deliberately good at holding a turn open, so something
+ *  has to be willing to give up: without this, a provider that accepts the
+ *  request and then never answers would keep the turn alive forever. */
+const TRANSLATION_TIMEOUT_MS = 120_000;
+/** The offline detector is a local unix-socket round trip, so this is generous.
+ *  It exists because Pi holds its `message_end` event until this handler
+ *  returns: a hung engine socket would otherwise stall the turn with no way
+ *  out. Timing out yields no local decision, which sends the message to the
+ *  translation model — the safe direction. */
+const DETECT_TIMEOUT_MS = 2_000;
 
 /** How many earlier exchanges the reference block may quote. Word sense
  *  saturates almost immediately — one or two turns fix the domain, and
@@ -97,6 +132,24 @@ interface LanguageDetection {
 
 let detectorPromise: Promise<EngineClient | undefined> | undefined;
 
+/** `promise`, or `undefined` if it has not settled within `ms` — a rejection
+ *  reads the same as a timeout, because every caller here treats both as "no
+ *  answer". Nothing on the translation path may hang: Pi withholds its
+ *  `message_end` event until the handler returns, and a turn whose stream goes
+ *  quiet is parked with everything after it dropped. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    // A pending translation must never be the reason the process stays alive.
+    timer.unref?.();
+    const settle = (value: T | undefined) => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    promise.then(settle, () => settle(undefined));
+  });
+}
+
 async function detectLanguage(value: string): Promise<LanguageDetection | undefined> {
   const modulePath = process.env.CYPHER_ENGINE_CLIENT_MODULE;
   const socketPath = process.env.CYPHER_ENGINE_SOCKET;
@@ -104,21 +157,22 @@ async function detectLanguage(value: string): Promise<LanguageDetection | undefi
   const pending = (detectorPromise ??= import(modulePath)
     .then((module) => module.connectEngine({ socketPath }))
     .catch(() => undefined));
-  const client = await pending;
+  const client = await withTimeout(pending, DETECT_TIMEOUT_MS);
   if (!client) {
     // A failed connect must not poison the process: the engine restarts
     // independently of this pi child, so let the next call reconnect.
     if (detectorPromise === pending) detectorPromise = undefined;
     return undefined;
   }
-  try {
-    return await client.call("DetectPiLanguage", { text: value });
-  } catch {
-    // Same reasoning for a dropped socket: drop the dead client so detection
-    // resumes after the engine comes back instead of silently staying off.
-    if (detectorPromise === pending) detectorPromise = undefined;
-    return undefined;
-  }
+  const detection = await withTimeout(
+    client.call("DetectPiLanguage", { text: value }),
+    DETECT_TIMEOUT_MS,
+  );
+  // A call that failed or timed out leaves a client that cannot be trusted:
+  // drop it so detection resumes after the engine comes back instead of
+  // silently staying off. A successful detection is always an object.
+  if (!detection && detectorPromise === pending) detectorPromise = undefined;
+  return detection;
 }
 
 /** Names and codes accepted for a configured language, mapped to ISO 639-3 —
@@ -392,6 +446,107 @@ export function unwrapTranslation(text: string, source: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
+/** The mid-stream form of [`unwrapTranslation`]. A wrapping fence has no
+ *  closing line yet while the answer is still arriving, so the strict pattern
+ *  cannot match and the opener would otherwise be published as literal
+ *  backticks and then taken back at the end.
+ *
+ *  Everything is held back until the opener's line is complete: `""` means
+ *  "nothing publishable yet", not "empty translation". The source is checked
+ *  first for the same reason as in the strict form — a message that IS a code
+ *  block must translate to one, fence included. */
+export function unwrapPartialTranslation(text: string, source: string): string {
+  const trimmed = text.trimStart();
+  if (source.trimStart().startsWith("```")) return trimmed;
+  if (!trimmed.startsWith("`")) return trimmed;
+  // A leading run of backticks may still be growing into a fence opener, so
+  // hold it back until it is long enough to tell apart from inline code.
+  if (!trimmed.startsWith("```")) return trimmed.length < 3 ? "" : trimmed;
+  const newline = trimmed.indexOf("\n");
+  return newline < 0 ? "" : trimmed.slice(newline + 1).trimStart();
+}
+
+/** What the message's text should render as, given a translation of it.
+ *
+ *  The extension renders rather than the harness, and that is what makes a
+ *  frame idempotent: every frame is the WHOLE replacement, so re-sending one,
+ *  or landing a later one first, converges instead of appending a second copy
+ *  of the answer. */
+export function renderTranslation(
+  original: string,
+  translated: string,
+  mode: OutputMode,
+): string {
+  return mode === "append" ? `${original}\n\n---\n\n${translated}` : translated;
+}
+
+/** Paces the frames a streaming translation publishes.
+ *
+ *  Two jobs, and the second is the one that matters. Frames are throttled to
+ *  Cypher's own doc-commit cadence, so a fast model does not cost a whole-text
+ *  snapshot per token. And a frame is re-sent on a keepalive even when nothing
+ *  changed, because the engine parks a turn whose stream falls silent and drops
+ *  everything that arrives after the park — a keepalive frame changes no text
+ *  and exists purely to prove the turn is still working.
+ *
+ *  The clock is injectable so the pacing rules can be tested without waiting
+ *  for wall time. */
+export class FramePump {
+  private latest: string | undefined;
+  private sentText: string | undefined;
+  /** Before the first frame, not at time zero: the opening frame must go out
+   *  the moment there is anything to say, whatever the clock reads. */
+  private sentAt = Number.NEGATIVE_INFINITY;
+  private readonly send: (text: string) => void;
+  private readonly now: () => number;
+  private readonly frameMs: number;
+  private readonly keepaliveMs: number;
+
+  constructor(
+    send: (text: string) => void,
+    now: () => number = Date.now,
+    frameMs: number = FRAME_MS,
+    keepaliveMs: number = KEEPALIVE_MS,
+  ) {
+    this.send = send;
+    this.now = now;
+    this.frameMs = frameMs;
+    this.keepaliveMs = keepaliveMs;
+  }
+
+  /** A new rendering is available; published at the next frame boundary. */
+  offer(text: string): void {
+    this.latest = text;
+    this.tick();
+  }
+
+  /** Called on a timer: publishes a pending change once the throttle window
+   *  has passed, and re-publishes an unchanged frame on the keepalive. */
+  tick(): void {
+    if (this.latest === undefined) return;
+    const since = this.now() - this.sentAt;
+    const due = this.latest === this.sentText ? this.keepaliveMs : this.frameMs;
+    if (since >= due) this.flush();
+  }
+
+  /** Publish now, throttle or not — the definitive last frame of a translation,
+   *  which has to land whatever the pacing rules would have said. */
+  flush(text?: string): void {
+    if (text !== undefined) this.latest = text;
+    if (this.latest === undefined) return;
+    this.send(this.latest);
+    this.sentText = this.latest;
+    this.sentAt = this.now();
+  }
+}
+
+/** One frame of the side-band channel Cypher's harness folds into the rendered
+ *  transcript, replacing the message's text with `text`. Pi's own message
+ *  history is deliberately left in the working language. */
+function publishTranslation(ctx: ExtensionContext, text: string): void {
+  ctx.ui.setStatus(TRANSLATION_STATUS_KEY, JSON.stringify({ version: 1, text }));
+}
+
 /** Translation is a mechanical rewrite, so reasoning models should not think.
  *
  *  Requesting an effort level is the wrong lever and actively harmful: the
@@ -426,12 +581,18 @@ function hasToolCall(message: AssistantMessage): boolean {
   return message.content.some((part) => part?.type === "toolCall");
 }
 
+/** Translate `value`, feeding `onPartial` the translation so far as it
+ *  arrives. Resolves with the finished translation, or `undefined` when there
+ *  is nothing to apply — no model, a failed request, or an answer that came
+ *  back unchanged. */
 async function translate(
   value: string,
   direction: Direction,
   pair: LanguagePair,
   ctx: ExtensionContext,
   config: TranslationSettings,
+  onPartial?: (translated: string) => void,
+  onIdle?: () => void,
 ): Promise<string | undefined> {
   const source = value.trim();
   if (!source || source.length > MAX_TRANSLATION_CHARS || !pair.toName) return undefined;
@@ -451,17 +612,33 @@ async function translate(
       ? undefined
       : referenceBlock(historyFor(ctx), direction, pair);
 
+  // Time-to-first-token is dead air on the session's stream, and so is a model
+  // that pauses mid-answer, so the idle tick runs for the whole request rather
+  // than only between deltas.
+  const idle = onIdle ? setInterval(onIdle, FRAME_MS) : undefined;
+  idle?.unref?.();
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), TRANSLATION_TIMEOUT_MS);
+  deadline.unref?.();
   try {
-    const result = await ctx.modelRegistry.complete(
+    const stream = ctx.modelRegistry.stream(
       model,
       {
         systemPrompt: translationSystemPrompt(direction, pair, reference),
         messages: [{ role: "user", content: source, timestamp: Date.now() }],
       },
-      noThinkingOptions(model),
+      { ...noThinkingOptions(model), signal: controller.signal },
     );
-    // `complete()` resolves with a failed message instead of throwing, so an
-    // API rejection would otherwise disable translation with no sign of it.
+    for await (const event of stream) {
+      if (event.type !== "text_delta" && event.type !== "text_end") continue;
+      // `partial` is the live response-so-far, which is exactly the shape a
+      // frame wants: the whole translation up to here, not this delta.
+      const partial = unwrapPartialTranslation(textOf(event.partial.content), source);
+      if (partial) onPartial?.(partial);
+    }
+    const result = await stream.result();
+    // The stream resolves with a failed message instead of throwing, so an API
+    // rejection would otherwise disable translation with no sign of it.
     if (result.stopReason === "error") {
       const detail = result.errorMessage ?? "the translation request failed";
       if (warnedError !== detail) {
@@ -478,8 +655,19 @@ async function translate(
     const translation = unwrapTranslation(textOf(result.content), source);
     return translation && translation !== source ? translation : undefined;
   } catch (error) {
-    ctx.ui.notify(`Translation skipped: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    // A timeout arrives as an abort. Whatever was streamed is deliberately NOT
+    // kept: a half-translated answer reads like a whole one, and acting on the
+    // half that arrived is worse than reading the original.
+    const detail = controller.signal.aborted
+      ? `it did not finish within ${Math.round(TRANSLATION_TIMEOUT_MS / 1_000)}s`
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    ctx.ui.notify(`Translation skipped: ${detail}`, "warning");
     return undefined;
+  } finally {
+    clearTimeout(deadline);
+    if (idle) clearInterval(idle);
   }
 }
 
@@ -526,27 +714,47 @@ async function transformFinalMessage(
   if (!original.trim()) return undefined;
   const pair = outputPair(config, lastUserLanguage);
   const wanted = config.translateFinalResponses && Boolean(config.translationModel.trim());
-  const translated =
-    wanted && translationDecision(await detectLanguage(original), pair)
-      ? await translate(original, "output", pair, ctx, config)
-      : undefined;
-  recordAssistantTurn(ctx, original.trim(), translated);
-  if (!translated) return undefined;
+  if (!wanted || !translationDecision(await detectLanguage(original), pair)) {
+    // Recorded even when nothing was translated: an untranslated turn still
+    // fixes what the words in the next one refer to.
+    recordAssistantTurn(ctx, original.trim(), undefined);
+    return undefined;
+  }
 
-  // Cypher has already streamed the original text into its transcript. Send a
-  // side-band status event so the harness can replace/append the rendered
-  // transcript without replacing Pi's own message history.
-  if (process.env.CYPHER_ENGINE_SOCKET && process.env.CYPHER_CHAT_ID) {
-    ctx.ui.setStatus(
-      "cypher.translation.v1",
-      JSON.stringify({
-        version: 1,
-        text: translated,
-        mode: config.outputMode,
-      }),
+  // Cypher has already streamed the original text into its transcript and owns
+  // the rendering, so the translation goes to it as side-band status frames
+  // and Pi's own message history is left alone. Everywhere else — TUI, plain
+  // RPC, SDK — there is no such transcript, so the message itself is rewritten
+  // once at the end.
+  const live = Boolean(process.env.CYPHER_ENGINE_SOCKET && process.env.CYPHER_CHAT_ID);
+  const pump = live ? new FramePump((text) => publishTranslation(ctx, text)) : undefined;
+  // An opening frame that re-states what is already on screen. It renders as
+  // no change at all, and exists only to prove the turn is still working while
+  // the translation model spends its time-to-first-token.
+  pump?.flush(original);
+
+  const translated = await translate(
+    original,
+    "output",
+    pair,
+    ctx,
+    config,
+    pump && ((partial) => pump.offer(renderTranslation(original, partial, config.outputMode))),
+    pump && (() => pump.tick()),
+  );
+  recordAssistantTurn(ctx, original.trim(), translated);
+
+  if (pump) {
+    // The definitive last frame, sent whatever happened. The partial frames
+    // already replaced the answer on screen, so a translation that failed,
+    // timed out, came back empty or came back unchanged has to put the
+    // original back rather than leave a half-translated answer standing.
+    pump.flush(
+      translated ? renderTranslation(original, translated, config.outputMode) : original,
     );
     return undefined;
   }
+  if (!translated) return undefined;
 
   let usedText = false;
   const content = assistant.content.map((part) => {

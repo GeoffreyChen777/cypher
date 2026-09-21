@@ -410,13 +410,25 @@ pub enum AgentEvent {
         /// fold tails it again before anything persists.
         output: String,
     },
-    /// Render-only translation for the completed final assistant statement.
+    /// Render-only translation for the final assistant statement, streamed.
     /// Pi keeps its original assistant message/context; Cypher applies this
-    /// side-band event to the displayed transcript after streaming completes.
+    /// side-band event to the displayed transcript.
+    ///
+    /// `text` is the WHOLE replacement for the message's rendered text, not a
+    /// delta and not just the translation: the publisher has already applied
+    /// its own append/replace mode, so the fold assigns and a series of frames
+    /// renders as streaming output. That is what makes a frame idempotent —
+    /// re-sending one, or replaying the journal, converges on the same text
+    /// instead of appending a second copy of the answer.
+    ///
+    /// Frames arrive every ~150ms while a translation runs, and at least every
+    /// few seconds even when nothing changed. That keepalive is load-bearing:
+    /// translation runs after the visible answer has finished streaming, and a
+    /// turn whose stream falls silent is parked with everything after it
+    /// dropped, which used to discard finished translations whole.
     #[serde(rename_all = "camelCase")]
     Translation {
         text: String,
-        mode: TranslationMode,
     },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
@@ -464,13 +476,6 @@ pub enum AgentEvent {
     SubagentStatus {
         runs: Vec<SubagentRun>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TranslationMode {
-    Replace,
-    Append,
 }
 
 #[cfg(test)]

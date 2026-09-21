@@ -314,19 +314,22 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
-        AgentEvent::Translation { text, mode } => {
+        AgentEvent::Translation { text } => {
+            // Assignment, not accumulation: the publisher sends the whole
+            // rendering it wants (already carrying its append/replace mode),
+            // so a stream of frames grows the answer in place and any one of
+            // them can be the last. Folding a delta here instead would make
+            // the result depend on how many frames happened to arrive, and a
+            // replayed or repeated frame would duplicate the answer.
+            //
+            // A frame whose text is unchanged is a keepalive: it proves the
+            // turn is alive, and diffs to nothing here and in the doc writer.
             if let Some(MessagePart::Text { text: current, .. }) = out
                 .iter_mut()
                 .rev()
                 .find(|part| matches!(part, MessagePart::Text { .. }))
             {
-                match mode {
-                    cypher_proto::TranslationMode::Replace => *current = text.clone(),
-                    cypher_proto::TranslationMode::Append => {
-                        current.push_str("\n\n---\n\n");
-                        current.push_str(text);
-                    }
-                }
+                current.clone_from(text);
             }
         }
         AgentEvent::ToolResult {
@@ -1044,33 +1047,71 @@ mod tests {
                 text: "final".into(),
             },
         );
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Translation {
-                text: "translated".into(),
-                mode: cypher_proto::TranslationMode::Replace,
-            },
-        );
+        fold_event_into_parts(&mut parts, &AgentEvent::Translation { text: "译".into() });
+        // Only the message's own text is rewritten: an earlier text part
+        // belongs to a statement that was already settled before a tool ran.
         assert!(matches!(
             &parts[0],
             MessagePart::Text { text, .. } if text == "first"
         ));
         assert!(matches!(
             &parts[2],
-            MessagePart::Text { text, .. } if text == "translated"
+            MessagePart::Text { text, .. } if text == "译"
+        ));
+    }
+
+    /// Streaming frames carry the whole rendering, so the fold assigns: the
+    /// answer grows in place, the last frame wins, and a frame that repeats
+    /// (a keepalive, or a replay) lands on the same text instead of
+    /// duplicating it.
+    #[test]
+    fn translation_frames_converge_on_the_last_one() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::TextDelta {
+                text: "the answer".into(),
+            },
+        );
+        for frame in ["译", "译文", "译文。", "译文。", "译文。"] {
+            fold_event_into_parts(&mut parts, &AgentEvent::Translation { text: frame.into() });
+        }
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { text, .. } if text == "译文。"
         ));
 
+        // Append mode is rendered by the publisher, so it arrives as one text
+        // and folds the same way — re-sending it never appends twice.
+        let appended = "the answer\n\n---\n\n译文。";
+        for _ in 0..3 {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Translation {
+                    text: appended.into(),
+                },
+            );
+        }
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Text { text, .. } if text == appended
+        ));
+    }
+
+    /// A frame with no statement to rewrite is a no-op rather than a new part:
+    /// it arrives after a boundary cleared the fold, and inventing a text part
+    /// there would splice the translation into the wrong entry.
+    #[test]
+    fn a_translation_with_nothing_to_rewrite_is_dropped() {
+        let mut parts = Vec::new();
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::Translation {
-                text: "追加".into(),
-                mode: cypher_proto::TranslationMode::Append,
+                text: "译文".into(),
             },
         );
-        assert!(matches!(
-            &parts[2],
-            MessagePart::Text { text, .. } if text == "translated\n\n---\n\n追加"
-        ));
+        assert!(parts.is_empty());
     }
 
     #[test]

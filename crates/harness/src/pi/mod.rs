@@ -56,8 +56,7 @@ use tokio::sync::mpsc;
 
 use cypher_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, TranslationMode,
-    UserInputQuestion,
+    SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, UserInputQuestion,
 };
 
 use crate::acp::normalize::{OUTPUT_CAP, cap_text, parse_commands};
@@ -163,7 +162,16 @@ pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
 /// Final-answer translation emitted by the Cypher translation extension.
 pub(crate) const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
 /// Whole-snapshot byte cap for one translation frame.
-const TRANSLATION_STATUS_MAX_BYTES: usize = 64 * 1024;
+///
+/// A frame carries the full replacement for the message's text, so append mode
+/// pays for the original AND the translation, and the extension caps only its
+/// SOURCE (24k chars). 24k chars of English plus a Chinese translation of them
+/// already clears 64KiB — the old cap silently dropped exactly the long answers
+/// that are hardest to read untranslated, and with streaming it would have
+/// dropped a run of frames and left the answer stuck half-translated. Sized to
+/// hold any frame that cap can produce, with room for 4-byte characters on both
+/// sides.
+const TRANSLATION_STATUS_MAX_BYTES: usize = 256 * 1024;
 /// Whole-snapshot byte cap (the extension caps at 64KiB; the harness
 /// re-checks so a misbehaving publisher can't smuggle an unbounded blob).
 const SUBAGENTS_STATUS_MAX_BYTES: usize = 64 * 1024;
@@ -244,16 +252,18 @@ fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
 
 /// Parse a `cypher.translation.v1` `statusText` into the rendered replacement.
 ///
-/// The whole-snapshot byte cap is the only size bound: a translation is
+/// One frame of a streaming translation: `text` is the whole replacement for
+/// the message's rendered text, already carrying the publisher's append/replace
+/// mode. The whole-snapshot byte cap is the only size bound — a translation is
 /// routinely longer than its source (CJK expands severalfold into English), so
-/// a second cap measured against the extension's *source* limit would silently
-/// drop exactly the long answers that are hardest to read untranslated.
-fn parse_translation_status(text: &str) -> Option<(String, TranslationMode)> {
+/// a second cap measured against the extension's *source* limit would reject
+/// well-formed frames.
+fn parse_translation_status(text: &str) -> Option<String> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
             target: "cypher_harness::pi",
             bytes = text.len(),
-            "translation status snapshot over 64KiB; ignoring"
+            "translation status snapshot over cap; ignoring"
         );
         return None;
     }
@@ -265,12 +275,7 @@ fn parse_translation_status(text: &str) -> Option<(String, TranslationMode)> {
     if translated.is_empty() {
         return None;
     }
-    let mode = match value.get("mode").and_then(Value::as_str)? {
-        "replace" => TranslationMode::Replace,
-        "append" => TranslationMode::Append,
-        _ => return None,
-    };
-    Some((translated.to_owned(), mode))
+    Some(translated.to_owned())
 }
 
 /// Strict per-run parse of one `cypher.subagents.v1` run object. `None` on
@@ -2572,12 +2577,8 @@ async fn run_session(session: Session) {
                                     .get("statusText")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default();
-                                if let Some((text, mode)) = parse_translation_status(text)
-                                    && !send(
-                                        &event_tx,
-                                        AgentEvent::Translation { text, mode },
-                                    )
-                                    .await
+                                if let Some(text) = parse_translation_status(text)
+                                    && !send(&event_tx, AgentEvent::Translation { text }).await
                                 {
                                     break 'main;
                                 }
@@ -3246,31 +3247,30 @@ mod tests {
 
     #[test]
     fn parse_translation_status_accepts_the_v1_frame() {
-        let (text, mode) = parse_translation_status(
-            &json!({ "version": 1, "text": "  译文  ", "mode": "append" }).to_string(),
-        )
-        .expect("valid frame");
+        let text =
+            parse_translation_status(&json!({ "version": 1, "text": "  译文  " }).to_string())
+                .expect("valid frame");
         assert_eq!(text, "译文", "surrounding whitespace is trimmed");
-        assert_eq!(mode, TranslationMode::Append);
+        // A `mode` from the pre-streaming publisher is ignored rather than
+        // rejected: the frame now carries the rendering it asked for.
         assert_eq!(
             parse_translation_status(
-                &json!({ "version": 1, "text": "hi", "mode": "replace" }).to_string()
+                &json!({ "version": 1, "text": "hi", "mode": "append" }).to_string()
             )
-            .map(|(_, mode)| mode),
-            Some(TranslationMode::Replace)
+            .as_deref(),
+            Some("hi")
         );
     }
 
     #[test]
     fn parse_translation_status_rejects_wrong_versions_junk_and_empty_text() {
         for bad in [
-            json!({ "version": 2, "text": "hi", "mode": "replace" }).to_string(),
-            json!({ "text": "hi", "mode": "replace" }).to_string(),
-            json!({ "version": 1, "mode": "replace" }).to_string(),
-            json!({ "version": 1, "text": "hi", "mode": "rewrite" }).to_string(),
-            json!({ "version": 1, "text": "hi" }).to_string(),
+            json!({ "version": 2, "text": "hi" }).to_string(),
+            json!({ "text": "hi" }).to_string(),
+            json!({ "version": 1 }).to_string(),
+            json!({ "version": 1, "text": 7 }).to_string(),
             // Whitespace-only would blank the rendered answer.
-            json!({ "version": 1, "text": "   ", "mode": "replace" }).to_string(),
+            json!({ "version": 1, "text": "   " }).to_string(),
             "not json".to_owned(),
             String::new(),
         ] {
@@ -3283,19 +3283,24 @@ mod tests {
 
     #[test]
     fn parse_translation_status_bounds_only_on_the_snapshot_byte_cap() {
-        // A translation is routinely longer than its source; only the 64KiB
-        // frame cap may drop one, never a source-sized character limit.
-        let long = "译".repeat(20_000);
-        let frame = json!({ "version": 1, "text": long, "mode": "replace" }).to_string();
-        assert!(frame.len() < TRANSLATION_STATUS_MAX_BYTES);
+        // A frame carries the whole rendering, so append mode pays for the
+        // original AND its translation. The cap has to clear what the
+        // extension's 24k-char source limit can produce, or streaming would
+        // stall half way through exactly the longest answers.
+        let long = format!("{}\n\n---\n\n{}", "x".repeat(24_000), "译".repeat(24_000));
+        let frame = json!({ "version": 1, "text": long }).to_string();
+        assert!(
+            frame.len() < TRANSLATION_STATUS_MAX_BYTES,
+            "{}",
+            frame.len()
+        );
         assert_eq!(
-            parse_translation_status(&frame).map(|(text, _)| text.chars().count()),
-            Some(20_000)
+            parse_translation_status(&frame).map(|text| text.chars().count()),
+            Some(48_007)
         );
 
         let oversized =
-            json!({ "version": 1, "text": "x".repeat(TRANSLATION_STATUS_MAX_BYTES), "mode": "replace" })
-                .to_string();
+            json!({ "version": 1, "text": "x".repeat(TRANSLATION_STATUS_MAX_BYTES) }).to_string();
         assert!(parse_translation_status(&oversized).is_none());
     }
 }

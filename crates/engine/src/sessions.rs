@@ -1755,6 +1755,9 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    // The last translation frame folded, so the keepalive repeats that keep a
+    // slow translation's stream alive are not each journaled in full.
+    let mut last_translation: Option<String> = None;
 
     let final_status = loop {
         let event: AgentEvent = tokio::select! {
@@ -2031,6 +2034,24 @@ async fn drive_run(
         // per long turn observed) — the touch above already did their job.
         if matches!(&event, AgentEvent::ReasoningDelta { text } if text.is_empty()) {
             continue;
+        }
+        // Same reasoning for a repeated translation frame. A frame carries the
+        // WHOLE rendering, so one identical to the frame right before it is a
+        // keepalive: the translation extension re-states the current text every
+        // few seconds so a slow translation cannot go quiet and be parked by
+        // the watchdog above. The touch already did that job, and folding it
+        // would assign the text that is already there — journaling and
+        // broadcasting a full copy of the answer per tick would be pure noise.
+        // Only an UNBROKEN repeat is dropped, so a later turn whose answer
+        // happens to translate identically still renders.
+        match &event {
+            AgentEvent::Translation { text }
+                if last_translation.as_deref() == Some(text.as_str()) =>
+            {
+                continue;
+            }
+            AgentEvent::Translation { text } => last_translation = Some(text.clone()),
+            _ => last_translation = None,
         }
 
         // Stale tool echoes: a ToolCall/ToolResult naming an id folded in a

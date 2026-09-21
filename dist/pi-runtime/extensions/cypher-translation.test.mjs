@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  FramePump,
   languageCode,
   languageName,
   noThinkingOptions,
   referenceBlock,
+  renderTranslation,
   translationDecision,
   translationSystemPrompt,
+  unwrapPartialTranslation,
   unwrapTranslation,
 } from "./cypher-translation.ts";
 
@@ -221,4 +224,121 @@ test("a message that is itself a code block keeps its fence", () => {
   // A fence inside the answer is not a wrapper either.
   const mixed = "Run this:\n\n```sh\nls\n```";
   assert.equal(unwrapTranslation(mixed, "运行这个：\n\n```sh\nls\n```"), mixed);
+});
+
+// Mid-stream a wrapping fence has no closing line yet, so the strict form
+// cannot see it. Publishing the opener anyway would put literal backticks in
+// the transcript and then have to take them back.
+test("a partial holds back a fence opener until its line is complete", () => {
+  assert.equal(unwrapPartialTranslation("`", "你好"), "");
+  assert.equal(unwrapPartialTranslation("``", "你好"), "");
+  assert.equal(unwrapPartialTranslation("```", "你好"), "");
+  assert.equal(unwrapPartialTranslation("```mark", "你好"), "");
+  assert.equal(unwrapPartialTranslation("```markdown\nHel", "你好"), "Hel");
+  assert.equal(unwrapPartialTranslation("\n\nHel", "你好"), "Hel");
+  // Inline code is not a fence, and must not be held back forever.
+  assert.equal(unwrapPartialTranslation("`ls`", "你好"), "`ls`");
+});
+
+test("a partial of a message that is itself a code block keeps its fence", () => {
+  const source = "```rust\nlet x = 1; // 一\n```";
+  assert.equal(unwrapPartialTranslation("```rust\nlet", source), "```rust\nlet");
+});
+
+// Partials grow by appending, which is what lets the doc writer take its cheap
+// trailing-append path instead of diffing the whole answer on every frame.
+test("successive partials stay prefixes of one another", () => {
+  // A model's output only ever grows, so every transform applied to it has to
+  // keep that true — including across the fence and leading-whitespace cases,
+  // which are the two that rewrite the head of the text.
+  const source = "Change the endpoint";
+  for (const stream of [
+    ["把", "把接口", "把接口改 ", "把接口改 成", "把接口改 成 400"],
+    ["\n", "\n把", "\n把接口"],
+    ["`", "``", "```", "```md", "```md\n", "```md\n把", "```md\n把接口"],
+    ["`", "``", "``把", "``把接口"],
+  ]) {
+    let previous = "";
+    for (const raw of stream) {
+      const partial = unwrapPartialTranslation(raw, source);
+      assert.ok(
+        partial.startsWith(previous),
+        `${JSON.stringify(partial)} must extend ${JSON.stringify(previous)}`,
+      );
+      previous = partial;
+    }
+  }
+});
+
+test("a frame carries the whole rendering, so append mode never doubles", () => {
+  assert.equal(renderTranslation("The answer", "译文", "replace"), "译文");
+  assert.equal(
+    renderTranslation("The answer", "译文", "append"),
+    "The answer\n\n---\n\n译文",
+  );
+  // Re-rendering the same frame is what a keepalive and a replay both do.
+  const once = renderTranslation("The answer", "译文", "append");
+  assert.equal(renderTranslation("The answer", "译文", "append"), once);
+});
+
+const pump = (frameMs = 150, keepaliveMs = 4_000) => {
+  const sent = [];
+  let clock = 1_000;
+  return {
+    sent,
+    advance: (ms) => {
+      clock += ms;
+    },
+    pump: new FramePump((text) => sent.push(text), () => clock, frameMs, keepaliveMs),
+  };
+};
+
+test("the opening frame goes out immediately, whatever the clock reads", () => {
+  const { pump: p, sent } = pump();
+  p.offer("译");
+  assert.deepEqual(sent, ["译"]);
+});
+
+test("frames are throttled to the doc commit cadence", () => {
+  const { pump: p, sent, advance } = pump();
+  p.offer("译");
+  p.offer("译文");
+  p.offer("译文。");
+  assert.deepEqual(sent, ["译"], "a burst inside one window costs one frame");
+  advance(150);
+  // The idle tick is what publishes a change that no later delta followed.
+  p.tick();
+  assert.deepEqual(sent, ["译", "译文。"], "and it is the newest rendering that goes");
+});
+
+// The reason the pump exists: a silent stream is a parked turn, and a parked
+// turn drops the translation it was waiting for.
+test("an unchanged frame is re-sent on the keepalive", () => {
+  const { pump: p, sent, advance } = pump();
+  p.offer("译文");
+  advance(150);
+  p.tick();
+  assert.deepEqual(sent, ["译文"], "nothing changed, so the frame window is not enough");
+  advance(4_000);
+  p.tick();
+  assert.deepEqual(sent, ["译文", "译文"], "the keepalive re-states it");
+});
+
+test("the last frame lands whatever the pacing rules would have said", () => {
+  const { pump: p, sent } = pump();
+  p.offer("译");
+  p.flush("译文。");
+  assert.deepEqual(sent, ["译", "译文。"]);
+  // A failed translation puts the original back through the same door.
+  p.flush("The answer");
+  assert.deepEqual(sent, ["译", "译文。", "The answer"]);
+});
+
+test("a pump with nothing to say never publishes", () => {
+  const { pump: p, sent, advance } = pump();
+  p.tick();
+  advance(10_000);
+  p.tick();
+  p.flush();
+  assert.deepEqual(sent, []);
 });
