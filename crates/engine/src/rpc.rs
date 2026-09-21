@@ -187,6 +187,9 @@ struct WorkspaceFileParams {
     cwd: String,
     #[serde(default)]
     path: String,
+    /// `WriteWorkspaceFile` only: the full replacement text.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
@@ -1313,6 +1316,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SEARCH_FILES
             | methods::LIST_WORKSPACE_FILES
             | methods::READ_WORKSPACE_FILE
+            | methods::WRITE_WORKSPACE_FILE
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
             | methods::CREATE_SCRATCH_DIR
@@ -2650,9 +2654,18 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
             }
-            methods::LIST_WORKSPACE_FILES | methods::READ_WORKSPACE_FILE => {
+            methods::LIST_WORKSPACE_FILES
+            | methods::READ_WORKSPACE_FILE
+            | methods::WRITE_WORKSPACE_FILE => {
                 let p: WorkspaceFileParams = parse_params(params)?;
                 let directory = method == methods::LIST_WORKSPACE_FILES;
+                let write = (method == methods::WRITE_WORKSPACE_FILE)
+                    .then(|| {
+                        p.text.clone().ok_or_else(|| {
+                            RpcError::BadParams("WriteWorkspaceFile needs text".into())
+                        })
+                    })
+                    .transpose()?;
                 tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     let same_checkout = || -> Result<(), RpcError> {
                         let chat = self
@@ -2679,14 +2692,18 @@ impl RpcService for EngineRpc {
                         })
                         .await?;
                     same_checkout()?;
-                    let value = crate::workspace_files::read(root, p.path.clone(), directory)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let value = match write {
+                        Some(text) => {
+                            crate::workspace_files::write(root, p.path.clone(), text).await
+                        }
+                        None => crate::workspace_files::read(root, p.path.clone(), directory).await,
+                    }
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                     same_checkout()?;
                     RpcReply::value(&value)
                 })
                 .await
-                .map_err(|_| RpcError::Failed("workspace file read timed out".into()))?
+                .map_err(|_| RpcError::Failed("workspace file access timed out".into()))?
             }
             methods::SEARCH_FILES => {
                 let p: FileSearchParams = parse_params(params)?;
@@ -3089,6 +3106,7 @@ mod tests {
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::LIST_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
+        assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
         assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
         assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
         assert!(forwardable(methods::GET_WEB_SEARCH_FALLBACK));

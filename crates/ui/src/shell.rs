@@ -28,6 +28,7 @@ use gpui_tokio::Tokio;
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use crate::files::FilesPanel;
 use crate::icons::{self, cypher_app_icon, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
@@ -139,6 +140,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     }
     cx.clear_key_bindings();
     crate::composer::init(cx);
+    crate::files::editor::init(cx);
     // Fixed app-level shortcuts (⌘Q quit, ⌘W close, ⌘M minimize, ⌘H hide) —
     // these back the native menu key equivalents and must survive keymap
     // re-application.
@@ -264,14 +266,16 @@ pub enum Route {
 /// One right-pane surface tab (t3code RightPanelSurface): a git-diff page
 /// (each tab its own [`Changes`] viewer — multiple diff panels, user
 /// request), one embedded terminal keyed by its [`TerminalPanel`] tab key,
-/// or a temporary Side Chat (round 21). `Picker` is the empty state
-/// ("Open a surface").
+/// a file browser/editor over the chat's checkout ([`FilesPanel`]), or a
+/// temporary Side Chat (round 21). `Picker` is the empty state ("Open a
+/// surface").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum RightSurface {
     #[default]
     Picker,
     Diff(u64),
     Terminal(u64),
+    Files(u64),
     SideChat(u64),
 }
 
@@ -1018,6 +1022,10 @@ pub struct Shell {
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
+    /// Files surfaces by id — each tab its own tree + editor over the
+    /// chat's checkout.
+    files: std::collections::HashMap<u64, Entity<FilesPanel>>,
+    files_seq: u64,
     /// Temporary Side Chat tabs (round 21): one [`SideChatPanel`] per open
     /// side chat, keyed by a shell-minted sequence id. Owned here so the
     /// shell can promote/close/dispose them and re-render their tabs.
@@ -1508,6 +1516,8 @@ impl Shell {
             diffs: std::collections::HashMap::new(),
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
+            files: std::collections::HashMap::new(),
+            files_seq: 0,
             side_chats: std::collections::HashMap::new(),
             side_chat_subs: std::collections::HashMap::new(),
             side_chat_seq: 0,
@@ -2000,6 +2010,10 @@ impl Shell {
                     .iter()
                     .find(|(k, _, _)| k == tab)
                     .map(|(_, title, _)| (*surface, title.clone())),
+                RightSurface::Files(id) => self
+                    .files
+                    .get(id)
+                    .map(|panel| (*surface, panel.read(cx).tab_title())),
                 RightSurface::SideChat(id) => self
                     .side_chats
                     .get(id)
@@ -2091,10 +2105,36 @@ impl Shell {
                     changes.update(cx, |changes, cx| changes.ensure_content(cx));
                 }
             }
+            RightSurface::Files(id) => {
+                if let Some(panel) = self.files.get(&id).cloned() {
+                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
+                }
+            }
             RightSurface::SideChat(_) => {}
             RightSurface::Picker => {}
         }
         cx.notify();
+    }
+
+    /// Files is only meaningful for a session bound to a project checkout
+    /// (the engine resolves paths against the chat's verified cwd).
+    fn files_available(&self, cx: &App) -> bool {
+        !self.active_chat.is_empty() && crate::files::context_for(self.state.read(cx)).is_ok()
+    }
+
+    /// The picker's Files card / the `+` menu's Files row: a fresh file
+    /// browser tab over the selected chat's checkout.
+    fn add_files_surface(&mut self, cx: &mut Context<Self>) {
+        self.files_seq += 1;
+        let id = self.files_seq;
+        let panel = cx.new(|cx| FilesPanel::new(self.state.clone(), cx));
+        self.files.insert(id, panel);
+        let key = self.panel_key(cx);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::Files(id));
+        self.set_right_active(RightSurface::Files(id), cx);
     }
 
     /// The picker's Git card / the `+` menu's Diff row: every click opens a
@@ -2853,6 +2893,11 @@ impl Shell {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
+            }
+            RightSurface::Files(id) => {
+                // Dropping the entity drops its editors — unsaved edits go
+                // with them (the tab title carries the ● warning).
+                self.files.remove(&id);
             }
             RightSurface::SideChat(id) => {
                 self.close_side_chat_by_seq(id, cx);
@@ -6895,6 +6940,34 @@ impl Shell {
                     panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
                     panel.into_any_element()
                 }
+                RightSurface::Files(id) if self.files.contains_key(&id) => {
+                    let panel = self.files.get(&id).cloned().expect("checked");
+                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
+                    // Same two-row shape as the diff pane: the surface's own
+                    // controls row under the tab strip, then the body.
+                    let controls = panel.update(cx, |panel, cx| panel.render_header_controls(cx));
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(px(36.0))
+                                .px(px(8.0))
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(controls),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .pb(px(PANEL_CORNER_RADIUS))
+                                .child(panel),
+                        )
+                        .into_any_element()
+                }
                 RightSurface::SideChat(id) => {
                     if let Some(panel) = self.side_chats.get(&id) {
                         panel.clone().into_any_element()
@@ -7058,6 +7131,16 @@ impl Shell {
                                     }),
                                 ),
                             )
+                            // Files needs a session with a project checkout
+                            // to browse (same gate as the `+` menu row).
+                            .when(self.files_available(cx), |el| {
+                                el.child(
+                                    row("surface-card-files", icons::FOLDER_WITH_FILES, "Files")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_files_surface(cx);
+                                        })),
+                                )
+                            })
                             // Git only where there IS git — the pane itself
                             // no longer gates on it (terminals work anywhere).
                             .when(self.space_git_detected(cx), |el| {
@@ -7271,6 +7354,7 @@ impl Shell {
             let is_active = surface == active;
             let icon_path = match surface {
                 RightSurface::Diff(_) => icons::GIT_BRANCH,
+                RightSurface::Files(_) => icons::FOLDER_WITH_FILES,
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 _ => icons::TERMINAL,
             };
@@ -7480,6 +7564,22 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
+                        .when(self.files_available(cx), |el| {
+                            el.child(
+                                popover::menu_row(&theme, false, "right-plus-files")
+                                    .id("right-plus-files-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.add_files_surface(cx);
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::FOLDER_WITH_FILES)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from("Files")),
+                            )
+                        })
                         // Git only where there IS git — a non-git project's
                         // diff surface would open a dead pane (same gate as
                         // the empty-surface picker card). Terminal is always

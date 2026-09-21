@@ -463,6 +463,13 @@ pub struct WorkspaceFileContent {
     pub truncated: bool,
 }
 
+/// `WriteWorkspaceFile` reply: the size of the file after the replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileWritten {
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffFileSummary {
