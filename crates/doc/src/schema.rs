@@ -429,6 +429,43 @@ impl SessionDoc {
         Err(DocError::Schema(format!("command {command_id} not found")))
     }
 
+    /// Remove message entries by id (Session Rewind: the transcript is
+    /// truncated at a settled anchor). Deletion walks the list BACKWARD so
+    /// earlier indices stay valid, and lands in ONE commit so watchers see a
+    /// single truncated transcript rather than a shrinking sequence of them.
+    /// Entries whose map carries no readable `id` are left alone (the same
+    /// skip-not-fail policy as [`Self::read_entries`] — a torn or
+    /// newer-schema entry is never collateral). Returns how many were
+    /// removed; an empty id set is a no-op with no commit.
+    pub fn remove_messages(
+        &self,
+        ids: &std::collections::HashSet<String>,
+    ) -> Result<usize, DocError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let messages = self.doc.get_list("messages");
+        let mut removed = 0usize;
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Value(LoroValue::String(id))) = map.get("id") else {
+                continue;
+            };
+            if ids.contains(id.as_str()) {
+                messages.delete(i, 1)?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.doc.commit();
+        }
+        Ok(removed)
+    }
+
     /// Stamp a terminal status on an existing message entry by id (recovery:
     /// abandoned `streaming` entries from a dead run are stamped `aborted`).
     /// Returns `false` when no entry with that id exists.
@@ -1168,6 +1205,33 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn remove_messages_truncates_and_leaves_the_prefix_intact() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        for id in ["m1", "m2", "m3", "m4"] {
+            doc.push_message(&user_entry(id, id)).unwrap();
+        }
+        let cut: std::collections::HashSet<String> =
+            ["m2".to_string(), "m4".to_string()].into_iter().collect();
+        assert_eq!(doc.remove_messages(&cut).unwrap(), 2);
+        let left: Vec<String> = doc
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(left, vec!["m1".to_string(), "m3".to_string()]);
+        // Idempotent: the ids are already gone.
+        assert_eq!(doc.remove_messages(&cut).unwrap(), 0);
+        // An empty set never touches the doc.
+        assert_eq!(
+            doc.remove_messages(&std::collections::HashSet::new())
+                .unwrap(),
+            0
+        );
+        assert_eq!(doc.read_entries().unwrap().len(), 2);
     }
 
     #[test]

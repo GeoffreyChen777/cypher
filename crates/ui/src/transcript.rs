@@ -61,6 +61,10 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
+/// How long a rewind affordance stays ARMED after its first click. Restarting
+/// deletes messages permanently, so the confirming click has to be deliberate
+/// — and a button left hot forever would make the next stray click destructive.
+pub const REWIND_ARM_MS: u64 = 4000;
 /// Vertical gap opening a new turn (new message entry).
 pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
@@ -606,6 +610,14 @@ pub enum TranscriptEvent {
         chat_id: String,
         anchor_message_id: String,
     },
+    /// The user CONFIRMED a settled entry's rewind affordance: restart the
+    /// conversation at `anchor_message_id` inside THIS chat — everything
+    /// after the boundary is deleted and the chat's Pi session is re-pointed
+    /// at the truncated one. Emitted only on the second (confirming) click.
+    RewindRequested {
+        chat_id: String,
+        anchor_message_id: String,
+    },
 }
 
 impl EventEmitter<TranscriptEvent> for Transcript {}
@@ -669,6 +681,79 @@ pub fn fork_tooltip(role: MessageRole, gate: &ForkGate) -> &'static str {
             // so a misroute is still coherent.
             MessageRole::System => "Fork after this message",
         },
+    }
+}
+
+/// The rewind affordance gate (pure, like [`fork_gate`]). Restarting the
+/// conversation from a message runs the SAME pi machinery as a fork — it just
+/// lands in place — so the prerequisites match, worded for a restart. One
+/// extra rule: the NEWEST entry has nothing after it, so restarting there
+/// would delete nothing.
+pub fn rewind_gate(
+    embedded: bool,
+    chat: Option<&Chat>,
+    live: bool,
+    offline: bool,
+    host_online: bool,
+    is_last_entry: bool,
+) -> ForkGate {
+    if embedded {
+        return ForkGate::Disabled("Side chats can't be restarted from a message.");
+    }
+    if offline {
+        return ForkGate::Disabled("The engine is offline.");
+    }
+    let Some(chat) = chat else {
+        return ForkGate::Disabled("No chat selected.");
+    };
+    if chat.is_child() {
+        return ForkGate::Disabled("Subagent chats can't be restarted from a message.");
+    }
+    if chat.config.as_ref().map(|c| c.harness) != Some(HarnessId::Pi) {
+        return ForkGate::Disabled("Only Pi chats can be restarted from a message.");
+    }
+    if live {
+        return ForkGate::Disabled("Wait for the chat to finish before restarting it.");
+    }
+    if !host_online {
+        return ForkGate::Disabled("The device hosting this chat is offline.");
+    }
+    if is_last_entry {
+        return ForkGate::Disabled("Nothing to remove after the last message.");
+    }
+    ForkGate::Enabled
+}
+
+/// The rewind affordance's tooltip. The ARMED text (after the first click)
+/// spells out what the confirming click deletes — the removal is permanent,
+/// so the count is never left implicit.
+pub fn rewind_tooltip(role: MessageRole, gate: &ForkGate, armed: bool, later: usize) -> String {
+    match gate {
+        ForkGate::Disabled(reason) => (*reason).to_string(),
+        ForkGate::Enabled if armed => match role {
+            MessageRole::User => format!(
+                "Click again to delete this message and {} after it",
+                plural_messages(later)
+            ),
+            _ => format!(
+                "Click again to delete {} after this response",
+                plural_messages(later)
+            ),
+        },
+        ForkGate::Enabled => match role {
+            MessageRole::User => {
+                "Restart from here — deletes this message and everything after it".to_string()
+            }
+            _ => "Restart from here — deletes everything after this response".to_string(),
+        },
+    }
+}
+
+fn plural_messages(count: usize) -> String {
+    if count == 1 {
+        "1 message".to_string()
+    } else {
+        format!("{count} messages")
     }
 }
 
@@ -1769,6 +1854,15 @@ pub struct Transcript {
     /// inert (double-click guard). The shell begins/ends these around the
     /// ForkSession call.
     fork_pending: std::collections::HashSet<(String, String)>,
+    /// In-flight Session Rewinds, keyed like [`Self::fork_pending`].
+    rewind_pending: std::collections::HashSet<(String, String)>,
+    /// The `(chat id, anchor message id)` whose rewind affordance is ARMED:
+    /// restarting deletes messages for good, so the first click only arms the
+    /// button (danger tint + a tooltip naming the damage) and the second one
+    /// inside [`REWIND_ARM_MS`] performs it.
+    rewind_armed: Option<(String, String)>,
+    /// Disarms [`Self::rewind_armed`] after the window elapses.
+    rewind_disarm: Option<Task<()>>,
     _style_observe: Subscription,
     _observe: Subscription,
 }
@@ -1893,6 +1987,9 @@ impl Transcript {
             blob_fetch_counter: 0,
             comment_popup,
             fork_pending: std::collections::HashSet::new(),
+            rewind_pending: std::collections::HashSet::new(),
+            rewind_armed: None,
+            rewind_disarm: None,
             _style_observe: style_observe,
             _observe: observe,
         };
@@ -3213,6 +3310,77 @@ impl Transcript {
         self.fork_pending.remove(&(chat_id, anchor_message_id));
     }
 
+    /// Session Rewind: the in-flight marker (spinner + double-click guard),
+    /// begun by the shell when RewindRequested fires.
+    pub fn begin_rewind(&mut self, chat_id: String, anchor_message_id: String) {
+        self.rewind_pending.insert((chat_id, anchor_message_id));
+    }
+
+    /// Session Rewind: clear the in-flight marker once the RPC settles.
+    pub fn end_rewind(&mut self, chat_id: String, anchor_message_id: String) {
+        self.rewind_pending.remove(&(chat_id, anchor_message_id));
+    }
+
+    /// Session Rewind: the rewind gate for THIS chat + anchor. Everything
+    /// [`Self::fork_gate_for`] checks, plus "this is not the newest entry"
+    /// (restarting at the tail would delete nothing).
+    fn rewind_gate_for(&self, is_last_entry: bool, cx: &App) -> ForkGate {
+        let chat_id = self.chat_id.as_deref();
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let chat = chat_id.and_then(|id| state.chats.iter().find(|c| c.id == id));
+        let live = chat_id.is_some_and(|id| {
+            matches!(
+                state.indicator_for(id, now),
+                Indicator::Working | Indicator::AwaitingInput
+            )
+        });
+        let host_online = chat.is_none_or(|c| state.device_online(&c.device_id, now));
+        rewind_gate(
+            self.embedded,
+            chat,
+            live,
+            state.engine().is_none(),
+            host_online,
+            is_last_entry,
+        )
+    }
+
+    /// First click ARMS the rewind (and disarms any other armed anchor);
+    /// the second click inside [`REWIND_ARM_MS`] emits the request. The arm
+    /// expires on its own so a forgotten button never stays hot.
+    fn arm_or_confirm_rewind(
+        &mut self,
+        chat_id: String,
+        anchor_message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (chat_id.clone(), anchor_message_id.clone());
+        if self.rewind_armed.as_ref() == Some(&key) {
+            self.rewind_armed = None;
+            self.rewind_disarm = None;
+            cx.emit(TranscriptEvent::RewindRequested {
+                chat_id,
+                anchor_message_id,
+            });
+            cx.notify();
+            return;
+        }
+        self.rewind_armed = Some(key.clone());
+        self.rewind_disarm = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(REWIND_ARM_MS))
+                .await;
+            let _ = this.update(cx, |this: &mut Transcript, cx| {
+                if this.rewind_armed.as_ref() == Some(&key) {
+                    this.rewind_armed = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -3544,6 +3712,97 @@ impl Transcript {
                     .into_any_element(),
             )
         };
+        // Session Rewind: the restart affordance rides the same strip, right
+        // after the fork one. Same prerequisites (it drives the same pi
+        // machinery), plus "not the newest entry" — restarting at the tail
+        // would delete nothing. Destructive, so the first click only ARMS it.
+        let is_last_entry = self
+            .rows
+            .last()
+            .is_some_and(|last| last.entry_id == row.entry_id);
+        let rewind_gate = self.rewind_gate_for(is_last_entry, cx);
+        let rewind_enabled = rewind_gate == ForkGate::Enabled;
+        let rewind_key = (fork_chat_id.clone(), fork_entry_id.to_string());
+        let rewind_armed = self.rewind_armed.as_ref() == Some(&rewind_key);
+        let rewind_pending = !fork_chat_id.is_empty() && self.rewind_pending.contains(&rewind_key);
+        let rewind_clickable = rewind_enabled && !rewind_pending;
+        // How much the confirming click deletes — named in the armed tooltip.
+        // (The anchor itself is named separately in the user-role wording.)
+        let later_entries = if rewind_enabled {
+            let state = self.state.read(cx);
+            state
+                .transcript
+                .iter()
+                .position(|e| e.id.as_str() == fork_entry_id.as_ref())
+                .map(|ix| state.transcript.len() - ix - 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let rewind_tip: SharedString =
+            rewind_tooltip(row.role, &rewind_gate, rewind_armed, later_entries).into();
+        let rewind_button: Option<AnyElement> = if self.embedded || row.role == MessageRole::System
+        {
+            None
+        } else {
+            let rewind_chat_id = fork_chat_id.clone();
+            let rewind_entry_id = fork_entry_id.clone();
+            Some(
+                div()
+                    .id((row.id.clone(), 2usize))
+                    .size(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if rewind_pending {
+                        crate::loaders::gradient_spinner(
+                            "rewind-spinner",
+                            &theme,
+                            2.5,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        crate::icons::icon(crate::icons::RESTART)
+                            .size(px(10.0))
+                            .text_color(if rewind_armed {
+                                theme.danger
+                            } else if rewind_enabled {
+                                theme.text_muted
+                            } else {
+                                theme.text_muted.opacity(0.3)
+                            })
+                            .into_any_element()
+                    })
+                    .when(rewind_clickable, |el| {
+                        el.cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if rewind_chat_id.is_empty() {
+                                    return;
+                                }
+                                this.arm_or_confirm_rewind(
+                                    rewind_chat_id.clone(),
+                                    rewind_entry_id.to_string(),
+                                    cx,
+                                );
+                            }))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| MessageActionTooltip {
+                            text: rewind_tip.clone(),
+                        })
+                        .into()
+                    })
+                    .tooltip_show_delay(Duration::from_millis(350))
+                    .into_any_element(),
+            )
+        };
         // Copy belongs to every message strip, including System/Side Chat and
         // offline/non-Pi chats. Inspect availability only for the hovered last
         // row; resolve and assemble the complete entry lazily on click.
@@ -3624,6 +3883,7 @@ impl Transcript {
                             .text_color(theme.text_muted.opacity(0.55))
                             .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
                             .when_some(fork_button, |el, button| el.child(button))
+                            .when_some(rewind_button, |el, button| el.child(button))
                             .when_some(copy_button, |el, button| el.child(button)),
                     ))
                 })
@@ -6381,6 +6641,140 @@ mod tests {
                 &ForkGate::Disabled("Only Pi chats can be forked.")
             ),
             "Only Pi chats can be forked."
+        );
+    }
+
+    // ---- Session Rewind (restart from a message) ----
+
+    #[test]
+    fn rewind_gate_matches_the_fork_prerequisites_plus_the_tail_rule() {
+        // A settled Pi root chat, anchored anywhere but the newest entry.
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, false)),
+                false,
+                false,
+                true,
+                false
+            ),
+            ForkGate::Enabled
+        );
+        // The newest entry has nothing after it: restarting would delete
+        // nothing, so the affordance is inert and says why.
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, false)),
+                false,
+                false,
+                true,
+                true
+            ),
+            ForkGate::Disabled("Nothing to remove after the last message.")
+        );
+        // Every fork prerequisite still applies, worded for a restart.
+        assert_eq!(
+            rewind_gate(
+                true,
+                Some(&pi_chat(false, false)),
+                false,
+                false,
+                true,
+                false
+            ),
+            ForkGate::Disabled("Side chats can't be restarted from a message.")
+        );
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, true)),
+                false,
+                false,
+                true,
+                false
+            ),
+            ForkGate::Disabled("Only Pi chats can be restarted from a message.")
+        );
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(true, false)),
+                false,
+                false,
+                true,
+                false
+            ),
+            ForkGate::Disabled("Subagent chats can't be restarted from a message.")
+        );
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, false)),
+                true,
+                false,
+                true,
+                false
+            ),
+            ForkGate::Disabled("Wait for the chat to finish before restarting it.")
+        );
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, false)),
+                false,
+                true,
+                true,
+                false
+            ),
+            ForkGate::Disabled("The engine is offline.")
+        );
+        assert_eq!(
+            rewind_gate(
+                false,
+                Some(&pi_chat(false, false)),
+                false,
+                false,
+                false,
+                false
+            ),
+            ForkGate::Disabled("The device hosting this chat is offline.")
+        );
+        assert_eq!(
+            rewind_gate(false, None, false, false, true, false),
+            ForkGate::Disabled("No chat selected.")
+        );
+    }
+
+    #[test]
+    fn rewind_tooltip_names_the_damage_once_armed() {
+        // Unarmed: what the affordance does, by role.
+        assert_eq!(
+            rewind_tooltip(MessageRole::User, &ForkGate::Enabled, false, 3),
+            "Restart from here — deletes this message and everything after it"
+        );
+        assert_eq!(
+            rewind_tooltip(MessageRole::Assistant, &ForkGate::Enabled, false, 3),
+            "Restart from here — deletes everything after this response"
+        );
+        // Armed: the confirming click's exact cost, correctly pluralized.
+        assert_eq!(
+            rewind_tooltip(MessageRole::User, &ForkGate::Enabled, true, 3),
+            "Click again to delete this message and 3 messages after it"
+        );
+        assert_eq!(
+            rewind_tooltip(MessageRole::Assistant, &ForkGate::Enabled, true, 1),
+            "Click again to delete 1 message after this response"
+        );
+        // A disabled affordance explains itself, armed or not.
+        assert_eq!(
+            rewind_tooltip(
+                MessageRole::User,
+                &ForkGate::Disabled("The engine is offline."),
+                true,
+                3
+            ),
+            "The engine is offline."
         );
     }
 

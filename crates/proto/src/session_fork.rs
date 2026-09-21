@@ -103,6 +103,57 @@ pub enum SessionForkResponse {
     Unavailable(SessionForkUnavailable),
 }
 
+/// `RewindSession` request (Session Rewind v1). Unlike a fork this mutates
+/// the chat IN PLACE: the transcript is truncated at the anchor and the chat
+/// row is re-pointed at a freshly materialized, truncated pi session. There
+/// is no client-minted id — the chat id IS the identity, and the operation is
+/// naturally self-limiting (a retry against an already-rewound transcript
+/// answers Unavailable rather than removing more).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRewindRequest {
+    /// The chat that is rewound in place.
+    pub chat_id: String,
+    /// The settled USER/ASSISTANT message the rewind anchors at. A USER
+    /// anchor removes that message too (its text comes back as
+    /// `composer_text`); an ASSISTANT anchor keeps it and removes what
+    /// follows.
+    pub anchor_message_id: String,
+}
+
+/// `RewindSession` success reply: the updated chat row (same id, new harness
+/// session pointer) plus what the boundary did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRewound {
+    /// The authoritative chat row AFTER the rewind — same id/device/space,
+    /// `harnessSessionId` re-pointed at the truncated session (absent for a
+    /// rewind to before the first user: that context is empty and pi
+    /// persists nothing until the next send).
+    pub chat: Chat,
+    /// Which boundary was materialized (the fork vocabulary, reused: a USER
+    /// anchor is `EditUser`, an ASSISTANT anchor `ContinueAfterAssistant`).
+    pub mode: SessionForkMode,
+    /// Composer prefill for `EditUser` rewinds (the removed user message's
+    /// visible text); `None` after an assistant anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_text: Option<String>,
+    /// The transcript entry ids removed from the doc (raw entries, including
+    /// continuations) — the caller may drop local state keyed by them.
+    #[serde(default)]
+    pub removed_message_ids: Vec<String>,
+}
+
+/// `RewindSession` reply envelope. Refusals reuse [`SessionForkUnavailable`]
+/// — the prerequisites are the same set, worded for a rewind by the engine.
+#[allow(clippy::large_enum_variant)] // same rationale as SessionForkResponse
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SessionRewindResponse {
+    Rewound(SessionRewound),
+    Unavailable(SessionForkUnavailable),
+}
+
 /// Pi-native fork boundary (harness seam, not a wire RPC type). `BeforeUser`
 /// indexes into the ordered Cypher visible USER prompts carried alongside;
 /// `CloneLeaf` duplicates the active branch at its current leaf.
@@ -234,6 +285,45 @@ mod tests {
         assert_eq!(json["reason"], "liveSession");
         let back: SessionForkResponse = serde_json::from_value(json).unwrap();
         assert_eq!(back, unavailable);
+    }
+
+    #[test]
+    fn rewind_request_and_reply_round_trip() {
+        let req = SessionRewindRequest {
+            chat_id: "chat-9".into(),
+            anchor_message_id: "msg-42".into(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chatId"], "chat-9");
+        assert_eq!(json["anchorMessageId"], "msg-42");
+        let back: SessionRewindRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back, req);
+
+        let resp = SessionRewindResponse::Rewound(SessionRewound {
+            chat: sample_chat(),
+            mode: SessionForkMode::EditUser,
+            composer_text: Some("fix the bug".into()),
+            removed_message_ids: vec!["msg-42".into(), "msg-43".into()],
+        });
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["kind"], "rewound");
+        assert_eq!(json["mode"], "editUser");
+        assert_eq!(json["removedMessageIds"][1], "msg-43");
+        let back: SessionRewindResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn rewind_unavailable_reuses_the_fork_refusal_shape() {
+        let resp = SessionRewindResponse::Unavailable(SessionForkUnavailable {
+            reason: SessionForkUnavailableReason::LiveSession,
+            message: "The chat is still running.".into(),
+        });
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["kind"], "unavailable");
+        assert_eq!(json["reason"], "liveSession");
+        let back: SessionRewindResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
     }
 
     #[test]

@@ -1357,6 +1357,8 @@ fn forwardable(method: &str) -> bool {
             // Session Forks are owned by the source chat's host device (the
             // Pi session store lives there).
             | methods::FORK_SESSION
+            // A rewind rewrites the same chat's Pi session: host device too.
+            | methods::REWIND_SESSION
     )
 }
 
@@ -3024,6 +3026,15 @@ impl RpcService for EngineRpc {
                 let reply = self
                     .session_forks
                     .fork(p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
+            }
+            methods::REWIND_SESSION => {
+                let p: cypher_proto::SessionRewindRequest = parse_params(params)?;
+                let reply = self
+                    .session_forks
+                    .rewind(p)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&reply)

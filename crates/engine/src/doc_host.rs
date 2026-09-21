@@ -2056,6 +2056,18 @@ impl DocHost {
         }
     }
 
+    /// Drop a chat's `.pre-chat2` rollback snapshot (Session Rewind): boot
+    /// [`Self::spawn_transcript_salvage`] re-appends that fat lineage into any
+    /// hosted chat2 doc it finds EMPTY, which after a rewind-to-the-start
+    /// would resurrect exactly the history the user just removed. Best-effort
+    /// and quiet: most chats never had a rollback copy.
+    pub fn drop_pre_chat2_rollback(&self, chat_id: &str) {
+        let rollback_id = format!("{chat_id}.pre-chat2");
+        if let Err(err) = self.inner.store.delete_snapshot(&rollback_id) {
+            tracing::debug!(chat = %chat_id, error = %err, "pre-chat2 rollback delete");
+        }
+    }
+
     /// Host-side seal of one upload against a chat (the UploadCommit handler):
     /// write the durable final path into the doc's `sealedAttachments` map.
     /// The doc commit re-triggers the chat's drain, releasing any Run whose

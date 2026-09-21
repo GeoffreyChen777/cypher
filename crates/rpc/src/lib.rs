@@ -234,6 +234,10 @@ pub mod methods {
     /// source chat's host device (unary, idempotent by the client-minted
     /// `requestId` = target chat id). Session Fork is Pi-only in v1.
     pub const FORK_SESSION: &str = "ForkSession";
+    /// Rewind a chat IN PLACE on its host device (unary): truncate the
+    /// transcript at a settled anchor and re-point the SAME chat at a
+    /// freshly materialized, truncated Pi session. Pi-only, like the fork.
+    pub const REWIND_SESSION: &str = "RewindSession";
 }
 
 #[derive(Debug, thiserror::Error)]

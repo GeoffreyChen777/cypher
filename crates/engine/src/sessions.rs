@@ -320,6 +320,33 @@ impl SessionsEngine {
         }
     }
 
+    /// Session Rewind: re-point a chat at a DIFFERENT harness session — the
+    /// truncated one the rewind materialized — or tombstone it (`None`) when
+    /// the rewind left an empty context and pi has nothing persisted yet.
+    ///
+    /// Both the live-process cache AND the durable chat row are written:
+    /// [`Inner::resume_for`] reads the cache first and the journal only when
+    /// both are absent, so a stale entry in either would resume the
+    /// PRE-rewind session and resurrect the removed turns.
+    pub fn rebind_harness_session(&self, chat_id: &str, session_id: Option<&str>, cwd: &str) {
+        // The empty string is the established "do not resume" tombstone on
+        // both the map and the row.
+        let session_id = session_id.unwrap_or_default();
+        lock(&self.inner.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: session_id.to_string(),
+                cwd: cwd.to_string(),
+            },
+        );
+        if self.inner.is_ephemeral(chat_id) {
+            return; // temporary Side Chat: the row is stamped at promotion
+        }
+        if let Some(ws) = self.inner.workspace() {
+            ws.set_chat_harness_session(chat_id, session_id, cwd);
+        }
+    }
+
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
         if self.inner.is_ephemeral(chat_id) {
             return; // temporary Side Chat: no checkout snapshot for the diff pane

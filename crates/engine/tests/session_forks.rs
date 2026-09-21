@@ -29,7 +29,7 @@ use cypher_proto::{
     AgentEvent, ChatConfig, ChildAgentProfile, DoneStatus, HarnessId, Model, PiForkBoundary,
     PiSessionForkRequest, PiSessionForkResult, ReasoningLevel, RunRequest, SandboxLevel,
     SessionForkMode, SessionForkRequest, SessionForkResponse, SessionForkUnavailableReason,
-    SessionStatus, SteeringMode, SubagentRunMode,
+    SessionRewindResponse, SessionStatus, SteeringMode, SubagentRunMode,
 };
 use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
@@ -1320,6 +1320,278 @@ async fn fork_is_stamped_as_new_sidebar_activity() {
     assert_eq!(
         created.chat.last_message_preview.as_deref(),
         Some("reply text")
+    );
+}
+
+// ── Session Rewind (v1): the same boundary, applied IN PLACE ──────────────
+
+async fn rewind(core: &EngineCore, anchor: &str) -> SessionRewindResponse {
+    let value = rpc(
+        core,
+        methods::REWIND_SESSION,
+        serde_json::json!({
+            "chatId": SOURCE,
+            "anchorMessageId": anchor,
+        }),
+    )
+    .await
+    .expect("rewind RPC succeeds");
+    serde_json::from_value(value).expect("typed rewind reply")
+}
+
+/// A USER anchor removes that message and everything after it, hands the text
+/// back for the composer, re-points the SAME chat at the truncated session,
+/// and mints no new chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn user_rewind_truncates_in_place_and_prefills() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let chats_before = rig.core.workspace.watch_chats().borrow().len();
+    let first_assistant = source_entry_id(&rig.core, 1);
+
+    let response = rewind(&rig.core, "m2").await;
+    let SessionRewindResponse::Rewound(rewound) = &response else {
+        panic!("expected Rewound, got {response:?}");
+    };
+    assert_eq!(rewound.mode, SessionForkMode::EditUser);
+    assert_eq!(rewound.composer_text.as_deref(), Some("second question"));
+    // Same chat: id, device, cwd, config all unchanged; no new row anywhere.
+    assert_eq!(rewound.chat.id, SOURCE);
+    assert_eq!(rewound.chat.cwd.as_deref(), Some("/tmp/repo"));
+    assert_eq!(
+        rig.core.workspace.watch_chats().borrow().len(),
+        chats_before
+    );
+
+    // Transcript truncated to the prefix before the clicked user message.
+    assert_eq!(
+        source_entries(&rig.core)
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m1", first_assistant.as_str()]
+    );
+    let second_assistant = rewound
+        .removed_message_ids
+        .iter()
+        .find(|id| id.as_str() != "m2")
+        .expect("the reply after the anchor is removed too");
+    assert!(rewound.removed_message_ids.contains(&"m2".to_string()));
+    assert_ne!(second_assistant.as_str(), first_assistant.as_str());
+
+    // The chat row now points at the truncated session (a real file under the
+    // managed root), not the pre-rewind one.
+    let row = rig.core.workspace.chat(SOURCE).unwrap().expect("row");
+    let session_path = row.harness_session_id.as_deref().expect("rewound session");
+    assert_ne!(session_path, "hs-source");
+    assert!(
+        session_path.contains("agent-sessions") && Path::new(session_path).is_file(),
+        "rewound session under the managed root: {session_path}"
+    );
+    assert_eq!(row.harness_session_cwd.as_deref(), Some("/tmp/repo"));
+    // Sidebar preview now ends at the surviving assistant reply.
+    assert_eq!(row.last_message_preview.as_deref(), Some("reply text"));
+
+    // The backend saw the source session, the stripped prompts, and the
+    // "before the clicked user" boundary.
+    let reqs = rig.fork_requests.lock().unwrap();
+    let req = reqs.last().expect("one rewind request");
+    assert_eq!(req.source_session_path, "hs-source");
+    assert_eq!(req.boundary, PiForkBoundary::BeforeUser(1));
+}
+
+/// An ASSISTANT anchor KEEPS the clicked reply and removes what follows, with
+/// no composer prefill.
+#[tokio::test(flavor = "multi_thread")]
+async fn assistant_rewind_keeps_the_clicked_reply() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let first_assistant = source_entry_id(&rig.core, 1);
+
+    let response = rewind(&rig.core, &first_assistant).await;
+    let SessionRewindResponse::Rewound(rewound) = &response else {
+        panic!("expected Rewound, got {response:?}");
+    };
+    assert_eq!(rewound.mode, SessionForkMode::ContinueAfterAssistant);
+    assert_eq!(rewound.composer_text, None);
+    assert_eq!(
+        source_entries(&rig.core)
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m1", first_assistant.as_str()]
+    );
+    let reqs = rig.fork_requests.lock().unwrap();
+    // Copy the session THROUGH the clicked reply = fork before the next user.
+    assert_eq!(reqs.last().unwrap().boundary, PiForkBoundary::BeforeUser(1));
+}
+
+/// Rewinding to the FIRST user message empties the transcript and tombstones
+/// the harness session (pi persists nothing for an empty context, so the next
+/// send starts fresh).
+#[tokio::test(flavor = "multi_thread")]
+async fn rewind_to_the_first_message_empties_the_chat() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+
+    let response = rewind(&rig.core, "m1").await;
+    let SessionRewindResponse::Rewound(rewound) = &response else {
+        panic!("expected Rewound, got {response:?}");
+    };
+    assert_eq!(rewound.composer_text.as_deref(), Some("first question"));
+    assert_eq!(rewound.removed_message_ids.len(), 4);
+    assert!(source_entries(&rig.core).is_empty());
+    let row = rig.core.workspace.chat(SOURCE).unwrap().expect("row");
+    assert_eq!(row.harness_session_id.as_deref(), Some(""));
+    assert_eq!(row.last_message_preview.as_deref(), Some(""));
+}
+
+/// The newest entry has nothing after it: refuse instead of spending a pi
+/// session on a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn rewind_at_the_last_message_is_unavailable() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let last = source_entry_id(&rig.core, 3);
+    let before = rig.fork_requests.lock().unwrap().len();
+
+    let response = rewind(&rig.core, &last).await;
+    let SessionRewindResponse::Unavailable(unavailable) = &response else {
+        panic!("expected Unavailable, got {response:?}");
+    };
+    assert_eq!(
+        unavailable.reason,
+        SessionForkUnavailableReason::BoundaryUnavailable
+    );
+    assert_eq!(source_entries(&rig.core).len(), 4, "transcript untouched");
+    assert_eq!(
+        rig.fork_requests.lock().unwrap().len(),
+        before,
+        "no pi helper call for a no-op rewind"
+    );
+}
+
+/// A second rewind at the same anchor finds it gone: refuse, never cut deeper.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_rewind_at_the_same_anchor_is_unavailable() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let first_assistant = source_entry_id(&rig.core, 1);
+    assert!(matches!(
+        rewind(&rig.core, "m2").await,
+        SessionRewindResponse::Rewound(_)
+    ));
+    let response = rewind(&rig.core, "m2").await;
+    let SessionRewindResponse::Unavailable(unavailable) = &response else {
+        panic!("expected Unavailable, got {response:?}");
+    };
+    assert_eq!(
+        unavailable.reason,
+        SessionForkUnavailableReason::BoundaryUnavailable
+    );
+    assert_eq!(
+        source_entries(&rig.core)
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m1", first_assistant.as_str()],
+        "the transcript stays where the first rewind left it"
+    );
+}
+
+/// A live turn owns the transcript tail and the session: refuse.
+#[tokio::test(flavor = "multi_thread")]
+async fn live_session_rewind_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = cypher_engine::HarnessRegistry::new();
+    registry.register(Arc::new(StuckHarness));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
+    core.workspace
+        .create_chat(
+            SOURCE,
+            None,
+            Some(core.device_id.as_str()),
+            Some(ChatConfig {
+                harness: HarnessId::Pi,
+                model: Some("model-x".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            }),
+            Some("/tmp/repo".into()),
+        )
+        .unwrap();
+    core.sessions
+        .dispatch(
+            SOURCE,
+            HarnessId::Pi,
+            RunRequest {
+                prompt: "hang".into(),
+                harness: Some(HarnessId::Pi),
+                model: Some("model-x".into()),
+                reasoning: None,
+                model_options: Default::default(),
+                cwd: "/tmp/repo".into(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                resume: None,
+                worktree: None,
+                attachments: Vec::new(),
+                pending_attachments: Vec::new(),
+            },
+            Some("m1".into()),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            let working = core
+                .sessions
+                .session_status(SOURCE)
+                .is_some_and(|s| s.status == SessionStatus::Working);
+            // The session row must be stamped too, or the rewind refuses at
+            // the earlier MissingSession gate instead of the live one.
+            let sessioned = core
+                .workspace
+                .chat(SOURCE)
+                .unwrap()
+                .is_some_and(|c| c.harness_session_id.as_deref() == Some("hs-live"));
+            working && sessioned
+        },
+        "the run to be working with a stored session",
+    );
+    let response = rewind(&core, "m1").await;
+    let SessionRewindResponse::Unavailable(unavailable) = &response else {
+        panic!("expected Unavailable, got {response:?}");
+    };
+    assert_eq!(
+        unavailable.reason,
+        SessionForkUnavailableReason::LiveSession
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwardable_marks_rewind_session() {
+    // REWIND_SESSION is device-addressable (the host owns the pi session).
+    let registry = cypher_engine::HarnessRegistry::new();
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
+    let reply = rpc(
+        &core,
+        methods::REWIND_SESSION,
+        serde_json::json!({
+            "chatId": "remote-chat",
+            "anchorMessageId": "m1",
+            "targetDeviceId": "other-device",
+        }),
+    )
+    .await;
+    let err = reply.expect_err("forward attempt fails without links");
+    assert!(
+        err.to_string().contains("remote routing unavailable")
+            || err.to_string().contains("cannot reach device"),
+        "{err}"
     );
 }
 

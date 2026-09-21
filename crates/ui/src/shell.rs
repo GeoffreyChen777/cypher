@@ -1376,6 +1376,14 @@ impl Shell {
                     // remote); `fork_session` arms the loading guard itself.
                     this.fork_session(chat_id.clone(), anchor_message_id.clone(), cx);
                 }
+                crate::transcript::TranscriptEvent::RewindRequested {
+                    chat_id,
+                    anchor_message_id,
+                } => {
+                    // Session Rewind: the transcript already took the user's
+                    // confirming click; the shell owns the RewindSession RPC.
+                    this.rewind_session(chat_id.clone(), anchor_message_id.clone(), cx);
+                }
             }
         });
         // CommentPopup → composer: a comment saved in any surface's anchored
@@ -2362,6 +2370,136 @@ impl Shell {
                         });
                     }
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// User-facing notice text for a failed `RewindSession` RPC, mirroring
+    /// [`Self::fork_session_error_text`]: an `unknown method` reply means the
+    /// device hosting the chat runs an engine without Session Rewind.
+    fn rewind_session_error_text(err: &cypher_rpc::RpcError) -> String {
+        if let cypher_rpc::RpcError::UnknownMethod(method) = err
+            && method == methods::REWIND_SESSION
+        {
+            "Restarting a conversation from a message requires a newer Cypher \
+             engine on the device hosting this session. Update that device or \
+             use a session hosted on this device."
+                .to_string()
+        } else {
+            format!("Could not restart the conversation: {err}")
+        }
+    }
+
+    /// `RewindSession` for a settled transcript entry: restart the
+    /// conversation at that anchor INSIDE the same chat — the engine deletes
+    /// everything after the boundary and re-points this chat's Pi session at
+    /// a truncated copy. No chat is created and the selection never moves;
+    /// the transcript shrinks through the doc watch the UI is already on.
+    ///
+    /// The confirming click happened in the transcript (the affordance arms
+    /// first), so this call is the point of no return. A USER anchor hands
+    /// its text back for the composer — seeded only when the composer is
+    /// empty, so a draft in progress is never clobbered.
+    ///
+    /// Deliberately NOT retried under an idempotence key: a lost reply leaves
+    /// the engine's truncation in place (the doc watch shows it), and a blind
+    /// retry would cut at the next boundary instead.
+    fn rewind_session(
+        &mut self,
+        chat_id: String,
+        anchor_message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript.update(cx, |t, cx| {
+            t.begin_rewind(chat_id.clone(), anchor_message_id.clone());
+            cx.notify();
+        });
+        let settle = {
+            let transcript = self.transcript.clone();
+            let chat_id = chat_id.clone();
+            let anchor_message_id = anchor_message_id.clone();
+            move |cx: &mut Context<Shell>| {
+                transcript.update(cx, |t, cx| {
+                    t.end_rewind(chat_id.clone(), anchor_message_id.clone());
+                    cx.notify();
+                });
+            }
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            tracing::warn!(%chat_id, "RewindSession skipped: engine offline");
+            let notice = "Cannot restart the conversation: the engine is not connected.";
+            crate::notify::post("Restart", notice);
+            self.sidebar_notice = Some(notice.into());
+            settle(cx);
+            cx.notify();
+            return;
+        };
+        let mut params = serde_json::Map::new();
+        params.insert("chatId".into(), serde_json::Value::String(chat_id.clone()));
+        params.insert(
+            "anchorMessageId".into(),
+            serde_json::Value::String(anchor_message_id.clone()),
+        );
+        {
+            let state = self.state.read(cx);
+            if let (Some(chat), Some(local)) = (
+                state.chats.iter().find(|c| c.id == chat_id),
+                state.local_device_id.clone(),
+            ) && chat.device_id != local
+            {
+                params.insert(
+                    "targetDeviceId".into(),
+                    serde_json::Value::String(chat.device_id.clone()),
+                );
+            }
+        }
+        let params = serde_json::Value::Object(params);
+        let weak = cx.weak_entity();
+        let composer = self.composer.clone();
+        cx.spawn(async move |_this, cx| {
+            let value = engine.client().call(methods::REWIND_SESSION, params).await;
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |_shell, cx| {
+                    settle(cx);
+                    cx.notify();
+                });
+            }
+            let result: Result<cypher_proto::SessionRewindResponse, cypher_rpc::RpcError> = value
+                .and_then(|v| {
+                    serde_json::from_value(v)
+                        .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
+                });
+            let notice = match result {
+                Ok(cypher_proto::SessionRewindResponse::Rewound(rewound)) => {
+                    if let Some(text) = rewound.composer_text {
+                        composer.update(cx, |composer, cx| {
+                            if composer.current_draft(cx).trim().is_empty() {
+                                composer.seed_draft(&chat_id, text, cx);
+                            }
+                        });
+                    }
+                    let removed = rewound.removed_message_ids.len();
+                    if removed == 1 {
+                        "Conversation restarted — 1 message removed".to_string()
+                    } else {
+                        format!("Conversation restarted — {removed} messages removed")
+                    }
+                }
+                Ok(cypher_proto::SessionRewindResponse::Unavailable(unavailable)) => {
+                    format!("Cannot restart here: {}", unavailable.message)
+                }
+                Err(err) => {
+                    tracing::warn!(%chat_id, error = %err, "RewindSession failed");
+                    Self::rewind_session_error_text(&err)
+                }
+            };
+            crate::notify::post("Restart", &notice);
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |shell, cx| {
+                    shell.sidebar_notice = Some(notice.clone().into());
+                    cx.notify();
+                });
             }
         })
         .detach();

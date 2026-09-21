@@ -33,7 +33,8 @@ use cypher_harness::{Harness, HarnessError};
 use cypher_proto::{
     Chat, PiForkBoundary, PiSessionForkRequest, PiSessionForkResult, SessionForkCreated,
     SessionForkMode, SessionForkRequest, SessionForkResponse, SessionForkUnavailable,
-    SessionForkUnavailableReason, SessionStatus,
+    SessionForkUnavailableReason, SessionRewindRequest, SessionRewindResponse, SessionRewound,
+    SessionStatus,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -167,9 +168,9 @@ impl SessionForks {
                 "The fork request id cannot equal the source chat id.",
             ));
         }
-        let source = match self.validate_source(&request.source_chat_id)? {
+        let source = match self.validate_source(&request.source_chat_id, Operation::Fork)? {
             Ok(chat) => chat,
-            Err(unavail) => return Ok(unavail),
+            Err(unavail) => return Ok(SessionForkResponse::Unavailable(unavail)),
         };
 
         // Read the authoritative joined source transcript + resolve the
@@ -254,7 +255,10 @@ impl SessionForks {
             .await
         {
             Ok(result) => result,
-            Err(err) => return classify_backend_error(&err),
+            Err(err) => {
+                return classify_backend_error(&err, Operation::Fork)
+                    .map(SessionForkResponse::Unavailable);
+            }
         };
         // `None` for an EMPTY-CONTEXT fork before the first user: pi does not
         // persist that session file until the target's first send.
@@ -332,35 +336,220 @@ impl SessionForks {
         }))
     }
 
-    /// Validate the source chat against every fork prerequisite. Returns the
-    /// source [`Chat`] or a typed Unavailable response.
+    /// `RewindSession` handler (Session Rewind v1): restart the conversation
+    /// from a settled anchor WITHOUT leaving the chat.
+    ///
+    /// Same boundary vocabulary as a fork ([`compute_boundary`]) and the same
+    /// pi helper, but the result lands IN PLACE:
+    /// 1. the helper materializes a truncated pi session from the source's
+    ///    file (which it never mutates);
+    /// 2. the transcript entries past the boundary are deleted from the
+    ///    chat's own doc in ONE commit (watchers see one truncation);
+    /// 3. the SAME chat row is re-pointed at the truncated session — the
+    ///    chat id, tab, sidebar row and doc lineage are untouched, so the
+    ///    user stays exactly where they were.
+    ///
+    /// A USER anchor removes that message too and hands its text back as
+    /// `composer_text`; an ASSISTANT anchor keeps the reply and removes what
+    /// follows. Rewinding the LATEST entry would remove nothing and is
+    /// refused rather than silently re-cloning the session.
+    ///
+    /// Not idempotent by design and deliberately not retried under one id:
+    /// after a successful rewind the anchor is either gone or terminal, so a
+    /// duplicate call answers Unavailable instead of cutting deeper.
+    pub async fn rewind(
+        &self,
+        request: SessionRewindRequest,
+    ) -> Result<SessionRewindResponse, EngineError> {
+        let chat = match self.validate_source(&request.chat_id, Operation::Rewind)? {
+            Ok(chat) => chat,
+            Err(unavail) => return Ok(SessionRewindResponse::Unavailable(unavail)),
+        };
+
+        let handle = self
+            .inner
+            .doc_host
+            .open(&chat.id)
+            .map_err(|_| EngineError::Other("chat doc unavailable".into()))?;
+        let raw = handle.doc().read_entries()?;
+        let joined = cypher_doc::join_continuation_entries(raw.clone());
+        let plan = match compute_boundary(&joined, &request.anchor_message_id) {
+            Ok(plan) => plan,
+            Err(reason) => return Ok(rewind_unavailable(reason, rewind_boundary_message(reason))),
+        };
+        // `CloneLeaf` is exactly the "anchor is the newest entry" case: a
+        // rewind there would delete nothing and still spend a pi session.
+        if matches!(plan.pi_boundary, PiForkBoundary::CloneLeaf) {
+            return Ok(rewind_unavailable(
+                SessionForkUnavailableReason::BoundaryUnavailable,
+                "This is already the last message — there is nothing after it \
+                 to remove.",
+            ));
+        }
+        let visible_prompts: Vec<String> = joined
+            .iter()
+            .filter(|e| e.role == MessageRole::User)
+            .map(visible_text_of)
+            .collect();
+
+        // A live turn owns both the transcript tail and the pi session; only
+        // a parked (Idle) run may be quiesced out of the way.
+        match self
+            .inner
+            .sessions
+            .session_status(&chat.id)
+            .map(|s| s.status)
+        {
+            Some(SessionStatus::Working) | Some(SessionStatus::AwaitingInput) => {
+                return Ok(rewind_unavailable(
+                    SessionForkUnavailableReason::LiveSession,
+                    "The chat is still running. Restart from a message once \
+                     the current turn settles.",
+                ));
+            }
+            Some(SessionStatus::Idle) => {
+                self.inner.sessions.quiesce_idle_for_fork(&chat.id).await?;
+            }
+            _ => {}
+        }
+
+        // The pi side: a separate `--no-extensions` helper builds the
+        // truncated session from a byte snapshot of the source file. Slow, so
+        // it runs OUTSIDE the mutation lock; the source file stays intact and
+        // becomes the pre-rewind copy on disk.
+        let source_session = chat
+            .harness_session_id
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
+        let pi_result = match self
+            .inner
+            .backend
+            .fork_session(PiSessionForkRequest {
+                source_session_path: source_session,
+                visible_user_prompts: visible_prompts,
+                boundary: plan.pi_boundary,
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return classify_backend_error(&err, Operation::Rewind)
+                    .map(SessionRewindResponse::Unavailable);
+            }
+        };
+        // `None` for a rewind to before the FIRST user: that context is empty
+        // and pi persists nothing until the next send.
+        let new_session_path = pi_result.session_path;
+
+        // Publish in place. The mutation lock serializes this against forks
+        // and other rewinds; the transcript recheck inside guards the window
+        // the slow helper opened — if the doc moved (a queued command drained,
+        // a remote device appended), the planned cut no longer describes this
+        // transcript and deleting by it could cut the wrong entries.
+        let _mutation = self.inner.mutation_lock.lock().await;
+        let raw_now = handle.doc().read_entries()?;
+        if raw_now.len() != raw.len()
+            || raw_now
+                .iter()
+                .zip(&raw)
+                .any(|(now, before)| now.id != before.id)
+        {
+            self.delete_new_fork_session(new_session_path.as_deref());
+            return Ok(rewind_unavailable(
+                SessionForkUnavailableReason::BoundaryUnavailable,
+                "The transcript changed while the restart was being prepared. \
+                 Try again.",
+            ));
+        }
+
+        let kept = plan.to_copy(&joined, &raw);
+        let keep_ids: HashSet<&str> = kept.iter().map(|e| e.id.as_str()).collect();
+        let removed_message_ids: Vec<String> = raw
+            .iter()
+            .filter(|e| !keep_ids.contains(e.id.as_str()))
+            .map(|e| e.id.clone())
+            .collect();
+        let removed_set: HashSet<String> = removed_message_ids.iter().cloned().collect();
+        handle.doc().remove_messages(&removed_set)?;
+
+        // Re-point the chat at the truncated session BEFORE anything can
+        // dispatch: the live cache and the durable row are written together,
+        // so the next send resumes the rewound context (or starts fresh when
+        // the rewind emptied it).
+        let session_cwd = chat
+            .harness_session_cwd
+            .clone()
+            .or_else(|| chat.cwd.as_deref().map(crate::repos::expand_home))
+            .unwrap_or_default();
+        self.inner.sessions.rebind_harness_session(
+            &chat.id,
+            new_session_path.as_deref(),
+            &session_cwd,
+        );
+
+        // The sidebar's endpoint preview now ends at the new last entry (empty
+        // when the rewind emptied the chat).
+        self.inner
+            .workspace
+            .note_message(&chat.id, &last_entry_activity(&kept).unwrap_or_default());
+
+        // An emptied transcript is the one shape boot-time transcript salvage
+        // would try to "repair" from the pre-chat2 rollback copy — which is
+        // exactly the history the user just deleted. Drop that copy so the
+        // removal stays removed.
+        if kept.is_empty() {
+            self.inner.doc_host.drop_pre_chat2_rollback(&chat.id);
+        }
+
+        let chat = self
+            .inner
+            .workspace
+            .chat(&chat.id)?
+            .ok_or_else(|| EngineError::Other("chat row vanished during rewind".into()))?;
+        Ok(SessionRewindResponse::Rewound(SessionRewound {
+            chat,
+            mode: plan.mode,
+            composer_text: plan.composer_text.clone(),
+            removed_message_ids,
+        }))
+    }
+
+    /// Validate the source chat against every prerequisite shared by a fork
+    /// and an in-place rewind (both drive the same pi helper against the same
+    /// session store, so the gate is identical — only the wording differs).
+    /// Returns the source [`Chat`] or a typed refusal.
     fn validate_source(
         &self,
         source_chat_id: &str,
-    ) -> Result<Result<Chat, SessionForkResponse>, EngineError> {
+        op: Operation,
+    ) -> Result<Result<Chat, SessionForkUnavailable>, EngineError> {
         let Some(chat) = self.inner.workspace.chat(source_chat_id)? else {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::MissingHost,
-                "Source chat not found.",
+                "Chat not found.",
             )));
         };
         if self.inner.sessions.is_ephemeral(source_chat_id) {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::TemporarySideChat,
-                "Temporary Side Chats cannot be forked.",
+                &format!("Temporary Side Chats cannot be {}.", op.past()),
             )));
         }
         if chat.is_child() {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::ChildChat,
-                "Child chats cannot be forked.",
+                &format!("Child chats cannot be {}.", op.past()),
             )));
         }
         if chat.device_id != self.inner.doc_host.device_id() {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::MissingHost,
-                "The source chat is hosted on another device. Session forks are \
-                 created on the device hosting the session.",
+                &format!(
+                    "This chat is hosted on another device. It can only be {} \
+                     on the device hosting its session.",
+                    op.past()
+                ),
             )));
         }
         let is_pi = chat
@@ -368,9 +557,9 @@ impl SessionForks {
             .as_ref()
             .is_some_and(|c| c.harness == cypher_proto::HarnessId::Pi);
         if !is_pi {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::NonPi,
-                "Session Fork requires a Pi session (Pi only in v1).",
+                &format!("{} requires a Pi session (Pi only in v1).", op.noun()),
             )));
         }
         let session_ok = chat
@@ -384,9 +573,9 @@ impl SessionForks {
                     || chat.cwd.as_deref().map(crate::repos::expand_home) == Some(c.to_string())
             });
         if !session_ok {
-            return Ok(Err(unavailable(
+            return Ok(Err(unavail(
                 SessionForkUnavailableReason::MissingSession,
-                "The source chat has no stored Pi session to fork from.",
+                &format!("This chat has no stored Pi session to {}.", op.verb()),
             )));
         }
         Ok(Ok(chat))
@@ -471,38 +660,51 @@ impl SessionForks {
     }
 }
 
-/// Classify an expected backend [`HarnessError`] into a typed
-/// [`SessionForkResponse`], or `Err(EngineError)` for genuine unexpected
-/// I/O/infrastructure failures (which surface as an RPC `Failed`, not a typed
-/// Unavailable).
-fn classify_backend_error(err: &HarnessError) -> Result<SessionForkResponse, EngineError> {
+/// Classify an expected backend [`HarnessError`] into a typed refusal, or
+/// `Err(EngineError)` for genuine unexpected I/O/infrastructure failures
+/// (which surface as an RPC `Failed`, not a typed Unavailable). Shared by the
+/// fork and the in-place rewind — they drive the SAME pi helper, so they fail
+/// the same ways.
+fn classify_backend_error(
+    err: &HarnessError,
+    op: Operation,
+) -> Result<SessionForkUnavailable, EngineError> {
     match err {
         // The hosting device lacks/needs a newer Pi CLI — actionable update/
         // install guidance, not a boundary problem.
-        HarnessError::NotInstalled(_) | HarnessError::Install(_) => Ok(unavailable(
+        HarnessError::NotInstalled(_) | HarnessError::Install(_) => Ok(unavail(
             SessionForkUnavailableReason::Unsupported,
-            "Session Fork requires the Pi CLI on the device hosting the \
-             session. Install or update it on that device, then retry.",
+            &format!(
+                "{} requires the Pi CLI on the device hosting the session. \
+                 Install or update it on that device, then retry.",
+                op.noun()
+            ),
         )),
         HarnessError::Protocol(msg)
             if msg.contains("unsupported for this harness")
                 || msg.contains("pi harness unavailable") =>
         {
-            Ok(unavailable(
+            Ok(unavail(
                 SessionForkUnavailableReason::Unsupported,
-                "The device hosting this session runs an engine or harness \
-                 that does not support Session Fork (Pi only in v1). Update \
-                 that device and retry.",
+                &format!(
+                    "The device hosting this session runs an engine or harness \
+                     that does not support this ({} is Pi-only in v1). Update \
+                     that device and retry.",
+                    op.noun().to_lowercase()
+                ),
             ))
         }
         // Prompt mapping / boundary / source-safety protocol refusals: the
         // transcript boundary could not be represented on the hosting device.
-        HarnessError::Protocol(msg) if !msg.contains("timed out") => Ok(unavailable(
+        HarnessError::Protocol(msg) if !msg.contains("timed out") => Ok(unavail(
             SessionForkUnavailableReason::BoundaryUnavailable,
-            "This message cannot be forked: the source session on the hosting \
-             device could not be mapped to the transcript boundary (missing or \
-             outside the managed store, mismatched prompts, or an \
-             unrepresentable boundary).",
+            &format!(
+                "Cannot {} this message: the session on the hosting device \
+                 could not be mapped to the transcript boundary (missing or \
+                 outside the managed store, mismatched prompts, or an \
+                 unrepresentable boundary).",
+                op.verb().split(' ').next().unwrap_or("fork")
+            ),
         )),
         // A slow/hung helper is an infrastructure problem: surface as a real
         // error (the UI retry keeps the same request id, so a late-created
@@ -542,11 +744,55 @@ fn canonicalize_under_root(path: &Path, root: &Path) -> Option<PathBuf> {
     Some(base)
 }
 
-fn unavailable(reason: SessionForkUnavailableReason, message: &str) -> SessionForkResponse {
-    SessionForkResponse::Unavailable(SessionForkUnavailable {
+/// Which operation a shared refusal is worded for. Fork and rewind run the
+/// same prerequisites through [`SessionForks::validate_source`]; only the
+/// user-facing verb changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Fork,
+    Rewind,
+}
+
+impl Operation {
+    /// Sentence subject: "Session Fork requires a Pi session."
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Fork => "Session Fork",
+            Self::Rewind => "Restarting a conversation",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Fork => "fork from",
+            Self::Rewind => "restart from",
+        }
+    }
+
+    fn past(self) -> &'static str {
+        match self {
+            Self::Fork => "forked",
+            Self::Rewind => "restarted",
+        }
+    }
+}
+
+fn unavail(reason: SessionForkUnavailableReason, message: &str) -> SessionForkUnavailable {
+    SessionForkUnavailable {
         reason,
         message: message.to_string(),
-    })
+    }
+}
+
+fn unavailable(reason: SessionForkUnavailableReason, message: &str) -> SessionForkResponse {
+    SessionForkResponse::Unavailable(unavail(reason, message))
+}
+
+fn rewind_unavailable(
+    reason: SessionForkUnavailableReason,
+    message: &str,
+) -> SessionRewindResponse {
+    SessionRewindResponse::Unavailable(unavail(reason, message))
 }
 
 fn boundary_message(reason: SessionForkUnavailableReason) -> &'static str {
@@ -557,6 +803,17 @@ fn boundary_message(reason: SessionForkUnavailableReason) -> &'static str {
              response, or the anchor was not found)."
         }
         _ => "This message cannot be forked.",
+    }
+}
+
+fn rewind_boundary_message(reason: SessionForkUnavailableReason) -> &'static str {
+    match reason {
+        SessionForkUnavailableReason::BoundaryUnavailable => {
+            "The conversation cannot restart here: no representable session \
+             boundary (the message is still streaming, another reply sits \
+             between it and the next prompt, or the anchor was not found)."
+        }
+        _ => "The conversation cannot restart from this message.",
     }
 }
 
