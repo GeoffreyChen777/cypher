@@ -46,6 +46,10 @@ pub const TREE_WIDTH: f32 = 224.0;
 pub const SPLIT_MIN_WIDTH: f32 = 560.0;
 const ROW_HEIGHT: f32 = 24.0;
 const INDENT: f32 = 14.0;
+/// Breathing room between the tree column's edges and a row's hover/selected
+/// pill. The list carries it as padding, so rows still fill the width inside.
+const ROW_INSET: f32 = 6.0;
+const ROW_RADIUS: f32 = 6.0;
 
 /// The request context a Files surface is bound to — the selected chat's
 /// checkout on its host device. Re-read per request (like the diff pane)
@@ -884,6 +888,7 @@ impl FilesPanel {
         .track_scroll(&self.tree_scroll)
         .size_full()
         .py(px(4.0))
+        .px(px(ROW_INSET))
         .into_any_element()
     }
 
@@ -1010,9 +1015,10 @@ fn render_tree_row(
     panel: Entity<FilesPanel>,
     _cx: &mut App,
 ) -> AnyElement {
-    let indent = 8.0 + row.depth as f32 * INDENT;
+    let indent = 4.0 + row.depth as f32 * INDENT;
     if let Some(note) = &row.note {
         return div()
+            .w_full()
             .h(px(ROW_HEIGHT))
             .pl(px(indent + 18.0))
             .pr(px(8.0))
@@ -1042,6 +1048,7 @@ fn render_tree_row(
     };
     div()
         .id(("files-row", ix))
+        .w_full()
         .h(px(ROW_HEIGHT))
         .pl(px(indent))
         .pr(px(8.0))
@@ -1050,6 +1057,7 @@ fn render_tree_row(
         .items_center()
         .gap(px(4.0))
         .cursor_pointer()
+        .rounded(px(ROW_RADIUS))
         .when(selected, |el| el.bg(crate::theme::wash(0.10)))
         .when(!selected, |el| el.hover(|s| s.bg(crate::theme::wash(0.05))))
         .on_click(move |_, window, cx| {
