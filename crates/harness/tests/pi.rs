@@ -1190,6 +1190,45 @@ async fn extension_select_before_prompt_ack_does_not_deadlock() {
 }
 
 #[tokio::test]
+async fn status_furniture_before_ack_does_not_end_the_turn_early() {
+    // Regression (2026-09-20): the goal/MCP/subagents extensions push
+    // `setStatus` before the prompt is acknowledged, and the translation
+    // extension delays the ACK. Counting that furniture as "UI happened"
+    // collapsed the no-activity grace to zero, so the harness emitted Done
+    // at the ACK — before the agent's first event — and the engine parked
+    // the session, then re-admitted the whole turn as self-continued output.
+    // The only Done must be the real settle, after the assistant text.
+    let harness = harness().with_no_activity_grace(Duration::from_millis(200));
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("scenario:status-before-ack"), controls).await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    let text_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "real turn"))
+        .expect("assistant text streamed");
+    let done_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Done { .. }))
+        .expect("done present");
+    assert!(
+        done_at > text_at,
+        "Done must follow the agent's output, not the prompt ACK: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+            .count(),
+        0,
+        "no segment boundary should be synthesized: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_binary_surfaces_not_installed() {
     let harness = PiHarness::new(std::env::temp_dir().join("cypher-pi-missing-sessions"))
         .with_executable("/nonexistent/definitely-not-pi");

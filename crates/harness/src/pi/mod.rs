@@ -2051,11 +2051,21 @@ async fn run_session(session: Session) {
         Some(Box::pin(async move {
             first_prompt_client.request("prompt", prompt_params).await
         }));
-    // True if a select/notify/confirm landed while the prompt RPC was in
-    // flight. Real pi only ACKs extension commands after the handler returns,
-    // so an ACK with UI and no agent lifecycle means the command is done —
-    // do not wait the 2s no-activity grace (that spin after closing a picker).
+    // True if a blocking dialog (select/input/editor/confirm) or a notify
+    // landed while the prompt RPC was in flight. Real pi only ACKs extension
+    // commands after the handler returns, so an ACK with that UI and no agent
+    // lifecycle means the command is done — do not wait the 2s no-activity
+    // grace (that spin after closing a picker). Transient TUI furniture
+    // (`setStatus`/`setWidget`/`setTitle`/`set_editor_text`) never counts:
+    // the goal, MCP and subagents extensions push status updates at startup
+    // and mid-turn, and treating those as "UI happened" collapsed the grace
+    // to zero on ordinary prompts, so the harness Done'd the turn before the
+    // agent's first event (2026-09-20: every turn of a chat "ended early").
     let mut had_ui = false;
+    // The zero-grace shortcut is for extension slash commands only: a plain
+    // prompt always starts an agent turn, so it keeps the full grace even if
+    // a real dialog fires during its preflight.
+    let mut prompt_is_command = request.prompt.trim_start().starts_with('/');
     let mut prompt_backlog: VecDeque<String> = VecDeque::new();
     // Interrupt escalation: abort, then SIGTERM → SIGKILL if the agent
     // doesn't wind down.
@@ -2114,6 +2124,7 @@ async fn run_session(session: Session) {
             // branch disabled while the request is in flight; the resolution
             // re-arms it once accepted (lifecycle events that landed first
             // disarm it via agent_started).
+            prompt_is_command = text.trim_start().starts_with('/');
             let mut params = Map::new();
             params.insert("message".into(), Value::String(text));
             // `streamingBehavior:"steer"` makes the parked restart atomic:
@@ -2198,12 +2209,12 @@ async fn run_session(session: Session) {
                         // a fresh grace window from here — never a stale
                         // timer from the previous turn.
                         // Extension commands ACK only after the handler
-                        // returns. If UI already happened and no agent
-                        // started, skip the 2s wait (close-picker spin).
-                        // Zero-sleep still yields to `incoming` first
-                        // (biased select) so a ui-select-then-ACK-then-text
-                        // burst is not cut off.
-                        let grace = if had_ui && !agent_started {
+                        // returns. If a slash command already showed a
+                        // dialog or notified and no agent started, skip the
+                        // 2s wait (close-picker spin). Zero-sleep still
+                        // yields to `incoming` first (biased select) so a
+                        // ui-select-then-ACK-then-text burst is not cut off.
+                        let grace = if had_ui && prompt_is_command && !agent_started {
                             Duration::ZERO
                         } else {
                             no_activity_grace
@@ -2497,10 +2508,10 @@ async fn run_session(session: Session) {
                     }
                 }
                 Some(Incoming::UiRequest { id, method, payload }) => {
-                    had_ui = true;
                     match method.as_str() {
                         // Dialog methods block the agent until answered.
                         "select" | "input" | "editor" | "confirm" => {
+                            had_ui = true;
                             bridge_ui_request(&client, std::sync::Arc::clone(&request_input), &id, &method, &payload);
                         }
                         // notify is the extension command's output channel:
@@ -2510,6 +2521,7 @@ async fn run_session(session: Session) {
                         // at the request top level and may carry escaped
                         // multi-line text — passed through as-is.
                         "notify" => {
+                            had_ui = true;
                             let message = payload
                                 .get("message")
                                 .and_then(Value::as_str)

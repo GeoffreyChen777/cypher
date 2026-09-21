@@ -462,6 +462,31 @@ while read -r line; do
       exit 1
       ;;
 
+    *scenario:status-before-ack*)
+      # Real pi at startup: the goal, MCP and subagents extensions push
+      # `setStatus` furniture BEFORE the prompt is acknowledged, and an input
+      # extension (translation) delays the ACK by seconds. A plain prompt then
+      # streams a normal turn after a short pause. That status traffic must
+      # not shorten the no-activity grace: the ONLY Done is the real settle,
+      # after the assistant text. (2026-09-20 regression: the harness Done'd
+      # at the ACK, parking the session before the agent's first event.)
+      emit '{"type":"extension_ui_request","id":"s-1","method":"setStatus","statusKey":"goal","statusText":""}'
+      emit '{"type":"extension_ui_request","id":"s-2","method":"setStatus","statusKey":"cypher.subagents.v1","statusText":""}'
+      emit '{"type":"extension_ui_request","id":"s-3","method":"setStatus","statusKey":"mcp","statusText":"3 servers"}'
+      sleep 0.3
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      # Shorter than the test grace, longer than a zero-length sleep: a
+      # collapsed grace fires here; an intact one waits for the turn.
+      sleep 0.1
+      emit '{"type":"agent_start"}'
+      emit '{"type":"turn_start"}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"real turn"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"real turn"}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      exit 0
+      ;;
+
     *scenario:noagent*)
       # An extension command whose handler only notifies: pi forwards the
       # notify UI requests (info multi-line + error), accepts the prompt,

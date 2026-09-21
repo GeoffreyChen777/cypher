@@ -295,6 +295,15 @@ prompt's preflight); lifecycle events that land before the response disarm it
 via `agent_started`, and a genuinely inert (notify-only) parked turn still
 terminates with its own notify text.
 
+The grace collapses to ZERO only for an extension **slash command** whose
+handler already showed a blocking dialog or notified before the ACK (the
+close-picker spin). Transient furniture (`setStatus`/`setWidget`/`setTitle`/
+`set_editor_text`) never counts as UI, and a plain prompt always keeps the
+full grace: the goal, MCP and subagents extensions push `setStatus` at startup
+and mid-turn, and the translation extension delays the ACK by seconds, so the
+old "any UI request" rule Done'd ordinary turns before their first agent
+event (2026-09-20; fixture `scenario:status-before-ack`).
+
 - **Segment semantics** (engine consumption is the source of truth; ACP is the
   reference): the doc fold splits entries only on `Steered` (and clears on
   `SessionStarted`) — `AssistantMessageCompleted` is journal-only, matching
