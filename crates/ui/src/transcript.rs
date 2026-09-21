@@ -123,6 +123,10 @@ pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
 /// Embedded (temporary Side Chat) own-turn top inset: no titlebar chrome
 /// above the panel, so the held prompt rests at a compact top gap.
 const EMBEDDED_TOP_INSET_PX: f32 = 10.0;
+/// Extra room a revealed find match keeps below the titlebar: the find bar
+/// floats there (shell chrome, [`crate::shell`] `render_find_bar`), and a hit
+/// parked underneath it would be exactly the one you cannot read.
+pub const FIND_BAR_CLEARANCE: f32 = 44.0;
 /// Epsilon of extra height under the reservation. The runway ends AT the
 /// app's bottom — this is not scroll room (24px of it read as a janky
 /// overshoot-and-fight zone, user report) — it exists only to keep the held
@@ -566,6 +570,51 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+}
+
+/// Whether a user row renders as the quiet slash-command action chip rather
+/// than a prompt bubble (settings commands are not a message to the model).
+/// Shared by the renderer and the find index so the two agree on which rows
+/// carry searchable, highlightable bubble text.
+fn renders_as_command_chip(
+    text: &str,
+    mentions: &[crate::composer::SentMentionSpan],
+    attachments: &[crate::attachments::UserImageAttachment],
+) -> bool {
+    crate::composer::slash_command_label(text).is_some()
+        && mentions.is_empty()
+        && attachments.is_empty()
+}
+
+/// How many find matches a row holds, over exactly the text elements the row
+/// renders as selectable text. Rows without one (tool groups, chips, the
+/// worked rule, command chips, image-only sends) contribute nothing: there is
+/// no laid-out text model to wash a highlight into, and reporting hits the
+/// user cannot see would break the "n of N" contract.
+fn row_match_count(row: &Row, query: &str) -> u32 {
+    let count = match &row.kind {
+        RowKind::User {
+            text,
+            mentions,
+            attachments,
+            ..
+        } => {
+            if text.is_empty() || renders_as_command_chip(text, mentions, attachments) {
+                0
+            } else {
+                crate::find::count_matches(text, query)
+            }
+        }
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+            .blocks
+            .get(*block_ix)
+            .map_or(0, |top| render::count_block_matches(&top.block, query)),
+        RowKind::ToolGroup { .. }
+        | RowKind::Worked { .. }
+        | RowKind::InputChip { .. }
+        | RowKind::ErrorChip { .. } => 0,
+    };
+    count.min(u32::MAX as usize) as u32
 }
 
 /// A resolved transcript mirror for the request currently served by the
@@ -1863,8 +1912,54 @@ pub struct Transcript {
     rewind_armed: Option<(String, String)>,
     /// Disarms [`Self::rewind_armed`] after the window elapses.
     rewind_disarm: Option<Task<()>>,
+    /// In-chat find (⌘F). `None` while the find bar is closed — the shell
+    /// renders the bar from this, so the two can never disagree about
+    /// whether find is open.
+    find: Option<FindState>,
     _style_observe: Subscription,
     _observe: Subscription,
+}
+
+/// The transcript's find index: how many matches each ROW holds, and which
+/// match is current.
+///
+/// Rows are the granularity because rows are what the list can scroll to, and
+/// because a row's match count is memoizable against the content version the
+/// row diff already maintains — a streaming commit rescans only the rows
+/// whose version moved, never the whole transcript. Within a row, the painter
+/// resolves exact byte ranges itself (see [`crate::find`]).
+#[derive(Default)]
+struct FindState {
+    query: String,
+    /// Matches per row, parallel to [`Transcript::rows`].
+    counts: Vec<u32>,
+    /// Matches before each row; `prefix[i]` for row `i`, `prefix[len]` is the
+    /// total. Turns a global match index into `(row, ordinal)` by search.
+    prefix: Vec<u32>,
+    /// Global index of the active match. Meaningless when the total is 0.
+    active: usize,
+    /// `row id → (row version, match count)`. Dropped whenever the query
+    /// changes; otherwise it is what keeps a re-index O(changed rows).
+    memo: HashMap<SharedString, (u64, u32)>,
+}
+
+impl FindState {
+    fn total(&self) -> usize {
+        self.prefix.last().copied().unwrap_or(0) as usize
+    }
+
+    /// `(row index, ordinal within that row)` of the active match.
+    fn target(&self) -> Option<(usize, usize)> {
+        if self.total() == 0 {
+            return None;
+        }
+        let active = self.active.min(self.total() - 1) as u32;
+        // The last row whose running total is still at or below `active` —
+        // rows with no matches share their neighbour's prefix, so the search
+        // lands past them, on the row that actually holds the hit.
+        let row = self.prefix.partition_point(|&before| before <= active) - 1;
+        Some((row, (active - self.prefix[row]) as usize))
+    }
 }
 
 /// One sidecar blob fetch's lifecycle.
@@ -1990,11 +2085,218 @@ impl Transcript {
             rewind_pending: std::collections::HashSet::new(),
             rewind_armed: None,
             rewind_disarm: None,
+            find: None,
             _style_observe: style_observe,
             _observe: observe,
         };
         this.sync(cx);
         this
+    }
+
+    // ---- in-chat find (⌘F); the bar itself is shell chrome ----
+
+    /// Whether the find bar should be on screen. The shell renders from this,
+    /// so closing here (a chat switch) closes the bar with it.
+    pub fn find_open(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// `(1-based position of the active match, total matches)` — `(0, 0)`
+    /// with no query or no hits, which is what the counter renders as "No
+    /// results".
+    pub fn find_status(&self) -> (usize, usize) {
+        let Some(find) = &self.find else {
+            return (0, 0);
+        };
+        let total = find.total();
+        if total == 0 {
+            return (0, 0);
+        }
+        (find.active.min(total - 1) + 1, total)
+    }
+
+    /// Open the find bar (idempotent — ⌘F on an open bar just refocuses it,
+    /// keeping the previous query the way every other find bar does).
+    pub fn open_find(&mut self, cx: &mut Context<Self>) {
+        if self.find.is_none() {
+            self.find = Some(FindState::default());
+            self.reindex_find();
+            cx.notify();
+        }
+    }
+
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            crate::find::clear(self.scope);
+            cx.notify();
+        }
+    }
+
+    /// Re-run the search for a new query, landing on the first match at or
+    /// after the current viewport (so opening find mid-scroll doesn't fling
+    /// the transcript back to the top).
+    pub fn set_find_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        if find.query == query {
+            return;
+        }
+        find.query.clear();
+        find.query.push_str(query);
+        find.memo.clear();
+        find.active = 0;
+        self.reindex_find();
+        self.select_nearest_find_match();
+        self.reveal_find_match(cx);
+        cx.notify();
+    }
+
+    /// Step to the next (`1`) or previous (`-1`) match, wrapping at both ends.
+    pub fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        let total = find.total();
+        if total == 0 {
+            return;
+        }
+        let active = find.active.min(total - 1) as isize;
+        find.active = (active + delta).rem_euclid(total as isize) as usize;
+        self.reveal_find_match(cx);
+        cx.notify();
+    }
+
+    /// Rebuild the per-row counts. O(rows) plus a rescan of the rows whose
+    /// version moved since the last pass.
+    fn reindex_find(&mut self) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        find.counts.clear();
+        find.counts.reserve(self.rows.len());
+        find.prefix.clear();
+        find.prefix.reserve(self.rows.len() + 1);
+        let mut running = 0u32;
+        find.prefix.push(0);
+        if find.query.is_empty() {
+            find.counts.resize(self.rows.len(), 0);
+            find.prefix.resize(self.rows.len() + 1, 0);
+            return;
+        }
+        for row in &self.rows {
+            let count = match find.memo.get(&row.id) {
+                Some(&(version, count)) if version == row.version => count,
+                _ => {
+                    let count = row_match_count(row, &find.query);
+                    find.memo.insert(row.id.clone(), (row.version, count));
+                    count
+                }
+            };
+            find.counts.push(count);
+            running = running.saturating_add(count);
+            find.prefix.push(running);
+        }
+        // Rows the diff removed must not keep the memo growing for the life
+        // of the session.
+        if find.memo.len() > self.rows.len() * 2 + 64 {
+            let live: std::collections::HashSet<&SharedString> =
+                self.rows.iter().map(|row| &row.id).collect();
+            find.memo.retain(|id, _| live.contains(id));
+        }
+        let total = running as usize;
+        if total == 0 {
+            find.active = 0;
+        } else if find.active >= total {
+            find.active = total - 1;
+        }
+    }
+
+    /// Park the active match on the first hit at or after the row currently
+    /// at the top of the viewport (browser find-bar behaviour), falling back
+    /// to the first match overall.
+    fn select_nearest_find_match(&mut self) {
+        let top_row = self.list.logical_scroll_top().item_ix;
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        if find.total() == 0 {
+            return;
+        }
+        let at_or_after = find
+            .prefix
+            .get(top_row.min(self.rows.len()))
+            .copied()
+            .unwrap_or(0) as usize;
+        find.active = if at_or_after < find.total() {
+            at_or_after
+        } else {
+            0
+        };
+    }
+
+    /// Bring the active match's row into view, below the chrome the find bar
+    /// and titlebar occupy. A row already comfortably on screen is left alone
+    /// so stepping through several matches inside one long reply doesn't
+    /// re-snap the viewport for each of them.
+    fn reveal_find_match(&mut self, cx: &mut Context<Self>) {
+        let Some((row_ix, _)) = self.find.as_ref().and_then(FindState::target) else {
+            return;
+        };
+        if row_ix >= self.rows.len() {
+            return;
+        }
+        let inset = self.find_reveal_inset();
+        let viewport = self.list.viewport_bounds();
+        if let Some(bounds) = self.list.bounds_for_item(row_ix) {
+            let top_limit = f32::from(viewport.top()) + inset;
+            let bottom_limit = f32::from(viewport.bottom()) - self.bottom_clearance;
+            if f32::from(bounds.top()) >= top_limit && f32::from(bounds.bottom()) <= bottom_limit {
+                return;
+            }
+        }
+        // Navigating is an explicit viewport move: release the bottom pin and
+        // any own-turn hold, both of which re-assert a scroll position every
+        // frame and would drag the view straight back off the match.
+        self.pinned = false;
+        self.own_turn = None;
+        self.own_turn_kick = false;
+        self.own_turn_last_tick = None;
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.list.scroll_to(ListOffset {
+            item_ix: row_ix,
+            offset_in_item: px(0.0),
+        });
+        self.list.scroll_by(px(-inset));
+        cx.notify();
+    }
+
+    /// How far below the viewport top a revealed match rests: the chrome the
+    /// transcript scrolls under, plus room for the find bar floating in it.
+    fn find_reveal_inset(&self) -> f32 {
+        if self.embedded {
+            EMBEDDED_TOP_INSET_PX
+        } else {
+            OWN_SEND_TOP_INSET_PX + FIND_BAR_CLEARANCE
+        }
+    }
+
+    /// Hand the painter this frame's query + active match (see
+    /// [`crate::find`]). Called once per render, before the list builds rows.
+    fn publish_find(&self) {
+        let Some(find) = &self.find else {
+            crate::find::clear(self.scope);
+            return;
+        };
+        let active = find.target().and_then(|(row_ix, ordinal)| {
+            self.rows
+                .get(row_ix)
+                .map(|row| (row.id.to_string(), ordinal))
+        });
+        crate::find::publish(self.scope, &find.query, active);
     }
 
     // ---- rail plumbing (rendering lives in crate::rail) ----
@@ -2696,6 +2998,10 @@ impl Transcript {
             }
             // Switching chats discards the transient comment pill/selection.
             self.dismiss_comment_ui_and_selection(cx);
+            // … and the find bar with them: its matches, its counter and its
+            // query all belonged to the transcript being left behind.
+            self.find = None;
+            crate::find::clear(self.scope);
             self.chat_id = selected;
             self.rows.clear();
             self.row_cache.clear();
@@ -2779,6 +3085,8 @@ impl Transcript {
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
             None => {
+                // Identical ids AND versions: every row's match count is
+                // already indexed (the memo is keyed on exactly that pair).
                 self.rows = new_rows;
                 self.refresh_protected_attachments(cx);
                 return;
@@ -2822,6 +3130,10 @@ impl Transcript {
         }
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
+        // Rows moved: re-derive the find counts (memoized per row version, so
+        // a streaming commit only rescans its own tail) and hold the active
+        // match inside the new total.
+        self.reindex_find();
         if self.own_turn.is_some() {
             // Appending a reply moves the runway from the previous last row to
             // the new one. Both measurements must be invalidated because the
@@ -3385,6 +3697,10 @@ impl Transcript {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
+        // Open this row's find-match counter before any of its text elements
+        // resolve their highlights (see [`crate::find`]). Rows build in
+        // document order, which is the order the ordinals have to follow.
+        crate::find::begin_row(self.scope, &row.id);
         let theme = crate::chat_style::theme(cx);
         let (wide, message_spacing, paragraph_spacing) = {
             let style = crate::chat_style::settings(cx);
@@ -3451,10 +3767,7 @@ impl Transcript {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
                 }
                 if !text.is_empty() {
-                    if crate::composer::slash_command_label(&text).is_some()
-                        && mentions.is_empty()
-                        && attachments.is_empty()
-                    {
+                    if renders_as_command_chip(&text, &mentions, &attachments) {
                         // Slash-command settings: a quiet action chip, not a
                         // user bubble that reads as a prompt to the model.
                         column = column.child(
@@ -4759,6 +5072,15 @@ fn user_bubble_text(
     let wash = theme.code_wash;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
+    // In-chat find, resolved at BUILD time like the markdown rows' — a user
+    // bubble is one text element, so it always takes its row's first
+    // ordinals.
+    let find_hits = crate::find::element_matches(
+        scope,
+        crate::markdown::selection::row_of_key(&sel_key),
+        &text,
+    );
+    let find_washes = render::find_wash(theme);
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -4774,6 +5096,7 @@ fn user_bubble_text(
                     ));
                 }
             }
+            render::paint_find_hits(window, &layout, &find_hits, find_washes);
             render::paint_text_selection(
                 window, scope, &sel_key, &text, &layout, &sel_theme, selection,
             );
@@ -5256,11 +5579,17 @@ impl Render for Transcript {
                     .ok();
             });
         }
+        // Hand the find query + active match to the painter BEFORE the list
+        // builds its rows (gpui requests items during layout, after this
+        // returns), so every row built this frame washes against the current
+        // state.
+        self.publish_find();
         let rail = self.render_rail(cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
-        // outlet — an overlay here would be tinted by the fade.
+        // outlet — an overlay here would be tinted by the fade. The find bar
+        // is shell chrome for the same reason.
         let root = div()
             .relative()
             .size_full()
@@ -5919,6 +6248,113 @@ mod tests {
             panic!()
         };
         assert!(!auto_open);
+    }
+
+    // ---- in-chat find (⌘F) ----
+
+    /// Build the index the way [`Transcript::reindex_find`] does, from a list
+    /// of per-row counts.
+    fn find_state(counts: [u32; 5]) -> FindState {
+        let mut state = FindState {
+            query: "x".into(),
+            counts: counts.to_vec(),
+            ..FindState::default()
+        };
+        let mut running = 0;
+        state.prefix.push(0);
+        for count in counts {
+            running += count;
+            state.prefix.push(running);
+        }
+        state
+    }
+
+    #[test]
+    fn find_target_resolves_a_global_index_onto_the_row_that_holds_it() {
+        // Empty rows on both sides of, and between, the rows with hits: the
+        // search must never land on a row whose count is 0.
+        let mut state = find_state([0, 3, 0, 2, 0]);
+        assert_eq!(state.total(), 5);
+        let targets: Vec<(usize, usize)> = (0..5)
+            .map(|ix| {
+                state.active = ix;
+                state.target().expect("a target for every match")
+            })
+            .collect();
+        assert_eq!(targets, [(1, 0), (1, 1), (1, 2), (3, 0), (3, 1)]);
+        // An index past the end (rows shrank under a live reindex) clamps to
+        // the last match instead of panicking or reporting a phantom row.
+        state.active = 99;
+        assert_eq!(state.target(), Some((3, 1)));
+    }
+
+    #[test]
+    fn find_target_is_none_without_matches() {
+        let mut state = find_state([0; 5]);
+        assert_eq!(state.total(), 0);
+        assert_eq!(state.target(), None);
+        state.active = 3;
+        assert_eq!(state.target(), None);
+    }
+
+    #[test]
+    fn row_match_counts_cover_prompts_and_replies_but_not_chips() {
+        // A user prompt: the bubble is one text element.
+        let mut prompt = assistant("f1", MessageStatus::Complete, vec![]);
+        prompt.role = MessageRole::User;
+        prompt.status = None;
+        prompt.parts = vec![text_part("t0", "Find the cypher, then CYPHER again")];
+        let rows = rows_for_entry(&prompt, false, &mut parse);
+        assert_eq!(row_match_count(&rows[0], "cypher"), 2);
+        assert_eq!(row_match_count(&rows[0], "nothing"), 0);
+
+        // A reply splits per markdown block, so each row counts its own.
+        let reply = assistant(
+            "f2",
+            MessageStatus::Complete,
+            vec![text_part(
+                "t0",
+                "cypher in prose\n\n```\nlet cypher = cypher();\n```",
+            )],
+        );
+        let rows = rows_for_entry(&reply, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(row_match_count(&rows[0], "cypher"), 1);
+        assert_eq!(row_match_count(&rows[1], "cypher"), 2);
+
+        // Tool groups render chips, not a laid-out text model — counting
+        // them would promise a highlight nothing can paint.
+        let tools = assistant(
+            "f3",
+            MessageStatus::Complete,
+            vec![tool_part("a", "grep cypher")],
+        );
+        let rows = rows_for_entry(&tools, false, &mut parse);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        assert_eq!(row_match_count(&rows[0], "cypher"), 0);
+    }
+
+    #[test]
+    fn slash_command_rows_are_not_searchable() {
+        // A settings command renders as a quiet action chip (plain text, no
+        // selection model), so it must stay out of the index — exactly the
+        // condition the renderer branches on.
+        let mut entry = assistant("f4", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("t0", "/model opus")];
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::User {
+            text,
+            mentions,
+            attachments,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert!(renders_as_command_chip(text, mentions, attachments));
+        assert_eq!(row_match_count(&rows[0], "model"), 0);
     }
 
     #[test]

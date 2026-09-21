@@ -142,6 +142,10 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
             MenuItem::separator(),
             MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
+            MenuItem::separator(),
+            // Routed to the shell's root handler, which owns the find bar
+            // over the open conversation (no-op in Settings).
+            MenuItem::action("Find in Chat", crate::shell::FindInChat),
         ]),
     ];
     // Appearance lives under View on every platform — it is the only View verb

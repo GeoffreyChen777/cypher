@@ -558,6 +558,65 @@ pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 /// A thin visual margin between an inline-code pill and neighboring prose.
 const INLINE_CODE_MARGIN: &str = "\u{2009}";
 
+/// The flat TEXT one inline-run sequence renders as — the string half of
+/// [`flatten_runs_weighted`], without the fonts/colors a theme would decide.
+///
+/// In-chat find counts matches over rows the virtualizer has not built (and
+/// may never build), so it cannot go through the cached `FlatText`. Keeping
+/// this beside the flattener it mirrors — and pinned to it by
+/// [`tests::runs_text_matches_the_flattened_text`] — is what makes the
+/// offscreen counts and the painted highlights agree.
+pub fn runs_text(runs: &[InlineRun]) -> String {
+    let mut text = String::new();
+    let mut previous_was_code = None;
+    for run in runs {
+        if run.text.is_empty() {
+            continue;
+        }
+        if previous_was_code.is_some_and(|was_code| was_code != run.style.code) {
+            text.push_str(INLINE_CODE_MARGIN);
+        }
+        text.push_str(&run.text);
+        previous_was_code = Some(run.style.code);
+    }
+    text
+}
+
+/// Find matches in one block, counted over the same text elements
+/// [`render_block`] would produce, in the same document order — so the
+/// transcript's per-row totals and the ordinals the painter hands out agree
+/// element for element.
+pub fn count_block_matches(block: &Block, query: &str) -> usize {
+    let cells = |cells: &[Vec<InlineRun>]| -> usize {
+        cells
+            .iter()
+            .map(|runs| crate::find::count_matches(&runs_text(runs), query))
+            .sum()
+    };
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+            crate::find::count_matches(&runs_text(runs), query)
+        }
+        // A fence is ONE selectable text model (see `flatten_code`), so its
+        // matches are counted over the raw source, newlines included.
+        Block::CodeBlock { code, .. } => crate::find::count_matches(code, query),
+        Block::BlockQuote { children } => children
+            .iter()
+            .map(|child| count_block_matches(child, query))
+            .sum(),
+        Block::List { items, .. } => items
+            .iter()
+            .flatten()
+            .map(|child| count_block_matches(child, query))
+            .sum(),
+        // Header row first, then the body rows — `render_table`'s order.
+        Block::Table { header, rows, .. } => {
+            cells(header) + rows.iter().map(|row| cells(row)).sum::<usize>()
+        }
+        Block::Rule => 0,
+    }
+}
+
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
 pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
     flatten_runs_weighted(
@@ -744,6 +803,12 @@ fn flat_text_element(
     let sel_wash = selection_wash(theme);
     let selection = opts.selection.clone();
     let scope = opts.scope;
+    // In-chat find: resolved while the element is BUILT, not painted — build
+    // order is document order, which is what makes each match's ordinal within
+    // its row line up with the transcript's offscreen counts.
+    let find_hits =
+        crate::find::element_matches(scope, super::selection::row_of_key(&sel_key), &flat.text);
+    let find_washes = find_wash(theme);
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
@@ -759,6 +824,9 @@ fn flat_text_element(
                     ));
                 }
             }
+            // Under the selection wash below: a drag over a hit must still
+            // read as selected.
+            paint_find_hits(window, &layout, &find_hits, find_washes);
             if let Some(range) = super::selection::wash_range(scope, &sel_key) {
                 for rect in range_rects(&layout, &range, 0.0, 0.0) {
                     window.paint_quad(quad(
@@ -796,6 +864,42 @@ fn flat_text_element(
 /// Selection tint: the accent hue under the glyphs, dark-panel strength.
 fn selection_wash(theme: &Theme) -> Hsla {
     theme.accent.opacity(0.35) // indigo-400
+}
+
+/// Find tints: `(every match, the active one)`. Amber rather than the accent
+/// hue so a highlight never reads as a selection — they can overlap, and the
+/// browser/editor convention is worth more here than palette purity.
+pub(crate) fn find_wash(theme: &Theme) -> (Hsla, Hsla) {
+    (theme.warning.opacity(0.22), theme.warning.opacity(0.58))
+}
+
+/// Corner radius on a match wash — just enough to read as a marker pen
+/// stroke rather than a hard box.
+const FIND_RADIUS: f32 = 3.0;
+/// The wash extends this far past the glyphs horizontally (the inline-code
+/// treatment, halved): a single-word hit needs a little air to read as marked.
+const FIND_PAD_X: f32 = 2.0;
+
+/// Paint one element's find matches under its glyphs. `hits` pairs each byte
+/// range with whether it is the surface's active match.
+pub(crate) fn paint_find_hits(
+    window: &mut Window,
+    layout: &gpui::TextLayout,
+    hits: &[(Range<usize>, bool)],
+    (match_wash, active_wash): (Hsla, Hsla),
+) {
+    for (range, is_active) in hits {
+        for rect in range_rects(layout, range, FIND_PAD_X, 0.0) {
+            window.paint_quad(quad(
+                rect,
+                px(FIND_RADIUS),
+                if *is_active { active_wash } else { match_wash },
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+    }
 }
 
 /// Selection support for a plain (non-markdown) text element — the user
@@ -1642,6 +1746,93 @@ mod tests {
             );
             assert_eq!(prose.runs[0].color, theme.text);
         }
+    }
+
+    #[test]
+    fn runs_text_matches_the_flattened_text() {
+        // The find index counts over `runs_text`; the painter highlights over
+        // the flattened `FlatText`. If these two ever disagree the match
+        // ordinals drift and the wrong hit lights up, so pin them together
+        // over the boundaries that make the two differ: empty runs (dropped)
+        // and prose/code transitions (a thin space is inserted OUTSIDE the
+        // code range).
+        let code = |text: &str| InlineRun {
+            text: text.into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        };
+        let prose = |text: &str| InlineRun {
+            text: text.into(),
+            style: InlineStyle::default(),
+        };
+        let theme = Theme::dark();
+        for runs in [
+            vec![],
+            vec![prose("plain prose")],
+            vec![code("cypher")],
+            vec![prose("call "), code("cypher"), prose(" twice")],
+            // Adjacent code runs merge into one wash but no margin between.
+            vec![code("cy"), code("pher"), prose(" done")],
+            // Empty runs never reach the text.
+            vec![prose(""), prose("a"), code(""), code("b"), prose("")],
+        ] {
+            assert_eq!(
+                runs_text(&runs),
+                flatten_runs(&runs, &theme, false).text.as_ref(),
+            );
+        }
+    }
+
+    #[test]
+    fn block_match_counts_walk_every_rendered_element() {
+        let runs = |text: &str| {
+            vec![InlineRun {
+                text: text.into(),
+                style: InlineStyle::default(),
+            }]
+        };
+        assert_eq!(count_block_matches(&Block::Rule, "x"), 0);
+        assert_eq!(
+            count_block_matches(
+                &Block::Paragraph {
+                    runs: runs("x y x")
+                },
+                "x"
+            ),
+            2
+        );
+        assert_eq!(
+            count_block_matches(
+                &Block::CodeBlock {
+                    language: None,
+                    code: "let x = x;\nreturn x;".into(),
+                },
+                "x"
+            ),
+            3
+        );
+        // Nested blocks recurse; table header and body cells both count.
+        let nested = Block::List {
+            ordered_start: None,
+            items: vec![
+                vec![Block::Paragraph { runs: runs("x") }],
+                vec![Block::BlockQuote {
+                    children: vec![Block::Heading {
+                        level: 2,
+                        runs: runs("x x"),
+                    }],
+                }],
+            ],
+        };
+        assert_eq!(count_block_matches(&nested, "x"), 3);
+        let table = Block::Table {
+            header: vec![runs("x"), runs("y")],
+            rows: vec![vec![runs("x x"), runs("y")], vec![runs("x")]],
+            align: Vec::new(),
+        };
+        assert_eq!(count_block_matches(&table, "x"), 4);
     }
 
     #[test]

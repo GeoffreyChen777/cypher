@@ -70,6 +70,7 @@ actions!(
         ToggleSidebar,
         ToggleChanges,
         AddSpacePalette,
+        FindInChat,
         NewSession,
         NextSession,
         PrevSession
@@ -185,6 +186,10 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // Fixed: ⌘K summons the add-space palette (the ⌘K chip in its search
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
+        // Fixed: ⌘F finds in the open conversation (the universal binding —
+        // rebindable shortcuts are the PANEL verbs, and a find bar nobody can
+        // guess the key for is a find bar nobody opens).
+        KeyBinding::new(&platform_combo("mod-f"), FindInChat, None),
         // Fixed: ⌘, opens Settings (macOS convention).
         KeyBinding::new(
             &platform_combo("mod-,"),
@@ -560,6 +565,29 @@ impl Render for SurfaceTabGhost {
     }
 }
 /// Drag marker for the terminal-panel height handle.
+/// Find-bar button tooltip (the step/close glyphs carry their key equivalent
+/// so the bar teaches ↵ / ⇧↵ / esc without spelling them on the chrome).
+struct FindTooltip(SharedString);
+
+impl Render for FindTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        motion::fade_quick(
+            "find-tooltip",
+            div()
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_raised)
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(self.0.clone()),
+        )
+    }
+}
+
 struct TerminalResize;
 
 /// Invisible drag ghost — resize drags render nothing at the cursor.
@@ -993,6 +1021,17 @@ pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    /// In-chat find (⌘F): the query field and the frame that owns its keys.
+    /// Whether the BAR is on screen is the transcript's state
+    /// ([`Transcript::find_open`]) — this pair is just the chrome, so a chat
+    /// switch closing find over there closes the bar here with no second
+    /// flag to keep in step.
+    find_input: Entity<ComposerInput>,
+    find_focus: gpui::FocusHandle,
+    /// Focus lands in the field on the render after ⌘F (the element has to
+    /// exist first — the palette flows do the same).
+    find_focus_pending: bool,
+    _find_events: Subscription,
     /// Session-level subagents chrome (current chat's live subagent runs): a
     /// compact trigger on the status strip's right edge with an upward
     /// inspector popover. Renders Empty without records, so the fixed-height
@@ -1497,6 +1536,20 @@ impl Shell {
             )),
             _ => None,
         };
+        // "PaletteSearch" context: ↵ / ⇧↵ / esc stay unbound so they bubble
+        // to the bar's frame (`find_key`) as match navigation instead of
+        // editing text.
+        let find_input =
+            cx.new(|cx| ComposerInput::with_context("Find in chat…", "PaletteSearch", cx));
+        let find_events = cx.subscribe(&find_input, {
+            let transcript = transcript.clone();
+            move |_: &mut Shell, input, event: &ComposerInputEvent, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    let query = input.read(cx).text().to_owned();
+                    transcript.update(cx, |t, cx| t.set_find_query(&query, cx));
+                }
+            }
+        });
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
@@ -1505,6 +1558,10 @@ impl Shell {
             state,
             transcript,
             composer,
+            find_input,
+            find_focus: cx.focus_handle(),
+            find_focus_pending: false,
+            _find_events: find_events,
             subagents,
             file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
@@ -6365,7 +6422,7 @@ impl Shell {
             )
     }
 
-    fn render_main(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme_owned = if matches!(self.route, Route::Chat) {
             crate::chat_style::theme(cx)
         } else {
@@ -6580,6 +6637,9 @@ impl Shell {
                             .band_bottom(bottom_band),
                         )
                         .children(self.render_jump_to_bottom(stack_h, cx))
+                        // The find bar floats in the same layer, at the top
+                        // — outside the fade scope, over the transcript.
+                        .children(self.render_find_bar(window, cx))
                 },
             )
             // The glass chrome stack, floating over the transcript's bottom:
@@ -6636,6 +6696,224 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    // ---- in-chat find (⌘F) ----
+
+    /// ⌘F (and Edit → Find in Chat). Opens the find bar over the open
+    /// conversation, or — when it is already open — just puts the caret back
+    /// in the field with the previous query intact, the way every find bar
+    /// behaves. There is nothing to search on the new-chat canvas or in
+    /// Settings, so both are no-ops rather than an empty bar.
+    fn open_find(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat)
+            || self.showing_setup()
+            || self.state.read(cx).selected_chat.is_none()
+        {
+            return;
+        }
+        let query = self.find_input.read(cx).text().to_owned();
+        self.transcript.update(cx, |transcript, cx| {
+            transcript.open_find(cx);
+            // Re-opening with a retained query must re-run it: the index was
+            // dropped when find closed.
+            transcript.set_find_query(&query, cx);
+        });
+        self.find_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Close the bar and hand the keyboard back to the composer — where it
+    /// was before ⌘F, and the only place in the chat route that wants it.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |transcript, cx| transcript.close_find(cx));
+        self.find_focus_pending = false;
+        window.focus(&self.composer.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |transcript, cx| transcript.step_find(delta, cx));
+    }
+
+    /// Find-bar keys, bubbling from the focused field ("PaletteSearch" leaves
+    /// ↵/⇧↵/↑↓/esc unbound exactly so they arrive here).
+    fn find_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.close_find(window, cx),
+            "enter" => {
+                let delta = if event.keystroke.modifiers.shift {
+                    -1
+                } else {
+                    1
+                };
+                self.step_find(delta, cx);
+            }
+            "up" => self.step_find(-1, cx),
+            "down" => self.step_find(1, cx),
+            _ => {}
+        }
+    }
+
+    /// The find bar: a floating pill in the conversation column's top-right,
+    /// below the titlebar and clear of the message rail (which hugs the left
+    /// edge). Rendered by the SHELL rather than inside the transcript for the
+    /// same reason as the jump pill — the transcript outlet sits inside the
+    /// EdgeFade scope, which would fade the bar out against the top band.
+    fn render_find_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.transcript.read(cx).find_open() {
+            return None;
+        }
+        if std::mem::take(&mut self.find_focus_pending) {
+            let handle = self.find_input.focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        let theme = Theme::of(cx).clone();
+        let (position, total) = self.transcript.read(cx).find_status();
+        let typed = !self.find_input.read(cx).text().trim().is_empty();
+        // Empty field reads as "nothing asked for yet", not "nothing found".
+        let counter: SharedString = match (typed, total) {
+            (false, _) => "".into(),
+            (true, 0) => "No results".into(),
+            (true, total) => format!("{position} of {total}").into(),
+        };
+        let has_matches = total > 0;
+        let step_button = |shell_key: &'static str,
+                           glyph: &'static str,
+                           tooltip: &'static str,
+                           delta: isize,
+                           cx: &mut Context<Self>| {
+            div()
+                .id(shell_key)
+                .size(px(22.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(has_matches, |el| {
+                    el.cursor_pointer()
+                        .bg(motion::hover_blend(
+                            shell_key,
+                            gpui::transparent_black(),
+                            theme.element_hover,
+                        ))
+                        .on_hover(motion::hover_listener(shell_key))
+                        .on_click(cx.listener(move |this, _, _, cx| this.step_find(delta, cx)))
+                })
+                .child(
+                    icon(glyph)
+                        .size(px(12.0))
+                        .text_color(if has_matches {
+                            theme.text_muted
+                        } else {
+                            theme.text_faint.opacity(0.5)
+                        })
+                        .flex_none(),
+                )
+                .tooltip(move |_, cx| cx.new(|_| FindTooltip(tooltip.into())).into())
+        };
+        let bar = div()
+            .id("find-bar")
+            .h(px(34.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .pl(px(10.0))
+            .pr(px(5.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .track_focus(&self.find_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                this.find_key(event, window, cx)
+            }))
+            .child(
+                icon(icons::MAGNIFER)
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .w(px(190.0))
+                    .flex_none()
+                    .text_size(px(13.0))
+                    .child(self.find_input.clone()),
+            )
+            .child(
+                div()
+                    // Fixed width so stepping through matches ("9 of 12" →
+                    // "10 of 12") never nudges the buttons under the cursor.
+                    .w(px(64.0))
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_faint)
+                    .truncate()
+                    .child(counter),
+            )
+            .child(div().w(px(1.0)).h(px(16.0)).flex_none().bg(theme.border))
+            .child(step_button(
+                "find-prev",
+                icons::ARROW_UP,
+                "Previous match (⇧↵)",
+                -1,
+                cx,
+            ))
+            .child(step_button(
+                "find-next",
+                icons::ARROW_DOWN,
+                "Next match (↵)",
+                1,
+                cx,
+            ))
+            .child(
+                div()
+                    .id("find-close")
+                    .size(px(22.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(
+                        "find-close",
+                        gpui::transparent_black(),
+                        theme.element_hover,
+                    ))
+                    .on_hover(motion::hover_listener("find-close"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
+                    .child(
+                        icon(icons::CLOSE)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .tooltip(|_, cx| cx.new(|_| FindTooltip("Close (esc)".into())).into()),
+            );
+        Some(
+            div()
+                .absolute()
+                .top(px(Theme::TITLEBAR_HEIGHT + 4.0))
+                .right(px(14.0))
+                .child(motion::dialog_in("find-bar-in", bar))
+                .into_any_element(),
+        )
     }
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
@@ -8313,6 +8591,21 @@ impl Render for Shell {
         {
             window.focus(&self.composer.focus_handle(cx), cx);
         }
+        // The find bar can close out from under the keyboard — selecting
+        // another chat closes find inside the transcript, which unmounts the
+        // field without ever firing a focus-lost event. Focus would then sit
+        // on an element that no longer renders and every key would dead-end.
+        if !self.transcript.read(cx).find_open()
+            && self.find_input.focus_handle(cx).is_focused(window)
+        {
+            self.find_focus_pending = false;
+            match self.route {
+                Route::Chat if !self.showing_setup() => {
+                    window.focus(&self.composer.focus_handle(cx), cx)
+                }
+                Route::Chat | Route::Settings(_) => window.blur(),
+            }
+        }
 
         let root = div()
             .id("shell-root")
@@ -8386,7 +8679,8 @@ impl Render for Shell {
                 } else {
                     this.open_add_space(cx);
                 }
-            }));
+            }))
+            .on_action(cx.listener(|this, _: &FindInChat, _, cx| this.open_find(cx)));
 
         let render_gate = if restart_required {
             GatePhase::Loading
@@ -8468,7 +8762,7 @@ impl Render for Shell {
                     |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
                     cx,
                 );
-                let main = self.render_main(cx);
+                let main = self.render_main(window, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
