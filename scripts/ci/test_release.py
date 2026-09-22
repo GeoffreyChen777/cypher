@@ -227,6 +227,13 @@ class Store:
         if self.after_put:
             self.after_put(self, key)
 
+    def list(self):
+        return {key: len(value) for key, value in self.objects.items()}
+
+    def delete(self, key):
+        self.operations.append(("delete", key))
+        self.objects.pop(key, None)
+
 
 class GitHub:
     def __init__(self, operations):
@@ -700,6 +707,110 @@ class GitHubPublication(Fixture):
         with self.assertRaisesRegex(release.ReleaseError, "regress"):
             release.publish_platform(self.plan_value, self.store, self.github)
         self.assertEqual(self.store.objects, {})
+
+
+class Retention(unittest.TestCase):
+    """`prune_plan` deletes production artifacts, so its safety rules are
+    pinned here rather than left to the caller."""
+
+    def bucket(self):
+        objects = {}
+        for v in ["0.3.18", "0.3.19", "0.3.20", "0.3.21", "0.3.22"]:
+            for name in ["linux-x86_64.tar.gz", "macos-arm64.dmg"]:
+                objects["cypher-{}-{}".format(v, name)] = 10
+                objects["cypher-{}-{}.sha256".format(v, name)] = 1
+            objects["linux/manifests/{}.json".format(v)] = 1
+            objects["macos/manifests/{}.json".format(v)] = 1
+        for rv in ["0.85.1.9", "0.85.1.11", "0.86.0.1", "0.86.0.2"]:
+            objects["runtimes/pi/cypher-pi-runtime-{}-linux-x86_64.tar.gz".format(rv)] = 100
+            objects["runtimes/pi/manifests/{}.json".format(rv)] = 1
+        for pointer in ["manifest.json", "latest.txt", "runtimes/pi/manifest.json",
+                        "linux/manifest.json", "linux/latest.txt", "linux/stem.txt",
+                        "macos/manifest.json", "macos/latest.txt", "macos/stem.txt"]:
+            objects[pointer] = 1
+        return objects
+
+    def pointers(self, app="0.3.22", runtime="0.86.0.2"):
+        return {
+            "linux/manifest.json": release.json_bytes(
+                {"version": app, "files": {"cypher-{}-linux-x86_64.tar.gz".format(app): {}}}),
+            "macos/manifest.json": release.json_bytes(
+                {"version": app, "files": {"cypher-{}-macos-arm64.dmg".format(app): {}}}),
+            "runtimes/pi/manifest.json": release.json_bytes(
+                {"files": {"linux-x86_64": {
+                    "url": "cypher-pi-runtime-{}-linux-x86_64.tar.gz".format(runtime)}}}),
+        }
+
+    def test_keeps_the_window_and_every_pointer(self):
+        objects = self.bucket()
+        doomed = set(release.prune_plan(objects, self.pointers()))
+        kept = set(objects) - doomed
+        for pointer in ["manifest.json", "latest.txt", "runtimes/pi/manifest.json",
+                        "linux/manifest.json", "macos/stem.txt"]:
+            self.assertIn(pointer, kept, "pointers are never candidates")
+        for v in ["0.3.22", "0.3.21", "0.3.20"]:
+            self.assertIn("cypher-{}-macos-arm64.dmg".format(v), kept)
+            self.assertIn("cypher-{}-macos-arm64.dmg.sha256".format(v), kept)
+        for v in ["0.3.19", "0.3.18"]:
+            self.assertIn("cypher-{}-macos-arm64.dmg".format(v), doomed)
+            self.assertIn("cypher-{}-macos-arm64.dmg.sha256".format(v), doomed)
+        for rv in ["0.86.0.2", "0.86.0.1"]:
+            self.assertIn("runtimes/pi/cypher-pi-runtime-{}-linux-x86_64.tar.gz".format(rv), kept)
+        for rv in ["0.85.1.11", "0.85.1.9"]:
+            self.assertIn("runtimes/pi/cypher-pi-runtime-{}-linux-x86_64.tar.gz".format(rv), doomed)
+
+    def test_never_deletes_what_a_live_pointer_names(self):
+        """Even a version outside the window survives while a pointer names it,
+        which is what makes a rollback (republishing an older pointer) safe."""
+        objects = self.bucket()
+        doomed = set(release.prune_plan(objects, self.pointers(app="0.3.18", runtime="0.85.1.9")))
+        self.assertNotIn("cypher-0.3.18-linux-x86_64.tar.gz", doomed)
+        self.assertNotIn("cypher-0.3.18-macos-arm64.dmg", doomed)
+        self.assertNotIn(
+            "runtimes/pi/cypher-pi-runtime-0.85.1.9-linux-x86_64.tar.gz", doomed)
+
+    def test_unrecognised_keys_are_never_candidates(self):
+        objects = self.bucket()
+        objects["install.sh"] = 1
+        objects["some/unexpected/object"] = 1
+        doomed = set(release.prune_plan(objects, self.pointers()))
+        self.assertNotIn("install.sh", doomed)
+        self.assertNotIn("some/unexpected/object", doomed)
+
+    def test_recut_builds_sort_after_their_base_version(self):
+        objects = self.bucket()
+        objects["cypher-0.3.22-b2-linux-x86_64.tar.gz"] = 10
+        objects["linux/manifests/0.3.22-b2.json"] = 1
+        doomed = set(release.prune_plan(objects, self.pointers()))
+        self.assertNotIn("cypher-0.3.22-b2-linux-x86_64.tar.gz", doomed)
+        # The re-cut takes a slot, so the oldest kept version rolls off.
+        self.assertIn("cypher-0.3.20-macos-arm64.dmg", doomed)
+
+    def test_is_idempotent(self):
+        objects = self.bucket()
+        pointers = self.pointers()
+        for key in release.prune_plan(objects, pointers):
+            objects.pop(key)
+        self.assertEqual(release.prune_plan(objects, pointers), [],
+                         "a second pass must find nothing")
+
+    def test_bounds_the_bucket_across_many_releases(self):
+        """The property this exists for: publishing forever must not grow R2."""
+        objects, pointers = {}, None
+        for minor in range(40):
+            version = "0.3.{}".format(minor)
+            objects["cypher-{}-linux-x86_64.tar.gz".format(version)] = 10
+            objects["linux/manifests/{}.json".format(version)] = 1
+            objects["linux/manifest.json"] = 1
+            pointers = {"linux/manifest.json": release.json_bytes(
+                            {"version": version,
+                             "files": {"cypher-{}-linux-x86_64.tar.gz".format(version): {}}}),
+                        "runtimes/pi/manifest.json": release.json_bytes({"files": {}})}
+            for key in release.prune_plan(objects, pointers):
+                objects.pop(key)
+        artifacts = [k for k in objects if k.endswith(".tar.gz")]
+        self.assertEqual(len(artifacts), release.KEEP_APP_VERSIONS,
+                         "40 releases converge on the keep window, not 40 artifacts")
 
 
 class Policies(unittest.TestCase):

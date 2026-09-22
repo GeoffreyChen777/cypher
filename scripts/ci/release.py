@@ -387,6 +387,7 @@ class R2:
         require(re.fullmatch("[0-9a-f]{32}", account), "Invalid Cloudflare account ID")
         self.api = Api("https://api.cloudflare.com/client/v4", token)
         self.prefix = "/accounts/{}/r2/buckets/cypher-releases/objects/".format(account)
+        self.listing = "/accounts/{}/r2/buckets/cypher-releases/objects".format(account)
 
     def get(self, key):
         return self.api.request(self.prefix + urllib.parse.quote(key, safe="/"), missing=True)
@@ -398,6 +399,24 @@ class R2:
         raw = self.api.request(self.prefix + urllib.parse.quote(key, safe="/"), "PUT", value)
         if raw:
             require(read_json(raw).get("success", True), "R2 rejected upload")
+
+    def list(self):
+        """Every object in the bucket as {key: size}, following pagination."""
+        objects, cursor = {}, None
+        while True:
+            path = self.listing + "?per_page=1000"
+            if cursor:
+                path += "&cursor=" + urllib.parse.quote(cursor, safe="")
+            body = read_json(self.api.request(path))
+            require(body.get("success", True), "R2 listing failed")
+            for entry in body.get("result") or []:
+                objects[entry["key"]] = entry.get("size", 0)
+            cursor = (body.get("result_info") or {}).get("cursor")
+            if not cursor:
+                return objects
+
+    def delete(self, key):
+        self.api.request(self.prefix + urllib.parse.quote(key, safe="/"), "DELETE", missing=True)
 
 
 class GitHubRelease:
@@ -586,6 +605,114 @@ def platform_remote_preflight(plan, store):
     return pointers, missing
 
 
+# Retention. Every client resolves the CURRENT pointer
+# (`{platform}/manifest.json`, `runtimes/pi/manifest.json`), so older artifacts
+# are unreachable by normal installs and updates; they exist only so a bad
+# release can be rolled back by republishing a pointer. Without a bound the
+# bucket grows ~84 MB per application release and ~640 MB per Runtime revision
+# forever, which is what drove R2 storage to 86% of the free tier.
+KEEP_APP_VERSIONS = 3
+KEEP_RUNTIME_VERSIONS = 2
+
+APP_ARTIFACT = re.compile(r"^cypher-(\d+(?:\.\d+)*(?:-b\d+)?)-(?:linux|macos)-[^/]+$")
+APP_MANIFEST = re.compile(r"^(?:linux/|macos/)?manifests/(\d+(?:\.\d+)*(?:-b\d+)?)\.json$")
+RUNTIME_ARTIFACT = re.compile(r"^runtimes/pi/cypher-pi-runtime-(\d+(?:\.\d+)*)-[^/]+\.tar\.gz$")
+RUNTIME_MANIFEST = re.compile(r"^runtimes/pi/manifests/(\d+(?:\.\d+)*)\.json$")
+
+
+def _stem_order(stem):
+    """Sortable key for a version stem, `0.3.22` or a re-cut `0.3.22-b2`."""
+    base, _, build = stem.partition("-b")
+    return version(base), int(build) if build else 1
+
+
+def prune_plan(objects, pointers):
+    """Which keys may be deleted, given every live pointer's own content.
+
+    Safety is structural rather than by convention: a key is a deletion
+    candidate only when it parses as a versioned artifact or manifest AND its
+    version is outside the keep window AND it is not named by any pointer we
+    just read. Pointers themselves are never candidates, so an unparsed or
+    unexpected key is always kept.
+    """
+    referenced = set()
+    for raw in pointers.values():
+        if not raw:
+            continue
+        try:
+            body = read_json(raw)
+        except ReleaseError:
+            continue
+        if isinstance(body, dict):
+            for name in (body.get("files") or {}):
+                referenced.add(name)
+                referenced.add("runtimes/pi/" + name)
+            for entry in (body.get("files") or {}).values():
+                url = isinstance(entry, dict) and entry.get("url")
+                if url:
+                    referenced.add(url)
+                    referenced.add("runtimes/pi/" + url)
+
+    def keep(pattern, limit):
+        stems = {m.group(1) for key in objects for m in [pattern.match(key)] if m}
+        return set(sorted(stems, key=_stem_order, reverse=True)[:limit])
+
+    keep_app = keep(APP_ARTIFACT, KEEP_APP_VERSIONS) | keep(APP_MANIFEST, KEEP_APP_VERSIONS)
+    keep_rt = keep(RUNTIME_ARTIFACT, KEEP_RUNTIME_VERSIONS) | keep(RUNTIME_MANIFEST,
+                                                                  KEEP_RUNTIME_VERSIONS)
+    doomed = []
+    for key in sorted(objects):
+        base = key[:-7] if key.endswith(".sha256") else key
+        if base in referenced or key in referenced:
+            continue
+        for pattern, keeps in ((APP_ARTIFACT, keep_app), (APP_MANIFEST, keep_app),
+                              (RUNTIME_ARTIFACT, keep_rt), (RUNTIME_MANIFEST, keep_rt)):
+            match = pattern.match(base)
+            if match:
+                if match.group(1) not in keeps:
+                    doomed.append(key)
+                break
+    return doomed
+
+
+def prune_after_publish(store):
+    """Retention on the publish path. Never fails the release.
+
+    The release is already promoted by the time this runs, so a listing or
+    delete error must be reported and swallowed: retention is housekeeping,
+    and the next publish (or `prune-releases`) retries it.
+    """
+    try:
+        prune_releases(store, apply=True)
+    except (ReleaseError, OSError) as err:
+        print("warning: release retention skipped: {}".format(err), file=sys.stderr)
+
+
+def prune_releases(store, apply=False):
+    """Delete artifacts outside the keep window. Never touches a pointer."""
+    pointer_keys = ["manifest.json", "latest.txt", "runtimes/pi/manifest.json"]
+    for platform in sorted(DESKTOP_PLATFORMS):
+        pointer_keys += [platform + "/manifest.json", platform + "/latest.txt",
+                         platform + "/stem.txt"]
+    pointers = {key: store.get(key) for key in pointer_keys}
+    require(any(pointers[p + "/manifest.json"] for p in DESKTOP_PLATFORMS),
+            "Refusing to prune: no application pointer is readable")
+    require(pointers["runtimes/pi/manifest.json"],
+            "Refusing to prune: the Runtime pointer is not readable")
+    objects = store.list()
+    doomed = prune_plan(objects, pointers)
+    freed = sum(objects[key] for key in doomed)
+    for key in doomed:
+        print("{} {:>10,} B  {}".format("delete" if apply else "would delete",
+                                        objects[key], key))
+        if apply:
+            store.delete(key)
+    print("{} {} objects, {:.3f} GB; {} objects remain".format(
+        "Deleted" if apply else "Would delete", len(doomed), freed / 1e9,
+        len(objects) - (len(doomed) if apply else 0)))
+    return doomed, freed
+
+
 def publish_platform(plan, store, github):
     platform = plan["platform"]
     pointers, missing = platform_remote_preflight(plan, store)
@@ -621,6 +748,8 @@ def publish_platform(plan, store, github):
             store.put(key, value)
         require(store.get(key) == value, "Release pointer verification failed")
     github.promote()  # Public GitHub release is the final step.
+    # Only after promotion: a failed publish must never delete anything.
+    prune_after_publish(store)
 
 
 def publish_runtime(plan, store):
@@ -636,6 +765,9 @@ def publish_runtime(plan, store):
     if pointers[key] != value:
         store.put(key, value)
     require(store.get(key) == value, "Release pointer verification failed")
+    # Only after the pointer is verified: the new Runtime must be live
+    # before an older one becomes a deletion candidate.
+    prune_after_publish(store)
 
 
 def require_ci_context(tag, credentials):
@@ -683,14 +815,22 @@ def main():
     parser.add_argument("action", choices=["platform-context", "validate-platform",
                                            "publish-platform", "check-deploy",
                                            "runtime-context", "validate-runtime", "publish-runtime",
-                                           "ios-context"])
+                                           "ios-context", "prune-releases"])
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version")
     parser.add_argument("--build", default="1")
     parser.add_argument("--platform", choices=sorted(DESKTOP_PLATFORMS))
     parser.add_argument("--out", type=Path, default=Path("target/release-plan"))
     parser.add_argument("--base-url", default="https://edge.letscypher.app")
+    parser.add_argument("--apply", action="store_true",
+                        help="prune-releases: actually delete (default is a dry run)")
     args = parser.parse_args()
+    if args.action == "prune-releases":
+        account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        require(account and token, "Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")
+        prune_releases(R2(account, token), apply=args.apply)
+        return
     if args.action in ("platform-context", "runtime-context", "ios-context"):
         event = os.environ.get("GITHUB_EVENT_NAME")
         require(event in ("push", "workflow_dispatch"), "Unsupported release event")
