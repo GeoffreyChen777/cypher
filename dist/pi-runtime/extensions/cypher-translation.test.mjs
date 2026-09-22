@@ -8,6 +8,8 @@ import {
   noThinkingOptions,
   referenceBlock,
   renderTranslation,
+  TRANSLATION_INPUT_ENTRY,
+  translationInputRecord,
   translationDecision,
   translationSystemPrompt,
   unwrapPartialTranslation,
@@ -341,4 +343,15 @@ test("a pump with nothing to say never publishes", () => {
   p.tick();
   p.flush();
   assert.deepEqual(sent, []);
+});
+
+// Session Fork / Restart in the Rust harness read this record back to match a
+// translated user message to the prompt Cypher shows; renaming either side
+// breaks forking every translated chat.
+test("a rewritten prompt is recorded under the entry the fork helper reads", () => {
+  assert.equal(TRANSLATION_INPUT_ENTRY, "cypher-translation-input");
+  assert.deepEqual(translationInputRecord("发布新版本", "Release a new version"), {
+    original: "发布新版本",
+    translated: "Release a new version",
+  });
 });

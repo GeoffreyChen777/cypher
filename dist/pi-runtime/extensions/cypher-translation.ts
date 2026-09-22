@@ -671,7 +671,25 @@ async function translate(
   }
 }
 
-async function transformInput(event: InputEvent, ctx: ExtensionContext, config: TranslationSettings) {
+/**
+ * The session entry recording a rewritten prompt. Pi keeps only the
+ * translation as the user message, but Cypher's transcript shows what the user
+ * typed, and Session Fork / Restart match the two by text — this record is the
+ * one place that pairing survives. Read by `TRANSLATION_INPUT_ENTRY` in
+ * `crates/harness/src/pi/fork.rs`; the name and fields are a contract.
+ */
+export const TRANSLATION_INPUT_ENTRY = "cypher-translation-input";
+
+export function translationInputRecord(original: string, translated: string) {
+  return { original, translated };
+}
+
+async function transformInput(
+  pi: ExtensionAPI,
+  event: InputEvent,
+  ctx: ExtensionContext,
+  config: TranslationSettings,
+) {
   const text = event.text.trim();
   if (!text || text.startsWith("/") || text.startsWith("!") || !enabledForSession(ctx, config)) {
     return;
@@ -694,6 +712,7 @@ async function transformInput(event: InputEvent, ctx: ExtensionContext, config: 
   // words in the next one refer to.
   recordUserTurn(ctx, text, translated);
   if (translated) {
+    pi.appendEntry(TRANSLATION_INPUT_ENTRY, translationInputRecord(event.text, translated));
     return { action: "transform" as const, text: translated, images: event.images };
   }
 }
@@ -772,6 +791,6 @@ async function transformFinalMessage(
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("input", (event, ctx) => transformInput(event, ctx, settings()));
+  pi.on("input", (event, ctx) => transformInput(pi, event, ctx, settings()));
   pi.on("message_end", (event, ctx) => transformFinalMessage(event, ctx, settings()));
 }

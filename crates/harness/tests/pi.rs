@@ -1380,9 +1380,9 @@ async fn clone_leaf_returns_the_cloned_session_path() {
     );
 }
 
-/// A prompt that no pi active user entry matches is a LOUD mapping failure,
-/// never a positional guess (the fixture would happily fork u1 for a guessed
-/// index — the refusal is the harness's).
+/// A prompt that no pi active user entry matches is a LOUD mapping failure
+/// when the counts disagree, never a positional guess (the fixture would
+/// happily fork u1 for a guessed index — the refusal is the harness's).
 #[tokio::test]
 async fn fork_refuses_mismatched_prompts() {
     let (harness, root, _dir) = fork_harness();
@@ -1390,12 +1390,19 @@ async fn fork_refuses_mismatched_prompts() {
     let err = harness
         .fork_session(cypher_proto::PiSessionForkRequest {
             source_session_path: source,
-            visible_user_prompts: vec!["first prompt".into(), "totally different".into()],
+            visible_user_prompts: vec![
+                "first prompt".into(),
+                "totally different".into(),
+                "third".into(),
+            ],
             boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
         })
         .await
         .expect_err("mismatch must fail");
-    assert!(err.to_string().contains("no pi user entry"), "{err}");
+    assert!(
+        err.to_string().contains("user message #2") && err.to_string().contains("no matching"),
+        "{err}"
+    );
     // The failed mapping still cleaned up its scratch snapshot.
     assert!(
         scratch_leftovers(&root).is_empty(),
@@ -1426,27 +1433,70 @@ async fn fork_of_the_first_prompt_targets_the_active_entry() {
     );
 }
 
-/// CloneLeaf refuses when the Cypher snapshot has FEWER user prompts than
-/// the pi active branch: the pi session grew past the snapshot, so cloning
-/// at the leaf would pull in a newer user the Cypher transcript omits.
+/// Equal prompt and user-entry counts with differing text (a prompt the
+/// translation extension rewrote before it recorded originals) map by
+/// position: the fixture only forks the ACTIVE u2 for the second prompt.
 #[tokio::test]
-async fn clone_leaf_refuses_when_snapshot_lags_the_active_branch() {
+async fn fork_maps_rewritten_prompts_by_position_when_counts_agree() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{\"seed\":1}\n");
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            visible_user_prompts: vec!["first prompt".into(), "第二条".into()],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
+        })
+        .await
+        .expect("positional fallback forks u2");
+    assert_eq!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        expected_fork_path(&root, "forked-u2.jsonl")
+    );
+}
+
+/// CloneLeaf accepts pi user entries past the last Cypher prompt: extensions
+/// append user messages of their own (`/goal` continuations). The race of a
+/// prompt sent while the helper runs is the engine's transcript recheck.
+#[tokio::test]
+async fn clone_leaf_accepts_extension_entries_past_the_last_prompt() {
+    let (harness, root, _dir) = fork_harness();
+    let source = write_source(&root, "source.jsonl", b"{}");
+    let result = harness
+        .fork_session(cypher_proto::PiSessionForkRequest {
+            source_session_path: source,
+            // The fixture's active branch has TWO user entries (u1, u2); the
+            // transcript shows only the first.
+            visible_user_prompts: vec!["first prompt".into()],
+            boundary: cypher_proto::PiForkBoundary::CloneLeaf,
+        })
+        .await
+        .expect("clone succeeds");
+    assert_eq!(
+        std::path::PathBuf::from(result.session_path.as_deref().unwrap()),
+        expected_fork_path(&root, "cloned.jsonl")
+    );
+    assert!(scratch_leftovers(&root).is_empty());
+}
+
+/// Forking AT a slash command is refused with a message that says so: the
+/// command has no user entry of its own to fork before.
+#[tokio::test]
+async fn fork_at_a_slash_command_is_refused_clearly() {
     let (harness, root, _dir) = fork_harness();
     let source = write_source(&root, "source.jsonl", b"{}");
     let err = harness
         .fork_session(cypher_proto::PiSessionForkRequest {
             source_session_path: source,
-            // The fixture's active branch has TWO user entries (u1, u2); the
-            // snapshot carries only one — cloning must be refused.
-            visible_user_prompts: vec!["first prompt".into()],
-            boundary: cypher_proto::PiForkBoundary::CloneLeaf,
+            visible_user_prompts: vec![
+                "first prompt".into(),
+                "/subagents".into(),
+                "second prompt".into(),
+            ],
+            boundary: cypher_proto::PiForkBoundary::BeforeUser(1),
         })
         .await
-        .expect_err("stale snapshot must fail");
-    assert!(
-        err.to_string().contains("refusing to clone a newer leaf"),
-        "{err}"
-    );
+        .expect_err("a command boundary must fail");
+    assert!(err.to_string().contains("slash command"), "{err}");
     assert!(scratch_leftovers(&root).is_empty());
 }
 

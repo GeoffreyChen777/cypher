@@ -283,6 +283,24 @@ impl SessionForks {
                 plan.composer_text.clone(),
             ));
         }
+        // The helper ran outside the lock. Cypher writes every prompt into the
+        // transcript BEFORE dispatching it to pi, so an unchanged transcript
+        // proves no prompt raced into the source session meanwhile — the
+        // helper no longer refuses pi user entries past the last Cypher
+        // prompt, because extensions append those (`/goal` continuations).
+        let raw_now = source_handle.doc().read_entries()?;
+        if raw_now.len() != raw.len()
+            || raw_now
+                .iter()
+                .zip(&raw)
+                .any(|(now, before)| now.id != before.id)
+        {
+            self.delete_new_fork_session(new_session_path.as_deref());
+            return Ok(unavailable(
+                SessionForkUnavailableReason::BoundaryUnavailable,
+                "The transcript changed while the fork was being prepared. Try again.",
+            ));
+        }
         let target_id = request.request_id.clone();
         let target_handle = self.inner.doc_host.open_ephemeral(&target_id)?;
         let to_copy = plan.to_copy(&joined, &raw);
@@ -696,16 +714,23 @@ fn classify_backend_error(
         }
         // Prompt mapping / boundary / source-safety protocol refusals: the
         // transcript boundary could not be represented on the hosting device.
-        HarnessError::Protocol(msg) if !msg.contains("timed out") => Ok(unavail(
-            SessionForkUnavailableReason::BoundaryUnavailable,
-            &format!(
-                "Cannot {} this message: the session on the hosting device \
-                 could not be mapped to the transcript boundary (missing or \
-                 outside the managed store, mismatched prompts, or an \
-                 unrepresentable boundary).",
-                op.verb().split(' ').next().unwrap_or("fork")
-            ),
-        )),
+        // The helper's own reason rides along — without it every one of these
+        // refusals reads the same and none can be diagnosed.
+        HarnessError::Protocol(msg) if !msg.contains("timed out") => {
+            tracing::warn!(operation = op.noun(), reason = %msg, "session fork refused by the pi helper");
+            let detail = msg
+                .strip_prefix("session fork mapping: ")
+                .or_else(|| msg.strip_prefix("session fork: "))
+                .unwrap_or(msg);
+            Ok(unavail(
+                SessionForkUnavailableReason::BoundaryUnavailable,
+                &format!(
+                    "Cannot {} this message: the session on the hosting device \
+                     could not be mapped to the transcript boundary. Reason: {detail}.",
+                    op.verb().split(' ').next().unwrap_or("fork")
+                ),
+            ))
+        }
         // A slow/hung helper is an infrastructure problem: surface as a real
         // error (the UI retry keeps the same request id, so a late-created
         // fork is still recovered idempotently).

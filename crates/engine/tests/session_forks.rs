@@ -1045,6 +1045,13 @@ async fn backend_mapping_protocol_error_is_boundary_unavailable() {
         panic!("expected Unavailable, got {response:?}");
     };
     assert_eq!(u.reason, SessionForkUnavailableReason::BoundaryUnavailable);
+    // The helper's own reason reaches the user, minus its internal prefix.
+    assert!(
+        u.message
+            .contains("Reason: ambiguous — refusing positional guess."),
+        "{}",
+        u.message
+    );
 }
 
 /// A genuine I/O failure from the backend stays an EngineError (surfaces as
@@ -1620,4 +1627,80 @@ async fn forwardable_marks_fork_session() {
             || err.to_string().contains("cannot reach device"),
         "{err}"
     );
+}
+
+/// A backend that appends a user prompt to the source transcript while the
+/// helper "runs" — the race of a prompt sent mid-fork — then materializes a
+/// session file like a real clone.
+struct RacingBackend {
+    doc_host: cypher_engine::DocHost,
+    session_root: PathBuf,
+}
+
+#[async_trait]
+impl PiForkBackend for RacingBackend {
+    async fn fork_session(
+        &self,
+        _request: PiSessionForkRequest,
+    ) -> Result<PiSessionForkResult, HarnessError> {
+        let handle = self.doc_host.open(SOURCE).expect("source doc");
+        handle
+            .doc()
+            .push_message(&cypher_doc::SessionMessageEntry {
+                id: "m-raced".into(),
+                role: cypher_doc::MessageRole::User,
+                parts: vec![cypher_doc::MessagePart::Text {
+                    id: "t0".into(),
+                    text: "sent while forking".into(),
+                }],
+                created_at: 1,
+                device_id: "dev".into(),
+                status: Some(cypher_doc::MessageStatus::Complete),
+                continuation_of: None,
+                completed_at: None,
+            })
+            .expect("append raced prompt");
+        let path = self.session_root.join("fork-raced.jsonl");
+        let _ = std::fs::create_dir_all(&self.session_root);
+        let _ = std::fs::write(&path, b"{}");
+        Ok(PiSessionForkResult {
+            session_path: Some(path.to_string_lossy().into_owned()),
+        })
+    }
+}
+
+/// The helper accepts pi user entries past the last Cypher prompt (extension
+/// continuations), so a prompt that raced into the source while the helper
+/// ran is caught by the engine: the transcript changed, the fork is refused,
+/// and the helper's new session file is deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_refuses_when_the_transcript_changes_during_the_helper() {
+    let rig = assemble();
+    seed_source(&rig.core).await;
+    let anchor = source_entry_id(&rig.core, 3);
+    let forks = SessionForks::with_backend(
+        rig.core.sessions.clone(),
+        rig.core.doc_host.clone(),
+        rig.core.workspace.clone(),
+        rig.pi_sessions_root.clone(),
+        Arc::new(RacingBackend {
+            doc_host: rig.core.doc_host.clone(),
+            session_root: rig.pi_sessions_root.clone(),
+        }),
+    );
+    let response = forks
+        .fork(SessionForkRequest {
+            request_id: "fork-raced".into(),
+            source_chat_id: SOURCE.into(),
+            anchor_message_id: anchor,
+        })
+        .await
+        .expect("typed reply");
+    let SessionForkResponse::Unavailable(u) = &response else {
+        panic!("expected Unavailable, got {response:?}");
+    };
+    assert_eq!(u.reason, SessionForkUnavailableReason::BoundaryUnavailable);
+    assert!(u.message.contains("transcript changed"), "{}", u.message);
+    assert!(rig.core.workspace.chat("fork-raced").unwrap().is_none());
+    assert!(!rig.pi_sessions_root.join("fork-raced.jsonl").exists());
 }

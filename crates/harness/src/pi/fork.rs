@@ -16,10 +16,15 @@
 //! - `get_state` → `sessionFile` (the new session's path).
 //!
 //! The helper verifies the Cypher visible user prompts against the pi active
-//! branch's user entries (exact text or the known `…\n\nUser request:\n<visible>`
-//! augmented wrappers) and REFUSES ambiguity/mismatch instead of guessing
-//! positionally. The source session file is never written; the returned new
-//! session file is verified non-empty and different from the source.
+//! branch's user entries (exact text, the known `…\n\nUser request:\n<visible>`
+//! augmented wrappers, or the pre-translation original recorded by the
+//! translation extension) and REFUSES ambiguity/mismatch. Slash-command
+//! prompts are extension input (`/goal`, `/subagents`, …) that pi rewrites or
+//! consumes, so they never anchor the alignment. The one positional fallback
+//! is a transcript with no slash commands whose prompt and user-entry counts
+//! agree — a translated session from before the extension recorded originals.
+//! The source session file is never written; the returned new session file is
+//! verified non-empty and different from the source.
 //!
 //! Materialization contract: a fork BEFORE THE FIRST USER is empty-context —
 //! real pi (0.84.1) returns a `sessionFile` that is NOT persisted until the
@@ -43,8 +48,14 @@ use crate::pi::PiHarness;
 use crate::pi::client::{Incoming, PiClient};
 use crate::{compose_child_path, shutdown_child};
 
+/// The custom entry the Cypher translation extension appends when it rewrites
+/// a prompt: `data: {original, translated}`. Pi stores only the translated
+/// text as the user message, so this is the one place the prompt the user
+/// actually typed (and Cypher shows) survives in the session.
+const TRANSLATION_INPUT_ENTRY: &str = "cypher-translation-input";
+
 /// One parsed `get_entries` message entry (only the fields the fork needs).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct PiEntry {
     pub id: String,
     pub parent_id: Option<String>,
@@ -53,11 +64,21 @@ pub(crate) struct PiEntry {
     /// The visible text of a user message (string or `text` content blocks
     /// joined), `None` for non-user messages.
     pub user_text: Option<String>,
+    /// For a user message the translation extension rewrote: the text the
+    /// user typed. Filled by [`active_branch_user_entries`].
+    pub original_text: Option<String>,
+    /// For a translation record entry: `(original, translated)`.
+    pub translation: Option<(String, String)>,
 }
 
 /// Rebuild the ACTIVE branch (leaf → root) from `get_entries` append-order
 /// data, filtering to the user messages on it. Abandoned branches are
 /// deliberately ignored. Returns the user entries oldest → newest.
+///
+/// A translation record is paired with the first LATER user message whose
+/// text is its translation. They are not necessarily adjacent: a prompt
+/// queued while the agent streams is recorded when it is submitted but only
+/// lands as a user message after the current turn.
 pub(crate) fn active_branch_user_entries(
     entries: &[PiEntry],
     leaf_id: Option<&str>,
@@ -73,17 +94,33 @@ pub(crate) fn active_branch_user_entries(
             .and_then(|pid| by_id.get(pid).copied());
     }
     branch.reverse();
-    branch
-        .into_iter()
-        .filter(|e| e.role.as_deref() == Some("user"))
-        .filter_map(|e| e.user_text.clone().map(|text| (e.id.clone(), text)))
-        .map(|(id, text)| PiEntry {
-            id,
-            parent_id: None,
+    let mut pending: Vec<&(String, String)> = Vec::new();
+    let mut users = Vec::new();
+    for entry in branch {
+        if let Some(record) = &entry.translation {
+            pending.push(record);
+            continue;
+        }
+        if entry.role.as_deref() != Some("user") {
+            continue;
+        }
+        let Some(text) = entry.user_text.clone() else {
+            continue;
+        };
+        let stored = strip_attachment_trailer(&text).trim();
+        let original_text = pending
+            .iter()
+            .position(|(_, translated)| strip_attachment_trailer(translated).trim() == stored)
+            .map(|i| pending.remove(i).0.clone());
+        users.push(PiEntry {
+            id: entry.id.clone(),
             role: Some("user".into()),
             user_text: Some(text),
-        })
-        .collect()
+            original_text,
+            ..PiEntry::default()
+        });
+    }
+    users
 }
 
 /// Strip the image-attachment trailer (`…\n\nAttached images (local files` …
@@ -126,90 +163,167 @@ pub(crate) fn matches_prompt(entry_text: &str, visible: &str) -> bool {
     entry.ends_with(&wrapped)
 }
 
+/// A slash-command prompt is extension input: pi either consumes it
+/// (`/subagents` leaves no user message) or rewrites it (`/goal` becomes a
+/// goal-mode prompt), so its text says nothing about which entry it produced.
+pub(crate) fn is_command_prompt(visible: &str) -> bool {
+    visible.trim_start().starts_with('/')
+}
+
+/// Where one Cypher prompt lands in the pi active branch's user entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptEntry {
+    /// Every complete alignment maps the prompt to this entry.
+    Entry(usize),
+    /// A slash command: it anchors nothing (see [`is_command_prompt`]).
+    Command,
+    /// Complete alignments disagree on this prompt's entry (repeated text,
+    /// e.g. a prompt pi holds twice after a resend).
+    Ambiguous,
+}
+
 /// Map the ordered Cypher visible USER prompts onto the pi active branch's
-/// user entries with GLOBAL monotonic sequence alignment: count every
-/// strictly-increasing COMPLETE alignment (prompt j → entry i_j with
-/// i_0 < i_1 < …), saturated at 2. Exactly one complete alignment → return it;
-/// zero → mismatch; more than one → ambiguity. Extra pi user entries are
-/// allowed (the alignment picks a subset), and repeated prompt text is fine as
-/// long as the SEQUENCE pins a unique alignment (e.g. `["hi","hi"]` over
-/// `["hi","hi"]` → `[0,1]`). Returns the indices into `active_users` for each
-/// prompt.
-// The DP below indexes `ways`, `prefix` and `active_users` by the SAME `i` and
-// reads row `j - 1` while writing row `j`. Iterator forms of those loops would
-// need zips and splits that obscure the recurrence this comment describes.
-#[allow(clippy::needless_range_loop)]
+/// user entries by monotonic sequence alignment (prompt j → entry i_j with
+/// i_0 < i_1 < …). Extra pi user entries are allowed (the alignment picks a
+/// subset), and repeated prompt text is fine as long as the SEQUENCE pins it
+/// (e.g. `["hi","hi"]` over `["hi","hi"]` → `[0,1]`).
+///
+/// A prompt maps to [`PromptEntry::Entry`] when EVERY complete alignment puts
+/// it on the same entry — then a fork before it is right whichever alignment
+/// is the true one — and to [`PromptEntry::Ambiguous`] otherwise. Ambiguity
+/// is therefore only fatal for a fork AT that prompt, never for the whole
+/// transcript. No complete alignment at all is a mismatch.
+///
+/// Slash-command prompts ([`is_command_prompt`]) take no part in the
+/// alignment. When nothing aligns, a transcript without slash commands whose
+/// prompt count equals the user-entry count maps position by position — each
+/// prompt produced exactly one user message and only the text differs (a
+/// translation from before the extension recorded originals). A prompt whose
+/// text matches some OTHER entry but not its own position vetoes that
+/// fallback. Returns one [`PromptEntry`] per prompt.
 pub(crate) fn map_prompts_to_entries(
     active_users: &[PiEntry],
     visible_prompts: &[String],
-) -> Result<Vec<usize>, HarnessError> {
-    // Counting solutions saturates here: >1 means ambiguity, so we never need
-    // the exact count past 2.
-    const CAP: u8 = 2;
-    let n = visible_prompts.len();
+) -> Result<Vec<PromptEntry>, HarnessError> {
+    let mut mapped = vec![PromptEntry::Command; visible_prompts.len()];
+    // The prompts that anchor the alignment, as indices into `visible_prompts`.
+    let anchors: Vec<usize> = (0..visible_prompts.len())
+        .filter(|&j| !is_command_prompt(&visible_prompts[j]))
+        .collect();
+    let n = anchors.len();
     let m = active_users.len();
     if n == 0 {
-        return Ok(Vec::new());
+        return Ok(mapped);
     }
-    // ways[j][i] = number of complete monotonic alignments of prompts[0..=j]
-    // with prompt j mapped to active_users[i], saturated at CAP.
-    let mut ways: Vec<Vec<u8>> = vec![vec![0u8; m]; n];
-    for i in 0..m {
-        if matches_entry(active_users, i, &visible_prompts[0]) {
-            ways[0][i] = 1;
-        }
-    }
-    for j in 1..n {
-        // prefix[i] = sum of ways[j-1][k] for k < i, capped at CAP.
-        let mut prefix = Vec::with_capacity(m);
-        let mut running = 0u8;
+    let matches: Vec<Vec<bool>> = anchors
+        .iter()
+        .map(|&j| {
+            (0..m)
+                .map(|i| matches_entry(active_users, i, &visible_prompts[j]))
+                .collect()
+        })
+        .collect();
+    // reach_fwd[j][i]: anchors 0..=j align with anchor j on entry i.
+    let mut reach_fwd = vec![vec![false; m]; n];
+    for j in 0..n {
+        let mut earlier = j == 0;
         for i in 0..m {
-            running = (running + ways[j - 1][i]).min(CAP);
-            prefix.push(running);
-        }
-        for i in 0..m {
-            if matches_entry(active_users, i, &visible_prompts[j]) {
-                ways[j][i] = if i == 0 { 0 } else { prefix[i - 1] };
+            reach_fwd[j][i] = matches[j][i] && earlier;
+            if j > 0 && reach_fwd[j - 1][i] {
+                earlier = true;
             }
         }
     }
-    let total: u8 = ways[n - 1].iter().copied().sum::<u8>().min(CAP);
-    match total {
-        0 => Err(HarnessError::Protocol(format!(
-            "session fork mapping: no pi user entry alignment maps the {} \
-             visible user prompt(s) onto the active branch (exact or \
-             `…\\n\\nUser request:\\n<text>`)",
-            n
-        ))),
-        1 => {
-            // Reconstruct the UNIQUE alignment backward: uniqueness of the
-            // whole alignment guarantees that at each step exactly one entry
-            // below the next chosen one carries a non-zero count.
-            let mut mapped = Vec::with_capacity(n);
-            let mut end = m; // exclusive upper bound from the later prompt
-            for j in (0..n).rev() {
-                let found = (0..end).find(|&i| ways[j][i] > 0).ok_or_else(|| {
-                    HarnessError::Protocol("session fork mapping: inconsistent alignment".into())
-                })?;
-                mapped.push(found);
-                end = found;
+    // reach_back[j][i]: anchors j..n align with anchor j on entry i.
+    let mut reach_back = vec![vec![false; m]; n];
+    for j in (0..n).rev() {
+        let mut later = j == n - 1;
+        for i in (0..m).rev() {
+            reach_back[j][i] = matches[j][i] && later;
+            if j + 1 < n && reach_back[j + 1][i] {
+                later = true;
             }
-            mapped.reverse();
-            Ok(mapped)
         }
-        _ => Err(HarnessError::Protocol(format!(
-            "session fork mapping: ambiguous — {total} distinct monotonic \
-             alignments map the visible prompts onto pi user entries; refusing \
-             positional guess"
-        ))),
     }
+    if !reach_fwd[n - 1].iter().any(|&r| r) {
+        if let Some(positional) = positional_mapping(active_users, visible_prompts) {
+            tracing::info!(
+                prompts = visible_prompts.len(),
+                "session fork mapping: prompt text differs from the pi user entries; \
+                 mapping by position (equal counts, no slash commands)"
+            );
+            return Ok(positional);
+        }
+        return Err(HarnessError::Protocol(first_unmatched_detail(
+            active_users,
+            visible_prompts,
+            &anchors,
+        )));
+    }
+    for (j, &prompt) in anchors.iter().enumerate() {
+        let mut feasible = (0..m).filter(|&i| reach_fwd[j][i] && reach_back[j][i]);
+        mapped[prompt] = match (feasible.next(), feasible.next()) {
+            (Some(i), None) => PromptEntry::Entry(i),
+            _ => PromptEntry::Ambiguous,
+        };
+    }
+    Ok(mapped)
+}
+
+/// The equal-count positional fallback described on
+/// [`map_prompts_to_entries`]; `None` when it does not apply.
+fn positional_mapping(
+    active_users: &[PiEntry],
+    visible_prompts: &[String],
+) -> Option<Vec<PromptEntry>> {
+    if visible_prompts.len() != active_users.len()
+        || visible_prompts.iter().any(|p| is_command_prompt(p))
+    {
+        return None;
+    }
+    let consistent = visible_prompts.iter().enumerate().all(|(j, p)| {
+        matches_entry(active_users, j, p)
+            || !(0..active_users.len()).any(|i| matches_entry(active_users, i, p))
+    });
+    consistent.then(|| (0..visible_prompts.len()).map(PromptEntry::Entry).collect())
+}
+
+/// Name the first anchoring prompt the greedy (earliest-match) scan cannot
+/// place — for a subsequence match that is exactly where every alignment
+/// breaks, and the one detail that makes a refusal diagnosable.
+fn first_unmatched_detail(
+    active_users: &[PiEntry],
+    visible_prompts: &[String],
+    anchors: &[usize],
+) -> String {
+    let mut next = 0;
+    for &j in anchors {
+        match (next..active_users.len())
+            .find(|&i| matches_entry(active_users, i, &visible_prompts[j]))
+        {
+            Some(i) => next = i + 1,
+            None => {
+                let preview: String = visible_prompts[j].chars().take(60).collect();
+                return format!(
+                    "session fork mapping: user message #{} ({preview:?}) has no \
+                     matching user entry in the Pi session ({} Cypher prompts, {} \
+                     Pi user entries)",
+                    j + 1,
+                    visible_prompts.len(),
+                    active_users.len()
+                );
+            }
+        }
+    }
+    "session fork mapping: no alignment maps the visible prompts onto the Pi session".into()
 }
 
 fn matches_entry(active_users: &[PiEntry], i: usize, prompt: &str) -> bool {
-    active_users[i]
-        .user_text
-        .as_deref()
-        .is_some_and(|t| matches_prompt(t, prompt))
+    let entry = &active_users[i];
+    [&entry.user_text, &entry.original_text]
+        .into_iter()
+        .flatten()
+        .any(|t| matches_prompt(t, prompt))
 }
 
 /// Parse the `get_entries` response `data` into raw entries + leaf id.
@@ -231,13 +345,31 @@ fn parse_entries_response(data: &Value) -> (Vec<PiEntry>, Option<String>) {
 fn parse_entry(v: &Value) -> Option<PiEntry> {
     let id = v.get("id").and_then(Value::as_str)?.to_string();
     let parent_id = v.get("parentId").and_then(Value::as_str).map(str::to_owned);
-    if v.get("type").and_then(Value::as_str) != Some("message") {
-        return Some(PiEntry {
-            id,
-            parent_id,
-            role: None,
-            user_text: None,
-        });
+    match v.get("type").and_then(Value::as_str) {
+        Some("message") => {}
+        Some("custom")
+            if v.get("customType").and_then(Value::as_str) == Some(TRANSLATION_INPUT_ENTRY) =>
+        {
+            let field = |name: &str| {
+                v.get("data")
+                    .and_then(|d| d.get(name))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            return Some(PiEntry {
+                id,
+                parent_id,
+                translation: field("original").zip(field("translated")),
+                ..PiEntry::default()
+            });
+        }
+        _ => {
+            return Some(PiEntry {
+                id,
+                parent_id,
+                ..PiEntry::default()
+            });
+        }
     }
     let message = v.get("message")?;
     let role = message
@@ -254,6 +386,7 @@ fn parse_entry(v: &Value) -> Option<PiEntry> {
         parent_id,
         role,
         user_text,
+        ..PiEntry::default()
     })
 }
 
@@ -332,20 +465,15 @@ impl PiHarness {
                 // or clone at the current leaf.
                 let entry_id = match request.boundary {
                     cypher_proto::PiForkBoundary::CloneLeaf => {
-                        // The Cypher transcript snapshot must already cover
-                        // EVERY active user entry — otherwise the pi session
-                        // grew past the snapshot and cloning would pull in a
-                        // newer user the Cypher transcript omits. Refuse
-                        // rather than clone a newer leaf.
-                        if mapping.len() != active_users.len() {
-                            return Err(HarnessError::Protocol(format!(
-                                "session fork clone: pi session has {} active \
-                                 user entries but the Cypher transcript snapshot \
-                                 has {} — refusing to clone a newer leaf",
-                                active_users.len(),
-                                mapping.len()
-                            )));
-                        }
+                        // Extensions append user messages of their own
+                        // (`/goal` continuations), so pi may legitimately hold
+                        // user entries past the last Cypher prompt. The race
+                        // this once guarded — a prompt sent while the helper
+                        // ran — is caught by the engine, which rechecks the
+                        // transcript (Cypher writes a prompt there BEFORE
+                        // dispatching it to pi) before publishing the fork.
+                        // The mapping above still had to succeed: it is what
+                        // proves this session belongs to this transcript.
                         let resp = client.request("clone", Map::new()).await?;
                         if resp
                             .get("cancelled")
@@ -359,8 +487,27 @@ impl PiHarness {
                         None
                     }
                     cypher_proto::PiForkBoundary::BeforeUser(index) => {
-                        let Some(entry) = mapping.get(index).and_then(|&i| active_users.get(i))
-                        else {
+                        let entry = match mapping.get(index) {
+                            Some(PromptEntry::Entry(i)) => active_users.get(*i),
+                            Some(PromptEntry::Command) => {
+                                return Err(HarnessError::Protocol(
+                                    "session fork: that message is a slash command, which \
+                                     has no user entry of its own in the Pi session — \
+                                     fork or restart from a neighbouring message instead"
+                                        .into(),
+                                ));
+                            }
+                            Some(PromptEntry::Ambiguous) => {
+                                return Err(HarnessError::Protocol(
+                                    "session fork mapping: ambiguous — the Pi session holds \
+                                     that message more than once and the transcript cannot \
+                                     tell which one it is; refusing a positional guess"
+                                        .into(),
+                                ));
+                            }
+                            None => None,
+                        };
+                        let Some(entry) = entry else {
                             return Err(HarnessError::Protocol(format!(
                                 "session fork: boundary user index {index} out of range"
                             )));
@@ -649,6 +796,7 @@ fn set_scratch_perms(_path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::PromptEntry::{Ambiguous, Command, Entry};
     use super::*;
     use cypher_proto::{PiForkBoundary, PiSessionForkRequest};
 
@@ -658,6 +806,7 @@ mod tests {
             parent_id: parent.map(str::to_owned),
             role: Some("user".into()),
             user_text: Some(text.into()),
+            ..PiEntry::default()
         }
     }
 
@@ -666,7 +815,7 @@ mod tests {
             id: id.into(),
             parent_id: parent.map(str::to_owned),
             role: Some("assistant".into()),
-            user_text: None,
+            ..PiEntry::default()
         }
     }
 
@@ -674,9 +823,21 @@ mod tests {
         PiEntry {
             id: id.into(),
             parent_id: parent.map(str::to_owned),
-            role: None,
-            user_text: None,
+            ..PiEntry::default()
         }
+    }
+
+    fn translation(id: &str, parent: Option<&str>, original: &str, translated: &str) -> PiEntry {
+        PiEntry {
+            id: id.into(),
+            parent_id: parent.map(str::to_owned),
+            translation: Some((original.into(), translated.into())),
+            ..PiEntry::default()
+        }
+    }
+
+    fn prompts(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|t| t.to_string()).collect()
     }
 
     #[test]
@@ -769,21 +930,21 @@ mod tests {
         let users = vec![user("a", None, "one"), user("b", Some("a"), "two")];
         let mapped =
             map_prompts_to_entries(&users, &["one".to_string(), "two".to_string()]).unwrap();
-        assert_eq!(mapped, vec![0, 1]);
+        assert_eq!(mapped, vec![Entry(0), Entry(1)]);
 
         // Out-of-order prompts are a mismatch (nothing after "two" matches "one").
         let err =
             map_prompts_to_entries(&users, &["two".to_string(), "one".to_string()]).unwrap_err();
-        assert!(err.to_string().contains("no pi user entry"));
+        assert!(err.to_string().contains("no matching user entry"), "{err}");
 
         // A SINGLE prompt against two identical entries is genuinely ambiguous.
         let dup = vec![user("a", None, "hi"), user("b", Some("a"), "hi")];
-        let err = map_prompts_to_entries(&dup, &["hi".to_string()]).unwrap_err();
-        assert!(err.to_string().contains("ambiguous"));
+        let mapped = map_prompts_to_entries(&dup, &["hi".to_string()]).unwrap();
+        assert_eq!(mapped, vec![Ambiguous]);
 
         // Missing prompt = mismatch.
         let err = map_prompts_to_entries(&users, &["nope".to_string()]).unwrap_err();
-        assert!(err.to_string().contains("no pi user entry"));
+        assert!(err.to_string().contains("no matching user entry"), "{err}");
     }
 
     #[test]
@@ -794,18 +955,18 @@ mod tests {
         let users = vec![user("a", None, "hi"), user("b", Some("a"), "hi")];
         let mapped = map_prompts_to_entries(&users, &["hi".to_string(), "hi".to_string()])
             .expect("sequence pins a unique alignment");
-        assert_eq!(mapped, vec![0, 1]);
+        assert_eq!(mapped, vec![Entry(0), Entry(1)]);
 
         // Three identical entries, two identical prompts: [0,1], [0,2], [1,2]
-        // — genuinely ambiguous, refused.
+        // — both prompts are genuinely ambiguous.
         let three = vec![
             user("a", None, "hi"),
             user("b", Some("a"), "hi"),
             user("c", Some("b"), "hi"),
         ];
-        let err =
-            map_prompts_to_entries(&three, &["hi".to_string(), "hi".to_string()]).unwrap_err();
-        assert!(err.to_string().contains("ambiguous"), "{err}");
+        let mapped = map_prompts_to_entries(&three, &["hi".to_string(), "hi".to_string()])
+            .expect("ambiguity is per prompt, not a failure");
+        assert_eq!(mapped, vec![Ambiguous, Ambiguous]);
 
         // Two identical prompts over three entries with a non-matching middle:
         // the only full alignment is [0,2].
@@ -816,7 +977,23 @@ mod tests {
         ];
         let mapped = map_prompts_to_entries(&gapped, &["hi".to_string(), "hi".to_string()])
             .expect("gap pins the alignment");
-        assert_eq!(mapped, vec![0, 2]);
+        assert_eq!(mapped, vec![Entry(0), Entry(2)]);
+    }
+
+    #[test]
+    fn ambiguity_stays_local_to_the_repeated_prompt() {
+        // Pi holds "commit" twice (a resend); Cypher shows it once. Only that
+        // prompt is ambiguous — the prompts around it still map exactly.
+        let users = vec![
+            user("a", None, "update packages"),
+            user("b", Some("a"), "commit"),
+            user("c", Some("b"), "commit"),
+            user("d", Some("c"), "publish"),
+        ];
+        let mapped =
+            map_prompts_to_entries(&users, &prompts(&["update packages", "commit", "publish"]))
+                .unwrap();
+        assert_eq!(mapped, vec![Entry(0), Ambiguous, Entry(3)]);
     }
 
     #[test]
@@ -831,7 +1008,7 @@ mod tests {
         ];
         let mapped = map_prompts_to_entries(&users, &["one".to_string(), "two".to_string()])
             .expect("extras are skipped");
-        assert_eq!(mapped, vec![0, 2]);
+        assert_eq!(mapped, vec![Entry(0), Entry(2)]);
     }
 
     #[test]
@@ -847,7 +1024,120 @@ mod tests {
         let mapped =
             map_prompts_to_entries(&users, &["visible".to_string(), "plain second".to_string()])
                 .unwrap();
-        assert_eq!(mapped, vec![0, 1]);
+        assert_eq!(mapped, vec![Entry(0), Entry(1)]);
+    }
+
+    #[test]
+    fn translation_records_restore_the_typed_prompt() {
+        // A queued prompt: recorded when submitted, landing as a user message
+        // only after the running turn's assistant reply.
+        let entries = vec![
+            user("u1", None, "first"),
+            translation("t2", Some("u1"), "发布一个新版本", "Release a new version"),
+            msg("a1", Some("t2")),
+            user("u2", Some("a1"), "Release a new version"),
+        ];
+        let active = active_branch_user_entries(&entries, Some("u2"));
+        assert_eq!(active[0].original_text, None);
+        assert_eq!(active[1].original_text.as_deref(), Some("发布一个新版本"));
+        let mapped = map_prompts_to_entries(&active, &prompts(&["first", "发布一个新版本"]))
+            .expect("the recorded original maps");
+        assert_eq!(mapped, vec![Entry(0), Entry(1)]);
+
+        // A record whose translation never landed attaches to nothing.
+        let entries = vec![
+            translation("t1", None, "原文", "Original"),
+            user("u1", Some("t1"), "something else"),
+        ];
+        let active = active_branch_user_entries(&entries, Some("u1"));
+        assert_eq!(active[0].original_text, None);
+    }
+
+    #[test]
+    fn slash_commands_never_anchor_the_alignment() {
+        // `/subagents` leaves no user entry; `/goal` is rewritten and followed
+        // by injected continuations.
+        let users = vec![
+            user("a", None, "one"),
+            user(
+                "g",
+                Some("a"),
+                "Goal mode is active. <goal_objective>\nship\n</goal_objective>",
+            ),
+            user(
+                "c",
+                Some("g"),
+                "Continue the active /goal until it is complete",
+            ),
+            user("b", Some("c"), "two"),
+            user(
+                "d",
+                Some("b"),
+                "Continue the active /goal until it is complete",
+            ),
+        ];
+        let mapped = map_prompts_to_entries(
+            &users,
+            &prompts(&["one", "/subagents", "/goal ship", "two"]),
+        )
+        .expect("commands are skipped");
+        assert_eq!(mapped, vec![Entry(0), Command, Command, Entry(3)]);
+
+        // A transcript of nothing but commands maps nothing (and succeeds).
+        let mapped = map_prompts_to_entries(&users, &prompts(&["/subagents"])).unwrap();
+        assert_eq!(mapped, vec![Command]);
+    }
+
+    #[test]
+    fn untranslated_legacy_sessions_map_by_position_when_counts_agree() {
+        let users = vec![
+            user("a", None, "Is Redis the best choice?"),
+            user("b", Some("a"), "ok"),
+            user("c", Some("b"), "Release a new build"),
+        ];
+        let mapped =
+            map_prompts_to_entries(&users, &prompts(&["是 redis 最好吗？", "ok", "发布新版本"]))
+                .expect("equal counts map by position");
+        assert_eq!(mapped, vec![Entry(0), Entry(1), Entry(2)]);
+
+        // A count mismatch refuses, naming the first prompt that did not map.
+        let err =
+            map_prompts_to_entries(&users, &prompts(&["是 redis 最好吗？", "ok"])).unwrap_err();
+        assert!(err.to_string().contains("user message #1"), "{err}");
+
+        // A slash command disables the fallback: it may have produced zero
+        // or several entries, so positions no longer line up.
+        let err = map_prompts_to_entries(
+            &users,
+            &prompts(&["是 redis 最好吗？", "/goal x", "发布新版本"]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no matching user entry"), "{err}");
+
+        // A prompt that matches a DIFFERENT position vetoes the fallback.
+        let err =
+            map_prompts_to_entries(&users, &prompts(&["是 redis 最好吗？", "发布新版本", "ok"]))
+                .unwrap_err();
+        assert!(err.to_string().contains("no matching user entry"), "{err}");
+    }
+
+    #[test]
+    fn parse_entry_reads_translation_records() {
+        let v: Value = serde_json::json!({
+            "type": "custom",
+            "customType": "cypher-translation-input",
+            "id": "t1",
+            "parentId": "p0",
+            "data": {"original": "你好", "translated": "Hello"}
+        });
+        let entry = parse_entry(&v).unwrap();
+        assert_eq!(entry.translation, Some(("你好".into(), "Hello".into())));
+        assert_eq!(entry.role, None);
+
+        let v: Value = serde_json::json!({
+            "type": "custom", "customType": "goal-state", "id": "g1", "data": {}
+        });
+        assert_eq!(parse_entry(&v).unwrap().translation, None);
     }
 
     #[test]
@@ -893,6 +1183,6 @@ mod tests {
         };
         let users = vec![user("a", None, "one"), user("b", Some("a"), "two")];
         let mapping = map_prompts_to_entries(&users, &req.visible_user_prompts).unwrap();
-        assert_eq!(mapping[1], 1);
+        assert_eq!(mapping[1], Entry(1));
     }
 }
