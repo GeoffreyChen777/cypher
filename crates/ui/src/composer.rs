@@ -1515,6 +1515,19 @@ fn session_refs_authoritative_error(
     None
 }
 
+/// The mention list's child index for candidate `active`: the "Sessions" and
+/// "Files" headers are also direct children of the scroll container, and
+/// both render only when session candidates exist.
+fn mention_scroll_child(active: usize, n_sessions: usize) -> usize {
+    if n_sessions == 0 {
+        active
+    } else if active < n_sessions {
+        active + 1
+    } else {
+        active + 2
+    }
+}
+
 /// Reconcile the mention popup's ONE active index after the candidate list
 /// changes. Session candidates are local and deterministic, so a non-empty
 /// list must seed `active = Some(0)` immediately — never waiting on the
@@ -4448,6 +4461,8 @@ pub struct Composer {
     /// container's direct children, so keyboard `scroll_to_item(active)`
     /// maps 1:1 — the pickers' model-menu pattern).
     slash_scroll: ScrollHandle,
+    /// Scroll position of the `@` popup's list (see [`mention_scroll_child`]).
+    mention_scroll: ScrollHandle,
     /// Advertised commands per harness. Refetched when Settings → Agents
     /// toggles a Pi package (`HarnessCatalogChanged`). Settings → Commands
     /// hide/show filters this list in [`Self::refilter_slash`].
@@ -4720,6 +4735,7 @@ impl Composer {
             slash_prefetch: None,
             slash: SlashState::default(),
             slash_scroll: ScrollHandle::new(),
+            mention_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
             slash_owner: None,
             slash_generation: 0,
@@ -5458,6 +5474,7 @@ impl Composer {
         if !refining {
             self.mention.files.clear();
             self.mention.active = None;
+            self.mention_scroll.set_offset(Point::default());
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
@@ -5597,6 +5614,12 @@ impl Composer {
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.mention.active =
             crate::popover::menu_step(self.mention.active, self.mention.count(), delta);
+        // Keep the keyboard-highlighted row in view, including the wrap from
+        // the last row back to the first.
+        if let Some(active) = self.mention.active {
+            self.mention_scroll
+                .scroll_to_item(mention_scroll_child(active, self.mention.sessions.len()));
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -5705,8 +5728,6 @@ impl Composer {
         let n_files = files.len();
         let mut card = crate::popover::popover_card(theme)
             .w(px(380.0))
-            .max_h(px(320.0))
-            .overflow_hidden()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && n_files == 0 && n_sessions == 0 {
             card = card.child(crate::popover::skeleton_rows(
@@ -5745,8 +5766,18 @@ impl Composer {
             }
         } else {
             // Sessions first, then files, under ONE keyboard active index.
+            // The scroll container owns the height cap; headers and rows are
+            // its direct children so `scroll_to_item` can follow the keyboard
+            // (see [`mention_scroll_child`]).
+            let mut list = div()
+                .id("mention-menu-scroll")
+                .max_h(px(312.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(&self.mention_scroll);
             if n_sessions > 0 {
-                card = card.child(
+                list = list.child(
                     div()
                         .px(px(10.0))
                         .pt(px(6.0))
@@ -5760,7 +5791,7 @@ impl Composer {
                     let subtitle = self.session_row_subtitle(session, cx);
                     let tooltip_title: SharedString = session.title.clone().into();
                     let tooltip_range = token.range.clone();
-                    card = card.child(
+                    list = list.child(
                         crate::popover::menu_row(
                             theme,
                             selected,
@@ -5785,6 +5816,8 @@ impl Composer {
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_1()
+                                .min_w_0()
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(
@@ -5822,7 +5855,7 @@ impl Composer {
                 || (n_sessions > 0 && (self.mention.loading || self.mention.error.is_some()))
             {
                 if n_sessions > 0 {
-                    card = card.child(
+                    list = list.child(
                         div()
                             .px(px(10.0))
                             .pt(px(6.0))
@@ -5838,7 +5871,7 @@ impl Composer {
                         let path = result.path.clone();
                         let tooltip_path: SharedString = path.clone().into();
                         let tooltip_range = token.range.clone();
-                        card = card.child(
+                        list = list.child(
                             crate::popover::menu_row(
                                 theme,
                                 selected,
@@ -5863,6 +5896,8 @@ impl Composer {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_1()
+                                    .min_w_0()
                                     .items_center()
                                     .gap(px(8.0))
                                     .child(
@@ -5890,7 +5925,7 @@ impl Composer {
                 } else if let Some(error) = self.mention.error.clone() {
                     // Sessions stay visible; the failed file search is a note
                     // under the Files header instead of hiding them.
-                    card = card.child(
+                    list = list.child(
                         div()
                             .px(px(12.0))
                             .py(px(8.0))
@@ -5899,7 +5934,7 @@ impl Composer {
                             .child(error),
                     );
                 } else {
-                    card = card.child(crate::popover::skeleton_rows(
+                    list = list.child(crate::popover::skeleton_rows(
                         "file-mention-loading",
                         theme,
                         2,
@@ -5908,6 +5943,7 @@ impl Composer {
                     ));
                 }
             }
+            card = card.child(list);
         }
         let anchor = self
             .input
@@ -6271,6 +6307,8 @@ impl Composer {
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_1()
+                                .min_w_0()
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(
@@ -9841,6 +9879,19 @@ mod tests {
         // An index the shrunken list has outgrown is cleared.
         assert_eq!(reconcile_mention_active(Some(2), 2), None);
         assert_eq!(reconcile_mention_active(Some(5), 1), None);
+    }
+
+    #[test]
+    fn mention_scroll_child_skips_section_headers() {
+        // Files only: no headers, candidates map 1:1.
+        assert_eq!(mention_scroll_child(0, 0), 0);
+        assert_eq!(mention_scroll_child(4, 0), 4);
+        // Sessions header precedes session rows.
+        assert_eq!(mention_scroll_child(0, 2), 1);
+        assert_eq!(mention_scroll_child(1, 2), 2);
+        // Files header follows the last session row.
+        assert_eq!(mention_scroll_child(2, 2), 4);
+        assert_eq!(mention_scroll_child(5, 2), 7);
     }
 
     #[test]
