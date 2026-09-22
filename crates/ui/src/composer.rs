@@ -1011,6 +1011,17 @@ struct OptionalCommentCopy {
     selected: String,
 }
 
+/// A page whose options ARE the whole answer: a single-select list. Such a page
+/// does not render the shared free-text input, so whatever the composer draft
+/// holds while it is up is not an answer to it.
+///
+/// Every other shape owns the input: a question with no options (free text —
+/// pi-ask-user's freeform stage and its optional-comment stage both land here)
+/// and multi-select, where typed text overrides the ticked boxes.
+fn wizard_pick_only(question: &UserInputQuestion) -> bool {
+    !question.options.is_empty() && !question.multi_select
+}
+
 fn wizard_context_card(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
     div().mt(px(12.0)).child(
         div()
@@ -6274,9 +6285,7 @@ impl Composer {
                                 slash_command_label(&text).map(str::to_string)
                             })
                     };
-                    let pick_only = questions
-                        .first()
-                        .is_some_and(|q| !q.options.is_empty() && !q.multi_select);
+                    let pick_only = questions.first().is_some_and(wizard_pick_only);
                     let input_header = questions.first().map(|q| q.header.clone());
                     let mut wizard = Wizard::new(request_id, questions);
                     if let Some(cmd) = slash {
@@ -6400,11 +6409,8 @@ impl Composer {
         if self.wizard.is_some() {
             // Enter inside the panel's free-text input submits the page — it
             // must never fall through and send a chat message under a panel
-            // that is still on screen.
-            let typed = self.input.read(cx).text().trim().to_string();
-            if let Some(w) = self.wizard.as_mut() {
-                w.set_typed(typed);
-            }
+            // that is still on screen. `wizard_advance` folds the typed text
+            // in on the way.
             self.wizard_advance(cx);
             return;
         }
@@ -7362,9 +7368,7 @@ impl Composer {
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
-        let pick_only = wizard
-            .current()
-            .is_some_and(|q| !q.options.is_empty() && !q.multi_select);
+        let pick_only = wizard.current().is_some_and(wizard_pick_only);
         let last_page = wizard.page + 1 >= wizard.questions.len();
         let step = wizard.select(option_ix);
         if !pick_only {
@@ -7399,7 +7403,37 @@ impl Composer {
         }));
     }
 
+    /// Fold the shared free-text input into the current page before it is
+    /// answered.
+    ///
+    /// Only pages that RENDER that input own it (see `pick_only` in
+    /// [`Self::render_wizard`]): on a pick-only page the composer input is not
+    /// part of the card at all and still holds the user's chat draft, which
+    /// must never be mistaken for an answer.
+    fn wizard_capture_typed(&mut self, cx: &mut Context<Self>) {
+        let takes_typed = self
+            .wizard
+            .as_ref()
+            .and_then(Wizard::current)
+            .is_some_and(|q| !wizard_pick_only(q));
+        if !takes_typed {
+            return;
+        }
+        let typed = self.input.read(cx).text().trim().to_string();
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(typed);
+        }
+    }
+
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        // Every route into an answer lands here — the panel's Submit/Next
+        // button, Enter (in the input or on the card), and the auto-advance
+        // timer — so the typed answer is collected HERE rather than at each
+        // call site. A button that only checked the input was non-empty to
+        // decide it could advance, then advanced without reading it, sent
+        // empty labels: pi-ask-user's freeform stage reads that as cancelled
+        // and throws the answer away.
+        self.wizard_capture_typed(cx);
         // A late auto-advance timer can land after its card is gone (the
         // answer already went out); there is nothing left to advance.
         let Some(wizard) = self.wizard.as_mut() else {
@@ -7589,11 +7623,10 @@ impl Composer {
                 cx.stop_propagation();
             }
         } else if key == "escape" && (!input_focused || input_empty) {
-            let cancel = self.wizard.as_ref().is_some_and(|w| {
-                w.page == 0
-                    && w.current()
-                        .is_some_and(|q| !q.options.is_empty() && !q.multi_select)
-            });
+            let cancel = self
+                .wizard
+                .as_ref()
+                .is_some_and(|w| w.page == 0 && w.current().is_some_and(wizard_pick_only));
             if cancel {
                 self.wizard_cancel(cx);
             } else {
@@ -7619,7 +7652,7 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let pick_only = !question.options.is_empty() && !question.multi_select;
+        let pick_only = wizard_pick_only(&question);
         let optional_comment = optional_comment_copy(&question.header, &question.question);
         let can_advance = optional_comment.is_some() || wizard.page_has_pick() || !typed_empty;
         let show_header = !pick_only && question.header.trim() != question.question.trim();
@@ -9858,6 +9891,47 @@ mod tests {
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
         }
+    }
+
+    /// Regression (user report): picking pi-ask-user's last option (its
+    /// freeform sentinel) opens a second, options-less stage; the answer typed
+    /// there came back to the model as "cancelled".
+    ///
+    /// Empty labels ARE the cancel signal on the wire (the pi bridge maps them
+    /// to `{"cancelled": true}`), so an options-less page that is advanced
+    /// without its typed text folded in cannot be told apart from a dismissal.
+    /// Such a page owns the free-text input — the whole answer lives there.
+    #[test]
+    fn freeform_page_owns_the_typed_input_and_answers_with_it() {
+        let freeform = question("q", &[], false);
+        assert!(
+            !wizard_pick_only(&freeform),
+            "an options-less page renders the free-text input"
+        );
+        assert!(
+            !wizard_pick_only(&question("q", &["a", "b"], true)),
+            "multi-select takes a typed override too"
+        );
+        assert!(
+            wizard_pick_only(&question("q", &["a", "b"], false)),
+            "a single-select list is answered by its options alone"
+        );
+
+        let mut w = Wizard::new("req".into(), vec![freeform]);
+        let WizardStep::Done(dropped) = w.advance() else {
+            panic!()
+        };
+        assert!(
+            dropped[0].labels.is_empty(),
+            "advancing without the typed text is indistinguishable from cancelling"
+        );
+
+        let mut w = Wizard::new("req".into(), vec![question("q", &[], false)]);
+        w.set_typed("  a different answer  ".into());
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["a different answer"]);
     }
 
     #[test]
