@@ -1523,11 +1523,22 @@ impl RpcService for AuthRpc {
                 {
                     return Err(RpcError::BadParams("invalid activity".into()));
                 }
-                let response = self.auth.report_notification_activity(&p.expected_user_id, &p.expected_org_id,
-                    serde_json::json!({
-                        "clientId": p.client_id, "sequence": p.sequence, "platform": "desktop", "foreground": p.foreground,
-                        "interactionAgeMs": p.interaction_age_ms, "chatId": p.chat_id,
-                    })).await.map_err(|e| RpcError::Failed(e.to_string()))?;
+                let activity = serde_json::json!({
+                    "clientId": p.client_id, "sequence": p.sequence, "platform": "desktop", "foreground": p.foreground,
+                    "interactionAgeMs": p.interaction_age_ms, "chatId": p.chat_id,
+                });
+                // A refresh of the same state rides the presence beat that is
+                // already going out every 15s, costing no request of its own.
+                // Only a transition spends an HTTP request, because only a
+                // transition needs the reply back.
+                if !self.auth.viewport_activity().record(activity.clone()) {
+                    return RpcReply::value(&serde_json::json!({ "ok": true, "deferred": true }));
+                }
+                let response = self
+                    .auth
+                    .report_notification_activity(&p.expected_user_id, &p.expected_org_id, activity)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&response)
             }
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),

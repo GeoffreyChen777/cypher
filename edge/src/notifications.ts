@@ -47,6 +47,45 @@ export class Notifications {
   private recipients(): Recipient[] { return this.get<Recipient[]>("recipients") ?? []; }
   private settings(): NotificationSettings { return this.get<NotificationSettings>("settings") ?? defaultNotificationSettings(); }
   private target(chatId: string): SessionTarget | undefined { return this.get<SessionTarget>(`target:${chatId}`); }
+
+  /** Apply one activity report, whoever carried it.
+   *
+   * The periodic refresh rides the registry room's presence frame, which is
+   * already sent every 15s on an open socket and costs 1/20 of a request; the
+   * identical report over HTTP cost a whole one. Both paths land here so the
+   * stored state cannot diverge by transport — only the reply differs, and a
+   * refresh has no reply to give.
+   *
+   * `undefined` = the report was a duplicate or arrived out of order and
+   * changed nothing; it must not replay a historical read, refresh a lease or
+   * route a new event to an old page. */
+  applyActivity(body: Record<string, unknown>): string[] | undefined {
+    if (!notificationsAvailable(this.env)) return undefined;
+    const now = Date.now(), id = identifier(body.clientId);
+    const current = this.get<Activity[]>("activity") ?? [];
+    const previous = current.find(a => a.clientId === id);
+    const activity = parseActivity(body, previous, now);
+    if (activity === previous) return undefined;
+    const remaining = current.filter(a => a.clientId !== id && now - a.receivedAt < 600_000);
+    this.set("activity", [...remaining.slice(-63), activity]);
+    const readEventIds: string[] = [];
+    if (activity.chatId && activity.foreground) {
+      this.set(`target:${activity.chatId}`, { clientId: activity.clientId, platform: activity.platform, at: now });
+      if (activity.platform === "ios") {
+        // Atomically retire only events that already exist for this chat.
+        // Keep enqueued:<chat> intact so mirror replay cannot recreate them.
+        for (const { notice } of this.events()) {
+          if (notice.chatId !== activity.chatId) continue;
+          this.remove(notice.id);
+          readEventIds.push(notice.id);
+        }
+        const unreadId = this.clearUnread(activity.chatId);
+        if (unreadId && !readEventIds.includes(unreadId)) readEventIds.push(unreadId);
+      }
+    }
+    if (readEventIds.length) this.schedule();
+    return readEventIds;
+  }
   private scope(): string { return this.ctx.id.toString(); }
   private badge(): BadgeSnapshot {
     return {
@@ -109,31 +148,10 @@ export class Notifications {
       }
       if (path === "activity" && request.method === "POST") {
         if (!notificationsAvailable(this.env)) return json({ ok: true, available: false });
-        const now = Date.now(), id = identifier(body.clientId);
-        const current = this.get<Activity[]>("activity") ?? [];
-        const previous = current.find(a => a.clientId === id);
-        const activity = parseActivity(body, previous, now);
-        // Duplicate/reordered reports must not replay a historical read,
-        // refresh its lease or route a new event to an old page.
-        if (activity === previous) return json({ ok: true, available: true, scope: this.scope(), readEventIds: [], ...this.badge() });
-        const remaining = current.filter(a => a.clientId !== id && now - a.receivedAt < 600_000);
-        this.set("activity", [...remaining.slice(-63), activity]);
-        const readEventIds: string[] = [];
-        if (activity.chatId && activity.foreground) {
-          this.set(`target:${activity.chatId}`, { clientId: activity.clientId, platform: activity.platform, at: now });
-          if (activity.platform === "ios") {
-            // Atomically retire only events that already exist for this chat.
-            // Keep enqueued:<chat> intact so mirror replay cannot recreate them.
-            for (const { notice } of this.events()) {
-              if (notice.chatId !== activity.chatId) continue;
-              this.remove(notice.id);
-              readEventIds.push(notice.id);
-            }
-            const unreadId = this.clearUnread(activity.chatId);
-            if (unreadId && !readEventIds.includes(unreadId)) readEventIds.push(unreadId);
-          }
+        const readEventIds = this.applyActivity(body);
+        if (readEventIds === undefined) {
+          return json({ ok: true, available: true, scope: this.scope(), readEventIds: [], ...this.badge() });
         }
-        if (readEventIds.length) this.schedule();
         return json({ ok: true, available: true, scope: this.scope(), readEventIds, ...this.badge() });
       }
       if (path === "event" && request.method === "POST") {

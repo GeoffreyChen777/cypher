@@ -41,6 +41,13 @@ use crate::{EngineError, new_id, now_ms};
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 
+/// Smallest gap between two tail publishes while a chat keeps changing. A
+/// cold reader opening mid-run sees a tail at most this stale and then takes
+/// live rows over its socket, so the only observable effect is on the
+/// instant-open snapshot. The publish that follows the final change is NOT
+/// rate limited (see `chat2_maintenance`), so a settled chat is always exact.
+const TAIL_MIN_PUBLISH_MS: u64 = 10_000;
+
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
 /// beyond this (and beyond [`cypher_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
 /// oldest-access-first — reopening from the SQLite snapshot measured within
@@ -79,6 +86,10 @@ pub struct EdgeConfig {
     /// socket meant reverse-engineering devices from rotating IPv6 privacy
     /// addresses; never again. Empty = omitted (tests).
     pub device_id: String,
+    /// The viewport's pending activity refresh, read by the registry presence
+    /// beat so that refresh costs no request of its own. Default = an unshared
+    /// slot that stays empty (tests, previews, headless sidecars).
+    pub viewport_activity: crate::viewport_activity::ViewportActivity,
 }
 
 impl std::fmt::Debug for EdgeConfig {
@@ -97,10 +108,21 @@ impl EdgeConfig {
             url: url.into(),
             token,
             device_id: String::new(),
+            viewport_activity: Default::default(),
         }
     }
 
     /// Attribute this engine's room sockets in edge logs.
+    /// Share the viewport's activity slot so the presence beat can carry
+    /// its periodic refresh instead of spending an HTTP request per beat.
+    pub fn with_viewport_activity(
+        mut self,
+        activity: crate::viewport_activity::ViewportActivity,
+    ) -> Self {
+        self.viewport_activity = activity;
+        self
+    }
+
     pub fn with_device(mut self, device_id: impl Into<String>) -> Self {
         self.device_id = device_id.into();
         self
@@ -272,6 +294,13 @@ pub struct ChatDocHandle {
     /// that differ only by their local clock.
     tail_hash: Arc<Mutex<Option<[u8; 32]>>>,
     tail_uploading: Arc<AtomicBool>,
+    /// When the tail sidecar last reached the Edge. The quiesce tick fires
+    /// about once a second for as long as a run keeps committing, and every
+    /// tick used to publish, costing one billable Durable Object request per
+    /// second per streaming chat. The tail only serves cold/thin readers
+    /// (`docs/chat2-sync.md`); live viewers take rows over the socket, so
+    /// second-by-second freshness buys nothing.
+    tail_published_at: Arc<Mutex<Option<tokio::time::Instant>>>,
     /// Set when a chat2 seed replaced this handle's lineage on disk: every
     /// further snapshot save from this handle is a stale FAT doc that would
     /// clobber the thin one — retired handles never persist again (unless no
@@ -988,6 +1017,7 @@ impl DocHost {
             checkpointing: Arc::new(AtomicBool::new(false)),
             tail_hash: Arc::new(Mutex::new(None)),
             tail_uploading: Arc::new(AtomicBool::new(false)),
+            tail_published_at: Arc::new(Mutex::new(None)),
             chat2: Mutex::new(None),
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
@@ -1117,6 +1147,7 @@ impl DocHost {
             checkpointing: Arc::new(AtomicBool::new(false)),
             tail_hash: Arc::new(Mutex::new(None)),
             tail_uploading: Arc::new(AtomicBool::new(false)),
+            tail_published_at: Arc::new(Mutex::new(None)),
             chat2: Mutex::new(None),
             chat2_pending_local: Mutex::new(Vec::new()),
             chat2_local_sub: Mutex::new(None),
@@ -1762,76 +1793,98 @@ impl DocHost {
     ///   instead of replaying the log (the alert-shaped growth bound);
     /// - tail sidecar: publish the last-64 transcript JSON for thin/instant
     ///   readers (the iOS fallback path).
-    async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>) {
+    ///
+    /// Returns the instant this chat must be ticked again, when a publish was
+    /// held back by [`TAIL_MIN_PUBLISH_MS`]. Without that the caller would stop
+    /// ticking a chat whose last change was rate limited, and the final tail
+    /// would never reach the Edge.
+    async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>) -> Option<tokio::time::Instant> {
         if handle.retired.load(Ordering::Relaxed) {
-            return;
+            return None;
         }
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
-            None => return,
+            None => return None,
         };
-        let Some(edge) = self.inner.config.edge.clone() else {
-            return;
-        };
+        let edge = self.inner.config.edge.clone()?;
         let chat_id = handle.chat_id.clone();
         // Only the workspace owner can publish chat sidecars/checkpoints;
         // non-host replicas would pay a guaranteed 403 and cannot change the
         // authoritative document anyway.
         if !self.is_host(&chat_id) {
-            return;
+            return None;
         }
-        // Tail publish: only when message content changed. `updatedAt` is
-        // deliberately normalized before hashing; the wire payload retains
-        // the current timestamp for existing readers.
-        if let Ok(tail) =
-            cypher_doc::materialize_tail(&handle.doc, now_ms(), cypher_doc::TAIL_MESSAGE_COUNT)
-            && let Ok(body) = serde_json::to_vec(&tail)
-        {
-            let mut signature_tail = tail.clone();
-            signature_tail.updated_at = 0;
-            let Ok(signature_bytes) = serde_json::to_vec(&signature_tail) else {
-                return;
-            };
-            let hash: [u8; 32] = Sha256::digest(&signature_bytes).into();
-            if lock(&handle.tail_hash).as_ref() == Some(&hash)
-                || handle.tail_uploading.swap(true, Ordering::AcqRel)
-            {
-                return;
-            }
-            let http = self.inner.http.clone();
-            let edge_tail = edge.clone();
-            let chat = chat_id.clone();
-            let tail_hash = handle.tail_hash.clone();
-            let uploading = handle.tail_uploading.clone();
-            self.spawn_worker(async move {
-                let Some(bearer) = edge_tail.bearer().await else {
-                    uploading.store(false, Ordering::Release);
-                    return;
-                };
-                let url = format!(
-                    "{}/chat2/{}/tail",
-                    edge_tail.url.trim_end_matches('/'),
-                    chat
-                );
-                let result = http
-                    .put(&url)
-                    .bearer_auth(&bearer)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await;
-                if result.is_ok_and(|response| response.status().is_success()) {
-                    *lock(&tail_hash) = Some(hash);
-                }
-                uploading.store(false, Ordering::Release);
-            });
-        }
+        let tick_again = self.publish_tail_if_due(handle, &edge, &chat_id);
         // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in
         // flight at a time (review H1).
         if stats.row_bytes <= 512 * 1024 && stats.row_count <= 200 {
-            return;
+            return tick_again;
         }
         self.spawn_chat2_checkpoint(handle, "threshold");
+        tick_again
+    }
+
+    /// Publish the tail sidecar when its content changed and the rate limit
+    /// allows it. `Some(instant)` means a changed tail was held back and this
+    /// chat must be ticked again then, so a run that stops mid-window still
+    /// lands its final tail.
+    fn publish_tail_if_due(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        edge: &EdgeConfig,
+        chat_id: &str,
+    ) -> Option<tokio::time::Instant> {
+        // `updatedAt` is deliberately normalized before hashing; the wire
+        // payload retains the current timestamp for existing readers.
+        let tail =
+            cypher_doc::materialize_tail(&handle.doc, now_ms(), cypher_doc::TAIL_MESSAGE_COUNT)
+                .ok()?;
+        let body = serde_json::to_vec(&tail).ok()?;
+        let mut signature_tail = tail.clone();
+        signature_tail.updated_at = 0;
+        let hash: [u8; 32] = Sha256::digest(&serde_json::to_vec(&signature_tail).ok()?).into();
+        if lock(&handle.tail_hash).as_ref() == Some(&hash) {
+            return None; // content unchanged
+        }
+        // Hold the publish back while a run keeps committing. Checked BEFORE
+        // the one-flight guard, so a deferred tick never blocks the send that
+        // follows it.
+        let now = tokio::time::Instant::now();
+        if let Err(due) = tail_rate_limit(*lock(&handle.tail_published_at), now) {
+            return Some(due);
+        }
+        if handle.tail_uploading.swap(true, Ordering::AcqRel) {
+            return None; // an upload is already in flight
+        }
+        *lock(&handle.tail_published_at) = Some(now);
+        let http = self.inner.http.clone();
+        let edge_tail = edge.clone();
+        let chat = chat_id.to_string();
+        let tail_hash = handle.tail_hash.clone();
+        let uploading = handle.tail_uploading.clone();
+        self.spawn_worker(async move {
+            let Some(bearer) = edge_tail.bearer().await else {
+                uploading.store(false, Ordering::Release);
+                return;
+            };
+            let url = format!(
+                "{}/chat2/{}/tail",
+                edge_tail.url.trim_end_matches('/'),
+                chat
+            );
+            let result = http
+                .put(&url)
+                .bearer_auth(&bearer)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await;
+            if result.is_ok_and(|response| response.status().is_success()) {
+                *lock(&tail_hash) = Some(hash);
+            }
+            uploading.store(false, Ordering::Release);
+        });
+        None
     }
 
     /// POST a full checkpoint for a chat2 room (one in flight per handle).
@@ -3142,6 +3195,21 @@ mod part_segment_tests {
     }
 }
 
+/// May a changed tail be sent now? `Err(due)` means hold until `due`.
+///
+/// A chat that has never published sends immediately, so the first tail of a
+/// run is never delayed and a chat that settles between runs is always exact.
+fn tail_rate_limit(
+    last_published: Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> Result<(), tokio::time::Instant> {
+    let Some(last) = last_published else {
+        return Ok(());
+    };
+    let due = last + std::time::Duration::from_millis(TAIL_MIN_PUBLISH_MS);
+    if now < due { Err(due) } else { Ok(()) }
+}
+
 /// Per-chat background task: reacts to doc changes (local commits and remote imports)
 /// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
 /// Holds only a weak handle so a dropped host tears the task down.
@@ -3172,12 +3240,13 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 }
             }
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
-                save_deadline = None;
                 let Some(handle) = weak.upgrade() else { break };
                 host.save_snapshot(&handle);
                 // chat2 host duties ride the same quiesce tick (C3):
-                // threshold checkpoints + the tail sidecar publish.
-                host.chat2_maintenance(&handle).await;
+                // threshold checkpoints + the tail sidecar publish. A tail held
+                // back by its rate limit asks to be ticked again, so the last
+                // change of a run always reaches the Edge.
+                save_deadline = host.chat2_maintenance(&handle).await;
                 // Post-quiesce eviction pass: sizes just refreshed.
                 host.evict_over_budget();
             }
@@ -3210,6 +3279,7 @@ mod loro_hook_tests {
                     url: "http://127.0.0.1:9".into(),
                     token: Arc::new(SignedOut),
                     device_id: "dev".into(),
+                    viewport_activity: Default::default(),
                 }),
             },
         )
@@ -3259,5 +3329,73 @@ mod loro_hook_tests {
         }
         drop(handle);
         host.shutdown_workers().await;
+    }
+}
+
+#[cfg(test)]
+mod tail_rate_limit_tests {
+    use super::{TAIL_MIN_PUBLISH_MS, tail_rate_limit};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// A chat that never published sends at once: the first tail of a run, and
+    /// the tail of a chat that settled between runs, are never delayed.
+    #[test]
+    fn first_publish_is_immediate() {
+        assert!(tail_rate_limit(None, Instant::now()).is_ok());
+    }
+
+    #[test]
+    fn a_second_change_inside_the_window_is_held_until_the_window_opens() {
+        let start = Instant::now();
+        let window = Duration::from_millis(TAIL_MIN_PUBLISH_MS);
+        // Just published: every tick until `start + window` must defer, and
+        // must name the SAME due instant so the caller's re-arm converges.
+        for elapsed_ms in [0, 1, TAIL_MIN_PUBLISH_MS / 2, TAIL_MIN_PUBLISH_MS - 1] {
+            let now = start + Duration::from_millis(elapsed_ms);
+            let due = tail_rate_limit(Some(start), now).expect_err("must defer");
+            assert_eq!(due, start + window, "deferred to a stable instant");
+            assert!(due > now, "the re-arm must be in the future");
+        }
+    }
+
+    #[test]
+    fn the_window_boundary_and_beyond_publish() {
+        let start = Instant::now();
+        let window = Duration::from_millis(TAIL_MIN_PUBLISH_MS);
+        assert!(
+            tail_rate_limit(Some(start), start + window).is_ok(),
+            "boundary sends"
+        );
+        assert!(
+            tail_rate_limit(Some(start), start + window + Duration::from_secs(60)).is_ok(),
+            "a long-idle chat sends its next change at once"
+        );
+    }
+
+    /// The bound this exists for: a run committing every 120ms used to publish
+    /// on every ~1s quiesce tick. Replaying that cadence must collapse to one
+    /// send per window, and the deferrals must always point forward so the
+    /// final change still lands.
+    #[test]
+    fn a_streaming_run_collapses_to_one_publish_per_window() {
+        let start = Instant::now();
+        let mut last: Option<Instant> = None;
+        let mut sends = 0;
+        // Five minutes of quiesce ticks, one per second.
+        for tick in 0..300u64 {
+            let now = start + Duration::from_secs(tick);
+            match tail_rate_limit(last, now) {
+                Ok(()) => {
+                    sends += 1;
+                    last = Some(now);
+                }
+                Err(due) => assert!(due > now, "a deferral must schedule a later tick"),
+            }
+        }
+        let window_secs = TAIL_MIN_PUBLISH_MS / 1000;
+        let expected = 1 + (299 / window_secs) as usize;
+        assert_eq!(sends, expected, "one send per {window_secs}s window");
+        assert_eq!(sends, 30, "300 ticks collapse from 300 sends to 30");
     }
 }

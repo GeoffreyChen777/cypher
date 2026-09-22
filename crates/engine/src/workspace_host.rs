@@ -99,22 +99,64 @@ const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// the FALLBACK path, for the case where presence itself is unavailable.
 const RELAY_PROBE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1_800);
 
+/// Ceiling for re-verifying a device that keeps answering `hostConnected=true`.
+/// Lower than the offline cap: a live device is worth checking on more often
+/// than one already known to be away.
+const RELAY_PROBE_ALIVE_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Only an explicit hostConnected=false earns negative-cache backoff. Network
 /// failures are not evidence that a device is offline. This is runtime-local;
 /// no presence rows or synchronization protocol change is needed.
 struct RelayProbeRetry {
     delay: std::time::Duration,
     retry_at: tokio::time::Instant,
+    /// Set when this entry came from a probe that answered `hostConnected=true`,
+    /// to the presence timestamp that probe stamped.
+    ///
+    /// A successful probe refreshes `presence_seen` itself, so without this the
+    /// candidate filter would read back our own stamp, mistake it for a genuine
+    /// heartbeat, and drop the very backoff we just set — leaving a healthy but
+    /// presence-quiet device polled forever at the sweep interval.
+    verified_at: Option<i64>,
 }
 
 impl RelayProbeRetry {
     fn offline(previous: Option<&Self>, now: tokio::time::Instant) -> Self {
         let delay = previous
+            .filter(|retry| retry.verified_at.is_none())
             .map(|retry| (retry.delay * 2).min(RELAY_PROBE_BACKOFF_CAP))
             .unwrap_or(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
         Self {
             delay,
             retry_at: now + delay,
+            verified_at: None,
+        }
+    }
+
+    /// Back off re-verifying a device that answered "alive".
+    ///
+    /// A successful probe grants only `PRESENCE_FRESH_MS` (45s) of freshness
+    /// while the sweep runs every 30s, so before this a device that was alive
+    /// but whose presence beat never reached us was re-probed about once a
+    /// minute, indefinitely — measured at 71 Durable Object requests/hour in
+    /// production, the largest remaining HTTP source after the activity
+    /// heartbeat moved onto the presence frame.
+    ///
+    /// Backing off is safe because this is only ever the FALLBACK path: when
+    /// presence works, a real beat clears the entry the moment it arrives and
+    /// nothing is probed at all. A registry reconnect, foreground retry and
+    /// system wake clear it too. The cap bounds only how long a badge may keep
+    /// showing "online" for a device that went away while its presence channel
+    /// was already broken.
+    fn alive(previous: Option<&Self>, now: tokio::time::Instant, stamped: i64) -> Self {
+        let delay = previous
+            .and_then(|retry| retry.verified_at.map(|_| retry.delay))
+            .map(|delay| (delay * 2).min(RELAY_PROBE_ALIVE_CAP))
+            .unwrap_or(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
+        Self {
+            delay,
+            retry_at: now + delay,
+            verified_at: Some(stamped),
         }
     }
 }
@@ -1436,6 +1478,30 @@ impl WorkspaceHost {
     }
 }
 
+/// Store a snapshot, waking watchers only when it actually differs.
+///
+/// Every inbound presence beat republishes everything, and with a beat per
+/// device every 15s that was thousands of *identical* snapshots an hour. Each
+/// one woke every watch stream, and a stream subscribed from another device
+/// turns into a relay frame on that device's room — measured in production as
+/// 1,050 inbound websocket messages/hour on a single DeviceRoom, all of them
+/// re-sending data the peer already had.
+///
+/// This keeps the stored value current, which is why it is not a plain `send`:
+/// `watch::Sender::send` drops the value when no receiver exists yet, so a
+/// stream subscribed later would start from a stale snapshot (found the hard
+/// way by the e2e smoke). `send_if_modified` still writes the value through —
+/// it just wakes nobody when nothing changed.
+fn publish_if_changed<T: PartialEq>(tx: &watch::Sender<Vec<T>>, next: Vec<T>) {
+    tx.send_if_modified(|current| {
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
+    });
+}
+
 impl WorkspaceHostInner {
     fn bump_changed(&self) {
         self.changed_tx.send_modify(|v| *v = v.wrapping_add(1));
@@ -1490,13 +1556,10 @@ impl WorkspaceHostInner {
         match lock(&self.reg).read_all() {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
-                // send_replace, NOT send: `watch::Sender::send` drops the value when
-                // no receiver exists yet, so a stream subscribed later would start
-                // from a stale snapshot (found the hard way by the e2e smoke).
-                self.chats_tx.send_replace(state.chats);
-                self.devices_tx.send_replace(state.devices);
-                self.sessions_tx.send_replace(state.sessions);
-                self.spaces_tx.send_replace(state.spaces);
+                publish_if_changed(&self.chats_tx, state.chats);
+                publish_if_changed(&self.devices_tx, state.devices);
+                publish_if_changed(&self.sessions_tx, state.sessions);
+                publish_if_changed(&self.spaces_tx, state.spaces);
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");
@@ -1632,9 +1695,19 @@ impl WorkspaceHostInner {
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.
+    /// Carries the viewport's pending activity refresh when there is one, so
+    /// that refresh costs no request of its own.
     fn presence_tick(&self) {
         if let Some(room) = lock(&self.room).as_ref() {
-            room.set_presence(now_ms());
+            let pending = self
+                .config
+                .edge
+                .as_ref()
+                .and_then(|edge| edge.viewport_activity.pending());
+            match pending {
+                Some(activity) => room.set_presence_with_activity(now_ms(), activity),
+                None => room.set_presence(now_ms()),
+            }
         }
     }
 }
@@ -1778,11 +1851,18 @@ impl WorkspaceHostInner {
                 if device.id == self.config.device_id {
                     return None;
                 }
-                if seen
-                    .get(&device.id)
-                    .is_some_and(|at| wall_now.saturating_sub(*at) < PRESENCE_FRESH_MS)
+                if let Some(at) = seen.get(&device.id).copied()
+                    && wall_now.saturating_sub(at) < PRESENCE_FRESH_MS
                 {
-                    backoff.remove(&device.id);
+                    // Only a genuine heartbeat clears the backoff. Freshness a
+                    // probe granted itself must not erase that probe's own
+                    // backoff, or the device is polled forever.
+                    let self_granted = backoff
+                        .get(&device.id)
+                        .is_some_and(|retry| retry.verified_at == Some(at));
+                    if !self_granted {
+                        backoff.remove(&device.id);
+                    }
                     return None;
                 }
                 backoff
@@ -1807,7 +1887,11 @@ impl WorkspaceHostInner {
         let mut backoff = lock(&self.relay_probe_backoff);
         if connected {
             seen.insert(device.to_string(), wall_now);
-            backoff.remove(device);
+            // Keep an entry rather than clearing it: a device that answers
+            // "alive" while its presence beat stays silent would otherwise be
+            // re-probed every sweep forever.
+            let retry = RelayProbeRetry::alive(backoff.get(device), now, wall_now);
+            backoff.insert(device.to_string(), retry);
             tracing::debug!(device, "presence: relay-verified alive");
             return true;
         }
@@ -1909,8 +1993,8 @@ mod tests {
     use cypher_sync::DocsStore;
 
     use super::{
-        WorkspaceHost, WorkspaceHostConfig, device_name_on_boot, linked_worktree_root,
-        merge_sessions,
+        RELAY_PROBE_ALIVE_CAP, RELAY_PROBE_INTERVAL_MS, RelayProbeRetry, WorkspaceHost,
+        WorkspaceHostConfig, device_name_on_boot, linked_worktree_root, merge_sessions,
     };
 
     fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
@@ -2067,7 +2151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_probe_errors_do_not_mean_offline_and_success_resets_backoff() {
+    async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
         use std::time::Duration;
         let dir = tempfile::tempdir().unwrap();
         let host = open_host(dir.path(), "self", false);
@@ -2100,12 +2184,30 @@ mod tests {
             vec!["peer"]
         );
 
+        // An "alive" answer keeps an entry rather than clearing it. The probe
+        // refreshes presence itself, and that self-granted freshness lasts only
+        // PRESENCE_FRESH_MS against a 30s sweep — so clearing here is what used
+        // to re-poll a healthy, presence-quiet device about once a minute
+        // forever (71 Durable Object requests/hour in production).
         assert!(host.inner.record_relay_probe("peer", Some(true), now));
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+        assert!(!super::lock(&host.inner.relay_probe_backoff).is_empty());
         assert!(host.inner.relay_probe_candidates(now).is_empty());
+
+        // Once that self-granted freshness lapses, the backoff still holds.
         super::lock(&host.inner.presence_seen)
             .insert("peer".into(), crate::now_ms() - super::PRESENCE_FRESH_MS);
-        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
+        assert!(host.inner.relay_probe_candidates(now).is_empty());
+        assert_eq!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(30)),
+            vec!["peer"]
+        );
+
+        // A genuine heartbeat is not the probe's own stamp, so it clears the
+        // backoff at once and the device is verified normally again.
+        super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms() + 5);
+        assert!(host.inner.relay_probe_candidates(now).is_empty());
+        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
     }
 
     #[tokio::test]
@@ -2275,5 +2377,107 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
+    }
+
+    /// A device that answers "alive" while its presence beat stays silent used
+    /// to be re-probed every sweep, forever: a successful probe cleared the
+    /// backoff and granted only PRESENCE_FRESH_MS (45s) of freshness against a
+    /// 30s sweep. Measured at 71 Durable Object requests/hour in production.
+    #[test]
+    fn a_live_but_presence_quiet_device_stops_being_polled() {
+        let now = tokio::time::Instant::now();
+
+        // First probe: nothing known yet, so it starts at the sweep interval.
+        let first = RelayProbeRetry::alive(None, now, 1_000);
+        assert_eq!(
+            first.delay,
+            std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS)
+        );
+        assert_eq!(first.verified_at, Some(1_000));
+
+        // Each further "alive" answer doubles the wait, up to the cap.
+        let second = RelayProbeRetry::alive(Some(&first), now, 2_000);
+        assert_eq!(second.delay, first.delay * 2);
+        let mut retry = second;
+        for stamp in 0..10 {
+            retry = RelayProbeRetry::alive(Some(&retry), now, stamp);
+        }
+        assert_eq!(retry.delay, RELAY_PROBE_ALIVE_CAP);
+        assert!(retry.retry_at > now);
+    }
+
+    /// The backoff only holds because the probe's own stamp is not mistaken for
+    /// a heartbeat. A genuine beat still clears it immediately.
+    #[test]
+    fn only_a_genuine_heartbeat_clears_the_alive_backoff() {
+        let now = tokio::time::Instant::now();
+        let probed = RelayProbeRetry::alive(None, now, 5_000);
+
+        // Freshness the probe granted itself: recognised, backoff survives.
+        assert_eq!(probed.verified_at, Some(5_000));
+
+        // A real presence frame carries a different, newer timestamp, so the
+        // candidate filter's `verified_at == seen` test fails and it clears.
+        assert_ne!(probed.verified_at, Some(6_000));
+    }
+
+    /// An offline answer must not inherit an alive entry's delay, or a device
+    /// that just went away would start its offline backoff already near the cap
+    /// and be noticed far too late.
+    #[test]
+    fn going_offline_restarts_the_backoff_from_the_sweep_interval() {
+        let now = tokio::time::Instant::now();
+        let mut alive = RelayProbeRetry::alive(None, now, 1);
+        for _ in 0..6 {
+            alive = RelayProbeRetry::alive(Some(&alive), now, 2);
+        }
+        assert_eq!(alive.delay, RELAY_PROBE_ALIVE_CAP);
+
+        let offline = RelayProbeRetry::offline(Some(&alive), now);
+        assert_eq!(
+            offline.delay,
+            std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS)
+        );
+        assert_eq!(offline.verified_at, None);
+
+        // Repeated offline answers still double as before.
+        let again = RelayProbeRetry::offline(Some(&offline), now);
+        assert_eq!(again.delay, offline.delay * 2);
+    }
+
+    /// Presence beats republish everything every 15s per device. Waking every
+    /// watch stream for an identical snapshot cost a relay frame to each
+    /// subscribed viewport — 1,050 inbound websocket messages/hour on one
+    /// DeviceRoom in production, all redundant.
+    #[test]
+    fn republishing_an_identical_snapshot_wakes_nobody() {
+        let (tx, mut rx) = tokio::sync::watch::channel(Vec::<String>::new());
+
+        super::publish_if_changed(&tx, vec!["a".to_string()]);
+        assert!(rx.has_changed().unwrap());
+        rx.borrow_and_update();
+
+        // The same snapshot again: stored, but no wake-up.
+        super::publish_if_changed(&tx, vec!["a".to_string()]);
+        super::publish_if_changed(&tx, vec!["a".to_string()]);
+        assert!(!rx.has_changed().unwrap());
+
+        // A real change still propagates immediately.
+        super::publish_if_changed(&tx, vec!["a".to_string(), "b".to_string()]);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            *rx.borrow_and_update(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    /// The value must be written through even when nobody is listening yet, or
+    /// a stream subscribed later would start from a stale snapshot.
+    #[test]
+    fn the_latest_snapshot_is_stored_for_a_later_subscriber() {
+        let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
+        drop(rx);
+        super::publish_if_changed(&tx, vec!["fresh".to_string()]);
+        assert_eq!(*tx.subscribe().borrow(), vec!["fresh".to_string()]);
     }
 }

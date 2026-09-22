@@ -97,9 +97,26 @@ final class NotificationController {
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
             await self?.refresh()
+            var elapsed = 0
             while !Task.isCancelled {
-                self?.reportActivity()
+                // Transitions report themselves (`setForeground`, `viewing`),
+                // so this loop only has to hold the leases the Worker reads.
+                // `active()` — the gate on notification suppression — requires
+                // foreground, and `iosViewingChat` requires a matching chatId,
+                // so a repeat sent while backgrounded, or while off a chat,
+                // refreshes nothing any consumer reads and costs one billable
+                // Durable Object request each.
+                //
+                // On a chat: 15s holds the Worker's 45s activity lease with a
+                // 3x margin against a lost report. Off a chat: only the badge
+                // carried in the reply still matters, and 60s is ample for it.
+                if let self, self.foreground {
+                    if self.currentChat != nil || elapsed % 60 == 0 {
+                        self.reportActivity()
+                    }
+                }
                 try? await Task.sleep(for: .seconds(15))
+                elapsed += 15
             }
         }
         drainRevocations()
@@ -318,6 +335,13 @@ final class NotificationController {
             }
         }
     }
+    /// The latest activity report, waiting for the next presence beat.
+    ///
+    /// Staleness is correct, not a leak: when reporting stops (backgrounded, or
+    /// off a chat) the sequence stops advancing, the edge treats the repeat as
+    /// a duplicate, and the target lease lapses on its own.
+    private(set) var pendingActivity: ActivityReport?
+
     private func reportActivity() {
         guard let config, available else { return }
         let ticket = generation
@@ -327,11 +351,17 @@ final class NotificationController {
         let sequence = max(saved.activitySequence ?? 0, Int(nowMs())) + 1
         saved.activitySequence = sequence
         guard persist() else { return }
-        let body: [String: Any] = [
-            "clientId": activityClientId, "sequence": sequence, "platform": "ios", "foreground": foreground,
-            "interactionAgeMs": 0, "chatId": currentChat as Any? ?? NSNull()
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: body), ticket == generation else { return }
+        let report = ActivityReport(clientId: activityClientId, sequence: sequence,
+                                    foreground: foreground, interactionAgeMs: 0,
+                                    chatId: currentChat)
+        // A refresh of the same state rides the presence beat this room is
+        // already sending every 15s, where inbound messages bill 20:1. Only a
+        // transition spends an HTTP request, because only a transition needs
+        // the reply carrying readEventIds and the badge.
+        let transition = report.isTransition(from: pendingActivity)
+        pendingActivity = report
+        guard transition else { return }
+        guard let data = try? JSONEncoder().encode(report), ticket == generation else { return }
         Task {
             // Old servers omit this additive response; ordinary activity
             // reporting remains compatible during a rolling upgrade.

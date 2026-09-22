@@ -16,6 +16,12 @@ const fixture = __ROWS_FIXTURE__;
 
 function meter(state: DurableObjectState, sockets: WebSocket[] = []) {
   let cursors: { category: string; cursor: SqlStorageCursor<Record<string, SqlStorageValue>> }[] = [];
+  // `setAlarm`/`deleteAlarm` each bill one row written and never reach
+  // `storage.sql`, so the SQL proxy below cannot see them — the measurement gap
+  // docs/rows-written-baseline.md records as "alarm API calls are not in the
+  // totals". Without this, a per-push `setAlarm` is invisible.
+  let alarms: string[] = [];
+  let pending: Promise<unknown>[] = [];
   const sql = new Proxy(state.storage.sql, {get(target, key) {
     if (key === "exec") return (query: string, ...params: SqlStorageValue[]) => {
       const cursor = target.exec(query, ...params);
@@ -30,15 +36,36 @@ function meter(state: DurableObjectState, sockets: WebSocket[] = []) {
   }});
   const storage = new Proxy(state.storage, {get(target, key) {
     if (key === "sql") return sql;
+    if (key === "setAlarm" || key === "deleteAlarm") {
+      const category = key === "setAlarm" ? "ALARM:set" : "ALARM:delete";
+      const fn = Reflect.get(target, key, target) as (...args: unknown[]) => Promise<void>;
+      return (...args: unknown[]) => { alarms.push(category); return fn.apply(target, args); };
+    }
     const value = Reflect.get(target, key, target);
     return typeof value === "function" ? value.bind(target) : value;
   }});
   const context = new Proxy(state, {get(target, key) {
     if (key === "storage") return storage;
     if (key === "getWebSockets") return () => sockets;
+    // Alarm scheduling runs off `waitUntil` (registry-room.ts) or a floating
+    // `.then` (chat-room.ts). Collect both so `settle()` can attribute their
+    // writes to the phase that caused them instead of a later one.
+    if (key === "waitUntil") return (promise: Promise<unknown>) => { pending.push(promise); };
     const value = Reflect.get(target, key, target);
     return typeof value === "function" ? value.bind(target) : value;
   }});
+  /** Drain deferred alarm work so `take()` sees it.
+   *
+   * Microtasks only: the fixture mocks `Date.now()` to a fixed past instant, so
+   * `markBackupDirty`'s `now + DAY_MS` alarm is already overdue in real time.
+   * Yielding to the macrotask queue lets workerd deliver that alarm mid-run,
+   * which measures the mock rather than the code. `waitUntil` chains (the
+   * registry's `scheduleAlarm`) settle on microtasks alone. ChatRoom's floating
+   * `getAlarm().then(...)` is therefore still attributed to a later phase — one
+   * `ALARM:set` for the whole run, unchanged from before this meter existed. */
+  const settle = async () => {
+    while (pending.length) { const batch = pending; pending = []; await Promise.allSettled(batch); }
+  };
   const take = () => {
     const counters: Record<string, {calls: number; written: number; read: number}> = {};
     // Read after consumers have drained their SELECT cursors, not at exec time.
@@ -46,11 +73,15 @@ function meter(state: DurableObjectState, sockets: WebSocket[] = []) {
       const c = counters[category] ??= {calls:0,written:0,read:0};
       c.calls++; c.written += cursor.rowsWritten; c.read += cursor.rowsRead;
     }
-    cursors = [];
+    for (const category of alarms) {
+      const c = counters[category] ??= {calls:0,written:0,read:0};
+      c.calls++; c.written += 1; // one billed row per alarm API call
+    }
+    cursors = []; alarms = [];
     return {written:Object.values(counters).reduce((a,b)=>a+b.written,0),
       read:Object.values(counters).reduce((a,b)=>a+b.read,0), sql:counters};
   };
-  return { context, take };
+  return { context, take, settle };
 }
 
 function peer(device: string) {
@@ -80,7 +111,8 @@ it("P0: identical real Loro history with one and three viewers", async ({task}) 
       const phases: Record<string, ReturnType<typeof m.take>> = {};
       let seq = 0, tailAt = 1000;
       const clock = vi.spyOn(Date,"now");
-      const add = (name: string) => {
+      const add = async (name: string) => {
+        await m.settle(); // deferred alarm writes belong to the phase that caused them
         const v = m.take(), old = phases[name];
         if (!old) {phases[name]=v; return;}
         old.written+=v.written;old.read+=v.read;
@@ -94,14 +126,14 @@ it("P0: identical real Loro history with one and three viewers", async ({task}) 
           await room.webSocketMessage(host.socket, encodeFrame(FRAME.push,{batchId:`b${index}`},new Uint8Array(step.update)).buffer as ArrayBuffer);
           const ack = decodeFrame(host.frames.at(-1)!)!;
           expect(ack.type).toBe(FRAME.ack);expect(ack.header.seq).toBe(++seq);
-          add("push");
+          await add("push");
           if (step.at >= tailAt || index === fixture.steps.length-1) {
             expect((await room.fetch(request("/tail","PUT",JSON.stringify(step.tail)))).status).toBe(200);
-            add("tail");tailAt=step.at+1000;
+            await add("tail");tailAt=step.at+1000;
           }
           if (step.checkpoint) {
             expect((await room.fetch(request(`/checkpoint?seqCovered=${seq}`,"POST",new Uint8Array(step.checkpoint)))).status).toBe(200);
-            add("checkpoint");
+            await add("checkpoint");
           }
         }
         const wsOutboundFrames=host.frames.length+readers.reduce((n,r)=>n+r.frames.length,0);
@@ -148,7 +180,7 @@ it("P0: registry heartbeat and notification event/activity writes", async ({task
       const op={kind:"sessions",id:"chat",op:"upsert",hlc:`1788998400000-${String(i).padStart(6,"0")}-host`,
         set:{chatId:"chat",deviceId:"host",status:"working",updatedAt:i}};
       const r=await room.fetch(request("/push?device=host","POST",JSON.stringify({batch:`b${i}`,ops:[op]})));
-      expect(r.status).toBe(200);registry.push(m.take());
+      expect(r.status).toBe(200);await m.settle();registry.push(m.take());
     }
     await state.storage.deleteAlarm();
     return registry;
@@ -180,21 +212,21 @@ it("P2 experiment: cumulative Loro export every 2s against the same ChatRoom", a
     state.storage.sql.exec("INSERT INTO meta(key,value) VALUES('owner','p0-user')");
     const setup = m.take();
     let seq = 0; const phases: Record<string, ReturnType<typeof m.take>> = {};
-    const add = (name: string) => { const value = m.take(); const old = phases[name]; if (!old) { phases[name] = value; return; }
+    const add = async (name: string) => { await m.settle(); const value = m.take(); const old = phases[name]; if (!old) { phases[name] = value; return; }
       old.written += value.written; old.read += value.read; for (const [k,c] of Object.entries(value.sql)) { const o = old.sql[k] ??= {calls:0,written:0,read:0}; o.calls += c.calls; o.written += c.written; o.read += c.read; } };
     let optimizedIndex = 0, tailAt = 1000;
     for (const step of fixture.steps) {
       while (optimizedIndex < fixture.optimized.length && fixture.optimized[optimizedIndex]!.at <= step.at) {
         const update = fixture.optimized[optimizedIndex++]!.update;
         await room.webSocketMessage(host.socket, encodeFrame(FRAME.push, { batchId: `p2-${++seq}` }, new Uint8Array(update)).buffer as ArrayBuffer);
-        expect(decodeFrame(host.frames.at(-1)!)?.type).toBe(FRAME.ack); add("push");
+        expect(decodeFrame(host.frames.at(-1)!)?.type).toBe(FRAME.ack); await add("push");
       }
       if (step.at >= tailAt || step === fixture.steps.at(-1)) {
-        expect((await room.fetch(request("/tail", "PUT", JSON.stringify(step.tail)))).status).toBe(200); add("tail"); tailAt = step.at + 1000;
+        expect((await room.fetch(request("/tail", "PUT", JSON.stringify(step.tail)))).status).toBe(200); await add("tail"); tailAt = step.at + 1000;
       }
       if (step.checkpoint) {
         const checkpointRequest = new Request(`https://test/checkpoint?seqCovered=${seq}`, { method:"POST", headers:{[AUTH_USER_HEADER]:"p0-user","content-type":"application/octet-stream","x-chat2-frontier":""}, body:new Uint8Array(step.checkpoint) });
-        expect((await room.fetch(checkpointRequest)).status).toBe(200); add("checkpoint");
+        expect((await room.fetch(checkpointRequest)).status).toBe(200); await add("checkpoint");
       }
     }
     return { fixture:"text-240x120ms-cumulative-2s", watchers:1, batches:seq, textBytes:fixture.textBytes, setup, phases, totalWritten:total(phases), pushPayloadBytes:host.frames.filter(f=>decodeFrame(f)?.type===FRAME.ack).map(f=>f.byteLength).reduce((a,b)=>a+b,0) };

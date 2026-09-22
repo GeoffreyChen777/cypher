@@ -55,6 +55,20 @@ export class RegistryRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   private readonly notifications: Notifications;
   private alarmScheduling: Promise<void> = Promise.resolve();
+  /** device → push attribution. Rebuilt from `meta:pushOutcomes` on first use,
+   * accumulated in memory, flushed on socket close and on the alarm. No client
+   * reads it; losing an unflushed delta to hibernation costs only precision. */
+  private outcomes?: Map<string, PushOutcome>;
+  private outcomesDirty = false;
+  /** Mirror of `meta:backupDirty` (`undefined` = not yet read), so a batch
+   * arriving at an already-dirty room does not rewrite the same flag. */
+  private backupDirty?: boolean;
+  /** The alarm instant this instance last set, `null` after an explicit
+   * delete, `undefined` when unknown (fresh instance, or just after `alarm()`
+   * ran — a direct call leaves the stored alarm in place, so re-read it).
+   * `setAlarm` bills one row written and almost every call from a push path
+   * re-sets the instant already scheduled. */
+  private scheduledAlarm?: number | null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -184,8 +198,9 @@ export class RegistryRoom implements DurableObject {
         tombstones,
         connectedSockets: this.ctx.getWebSockets().length,
         // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>,
+        // incident tooling (SessionRoom's /stats pushOutcomes). Served from
+        // memory: flushed table state plus this instance's unflushed delta.
+        pushOutcomes: Object.fromEntries(this.loadOutcomes()) as Record<string, PushOutcome>,
         lastBackupSeq: Number(this.getMeta("backupSeq") ?? "0"),
         lastGcAt: Number(this.getMeta("lastGcAt") ?? "0")
       });
@@ -244,6 +259,10 @@ export class RegistryRoom implements DurableObject {
       this.notifications.clearPending();
       this.ctx.storage.sql.exec("DELETE FROM rows");
       this.ctx.storage.sql.exec("DELETE FROM meta");
+      // Memory mirrors of the meta rows just wiped.
+      this.outcomes = new Map();
+      this.outcomesDirty = false;
+      this.backupDirty = false;
       this.scheduleAlarm();
       for (const ws of this.ctx.getWebSockets()) {
         try {
@@ -296,11 +315,13 @@ export class RegistryRoom implements DurableObject {
   }
 
   async webSocketClose(): Promise<void> {
-    /* nothing buffered; rows are written synchronously on push */
+    // Rows are written synchronously on push; only the attribution counters
+    // are buffered, and this is their convergence point.
+    this.flushOutcomes();
   }
 
   async webSocketError(): Promise<void> {
-    /* ditto */
+    this.flushOutcomes();
   }
 
   private handleHello(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
@@ -415,6 +436,18 @@ export class RegistryRoom implements DurableObject {
     if (!state.ready || state.device === "") return;
     const at = typeof frame.at === "number" ? frame.at : Date.now();
     this.presence.set(state.device, at);
+    // Optional piggyback: the viewport's periodic activity refresh. This frame
+    // already flows every 15s and bills 20:1, so carrying the refresh here
+    // costs nothing, where the identical report over HTTP cost a full request.
+    // Transitions still use HTTP because only they need the reply. A malformed
+    // payload must not take the socket down — presence is liveness first.
+    if (frame.activity && typeof frame.activity === "object") {
+      try {
+        this.notifications.applyActivity(frame.activity as Record<string, unknown>);
+      } catch {
+        /* ignore: an invalid refresh simply lets the lease lapse */
+      }
+    }
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === ws) continue;
       const socketState = socket.deserializeAttachment() as SocketState | null;
@@ -423,23 +456,44 @@ export class RegistryRoom implements DurableObject {
     }
   }
 
+  /** Rebuild the counters from the table once per instance (one read). */
+  private loadOutcomes(): Map<string, PushOutcome> {
+    if (!this.outcomes) {
+      const stored = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
+      this.outcomes = new Map(Object.entries(stored));
+    }
+    return this.outcomes;
+  }
+
+  private flushOutcomes(): void {
+    if (!this.outcomesDirty || !this.outcomes) return;
+    this.setMeta("pushOutcomes", JSON.stringify(Object.fromEntries(this.outcomes)));
+    this.outcomesDirty = false;
+  }
+
   private recordPush(device: string, ok: boolean): void {
     const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(this.getMeta("pushOutcomes") ?? "{}") as Record<string, PushOutcome>;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+    const outcomes = this.loadOutcomes();
+    const entry = outcomes.get(key) ?? { ok: 0, rejected: 0, lastOkAt: 0 };
     if (ok) {
       entry.ok += 1;
       entry.lastOkAt = Date.now();
     } else {
       entry.rejected += 1;
     }
-    outcomes[key] = entry;
-    this.setMeta("pushOutcomes", JSON.stringify(outcomes));
+    outcomes.set(key, entry);
+    this.outcomesDirty = true;
   }
 
   private markBackupDirty(): void {
-    const alreadyDirty = this.getMeta("backupDirty") === "1";
-    this.setMeta("backupDirty", "1");
+    if (this.backupDirty === undefined) {
+      this.backupDirty = this.getMeta("backupDirty") === "1";
+    }
+    const alreadyDirty = this.backupDirty;
+    if (!alreadyDirty) {
+      this.setMeta("backupDirty", "1");
+      this.backupDirty = true;
+    }
     if (!Number(this.getMeta("backupDue") ?? "0")) {
       this.setMeta("backupDue", String(Date.now() + (alreadyDirty ? 0 : DAY_MS)));
     }
@@ -457,8 +511,21 @@ export class RegistryRoom implements DurableObject {
       const backupDue = this.getMeta("backupDirty") === "1"
         ? Number(this.getMeta("backupDue") ?? "0") : Infinity;
       const due = Math.min(notificationDue, backupDue);
-      if (Number.isFinite(due)) await this.ctx.storage.setAlarm(Math.max(Date.now() + 1000, due));
-      else await this.ctx.storage.deleteAlarm();
+      // Skip the write when the instant we want is already the one scheduled.
+      // `getAlarm` is a read; `setAlarm`/`deleteAlarm` each bill a row written.
+      if (this.scheduledAlarm === undefined) this.scheduledAlarm = await this.ctx.storage.getAlarm();
+      if (Number.isFinite(due)) {
+        // An overdue `due` still moves the clamped target every call, so this
+        // only ever elides a genuinely redundant re-set.
+        const target = Math.max(Date.now() + 1000, due);
+        if (this.scheduledAlarm !== target) {
+          await this.ctx.storage.setAlarm(target);
+          this.scheduledAlarm = target;
+        }
+      } else if (this.scheduledAlarm !== null) {
+        await this.ctx.storage.deleteAlarm();
+        this.scheduledAlarm = null;
+      }
     };
     this.alarmScheduling = this.alarmScheduling.then(schedule, schedule);
     this.ctx.waitUntil(this.alarmScheduling);
@@ -466,6 +533,11 @@ export class RegistryRoom implements DurableObject {
 
   /** Daily alarm: tombstone GC + nightly R2 backup of the full table. */
   async alarm(): Promise<void> {
+    // The runtime clears a delivered alarm before invoking this, but a direct
+    // call (tests, the tail of a previous alarm) does not — so drop to
+    // "unknown" and let the next schedule re-read rather than assume null.
+    this.scheduledAlarm = undefined;
+    this.flushOutcomes();
     await this.notifications.flush();
     if (this.getMeta("backupDirty") !== "1" || Number(this.getMeta("backupDue") ?? "0") > Date.now()) {
       this.scheduleAlarm();
@@ -504,6 +576,7 @@ export class RegistryRoom implements DurableObject {
     if (this.seq() === seq) {
       this.setMeta("backupDirty", "0");
       this.setMeta("backupDue", "0");
+      this.backupDirty = false;
     } else this.setMeta("backupDue", String(Date.now() + DAY_MS));
     this.scheduleAlarm();
     await this.alarmScheduling;

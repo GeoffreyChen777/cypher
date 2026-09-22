@@ -41,6 +41,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 pub mod uploads;
+pub mod viewport_activity;
 mod workspace_files;
 pub mod workspace_host;
 
@@ -147,7 +148,7 @@ mod development_auth_tests {
             org_id: Some("dev-org".into()),
             workos_client_id: None,
         };
-        config.edge_url = "https://cypher-edge-development.geoffreychen777.workers.dev".into();
+        config.edge_url = "http://127.0.0.1:27640".into();
         let secret = "a".repeat(64);
         config.edge_token = Some(secret.clone());
         config.workos_client_id = None;
@@ -722,6 +723,32 @@ impl Drop for EngineRuntime {
     }
 }
 
+/// Is this Edge URL a development endpoint, entitled to the locked `dev-user`
+/// identity and the preview relay?
+///
+/// The hosted development Worker was retired on 2026-09-22, so a loopback
+/// `wrangler dev` is the default answer. `CYPHER_DEV_EDGE_URL` may name a
+/// self-hosted staging endpoint instead; the client-side guard that keeps a
+/// development bearer away from production lives in `apps/cypher`
+/// (`development_edge_is_safe`), and this only has to agree with it.
+#[cfg(feature = "development")]
+fn is_development_edge(edge_url: &str) -> bool {
+    let trimmed = edge_url.trim_end_matches('/');
+    if cypher_env::var("DEV_EDGE_URL").is_some_and(|configured| {
+        configured
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(trimmed)
+    }) {
+        return true;
+    }
+    reqwest::Url::parse(edge_url).is_ok_and(|url| {
+        matches!(
+            url.host_str(),
+            Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
+        )
+    })
+}
+
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
         Self { config }
@@ -746,7 +773,7 @@ impl Engine {
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
             #[cfg(feature = "development")]
-            if config.edge_url == "https://cypher-edge-development.geoffreychen777.workers.dev" {
+            if is_development_edge(&config.edge_url) {
                 auth_config.dev_user_id = "dev-user".into();
                 auth_config.dev_access_token = Some(token.clone());
             }
@@ -881,16 +908,15 @@ impl Engine {
         let device_id = load_or_create_device_id(profile.device_root())?;
         #[allow(unused_mut)]
         let mut edge = edge_enabled.then(|| {
-            EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
+            EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone()))
+                .with_device(device_id)
+                .with_viewport_activity(auth.viewport_activity())
         });
         #[cfg(feature = "development")]
         if std::env::var("CYPHER_DEV_STREAM_PREVIEW").as_deref() == Ok("1") {
             let url = reqwest::Url::parse(&config.edge_url)?;
-            let allowed = config.edge_url
-                == "https://cypher-edge-development.geoffreychen777.workers.dev"
-                || matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
             anyhow::ensure!(
-                allowed
+                is_development_edge(&config.edge_url)
                     && matches!(url.scheme(), "http" | "https")
                     && profile.scope() == WorkspaceScope::Development
                     && config.edge_token.is_some(),

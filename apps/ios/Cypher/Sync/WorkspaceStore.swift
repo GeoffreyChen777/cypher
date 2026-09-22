@@ -35,11 +35,19 @@ final class WorkspaceStore {
     @ObservationIgnored private var presenceReceivedAt: [String: Int64] = [:]
     private let config: AppConfig
 
-    init(config: AppConfig, initialDocument: RegistryDoc? = nil) {
+    /// `pendingActivity` lets the registry room's presence beat carry the
+    /// viewport's periodic activity refresh. That beat already flows every 15s
+    /// and bills 20:1, so the refresh rides free; sent over HTTP it cost a full
+    /// billable request every time.
+    init(config: AppConfig, initialDocument: RegistryDoc? = nil,
+         pendingActivity: @escaping @MainActor @Sendable () -> ActivityReport? = { nil }) {
         self.config = config
         self.doc = initialDocument ?? RegistryDoc(deviceId: config.deviceId)
+        self.pendingActivity = pendingActivity
         project()
     }
+
+    private let pendingActivity: @MainActor @Sendable () -> ActivityReport?
 
     func start() {
         guard client == nil else { return }
@@ -69,7 +77,8 @@ final class WorkspaceStore {
                 self.project()
                 self.saver?.poke()
             },
-            event: { [weak self] event in self?.handle(event) }
+            event: { [weak self] event in self?.handle(event) },
+            pendingActivity: { [pendingActivity] in pendingActivity() }
         )
         let client = RegistryClient(device: config.deviceId,
                                     urlProvider: { [config] in await config.registrySocketURL() },

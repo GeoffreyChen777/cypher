@@ -108,6 +108,13 @@ enum ClientFrame<'a> {
     },
     Presence {
         at: i64,
+        /// The viewport's periodic activity refresh, piggybacked. This frame
+        /// already flows every 15s and bills 20:1, so carrying the refresh
+        /// here is free, where the identical report over HTTP cost a whole
+        /// billable request. Transitions still go over HTTP — only they need
+        /// the reply.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        activity: Option<&'a serde_json::Value>,
     },
     Probe,
 }
@@ -291,7 +298,7 @@ pub struct RegistryClient {
     nudge: mpsc::Sender<()>,
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
-    presence_out: mpsc::Sender<i64>,
+    presence_out: mpsc::Sender<(i64, Option<serde_json::Value>)>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     stats: Arc<Stats>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -447,9 +454,15 @@ impl RegistryClient {
         let _ = self.nudge.try_send(());
     }
 
-    /// Publish this device's presence beat (epoch ms).
+    /// Publish this device's presence beat (epoch ms), optionally carrying the
+    /// viewport's activity refresh so it costs no request of its own.
     pub fn set_presence(&self, at: i64) {
-        let _ = self.presence_out.try_send(at);
+        let _ = self.presence_out.try_send((at, None));
+    }
+
+    /// Presence beat plus a piggybacked activity refresh.
+    pub fn set_presence_with_activity(&self, at: i64, activity: serde_json::Value) {
+        let _ = self.presence_out.try_send((at, Some(activity)));
     }
 
     /// Remote devices' live presence beats (entries within the 30s TTL),
@@ -506,7 +519,7 @@ struct Actor {
     nudge_rx: mpsc::Receiver<()>,
     probe_rx: mpsc::Receiver<()>,
     redial_rx: mpsc::Receiver<()>,
-    presence_rx: mpsc::Receiver<i64>,
+    presence_rx: mpsc::Receiver<(i64, Option<serde_json::Value>)>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
     stats: Arc<Stats>,
     transport: Option<Arc<dyn RegistryTransport>>,
@@ -911,10 +924,13 @@ impl Actor {
                         return SessionEnd::Reconnect;
                     }
                 }
-                at = self.presence_rx.recv() => {
-                    if let Some(at) = at {
-                        let frame = serde_json::to_string(&ClientFrame::Presence { at })
-                            .expect("presence serializes");
+                beat = self.presence_rx.recv() => {
+                    if let Some((at, activity)) = beat {
+                        let frame = serde_json::to_string(&ClientFrame::Presence {
+                            at,
+                            activity: activity.as_ref(),
+                        })
+                        .expect("presence serializes");
                         if pipe.tx.send(frame).await.is_err() {
                             return SessionEnd::Reconnect;
                         }

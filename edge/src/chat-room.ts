@@ -78,6 +78,16 @@ export class ChatRoom implements DurableObject {
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
   private readonly quotas = new Map<string, QuotaWindow>();
+  /** device → push attribution. Rebuilt from `meta:pushOutcomes` on first use,
+   * accumulated in memory, flushed on socket close and on the daily alarm.
+   * Writing it per push cost one row every time for data no client reads; a
+   * hibernation eviction now loses counter precision, never sync state. */
+  private outcomes?: Map<string, PushOutcome>;
+  private outcomesDirty = false;
+  /** Mirror of `meta:backupDirty`. `undefined` = not yet read. The flag is
+   * cleared once a day by the alarm, so an unguarded write per push was
+   * "set 1 to 1" for every push after the first. */
+  private backupDirty?: boolean;
 
   constructor(ctx: DurableObjectState, env: Env, private readonly preview?: DevelopmentPreviewRelay) {
     this.ctx = ctx;
@@ -303,11 +313,10 @@ export class ChatRoom implements DurableObject {
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
         // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes).
-        pushOutcomes: JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-          string,
-          PushOutcome
-        >,
+        // incident tooling (SessionRoom's /stats pushOutcomes). Served from
+        // memory: the table holds everything flushed so far, the map holds
+        // that plus this instance's unflushed delta.
+        pushOutcomes: Object.fromEntries(this.loadOutcomes()) as Record<string, PushOutcome>,
         lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0")
       });
     }
@@ -321,6 +330,10 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM rows");
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
+      // Memory mirrors of the meta rows just wiped.
+      this.outcomes = new Map();
+      this.outcomesDirty = false;
+      this.backupDirty = false;
       this.preview?.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
@@ -377,12 +390,14 @@ export class ChatRoom implements DurableObject {
 
   async webSocketClose(ws: WebSocket): Promise<void> {
     this.preview?.left(ws);
-    /* nothing buffered; rows are written synchronously on push */
+    // Rows are written synchronously on push; only the attribution counters
+    // are buffered, and this is their convergence point.
+    this.flushOutcomes();
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.preview?.left(ws);
-    /* ditto */
+    this.flushOutcomes();
   }
 
   private handleHello(ws: WebSocket, state: SocketState, header: Record<string, unknown>): void {
@@ -525,26 +540,50 @@ export class ChatRoom implements DurableObject {
     return window.pushes <= QUOTA_MAX_PUSHES && window.bytes <= QUOTA_MAX_BYTES;
   }
 
+  /** Rebuild the counters from the table once per instance (one read). */
+  private loadOutcomes(): Map<string, PushOutcome> {
+    if (!this.outcomes) {
+      const stored = JSON.parse(getMeta(this.ctx.storage.sql, "pushOutcomes") ?? "{}") as Record<
+        string,
+        PushOutcome
+      >;
+      this.outcomes = new Map(Object.entries(stored));
+    }
+    return this.outcomes;
+  }
+
+  private flushOutcomes(): void {
+    if (!this.outcomesDirty || !this.outcomes) return;
+    setMeta(
+      this.ctx.storage.sql,
+      "pushOutcomes",
+      JSON.stringify(Object.fromEntries(this.outcomes))
+    );
+    this.outcomesDirty = false;
+  }
+
   private recordPush(device: string, ok: boolean): void {
-    const sql = this.ctx.storage.sql;
     const key = device === "" ? "(unknown)" : device;
-    const outcomes = JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
-      string,
-      PushOutcome
-    >;
-    const entry = outcomes[key] ?? { ok: 0, rejected: 0, lastOkAt: 0 };
+    const outcomes = this.loadOutcomes();
+    const entry = outcomes.get(key) ?? { ok: 0, rejected: 0, lastOkAt: 0 };
     if (ok) {
       entry.ok += 1;
       entry.lastOkAt = Date.now();
     } else {
       entry.rejected += 1;
     }
-    outcomes[key] = entry;
-    setMeta(sql, "pushOutcomes", JSON.stringify(outcomes));
+    outcomes.set(key, entry);
+    this.outcomesDirty = true;
   }
 
   private markBackupDirty(): void {
-    setMeta(this.ctx.storage.sql, "backupDirty", "1");
+    if (this.backupDirty === undefined) {
+      this.backupDirty = getMeta(this.ctx.storage.sql, "backupDirty") === "1";
+    }
+    if (!this.backupDirty) {
+      setMeta(this.ctx.storage.sql, "backupDirty", "1");
+      this.backupDirty = true;
+    }
     void this.ctx.storage.getAlarm().then((existing) => {
       if (existing === null) void this.ctx.storage.setAlarm(Date.now() + DAY_MS);
     });
@@ -554,7 +593,11 @@ export class ChatRoom implements DurableObject {
    * room can never replace the last good copy with a hollow one. */
   async alarm(): Promise<void> {
     const sql = this.ctx.storage.sql;
-    if (getMeta(sql, "backupDirty") !== "1") return; // idle: stop the chain
+    this.flushOutcomes(); // converge attribution even on an idle-backup pass
+    if (getMeta(sql, "backupDirty") !== "1") {
+      this.backupDirty = false;
+      return; // idle: stop the chain
+    }
     const head = headSeq(sql);
     if (head > Number(getMeta(sql, "backupSeq") ?? "0")) {
       const rows = [...rowsAfter(sql, 0)].map((row) => ({
@@ -578,6 +621,7 @@ export class ChatRoom implements DurableObject {
       setMeta(sql, "backupSeq", String(head));
     }
     setMeta(sql, "backupDirty", "0");
+    this.backupDirty = false;
   }
 }
 

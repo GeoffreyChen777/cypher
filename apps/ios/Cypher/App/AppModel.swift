@@ -324,7 +324,8 @@ final class AppModel {
                                tokens: tokens, devBearer: devBearer)
         self.config = config
         if !DevelopmentProfile.enabled { notifications.bind(config) }
-        let store = WorkspaceStore(config: config)
+        let store = WorkspaceStore(config: config,
+                                   pendingActivity: { [notifications] in notifications.pendingActivity })
         workspace = store
         store.start()
         phase = .ready

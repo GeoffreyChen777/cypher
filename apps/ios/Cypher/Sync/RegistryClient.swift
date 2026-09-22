@@ -58,6 +58,11 @@ actor RegistryClient {
         var resetPushable: @MainActor @Sendable () -> Void
         var acknowledge: @MainActor @Sendable (String, UInt64) -> Void
         var event: @MainActor @Sendable (RegistryEvent) -> Void
+        /// The viewport's periodic activity refresh, to ride the presence beat.
+        /// That beat already goes to this same room every 15s and bills 20:1,
+        /// so carrying the refresh is free; the identical report over HTTP cost
+        /// a whole billable request. `nil` = nothing to refresh.
+        var pendingActivity: @MainActor @Sendable () -> ActivityReport? = { nil }
     }
 
     private let device: String
@@ -332,7 +337,7 @@ actor RegistryClient {
 
     private func presenceTick(gen: Int) async {
         guard gen == generation, joined else { return }
-        await send(PresenceFrame(at: nowMs()))
+        await send(PresenceFrame(at: nowMs(), activity: await delegate.pendingActivity()))
     }
 
     /// Hello answers and probes run against hard deadlines; a long-quiet but
@@ -400,7 +405,7 @@ actor RegistryClient {
             // Anything pending (offline writes, reseeds) pushes now, and our
             // beat announces this device without waiting for the timer.
             await pushPending()
-            await send(PresenceFrame(at: nowMs()))
+            await send(PresenceFrame(at: nowMs(), activity: nil))
 
         case .rows(let seq, let rows):
             await delegate.event(.rows(seq: seq, rows: rows))
@@ -465,6 +470,45 @@ private struct PushFrame: Encodable {
 private struct PresenceFrame: Encodable {
     var t = "presence"
     var at: Int64
+    /// Omitted entirely when there is nothing to refresh, so an ordinary beat
+    /// stays the same frame it has always been.
+    var activity: ActivityReport?
+}
+
+/// One activity report, used for both transports so the two cannot drift.
+///
+/// `chatId` is encoded explicitly as null rather than omitted: the synthesized
+/// encoder would drop the key, and "no chat" must be stated, not implied.
+struct ActivityReport: Encodable, Sendable, Equatable {
+    var clientId: String
+    var sequence: Int
+    var platform = "ios"
+    var foreground: Bool
+    var interactionAgeMs: Int
+    var chatId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case clientId, sequence, platform, foreground, interactionAgeMs, chatId
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(clientId, forKey: .clientId)
+        try c.encode(sequence, forKey: .sequence)
+        try c.encode(platform, forKey: .platform)
+        try c.encode(foreground, forKey: .foreground)
+        try c.encode(interactionAgeMs, forKey: .interactionAgeMs)
+        if let chatId { try c.encode(chatId, forKey: .chatId) }
+        else { try c.encodeNil(forKey: .chatId) }
+    }
+
+    /// A transition — a different chat, or entering/leaving the foreground —
+    /// as opposed to a refresh of a state already reported. Only a transition
+    /// needs an HTTP request, because only it needs the reply.
+    func isTransition(from previous: ActivityReport?) -> Bool {
+        guard let previous else { return true }
+        return previous.foreground != foreground || previous.chatId != chatId
+    }
 }
 
 private struct ProbeFrame: Encodable {

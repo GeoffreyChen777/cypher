@@ -7,6 +7,8 @@ __pycache__/
 .DS_Store
 .env
 .env.local
+# wrangler's local secret file (dev access token) — never commit.
+.dev.vars
 node_modules
 .wrangler
 build/
