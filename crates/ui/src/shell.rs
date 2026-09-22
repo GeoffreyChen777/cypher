@@ -46,6 +46,7 @@ use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::providers::{ProviderIntent, ProvidersPage};
 use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
+use crate::settings::subagents::SubagentsPage;
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
     SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
@@ -211,6 +212,8 @@ pub enum SettingsSection {
     Agents,
     Commands,
     Mcp,
+    /// The `agents/*.md` profiles a chat can spawn as children.
+    Subagents,
     Appearance,
     Notifications,
     Shortcuts,
@@ -218,8 +221,13 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const DEVICE_SETTINGS: [Self; 4] =
-        [Self::Harnesses, Self::Providers, Self::Commands, Self::Mcp];
+    pub const DEVICE_SETTINGS: [Self; 5] = [
+        Self::Harnesses,
+        Self::Providers,
+        Self::Subagents,
+        Self::Commands,
+        Self::Mcp,
+    ];
     pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
     // Registry and archived conversations span the workspace, not the selected
     // host. Keep them separate from both host configuration and UI preferences.
@@ -230,10 +238,11 @@ impl SettingsSection {
         ("Workspace", &Self::WORKSPACE_SETTINGS),
     ];
 
-    pub const ALL: [SettingsSection; 9] = [
+    pub const ALL: [SettingsSection; 10] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Providers,
+        SettingsSection::Subagents,
         SettingsSection::Commands,
         SettingsSection::Mcp,
         SettingsSection::Appearance,
@@ -253,6 +262,7 @@ impl SettingsSection {
             SettingsSection::Agents => "Accounts",
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
+            SettingsSection::Subagents => "Subagents",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
@@ -1096,6 +1106,7 @@ pub struct Shell {
     commands_page: Option<Entity<CommandsPage>>,
     commands_sub: Option<Subscription>,
     mcp_page: Option<Entity<McpPage>>,
+    subagents_page: Option<Entity<SubagentsPage>>,
     setup_page: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
@@ -1509,6 +1520,7 @@ impl Shell {
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/commands") => Route::Settings(SettingsSection::Commands),
             Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
+            Some("settings/subagents") => Route::Settings(SettingsSection::Subagents),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
@@ -1596,6 +1608,7 @@ impl Shell {
             commands_page: None,
             commands_sub: None,
             mcp_page: None,
+            subagents_page: None,
             setup_page: None,
             setup_sub: None,
             setup_dismissed: false,
@@ -3228,6 +3241,11 @@ impl Shell {
         if section == SettingsSection::Mcp {
             self.mcp_page = None;
         }
+        // Same reason as the pages above: the profiles are files on the target
+        // device, so a fresh visit re-reads them.
+        if section == SettingsSection::Subagents {
+            self.subagents_page = None;
+        }
         self.dismiss_comment_popup(cx);
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
@@ -3376,6 +3394,17 @@ impl Shell {
                     self.mcp_page = Some(cx.new(|cx| McpPage::new(state, target, cx)));
                 }
                 match &self.mcp_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Subagents => {
+                if self.subagents_page.is_none() {
+                    let state = self.state.clone();
+                    let target = self.settings_target.clone();
+                    self.subagents_page = Some(cx.new(|cx| SubagentsPage::new(state, target, cx)));
+                }
+                match &self.subagents_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -4551,6 +4580,7 @@ impl Shell {
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,
+            SettingsSection::Subagents => icons::CHECKLIST,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
@@ -9998,6 +10028,7 @@ mod tests {
             [
                 SettingsSection::Harnesses,
                 SettingsSection::Providers,
+                SettingsSection::Subagents,
                 SettingsSection::Commands,
                 SettingsSection::Mcp,
             ]

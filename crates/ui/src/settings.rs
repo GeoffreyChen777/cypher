@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod providers;
 pub mod setup;
 pub mod shortcuts;
+pub mod subagents;
 pub mod titles;
 pub mod translation;
 pub mod web_search;

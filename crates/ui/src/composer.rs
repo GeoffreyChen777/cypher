@@ -76,6 +76,10 @@ pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
 pub const INPUT_LINE_HEIGHT: f32 = 22.75;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
+/// Content cap for a [`ComposerInput::settings_prompt_field`] — a settings
+/// field that holds a DOCUMENT (a subagent's system prompt) rather than a
+/// value. Deep enough to read a paragraph in place, then scrolls internally.
+pub const PROMPT_FIELD_MAX: f32 = 420.0;
 
 fn compact_height_for_line(line_height: f32) -> f32 {
     COMPACT_TOTAL_HEIGHT.max(COMPACT_TOTAL_HEIGHT + line_height - INPUT_LINE_HEIGHT)
@@ -1819,9 +1823,15 @@ enum EditKind {
 pub fn init(cx: &mut App) {
     // Settings fields share native text editing, not the chat's Tab/Escape
     // completions or Shift+Enter multiline behavior.
-    let ctx = Some("Composer || ProviderField");
+    let ctx = Some("Composer || ProviderField || PromptField");
+    // Enter SUBMITS a single-line value field, but a prompt field holds a
+    // document: there, both Enter and Shift+Enter insert a line break and
+    // saving is an explicit button.
+    let submit_ctx = Some("Composer || ProviderField");
     let mut bindings = vec![
-        KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("enter", Submit, submit_ctx),
+        KeyBinding::new("enter", Newline, Some("PromptField")),
+        KeyBinding::new("shift-enter", Newline, Some("PromptField")),
         KeyBinding::new("tab", MentionTab, Some("Composer")),
         KeyBinding::new("escape", MentionEscape, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
@@ -2167,6 +2177,19 @@ impl ComposerInput {
     ) -> Self {
         let mut input = Self::with_context(placeholder, "ProviderField", cx);
         input.secret = secret;
+        input.refresh_projection();
+        input
+    }
+
+    /// A settings field for multi-line prose (a subagent system prompt): the
+    /// same native editing as [`Self::settings_field`], but Enter inserts a
+    /// newline instead of submitting and the box grows to
+    /// [`PROMPT_FIELD_MAX`] before scrolling.
+    pub fn settings_prompt_field(
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut input = Self::with_context(placeholder, "PromptField", cx);
         input.refresh_projection();
         input
     }
@@ -3945,10 +3968,10 @@ impl Render for ComposerInput {
                 input: cx.entity(),
                 // Internal scrolling once content exceeds the 260px textarea
                 // box minus its `pt-4 pb-1` padding.
-                max_content_height: if self.key_context == "ProviderField" {
-                    INPUT_LINE_HEIGHT
-                } else {
-                    TEXTAREA_MAX - TEXTAREA_PAD_V
+                max_content_height: match self.key_context {
+                    "ProviderField" => INPUT_LINE_HEIGHT,
+                    "PromptField" => PROMPT_FIELD_MAX,
+                    _ => TEXTAREA_MAX - TEXTAREA_PAD_V,
                 },
             })
     }
