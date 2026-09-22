@@ -61,14 +61,13 @@ cp "$SPEC/provider-service.mjs" "$STAGE/"
 cp "$SPEC/package.json" "$SPEC/package-lock.json" "$SPEC/.npmrc" "$STAGE/npm/"
 npm ci --prefix "$STAGE/npm" --omit=dev --ignore-scripts
 
-# pi-claude-bridge derives its picker from pi-ai's built-in anthropic catalog,
-# which has no claude-opus-5-5 row while the Claude CLI it drives already serves
-# the model. Patch the installed source (the bridge runs from TypeScript) rather
-# than forking the pinned git dependency. Temporary: the injected row goes inert
-# the moment pi-ai ships its own. Missing anchors fail the build on purpose.
+# pi-claude-bridge serves only the models it has measured at 1M with the [1m]
+# id; claude-opus-5-5 is not measured yet, so it would run at 200K. Patch the
+# installed source (the bridge runs from TypeScript) rather than forking the
+# pinned git dependency. Temporary: the patch reports itself inert once upstream
+# lists the model. Missing anchors fail the build on purpose.
 node "$SPEC/patches/pi-claude-bridge-opus-5-5.mjs" \
-  "$STAGE/npm/node_modules/pi-claude-bridge" \
-  "$STAGE/npm/node_modules/@earendil-works/pi-coding-agent"
+  "$STAGE/npm/node_modules/pi-claude-bridge"
 
 # pi-agent-squad runs each subagent as its own hidden child process, so the
 # Subagents inspector had nothing to open. Route its runs through the engine's
