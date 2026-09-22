@@ -7061,9 +7061,14 @@ impl Composer {
                                 .map(|attachment| attachment.bytes().len() as u64)
                                 .sum();
                             let progress_for_state = progress.clone();
+                            let progress_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
                                 composer.state.update(cx, |state, cx| {
-                                    state.begin_upload_progress(total_bytes, progress_for_state);
+                                    state.begin_upload_progress(
+                                        &progress_chat_id,
+                                        total_bytes,
+                                        progress_for_state,
+                                    );
                                     cx.notify();
                                 });
                             })
@@ -7232,6 +7237,14 @@ impl Composer {
             .await;
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                // The send has left the streaming stage on EVERY path (sealed,
+                // failed mid-upload, or never uploaded at all) — retire the
+                // "Uploading n%" trailer so the working spinner goes back to
+                // narrating the run instead of a finished upload forever.
+                composer.state.update(cx, |s, cx| {
+                    s.end_upload_progress(&err_chat_id);
+                    cx.notify();
+                });
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
                     // draft, staged files back in the chat's stash.

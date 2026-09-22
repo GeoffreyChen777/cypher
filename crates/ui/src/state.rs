@@ -548,6 +548,10 @@ struct PendingSend {
 }
 
 struct UploadProgress {
+    /// The chat whose send owns this upload. The trailer is scoped to it so a
+    /// background upload never narrates itself under someone else's
+    /// conversation.
+    chat_id: String,
     total_bytes: u64,
     completed_bytes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1251,21 +1255,37 @@ impl AppState {
 
     pub fn begin_upload_progress(
         &mut self,
+        chat_id: &str,
         total_bytes: u64,
         completed_bytes: Arc<std::sync::atomic::AtomicU64>,
     ) {
         self.upload_progress = Some(UploadProgress {
+            chat_id: chat_id.to_string(),
             total_bytes: total_bytes.max(1),
             completed_bytes,
         });
     }
 
-    pub fn end_upload_progress(&mut self) {
-        self.upload_progress = None;
+    /// Retire the upload trailer when `chat_id`'s send leaves the streaming
+    /// stage — success or failure. Scoped by chat so a finishing send never
+    /// cancels a LATER upload that has already claimed the slot.
+    pub fn end_upload_progress(&mut self, chat_id: &str) {
+        if self
+            .upload_progress
+            .as_ref()
+            .is_some_and(|p| p.chat_id == chat_id)
+        {
+            self.upload_progress = None;
+        }
     }
 
-    pub fn upload_progress_percent(&self) -> Option<u8> {
+    /// Percent uploaded for `chat_id`'s in-flight send, or `None` when this
+    /// chat has no upload streaming right now.
+    pub fn upload_progress_percent(&self, chat_id: &str) -> Option<u8> {
         let progress = self.upload_progress.as_ref()?;
+        if progress.chat_id != chat_id {
+            return None;
+        }
         let completed = progress
             .completed_bytes
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -3234,6 +3254,38 @@ mod tests {
         assert!(s.send_pending("c", now), "m2's overlay must survive");
         s.end_pending_send("c", "m2");
         assert!(!s.send_pending("c", now));
+    }
+
+    #[test]
+    fn upload_progress_is_scoped_to_its_chat_and_ends_with_the_send() {
+        let mut s = AppState::new();
+        let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        s.begin_upload_progress("c", 200, done.clone());
+        assert_eq!(s.upload_progress_percent("c"), Some(0));
+        // The OTHER conversations keep their own spinner word — one chat's
+        // upload must never narrate itself under theirs.
+        assert_eq!(s.upload_progress_percent("other"), None);
+        done.store(100, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(s.upload_progress_percent("c"), Some(50));
+        // Sealed at 100%: the send retires the trailer instead of leaving
+        // "Uploading 100%" frozen under every chat forever.
+        done.store(200, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(s.upload_progress_percent("c"), Some(100));
+        s.end_upload_progress("c");
+        assert_eq!(s.upload_progress_percent("c"), None);
+    }
+
+    #[test]
+    fn upload_cleanup_only_ends_its_own_progress() {
+        let mut s = AppState::new();
+        let first = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let second = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        s.begin_upload_progress("a", 100, first);
+        s.begin_upload_progress("b", 100, second); // b's send claimed the slot
+        s.end_upload_progress("a"); // a's late cleanup must not steal it
+        assert_eq!(s.upload_progress_percent("b"), Some(0));
+        s.end_upload_progress("b");
+        assert_eq!(s.upload_progress_percent("b"), None);
     }
 
     #[test]
