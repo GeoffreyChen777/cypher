@@ -3197,16 +3197,7 @@ impl ComposerInput {
     // ---- utf16 mapping (IME) ----
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
+        utf16_to_byte_offset(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -3374,6 +3365,25 @@ impl Focusable for ComposerInput {
     }
 }
 
+/// UTF-16 offset → byte offset, measured *within `text`*.
+///
+/// The two are interchangeable only while the text stays in the BMP's
+/// single-byte range; every CJK character widens the byte offset by two past
+/// the UTF-16 one, so the string the offset was expressed against is the one it
+/// has to be resolved against.
+fn utf16_to_byte_offset(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
 impl EntityInputHandler for ComposerInput {
     fn text_for_range(
         &mut self,
@@ -3480,10 +3490,18 @@ impl EntityInputHandler for ComposerInput {
         } else {
             self.marked_range = Some(range.start..range.start + new_text.len());
         }
+        // `new_selected_range_utf16` is scoped to `new_text` (it comes straight
+        // from `setMarkedText:selectedRange:`), so it has to be measured inside
+        // `new_text` and only then rebased onto the document. Measuring it
+        // against the whole draft drifts the caret by however much wider the
+        // preceding text is in UTF-8 than in UTF-16 — which is exactly what a
+        // line mixing CJK with Latin does.
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+            .map(|r| {
+                range.start + utf16_to_byte_offset(new_text, r.start)
+                    ..range.start + utf16_to_byte_offset(new_text, r.end)
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.follow_cursor = true;
         self.reset_blink();
@@ -7067,9 +7085,14 @@ impl Composer {
                                 .map(|attachment| attachment.bytes().len() as u64)
                                 .sum();
                             let progress_for_state = progress.clone();
+                            let progress_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
                                 composer.state.update(cx, |state, cx| {
-                                    state.begin_upload_progress(total_bytes, progress_for_state);
+                                    state.begin_upload_progress(
+                                        &progress_chat_id,
+                                        total_bytes,
+                                        progress_for_state,
+                                    );
                                     cx.notify();
                                 });
                             })
@@ -7238,6 +7261,14 @@ impl Composer {
             .await;
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                // The send has left the streaming stage on EVERY path (sealed,
+                // failed mid-upload, or never uploaded at all) — retire the
+                // "Uploading n%" trailer so the working spinner goes back to
+                // narrating the run instead of a finished upload forever.
+                composer.state.update(cx, |s, cx| {
+                    s.end_upload_progress(&err_chat_id);
+                    cx.notify();
+                });
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
                     // draft, staged files back in the chat's stash.
@@ -8640,6 +8671,35 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn ime_selection_is_measured_inside_the_composing_text() {
+        // What `setMarkedText:selectedRange:` hands over: the caret sits at the
+        // end of "zai jia", the composition starts after "中文", and the draft
+        // reads "中文zai jia English sentence".
+        let draft = "中文zai jia English sentence";
+        let new_text = "zai jia";
+        let start = "中文".len();
+        let caret = start + utf16_to_byte_offset(new_text, 7);
+        assert_eq!(caret, start + new_text.len());
+        assert_eq!(&draft[..caret], "中文zai jia");
+        // Resolving the same offset against the whole draft is the drift: two
+        // CJK characters push it four bytes too far.
+        assert_eq!(start + utf16_to_byte_offset(draft, 7), caret + 4);
+    }
+
+    #[test]
+    fn utf16_offsets_resolve_per_string() {
+        assert_eq!(utf16_to_byte_offset("abc", 2), 2);
+        assert_eq!(utf16_to_byte_offset("中文abc", 2), 6);
+        assert_eq!(utf16_to_byte_offset("中文abc", 3), 7);
+        // Surrogate pairs count as two UTF-16 units and four bytes.
+        assert_eq!(utf16_to_byte_offset("😀a", 2), 4);
+        assert_eq!(utf16_to_byte_offset("😀a", 3), 5);
+        // Past the end clamps to the end rather than running off it.
+        assert_eq!(utf16_to_byte_offset("中文", 99), 6);
+        assert_eq!(utf16_to_byte_offset("", 3), 0);
+    }
 
     fn tooltip_target(range: Range<usize>, path: &str) -> MentionTooltipTarget {
         MentionTooltipTarget::File {
