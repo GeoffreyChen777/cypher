@@ -550,11 +550,20 @@ pub fn inline_code_text(theme: &Theme) -> Hsla {
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
     theme.inline_code_background.unwrap_or(theme.code_wash)
 }
-/// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
-/// x extends 4px past the glyphs, y insets 2px from the 22px line box).
+/// Rounded-wash geometry: small radius on a box sized from the font, not the
+/// line box (paint-only — x extends 4px past the glyphs; the height is
+/// `INLINE_CODE_HEIGHT_EM × font size`, centered like GPUI centers glyphs).
 pub const INLINE_CODE_RADIUS: f32 = 4.5;
 pub const INLINE_CODE_PAD_X: f32 = 4.0;
-pub const INLINE_CODE_INSET_Y: f32 = 2.0;
+/// 18px at the default 14px text — the original 22px line box inset by 2px.
+pub const INLINE_CODE_HEIGHT_EM: f32 = 18.0 / 14.0;
+
+/// Vertical inset that centers a font-sized wash in the line box, so a taller
+/// line height adds air around the pill instead of stretching it. Never
+/// negative: a line box tighter than the wash clips it to the line.
+fn inline_code_inset_y(line_height: f32, font_size: f32) -> f32 {
+    ((line_height - font_size * INLINE_CODE_HEIGHT_EM) / 2.0).max(0.0)
+}
 /// A thin visual margin between an inline-code pill and neighboring prose.
 const INLINE_CODE_MARGIN: &str = "\u{2009}";
 
@@ -812,8 +821,15 @@ fn flat_text_element(
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
+            let line_height = f32::from(layout.line_height());
             for range in &code_ranges {
-                for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
+                let inset_y = layout
+                    .line_layout_for_index(range.start)
+                    .map(|line| {
+                        inline_code_inset_y(line_height, f32::from(line.unwrapped_layout.font_size))
+                    })
+                    .unwrap_or(0.0);
+                for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, inset_y) {
                     window.paint_quad(quad(
                         rect,
                         px(INLINE_CODE_RADIUS),
@@ -2134,6 +2150,17 @@ mod tests {
             0.0,
             wrapped_position,
         )
+    }
+
+    #[test]
+    fn inline_code_wash_follows_font_size_not_line_height() {
+        // Default metrics keep the original 2px inset (18px wash).
+        assert!((inline_code_inset_y(22.0, 14.0) - 2.0).abs() < 1e-4);
+        // A taller line only adds inset; the wash height stays 18px.
+        let inset = inline_code_inset_y(32.0, 14.0);
+        assert!((32.0 - 2.0 * inset - 18.0).abs() < 1e-4);
+        // A tighter line than the wash never goes negative.
+        assert_eq!(inline_code_inset_y(16.0, 14.0), 0.0);
     }
 
     #[test]
