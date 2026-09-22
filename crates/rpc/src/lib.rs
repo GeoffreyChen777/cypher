@@ -45,6 +45,15 @@ pub mod methods {
     pub const SET_PI_PACKAGE_ENABLED: &str = "SetPiPackageEnabled";
     /// Download/install state for Cypher's isolated Pi runtime.
     pub const PI_RUNTIME_STATUS: &str = "PiRuntimeStatus";
+    /// Subagent profiles (`agents/*.md`) discoverable on the target device —
+    /// the extension's built-ins with the user's overrides applied.
+    pub const LIST_PI_SUBAGENTS: &str = "ListPiSubagents";
+    /// Create, edit or rename one user-level subagent profile; replies with
+    /// the device's fresh `ListPiSubagents` list.
+    pub const SAVE_PI_SUBAGENT: &str = "SavePiSubagent";
+    /// Remove a user-level profile. A built-in cannot be deleted — deleting an
+    /// override restores it.
+    pub const DELETE_PI_SUBAGENT: &str = "DeletePiSubagent";
     pub const GET_PI_TRANSLATION_SETTINGS: &str = "GetPiTranslationSettings";
     pub const SET_PI_TRANSLATION_SETTINGS: &str = "SetPiTranslationSettings";
     pub const DETECT_PI_LANGUAGE: &str = "DetectPiLanguage";

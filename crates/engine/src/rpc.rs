@@ -350,6 +350,25 @@ struct StartSubagentParams {
     child_index: u32,
 }
 
+/// `SavePiSubagent` params: the edited profile, plus the name the editor was
+/// opened on so a rename can retire the old file. Absent `originalName` means
+/// "create", which refuses to overwrite an existing profile.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavePiSubagentParams {
+    #[serde(flatten)]
+    agent: crate::pi_subagents::PiSubagent,
+    #[serde(default)]
+    original_name: Option<String>,
+}
+
+/// `DeletePiSubagent` params.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletePiSubagentParams {
+    name: String,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -1267,6 +1286,9 @@ fn forwardable(method: &str) -> bool {
             | methods::INSTALL_PI_PACKAGE
             | methods::SET_PI_PACKAGE_ENABLED
             | methods::PI_RUNTIME_STATUS
+            | methods::LIST_PI_SUBAGENTS
+            | methods::SAVE_PI_SUBAGENT
+            | methods::DELETE_PI_SUBAGENT
             | methods::GET_PI_TRANSLATION_SETTINGS
             | methods::SET_PI_TRANSLATION_SETTINGS
             | methods::DETECT_PI_LANGUAGE
@@ -1753,6 +1775,58 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
             }
             methods::PI_RUNTIME_STATUS => RpcReply::value(&self.pi_runtime()?.status()),
+            methods::LIST_PI_SUBAGENTS => {
+                let paths = self.pi_runtime()?.paths().clone();
+                let agents = crate::off_runtime(move || crate::pi_subagents::list(&paths))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&agents)
+            }
+            methods::SAVE_PI_SUBAGENT => {
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let request: SavePiSubagentParams = parse_params(body)?;
+                request.agent.validate().map_err(RpcError::BadParams)?;
+                let paths = self.pi_runtime()?.paths().clone();
+                let list_paths = paths.clone();
+                crate::off_runtime(move || {
+                    crate::pi_subagents::save(
+                        &paths,
+                        &request.agent,
+                        request.original_name.as_deref(),
+                    )
+                })
+                .await
+                .map_err(RpcError::Failed)?
+                .map_err(RpcError::BadParams)?;
+                // The next child spawn has to read the new profile, and the
+                // extension loads `agents/` once per process.
+                self.reload_pi_runtime().await;
+                let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&agents)
+            }
+            methods::DELETE_PI_SUBAGENT => {
+                let mut body = params;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("targetDeviceId");
+                }
+                let request: DeletePiSubagentParams = parse_params(body)?;
+                let paths = self.pi_runtime()?.paths().clone();
+                let list_paths = paths.clone();
+                crate::off_runtime(move || crate::pi_subagents::delete(&paths, &request.name))
+                    .await
+                    .map_err(RpcError::Failed)?
+                    .map_err(RpcError::BadParams)?;
+                self.reload_pi_runtime().await;
+                let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&agents)
+            }
             methods::GET_PI_TRANSLATION_SETTINGS => {
                 let paths = self.pi_runtime()?.paths().clone();
                 let settings = crate::off_runtime(move || crate::pi_translation::load(&paths))

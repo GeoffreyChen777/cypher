@@ -3537,7 +3537,7 @@ impl Transcript {
             let elapsed = turn_started
                 .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                 .unwrap_or(0);
-            (sending, elapsed, state.upload_progress_percent())
+            (sending, elapsed, state.upload_progress_percent(&chat_id))
         };
         let word = if let Some(percent) = upload_percent {
             format!("Uploading {percent}%")
