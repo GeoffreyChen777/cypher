@@ -71,6 +71,25 @@ pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high
 /// allowlist (`cypher_harness::pi::MESSAGING_TOOLS`).
 const MESSAGING_TOOLS: &str = "send_message, read_inbox, reply_message";
 
+/// Editor dialog width. Wider than [`popover::dialog_card`]'s 360px default
+/// because this form carries chip rows and a prompt document, not a field or
+/// two.
+const EDITOR_WIDTH: f32 = 560.0;
+/// Confirmation dialog width — a question, so the default reads better.
+const CONFIRM_WIDTH: f32 = 400.0;
+/// Chrome above and below the dialog's scrolling body (heading + footer +
+/// window margin), subtracted from the viewport to bound that scroll.
+const DIALOG_CHROME: f32 = 260.0;
+
+/// Dialog caption line (providers.rs `caption`).
+fn caption(theme: &Theme, text: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
 /// The open editor. `original` is the profile it was opened on: `None` means
 /// "create", and a changed name means "rename" — both decided by the engine,
 /// which owns the file moves.
@@ -132,6 +151,11 @@ pub struct SubagentsPage {
     load_task: Option<Task<()>>,
     editor: Option<Editor>,
     delete: Option<DeleteConfirmation>,
+    /// Focus owner of the open dialog, so Escape reaches [`Self::on_dialog_key`]
+    /// even when no field inside it holds focus.
+    dialog_focus: FocusHandle,
+    /// Where focus returns when a dialog closes.
+    page_focus: FocusHandle,
 }
 
 impl SubagentsPage {
@@ -170,9 +194,40 @@ impl SubagentsPage {
             load_task: None,
             editor: None,
             delete: None,
+            dialog_focus: cx.focus_handle(),
+            page_focus: cx.focus_handle(),
         };
         page.load(cx);
         page
+    }
+
+    /// Dismiss whichever dialog is open and hand focus back to the page.
+    fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.editor = None;
+        self.delete = None;
+        self.error = None;
+        self.page_focus.clone().focus(window, cx);
+        cx.notify();
+    }
+
+    /// Escape closes the model dropdown first, then the dialog — one layer per
+    /// press, so dismissing a menu never discards a half-filled form.
+    fn on_dialog_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key != "escape" {
+            return;
+        }
+        cx.stop_propagation();
+        if let Some(editor) = &mut self.editor
+            && editor.model_menu_open
+        {
+            editor.model_menu_open = false;
+            cx.notify();
+            return;
+        }
+        self.close_dialog(window, cx);
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -952,7 +1007,13 @@ impl SubagentsPage {
                 )
             }
         }
-        popover::anchored_menu_below("subagent-model-popup", menu.into_any_element(), None)
+        // In-dialog layer: the modal defers at priority 2, so the default
+        // priority-1 menu would draw UNDER the card that owns its trigger.
+        popover::anchored_menu_below_in_dialog(
+            "subagent-model-popup",
+            menu.into_any_element(),
+            None,
+        )
     }
 
     /// Label for the model trigger, preferring the catalog's human name.
@@ -966,12 +1027,18 @@ impl SubagentsPage {
         }
     }
 
-    fn render_editor(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_editor(
+        &mut self,
+        window: &mut Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let editor = self.editor.as_ref().unwrap();
         let busy = self.busy.is_some();
         let creating = editor.original.is_none();
         let from_builtin = editor.from_builtin;
         let read_only = editor.read_only;
+        let original_label = editor.original.clone();
         let label = editor.ticket.label.clone();
         let selected_tools = editor.tools.clone();
         let custom_tools = editor.custom_tools();
@@ -1249,21 +1316,18 @@ impl SubagentsPage {
                 .child(widgets::field_label(theme, "Read-only agent")),
         );
 
-        if from_builtin {
-            fields = fields.child(widgets::page_subtitle(
-                theme,
+        fields = fields.child(caption(
+            theme,
+            if from_builtin {
                 format!(
                     "Saving writes your own copy on {label}. The built-in stays untouched, and deleting your copy brings it back."
-                ),
-            ));
-        } else {
-            fields = fields.child(widgets::page_subtitle(
-                theme,
+                )
+            } else {
                 format!(
                     "Saved to {label}. Runs already in flight keep the profile they started with."
-                ),
-            ));
-        }
+                )
+            },
+        ));
 
         let save_label = if busy {
             "Saving…"
@@ -1272,61 +1336,111 @@ impl SubagentsPage {
         } else {
             "Save subagent"
         };
-        fields = fields.child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(8.0))
-                .child(
-                    widgets::ghost_action(theme)
-                        .id("subagent-cancel")
-                        .text_color(theme.text)
-                        .hover(|s| widgets::ghost_hover(theme, s))
-                        .child("Cancel")
-                        .when(busy, |el| el.opacity(0.45))
-                        .when(!busy, |el| {
-                            el.on_click(cx.listener(|page, _, _, cx| {
-                                page.editor = None;
-                                page.error = None;
-                                cx.notify();
-                            }))
-                        }),
-                )
-                .child(
-                    popover::btn_primary(theme, save_label)
-                        .id("subagent-save")
-                        .debug_selector(|| "subagent-save".into())
-                        .when(busy, |el| el.opacity(0.45))
-                        .when(!busy, |el| {
-                            el.on_click(cx.listener(|page, _, _, cx| page.save(cx)))
-                        }),
-                ),
-        );
+        let footer = div()
+            .px(px(20.0))
+            .py(px(14.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                widgets::ghost_action(theme)
+                    .id("subagent-cancel")
+                    .debug_selector(|| "subagent-cancel".into())
+                    .text_color(theme.text)
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .child("Cancel")
+                    .when(busy, |el| el.opacity(0.45))
+                    .when(!busy, |el| {
+                        el.on_click(
+                            cx.listener(|page, _, window, cx| page.close_dialog(window, cx)),
+                        )
+                    }),
+            )
+            .child(
+                popover::btn_primary(theme, save_label)
+                    .id("subagent-save")
+                    .debug_selector(|| "subagent-save".into())
+                    .when(busy, |el| el.opacity(0.45))
+                    .when(!busy, |el| {
+                        el.on_click(cx.listener(|page, _, _, cx| page.save(cx)))
+                    }),
+            );
 
-        widgets::section_card(theme)
-            .id("subagent-editor")
-            .mt(px(16.0))
-            .p(px(20.0))
-            .on_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && page.busy.is_none() {
-                    // Escape closes the model menu first, then the editor.
-                    let menu_open = page
-                        .editor
-                        .as_ref()
-                        .is_some_and(|editor| editor.model_menu_open);
-                    if menu_open {
-                        if let Some(editor) = &mut page.editor {
-                            editor.model_menu_open = false;
-                        }
-                    } else {
-                        page.editor = None;
-                        page.error = None;
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .child(fields)
+        let heading_title = match (creating, from_builtin, original_label.as_deref()) {
+            (true, _, _) => "New subagent".to_string(),
+            (false, true, Some(name)) => format!("Customize “{name}”"),
+            (false, _, Some(name)) => format!("Edit “{name}”"),
+            (false, _, None) => "Subagent".to_string(),
+        };
+        let heading_copy = if from_builtin {
+            "Saving keeps the built-in and adds your own copy of it."
+        } else {
+            "How this specialist runs when a chat spawns it."
+        };
+
+        popover::dialog_card(theme)
+            .id("subagent-editor-dialog")
+            .role(gpui::Role::Dialog)
+            .aria_label("Subagent settings")
+            .track_focus(&self.dialog_focus)
+            .key_context("SubagentDialog")
+            .tab_group()
+            .p_0()
+            .w(px(EDITOR_WIDTH))
+            .overflow_hidden()
+            .on_key_down(cx.listener(Self::on_dialog_key))
+            .child(
+                div()
+                    .px(px(20.0))
+                    .pt(px(20.0))
+                    .flex()
+                    .items_start()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(popover::dialog_title(theme, &heading_title).text_size(px(17.0)))
+                            .child(caption(theme, heading_copy).mt(px(6.0)))
+                            .child(caption(theme, format!("Target device: {label}")).mt(px(4.0))),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("subagent-dialog-close")
+                            .debug_selector(|| "subagent-dialog-close".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Close")
+                            .flex_none()
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .child(
+                                icons::icon(icons::CLOSE)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .when(busy, |el| el.opacity(0.45))
+                            .when(!busy, |el| {
+                                el.on_click(
+                                    cx.listener(|page, _, window, cx| {
+                                        page.close_dialog(window, cx)
+                                    }),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("subagent-editor-scroll")
+                    .max_h(px((f32::from(window.viewport_size().height)
+                        - DIALOG_CHROME)
+                        .max(160.0)))
+                    .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(16.0))
+                    .child(fields),
+            )
+            .child(footer)
             .into_any_element()
     }
 
@@ -1351,15 +1465,18 @@ impl SubagentsPage {
         } else {
             "The profile file is removed from this device. Chats that already spawned this subagent are unaffected; new spawns will not find it."
         };
-        widgets::section_card(theme)
+        popover::dialog_card(theme)
             .id("subagent-delete-confirmation")
-            .mt(px(16.0))
-            .p(px(20.0))
-            .flex()
-            .flex_col()
+            .role(gpui::Role::Dialog)
+            .aria_label("Confirm")
+            .track_focus(&self.dialog_focus)
+            .key_context("SubagentDialog")
+            .tab_group()
+            .w(px(CONFIRM_WIDTH))
             .gap(px(12.0))
-            .child(widgets::row_title(theme, title))
-            .child(widgets::page_subtitle(theme, body))
+            .on_key_down(cx.listener(Self::on_dialog_key))
+            .child(popover::dialog_title(theme, &title))
+            .child(popover::dialog_body(theme, body))
             .child(
                 div()
                     .flex()
@@ -1368,16 +1485,17 @@ impl SubagentsPage {
                     .child(
                         widgets::ghost_action(theme)
                             .id("subagent-delete-cancel")
+                            .debug_selector(|| "subagent-delete-cancel".into())
                             .text_color(theme.text)
                             .hover(|s| widgets::ghost_hover(theme, s))
                             .child("Cancel")
                             .when(busy, |el| el.opacity(0.45))
                             .when(!busy, |el| {
-                                el.on_click(cx.listener(|page, _, _, cx| {
-                                    page.delete = None;
-                                    page.error = None;
-                                    cx.notify();
-                                }))
+                                el.on_click(
+                                    cx.listener(|page, _, window, cx| {
+                                        page.close_dialog(window, cx)
+                                    }),
+                                )
                             }),
                     )
                     .child(
@@ -1403,7 +1521,7 @@ impl SubagentsPage {
 }
 
 impl Render for SubagentsPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let body: AnyElement = match self.agents.clone() {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
@@ -1454,11 +1572,24 @@ impl Render for SubagentsPage {
             && self.busy.is_none()
             && !editing
             && self.delete.is_none();
-        let editor = editing.then(|| self.render_editor(&theme, cx));
-        let delete = self
-            .delete
-            .as_ref()
-            .map(|_| self.render_delete_confirmation(&theme, cx));
+        // One focused surface at a time, over a scrim that swallows clicks —
+        // the provider dialogs' shape. Deliberately NOT dismissed by clicking
+        // the scrim: this form holds a prompt someone just typed.
+        let modal = if editing {
+            Some(popover::modal(
+                "subagent-editor-modal",
+                window.viewport_size(),
+                self.render_editor(window, &theme, cx),
+            ))
+        } else if self.delete.is_some() {
+            Some(popover::modal(
+                "subagent-delete-modal",
+                window.viewport_size(),
+                self.render_delete_confirmation(&theme, cx),
+            ))
+        } else {
+            None
+        };
         let count = match &self.agents {
             Loadable::Ready(agents) => Some(agents.len()),
             _ => None,
@@ -1466,8 +1597,11 @@ impl Render for SubagentsPage {
 
         div()
             .id("subagents-page")
+            .track_focus(&self.page_focus)
             .size_full()
+            .relative()
             .overflow_y_scroll()
+            .children(modal)
             .child(
                 widgets::page_column()
                     .child(
@@ -1509,8 +1643,6 @@ impl Render for SubagentsPage {
                             .clone()
                             .map(|notice| widgets::page_subtitle(&theme, notice)),
                     )
-                    .children(editor)
-                    .children(delete)
                     .child(body),
             )
     }
@@ -1761,6 +1893,53 @@ mod tests {
             written.contains("tools: read, grep, web_search, ask_user"),
             "{written}"
         );
+    }
+
+    /// Escape peels one layer per press: the model dropdown, then the dialog.
+    /// A form holding a freshly typed prompt must not vanish because someone
+    /// dismissed a menu.
+    #[gpui::test]
+    fn escape_closes_the_dropdown_before_the_dialog(cx: &mut gpui::TestAppContext) {
+        let (f, mut visual) = start(cx, "---\nname: reviewer\ndescription: Verify\n---\nBody\n");
+        let page = f.page.clone();
+        draw(&mut visual);
+
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.open_editor(None, w, cx));
+        });
+        page.update(cx, |page, cx| {
+            page.editor.as_mut().unwrap().model_menu_open = true;
+            cx.notify();
+        });
+
+        let escape = || gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("escape").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        // First press: only the dropdown closes.
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.on_dialog_key(&escape(), w, cx));
+        });
+        cx.update(|cx| {
+            let page = page.read(cx);
+            let editor = page.editor.as_ref().expect("dialog stays open");
+            assert!(!editor.model_menu_open, "dropdown closed");
+        });
+        // Second press: the dialog goes.
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.on_dialog_key(&escape(), w, cx));
+        });
+        cx.update(|cx| assert!(page.read(cx).editor.is_none()));
+
+        // The same key closes a confirmation outright.
+        let agent = cx.update(|cx| page.read(cx).agents.ready().unwrap()[0].clone());
+        page.update(cx, |page, cx| page.request_delete(&agent, cx));
+        cx.update(|cx| assert!(page.read(cx).delete.is_some()));
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.on_dialog_key(&escape(), w, cx));
+        });
+        cx.update(|cx| assert!(page.read(cx).delete.is_none()));
     }
 
     #[gpui::test]
