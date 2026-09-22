@@ -327,7 +327,12 @@ struct StartSubagentParams {
     /// `parent_chat_id`.
     run_id: String,
     agent: String,
+    /// Short task label for the child row (title / Inspector); ≤500 chars.
     task: String,
+    /// The FULL task text for the initial run when it outgrows `task` (the
+    /// extension accepts tasks up to 64 KiB). Absent: `task` is the prompt.
+    #[serde(default)]
+    prompt: Option<String>,
     mode: SubagentRunMode,
     /// Parent tool call id this run answers to (sync/async); persisted on the
     /// child row as the durable link to the parent's transcript part.
@@ -348,6 +353,10 @@ struct StartSubagentParams {
     message_root: String,
     #[serde(default)]
     child_index: u32,
+    /// Messaging address of this run when it is not the agent name; host-local
+    /// like the channel it names, so it is never written to the synced row.
+    #[serde(default)]
+    address: Option<String>,
 }
 
 /// `SavePiSubagent` params: the edited profile, plus the name the editor was
@@ -802,6 +811,13 @@ impl EngineRpc {
         if params.task.chars().count() > 500 {
             return Err(bad("task too long"));
         }
+        if params
+            .prompt
+            .as_deref()
+            .is_some_and(|p| p.len() > 64 * 1024)
+        {
+            return Err(bad("prompt too large"));
+        }
         if params.system_prompt.len() > 64 * 1024 {
             return Err(bad("systemPrompt too large"));
         }
@@ -822,6 +838,13 @@ impl EngineRpc {
             .is_some_and(|c| c.chars().count() > 1024)
         {
             return Err(bad("cwd too long"));
+        }
+        if params
+            .address
+            .as_deref()
+            .is_some_and(|a| a.chars().count() > 256 || a.trim().is_empty())
+        {
+            return Err(bad("address invalid"));
         }
         if params.child_index > 32 {
             return Err(bad("childIndex too large"));
@@ -910,16 +933,22 @@ impl EngineRpc {
                 &child_id,
                 &params.message_root,
                 params.child_index,
+                params.address.as_deref().filter(|a| *a != params.agent),
             );
 
             // The normal durable Run command (idempotent by child chat + message id;
             // the engine's own executor picks it up and dispatches through the pi
             // harness with the child's persisted profile + local messaging channel).
+            let task = params
+                .prompt
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .unwrap_or(&params.task);
             let request = RunRequest {
-                prompt: if params.task.trim().is_empty() {
+                prompt: if task.trim().is_empty() {
                     "Task: (no description provided)".to_string()
                 } else {
-                    format!("Task: {}", params.task)
+                    format!("Task: {task}")
                 },
                 harness: Some(HarnessId::Pi),
                 model: params.model.clone(),
@@ -1005,18 +1034,31 @@ impl EngineRpc {
             .sessions
             .subscribe(&chat_id, after_seq)
             .map_err(|e| RpcError::Failed(e.to_string()))?;
+        // The hub subscription opens before the journal is read, so an event
+        // published in between is in both; the live leg starts after the
+        // newest replayed seq (a doubled text delta would double the text).
+        let replayed_through = replay.last().map(|entry| entry.seq).unwrap_or(0);
         let replay = futures::stream::iter(replay.into_iter().map(|entry| {
             serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string()))
         }));
         // Journaled events are tagged JSON (`AgentEvent`'s own serde); the
-        // live hub carries the same shape.
-        let live = futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.ok().map(|entry| {
-                (
-                    serde_json::to_value(&entry.event).map_err(|e| RpcError::Failed(e.to_string())),
-                    rx,
-                )
-            })
+        // live hub carries the same shape. A lagging subscriber skips the
+        // deltas it missed rather than ending the stream: the parent extension
+        // treats an ended stream as a lost child, and the terminal `Done` it
+        // waits for is still ahead of it.
+        let live = futures::stream::unfold(rx, move |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(entry) if entry.seq != 0 && entry.seq <= replayed_through => continue,
+                    Ok(entry) => {
+                        let value = serde_json::to_value(&entry.event)
+                            .map_err(|e| RpcError::Failed(e.to_string()));
+                        return Some((value, rx));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
         });
         let stream = replay
             .chain(live)

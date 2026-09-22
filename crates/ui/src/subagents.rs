@@ -682,8 +682,10 @@ impl SubagentsPanel {
                     let id = format!("subagent-open-{}", entry.run_id);
                     let hover_id = id.clone();
                     let click_child = child_id.clone();
+                    let selector = id.clone();
                     let mut row_wrap = div()
                         .id(id)
+                        .debug_selector(move || selector.clone())
                         .cursor_pointer()
                         .on_hover(motion::hover_listener(&hover_id))
                         .bg(motion::hover_blend(
@@ -1033,6 +1035,7 @@ impl Render for SubagentsPanel {
 
         let mut trigger = div()
             .id("subagents-trigger")
+            .debug_selector(|| "subagents-trigger".into())
             .track_focus(&self.focus)
             .h(px(22.0))
             .min_w_0()
@@ -1984,5 +1987,121 @@ mod tests {
         assert_eq!(next_active_index(Some(1), 0, 3), Some(1));
         assert_eq!(next_active_index(None, 1, 0), None);
         assert_eq!(next_active_index(Some(0), 1, 0), None);
+    }
+
+    fn chat_row(id: &str, child: Option<cypher_proto::ChildChat>) -> cypher_proto::Chat {
+        cypher_proto::Chat {
+            pinned: false,
+            id: id.into(),
+            device_id: "dev".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            child,
+        }
+    }
+
+    /// A RUNNING child opens from the inspector: the row is live (its spinner
+    /// re-renders the popover between press and release), and the click still
+    /// lands and selects the child's session.
+    #[gpui::test]
+    fn clicking_a_running_child_row_opens_its_session(cx: &mut gpui::TestAppContext) {
+        let now = Utc::now();
+        let state = cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.new(|_| AppState::new())
+        });
+        cx.update(|cx| {
+            state.update(cx, |s, _| {
+                let child = cypher_proto::ChildChat {
+                    parent_chat_id: "parent".into(),
+                    parent_run_id: "run-1".into(),
+                    agent: "planner".into(),
+                    task: "Plan the panel".into(),
+                    mode: SubagentRunMode::Sync,
+                    tool_call_id: Some("planner-1".into()),
+                    profile: cypher_proto::ChildAgentProfile {
+                        system_prompt: "x".into(),
+                        tools: vec![],
+                        model: None,
+                        thinking: None,
+                    },
+                };
+                s.apply_chats(vec![
+                    chat_row("parent", None),
+                    chat_row("child-1", Some(child)),
+                ]);
+                let mut r = run(
+                    "run-1",
+                    Some("planner-1"),
+                    SubagentRunMode::Sync,
+                    SubagentRunStatus::Running,
+                    now.timestamp_millis(),
+                );
+                r.child_chat_id = Some("child-1".into());
+                s.apply_sessions(vec![
+                    cypher_proto::Session {
+                        chat_id: "parent".into(),
+                        device_id: "dev".into(),
+                        status: SessionStatus::Working,
+                        started_at: None,
+                        updated_at: now,
+                        subagents: vec![r],
+                    },
+                    cypher_proto::Session {
+                        chat_id: "child-1".into(),
+                        device_id: "dev".into(),
+                        status: SessionStatus::Working,
+                        started_at: None,
+                        updated_at: now,
+                        subagents: vec![],
+                    },
+                ]);
+                s.selected_chat = Some("parent".into());
+                s.transcript = vec![streaming_entry(vec![subagent_part(
+                    "planner-1",
+                    false,
+                    false,
+                    false,
+                )])];
+            });
+        });
+        let window = cx.open_window(gpui::size(px(1100.0), px(800.0)), |_, cx| {
+            SubagentsPanel::new(state.clone(), cx)
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|w, cx| {
+                w.refresh();
+                w.draw(cx).clear();
+            });
+        };
+        draw(&mut visual);
+        let trigger = visual.debug_bounds("subagents-trigger").expect("trigger");
+        visual.simulate_click(trigger.center(), Default::default());
+        draw(&mut visual);
+        let row = visual.debug_bounds("subagent-open-run-1").expect("row");
+        visual.simulate_mouse_move(row.center(), None, Default::default());
+        draw(&mut visual);
+        visual.simulate_mouse_down(row.center(), gpui::MouseButton::Left, Default::default());
+        for _ in 0..3 {
+            visual.update(|_, cx| state.update(cx, |_, cx| cx.notify()));
+            draw(&mut visual);
+        }
+        visual.simulate_mouse_up(row.center(), gpui::MouseButton::Left, Default::default());
+        draw(&mut visual);
+        let selected = visual.update(|_, cx| state.read(cx).selected_chat.clone());
+        assert_eq!(selected.as_deref(), Some("child-1"));
     }
 }

@@ -221,6 +221,16 @@ have no `RunControls`); an unbridged harness clears inherited bridge addresses.
 The adapter ships inside the Engine binary and resolves `ws` from the isolated
 Runtime's locked dependency tree, never from global npm.
 
+`CYPHER_SUBAGENT_BRIDGE` rides with the socket and names the bridge protocol
+(`2`: the `prompt`/`address` start fields and a lag-tolerant, de-duplicated
+event stream). The bridge's only caller is the Runtime's build-time patch of
+`pi-agent-squad` (`dist/pi-runtime/patches/pi-agent-squad-cypher-host.mjs`,
+Runtime 0.86.0.5+): upstream spawns every subagent as its own hidden child
+process, which left the inspector row with no session to open. The patch hosts
+sync and background runs as child chats when it reads a version it knows, and
+keeps the upstream process spawn when it does not (an older engine), when the
+engine refuses the start, or when the parent is not a durable local chat.
+
 - **`StartSubagent`** (unary, strict bounded params): validates the parent exists
   and is hosted locally, idempotently creates the same-device child chat
   (deterministic lookup by `parentChatId`+`runId`), inherits the parent's
@@ -229,8 +239,12 @@ Runtime's locked dependency tree, never from global npm.
   queues the normal durable Run command, then replies `{childChatId}`. An
   idempotent retry of `(parentChatId, runId)` returns the existing child's id
   WITHOUT queueing a second Run (exactly one run command per child). Optional
-  `model`/`thinking` are length-bounded. A queue failure rolls the row back —
-  no bogus navigable chat.
+  `model`/`thinking` are length-bounded. `task` is the row's ≤500-char label;
+  a longer task travels whole as `prompt` (≤64 KiB) and is what the child is
+  asked. `address` is the run's messaging identity when the extension minted
+  one (`planner#1a2b3c4d`); like the channel it names it stays host-local, so
+  the row keeps the agent name. A queue failure rolls the row back — no bogus
+  navigable chat.
 - **`WatchAgentEvents`** (stream): replayable per-chat agent events (journal
   replay after `afterSeq`, then live) — the parent extension observes the
   child's terminal `done`/result.

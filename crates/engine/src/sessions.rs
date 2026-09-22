@@ -160,6 +160,11 @@ struct Inner {
 pub struct LocalChildChannel {
     pub channel_root: String,
     pub child_index: u32,
+    /// The run's messaging address when it differs from the agent name (the
+    /// extension mints `planner#1a2b3c4d` for a second concurrent planner).
+    /// The channel directory and every routed message key on it, while the
+    /// synced row keeps the agent name the Inspector shows.
+    pub address: Option<String>,
 }
 
 /// Cap on live local child-channel entries (bounded memory; a hostile flood
@@ -385,7 +390,13 @@ impl SessionsEngine {
 
     /// Register a child chat's host-local messaging channel (initial run
     /// only). Never persisted/synced — see [`Inner::child_channels`].
-    pub fn register_child_channel(&self, chat_id: &str, channel_root: &str, child_index: u32) {
+    pub fn register_child_channel(
+        &self,
+        chat_id: &str,
+        channel_root: &str,
+        child_index: u32,
+        address: Option<&str>,
+    ) {
         let mut map = lock(&self.inner.child_channels);
         if map.len() >= MAX_LOCAL_CHILD_CHANNELS {
             // Bounded cap: evict an arbitrary stale entry (the channel is
@@ -400,6 +411,7 @@ impl SessionsEngine {
             LocalChildChannel {
                 channel_root: channel_root.to_string(),
                 child_index,
+                address: address.map(str::to_owned),
             },
         );
     }
@@ -1331,15 +1343,19 @@ impl Inner {
             && let Some(child) = chat.child
         {
             let channel = lock(&self.child_channels).remove(chat_id);
+            let (channel_root, child_index, address) = match channel {
+                Some(c) => (Some(c.channel_root), c.child_index, c.address),
+                None => (None, 0, None),
+            };
             ctx.child = Some(ChildRunEnv {
                 system_prompt: child.profile.system_prompt,
                 tools: child.profile.tools,
                 model: child.profile.model,
                 thinking: child.profile.thinking,
-                channel_root: channel.as_ref().map(|c| c.channel_root.clone()),
+                channel_root,
                 run_id: child.parent_run_id,
-                agent: child.agent,
-                child_index: channel.map(|c| c.child_index).unwrap_or(0),
+                agent: address.unwrap_or(child.agent),
+                child_index,
             });
         }
         ctx

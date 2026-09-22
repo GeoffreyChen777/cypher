@@ -218,6 +218,84 @@ async fn start_subagent_creates_child_and_queues_run() {
     rig.core.shutdown().await;
 }
 
+/// The row's `task` is a 500-char label, but a subagent task can run to 64
+/// KiB: the full text travels as `prompt` and is what the child is asked to
+/// do. An oversized prompt is refused before any row exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_subagent_runs_the_full_prompt_behind_a_short_label() {
+    let rig = assemble();
+    rig.core
+        .workspace
+        .create_chat(PARENT, None, Some(rig.core.device_id.as_str()), None, None)
+        .expect("parent chat");
+
+    let full = format!("Plan the panel. {}", "Detail. ".repeat(200));
+    let mut params = start_params("run-long", PARENT);
+    params["prompt"] = serde_json::Value::String(full.clone());
+    let reply = rig
+        .core
+        .rpc_service()
+        .handle(methods::START_SUBAGENT, params)
+        .await
+        .expect("start ok");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    let child_id = value["childChatId"].as_str().expect("child id").to_owned();
+    let meta = rig
+        .core
+        .workspace
+        .chat(&child_id)
+        .expect("chat read")
+        .and_then(|c| c.child)
+        .expect("child metadata");
+    assert_eq!(meta.task, "Plan the panel", "the row keeps the short label");
+
+    let expected = format!("Task: {full}");
+    wait_for(
+        || {
+            rig.core
+                .doc_host
+                .open(&child_id)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .is_some_and(|entries| {
+                    entries.iter().any(|e| {
+                        e.role == cypher_doc::MessageRole::User
+                            && e.parts.iter().any(|p| {
+                                matches!(p, cypher_doc::MessagePart::Text { text, .. } if *text == expected)
+                            })
+                    })
+                })
+        },
+        "child run to be asked the full prompt",
+    );
+
+    let mut oversized = start_params("run-huge", PARENT);
+    oversized["prompt"] = serde_json::Value::String("x".repeat(64 * 1024 + 1));
+    let err = rig
+        .core
+        .rpc_service()
+        .handle(methods::START_SUBAGENT, oversized)
+        .await
+        .err()
+        .expect("an oversized prompt is refused");
+    assert!(matches!(err, RpcError::BadParams(_)), "{err:?}");
+    assert!(
+        rig.core
+            .workspace
+            .child_chats(PARENT)
+            .expect("children read")
+            .iter()
+            .all(|c| c
+                .child
+                .as_ref()
+                .is_some_and(|m| m.parent_run_id != "run-huge")),
+        "no row for a refused start"
+    );
+    rig.core.shutdown().await;
+}
+
 /// A `cwd` override belongs on the ROW, not just on the initial run: the child's
 /// later turns rebuild their request from the row, so persisting only the run's
 /// cwd would silently drop the child back into the parent's folder on turn two.
@@ -713,6 +791,52 @@ async fn child_runs_receive_child_env_via_host_context() {
     assert!(
         core.sessions.take_child_channel(&child_id).is_none(),
         "the local channel is consumed by the initial run"
+    );
+    core.shutdown().await;
+}
+
+/// A second concurrent planner messages as `planner#1a2b3c4d`: the initial
+/// run's channel identity is that address, while the synced row (and so the
+/// Inspector) keeps the agent name. The address is host-local like the channel
+/// it names — it never reaches the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
+    let host = Arc::new(Mutex::new(None));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(CapturingHarness { host: host.clone() }));
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
+        .expect("parent chat");
+    let mut params = start_params("run-2", PARENT);
+    params["address"] = serde_json::Value::String("planner#1a2b3c4d".into());
+    let reply = core
+        .rpc_service()
+        .handle(methods::START_SUBAGENT, params)
+        .await
+        .expect("start ok");
+    let RpcReply::Value(value) = reply else {
+        panic!("StartSubagent must be unary");
+    };
+    let child_id = value["childChatId"].as_str().expect("child id").to_owned();
+    wait_for(
+        || host.lock().unwrap().is_some(),
+        "child run to reach the harness",
+    );
+    let child_env = host
+        .lock()
+        .unwrap()
+        .clone()
+        .and_then(|h| h.child)
+        .expect("child env");
+    assert_eq!(child_env.agent, "planner#1a2b3c4d");
+    let row = core.workspace.chat(&child_id).expect("read").expect("row");
+    assert_eq!(row.child.expect("metadata").agent, "planner");
+    assert!(
+        !serde_json::to_string(&row.title).unwrap().contains('#'),
+        "the title names the agent, not the address"
     );
     core.shutdown().await;
 }
