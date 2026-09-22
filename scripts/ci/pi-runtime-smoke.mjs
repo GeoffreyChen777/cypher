@@ -125,6 +125,12 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               assert.equal(responses.get("state").isStreaming, false);
               assert.ok(responses.get("models").models.some(model =>
                 model.provider === "cypher-ci" && model.id === "gpt-4o"));
+              // Guards dist/pi-runtime/patches/pi-claude-bridge-opus-5-5.mjs. The
+              // bridge registers its catalog unconditionally, so an unapplied
+              // patch would otherwise ship a runtime quietly missing the model.
+              assert.ok(responses.get("models").models.some(model =>
+                model.provider === "claude-bridge" && model.id === "claude-opus-5-5"),
+                "claude-bridge must offer claude-opus-5-5");
               const names = new Set(responses.get("commands").commands.map(command => command.name));
               for (const name of ["provider", "login", "logout", "newapi-provider-add"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);

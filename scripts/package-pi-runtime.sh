@@ -61,6 +61,15 @@ cp "$SPEC/provider-service.mjs" "$STAGE/"
 cp "$SPEC/package.json" "$SPEC/package-lock.json" "$SPEC/.npmrc" "$STAGE/npm/"
 npm ci --prefix "$STAGE/npm" --omit=dev --ignore-scripts
 
+# pi-claude-bridge derives its picker from pi-ai's built-in anthropic catalog,
+# which has no claude-opus-5-5 row while the Claude CLI it drives already serves
+# the model. Patch the installed source (the bridge runs from TypeScript) rather
+# than forking the pinned git dependency. Temporary: the injected row goes inert
+# the moment pi-ai ships its own. Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-opus-5-5.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge" \
+  "$STAGE/npm/node_modules/@earendil-works/pi-coding-agent"
+
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
 keep="${ESBUILD#@esbuild/}"
