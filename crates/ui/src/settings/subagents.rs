@@ -14,13 +14,32 @@
 //!   says which of the two is about to happen.
 //! - `description` is not decoration: a profile without one is silently
 //!   ignored by the extension. The editor treats it as required.
+//!
+//! **Each field is edited as its own type, not as free text**, because every
+//! one of these values is a string the extension matches EXACTLY and a typo
+//! produces a subagent that launches wrong rather than an error:
+//!
+//! - **model** is picked from the target device's own `ListModels` catalog,
+//!   whose `id` is already the `provider/model` string the file stores.
+//! - **thinking** is Pi's fixed `--thinking` ladder ([`THINKING_LEVELS`]),
+//!   further narrowed by the chosen model — a model that does not support
+//!   reasoning has no levels to offer.
+//! - **tools** are toggles over Pi's built-in set ([`BUILTIN_TOOLS`], its
+//!   `allToolNames`). Extension and MCP tools stay free-form additions
+//!   because Pi has no RPC that enumerates them — `get_available_models` and
+//!   `get_available_thinking_levels` exist, a tools equivalent does not.
+//!
+//! A value already in a file that is not in the catalog is never silently
+//! dropped: it stays selected and is flagged, so opening an agent whose
+//! provider is offline and pressing Save cannot quietly retarget it.
 
 use gpui::{
-    Context, Entity, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Subscription,
-    Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 
 use cypher_engine::pi_subagents::PiSubagent;
+use cypher_proto::Model;
 use cypher_rpc::methods;
 
 use super::device_target::{DeviceTarget, DeviceTicket};
@@ -31,6 +50,27 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+/// Pi's built-in tools (`core/tools/index.js` `allToolNames`). Anything else a
+/// profile lists — an extension or MCP tool — is kept as a custom chip.
+pub const BUILTIN_TOOLS: [&str; 8] = [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write",
+    "bash",
+    "powershell",
+];
+
+/// Pi's `--thinking` ladder. `off` is Pi's own extra tier and has no
+/// `ReasoningLevel` equivalent, so it is spelled here rather than derived.
+pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The messaging trio the harness appends to every child regardless of the
+/// allowlist (`cypher_harness::pi::MESSAGING_TOOLS`).
+const MESSAGING_TOOLS: &str = "send_message, read_inbox, reply_message";
+
 /// The open editor. `original` is the profile it was opened on: `None` means
 /// "create", and a changed name means "rename" — both decided by the engine,
 /// which owns the file moves.
@@ -40,13 +80,33 @@ struct Editor {
     from_builtin: bool,
     ticket: DeviceTicket,
     read_only: bool,
+    /// `None` = inherit the parent chat's model.
+    model: Option<String>,
+    /// `None` = inherit; otherwise one of [`THINKING_LEVELS`], or a value the
+    /// file already carried.
+    thinking: Option<String>,
+    /// Empty = every tool.
+    tools: Vec<String>,
     name: Entity<ComposerInput>,
     description: Entity<ComposerInput>,
-    model: Entity<ComposerInput>,
-    thinking: Entity<ComposerInput>,
-    tools: Entity<ComposerInput>,
     prompt: Entity<ComposerInput>,
+    /// Free-form entry for an extension/MCP tool Pi cannot enumerate.
+    tool_entry: Entity<ComposerInput>,
+    model_menu_open: bool,
+    model_search: Entity<ComposerInput>,
+    model_trigger: FocusHandle,
     _events: Vec<Subscription>,
+}
+
+impl Editor {
+    /// Tools the profile lists that are not Pi built-ins.
+    fn custom_tools(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|tool| !BUILTIN_TOOLS.contains(&tool.as_str()))
+            .cloned()
+            .collect()
+    }
 }
 
 struct DeleteConfirmation {
@@ -63,6 +123,9 @@ pub struct SubagentsPage {
     generation: u64,
     _target_observer: Subscription,
     agents: Loadable<Vec<PiSubagent>>,
+    /// The target device's Pi catalog, for the model picker. A failure here
+    /// never blocks editing — a stored model id stands on its own.
+    models: Loadable<Vec<Model>>,
     error: Option<String>,
     notice: Option<String>,
     busy: Option<String>,
@@ -84,6 +147,7 @@ impl SubagentsPage {
                 page.generation = generation;
                 page.load_task = None;
                 page.agents = Loadable::Idle;
+                page.models = Loadable::Idle;
                 page.busy = None;
                 page.error = None;
                 page.notice = None;
@@ -99,6 +163,7 @@ impl SubagentsPage {
             generation,
             _target_observer: observer,
             agents: Loadable::Idle,
+            models: Loadable::Idle,
             error: None,
             notice: None,
             busy: None,
@@ -126,6 +191,7 @@ impl SubagentsPage {
             return;
         };
         self.agents = Loadable::Loading;
+        self.models = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -148,6 +214,40 @@ impl SubagentsPage {
                 cx.notify();
             })
             .ok();
+
+            // The catalog is a convenience for the picker, fetched second so a
+            // slow or broken model probe never delays the profile list.
+            let models = engine
+                .client()
+                .call(
+                    methods::LIST_MODELS,
+                    ticket.params(serde_json::json!({"harness":"pi"})),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                if !page.target.read(cx).matches(&ticket) {
+                    return;
+                }
+                page.models = match models {
+                    Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
+                        Ok(mut models) => {
+                            models.sort_by(|a, b| {
+                                a.label
+                                    .to_lowercase()
+                                    .cmp(&b.label.to_lowercase())
+                                    .then(a.id.cmp(&b.id))
+                            });
+                            Loadable::Ready(models)
+                        }
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => {
+                        Loadable::Error(format!("Couldn't load this device's Pi models: {err}"))
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
@@ -161,6 +261,24 @@ impl SubagentsPage {
             )
         } else {
             format!("{}: {error}", ticket.label)
+        }
+    }
+
+    /// The catalog entry for an id, when the device knows it.
+    fn model_entry(&self, id: &str) -> Option<&Model> {
+        self.models
+            .ready()
+            .and_then(|models| models.iter().find(|model| model.id == id))
+    }
+
+    /// Levels the editor may offer. A model the device knows decides: no
+    /// reasoning support means no ladder at all, so the UI stops offering a
+    /// setting Pi would ignore. An unknown or inherited model keeps the full
+    /// ladder rather than guessing.
+    fn available_levels(&self, editor: &Editor) -> Vec<&'static str> {
+        match editor.model.as_deref().and_then(|id| self.model_entry(id)) {
+            Some(model) if model.reasoning_levels.is_empty() => Vec::new(),
+            _ => THINKING_LEVELS.to_vec(),
         }
     }
 
@@ -195,25 +313,8 @@ impl SubagentsPage {
             existing.map(|a| a.description.as_str()).unwrap_or_default(),
             cx,
         );
-        let model = field(
-            "Inherit the parent's model",
-            existing
-                .and_then(|a| a.model.as_deref())
-                .unwrap_or_default(),
-            cx,
-        );
-        let thinking = field(
-            "Inherit — e.g. low, high, xhigh, max",
-            existing
-                .and_then(|a| a.thinking.as_deref())
-                .unwrap_or_default(),
-            cx,
-        );
-        let tools = field(
-            "All tools — or a list like read, grep, find, ls",
-            &existing.map(|a| a.tools.join(", ")).unwrap_or_default(),
-            cx,
-        );
+        let tool_entry = field("Add an extension or MCP tool…", "", cx);
+        let model_search = field("Search models…", "", cx);
         let prompt = cx.new(|cx| {
             let mut input = ComposerInput::settings_prompt_field(
                 "The system prompt appended for this agent's runs.",
@@ -228,7 +329,7 @@ impl SubagentsPage {
         });
 
         let mut events = Vec::new();
-        for input in [&name, &description, &model, &thinking, &tools, &prompt] {
+        for input in [&name, &description, &prompt] {
             events.push(
                 cx.subscribe(input, |page: &mut Self, _, event, cx| match event {
                     // Enter in a value field saves; the prompt field binds
@@ -242,6 +343,22 @@ impl SubagentsPage {
                 }),
             );
         }
+        // Enter in the tool box adds that tool instead of saving the form.
+        events.push(
+            cx.subscribe(&tool_entry, |page: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Submitted => page.add_custom_tool(cx),
+                ComposerInputEvent::Edited => {
+                    page.error = None;
+                    cx.notify();
+                }
+                _ => {}
+            }),
+        );
+        events.push(cx.subscribe(&model_search, |_: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        }));
 
         self.notice = None;
         self.error = None;
@@ -251,12 +368,16 @@ impl SubagentsPage {
             from_builtin: existing.is_some_and(|a| a.builtin),
             ticket,
             read_only: existing.is_some_and(|a| a.read_only),
+            model: existing.and_then(|a| a.model.clone()),
+            thinking: existing.and_then(|a| a.thinking.clone()),
+            tools: existing.map(|a| a.tools.clone()).unwrap_or_default(),
             name,
             description,
-            model,
-            thinking,
-            tools,
             prompt,
+            tool_entry,
+            model_menu_open: false,
+            model_search,
+            model_trigger: cx.focus_handle(),
             _events: events,
         });
         if let Some(editor) = &self.editor {
@@ -270,32 +391,97 @@ impl SubagentsPage {
         cx.notify();
     }
 
-    /// Build the save request from the open editor.
-    fn save_request(&self, cx: &Context<Self>) -> Option<serde_json::Value> {
-        let editor = self.editor.as_ref()?;
-        let text = |input: &Entity<ComposerInput>| input.read(cx).text().trim().to_string();
-        let optional = |input: &Entity<ComposerInput>| {
-            let value = text(input);
-            (!value.is_empty()).then_some(value)
+    fn toggle_tool(&mut self, tool: String, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        if let Some(editor) = &mut self.editor {
+            if let Some(index) = editor.tools.iter().position(|t| *t == tool) {
+                editor.tools.remove(index);
+            } else {
+                editor.tools.push(tool);
+            }
+            self.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Add whatever is in the tool box. Kept permissive on purpose: Pi cannot
+    /// list extension or MCP tools, so the user is the only source for them.
+    fn add_custom_tool(&mut self, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(editor) = &self.editor else {
+            return;
         };
-        let tools: Vec<String> = text(&editor.tools)
+        let raw = editor.tool_entry.read(cx).text().trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        // A pasted "a, b" is two tools, not one name with a comma in it — and
+        // a comma could not survive the file's comma-separated list anyway.
+        let added: Vec<String> = raw
             .split(',')
             .map(str::trim)
             .filter(|tool| !tool.is_empty())
             .map(str::to_string)
             .collect();
+        if let Some(editor) = &mut self.editor {
+            for tool in added {
+                if !editor.tools.contains(&tool) {
+                    editor.tools.push(tool);
+                }
+            }
+        }
+        if let Some(editor) = &self.editor {
+            editor
+                .tool_entry
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.error = None;
+        cx.notify();
+    }
+
+    fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        // Resolved before the editor is borrowed: a model the device knows to
+        // have no reasoning ladder cannot carry a thinking level, and an
+        // unknown or inherited one is given the benefit of the doubt.
+        let supports_thinking = match model.as_deref() {
+            None => true,
+            Some(id) => self
+                .model_entry(id)
+                .is_none_or(|entry| !entry.reasoning_levels.is_empty()),
+        };
+        if let Some(editor) = &mut self.editor {
+            editor.model = model;
+            editor.model_menu_open = false;
+            // Dropping the level here keeps the file honest instead of
+            // writing a setting Pi would ignore.
+            if !supports_thinking {
+                editor.thinking = None;
+            }
+        }
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Build the save request from the open editor.
+    fn save_request(&self, cx: &Context<Self>) -> Option<serde_json::Value> {
+        let editor = self.editor.as_ref()?;
+        let text = |input: &Entity<ComposerInput>| input.read(cx).text().trim().to_string();
         let mut params = serde_json::json!({
             "name": text(&editor.name),
             "description": text(&editor.description),
             "systemPrompt": editor.prompt.read(cx).text().trim(),
-            "tools": tools,
+            "tools": editor.tools,
             "readOnly": editor.read_only,
         });
         if let Some(object) = params.as_object_mut() {
-            if let Some(model) = optional(&editor.model) {
+            if let Some(model) = editor.model.clone() {
                 object.insert("model".into(), model.into());
             }
-            if let Some(thinking) = optional(&editor.thinking) {
+            if let Some(thinking) = editor.thinking.clone() {
                 object.insert("thinking".into(), thinking.into());
             }
             // A built-in is not a file we may edit: saving always creates a
@@ -460,7 +646,7 @@ impl SubagentsPage {
         agent: PiSubagent,
         index: usize,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> AnyElement {
         let blocked = self.busy.is_some()
             || self.editor.is_some()
             || self.delete.is_some()
@@ -483,14 +669,15 @@ impl SubagentsPage {
         }
 
         // The quiet line is what actually governs a run: model, thinking and
-        // how wide the tool allowlist is.
-        let mut facts: Vec<gpui::AnyElement> = Vec::new();
+        // how wide the tool allowlist is. The model shows its catalog LABEL
+        // when the device knows it, because `provider/id` is unreadable.
+        let mut facts: Vec<AnyElement> = Vec::new();
         if let Some(model) = agent.model.as_deref() {
-            facts.push(
-                div()
-                    .child(SharedString::from(model.to_string()))
-                    .into_any_element(),
-            );
+            let label = self
+                .model_entry(model)
+                .map(|entry| entry.label.clone())
+                .unwrap_or_else(|| model.to_string());
+            facts.push(div().child(SharedString::from(label)).into_any_element());
         }
         if let Some(thinking) = agent.thinking.as_deref() {
             facts.push(
@@ -586,13 +773,213 @@ impl SubagentsPage {
         row.into_any_element()
     }
 
-    fn render_editor(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// One selectable pill. Used for every enumerable value on this page so a
+    /// thinking level and a tool read as the same kind of choice.
+    fn chip(
+        theme: &Theme,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        selected: bool,
+        enabled: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id.into())
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded_full()
+            .border_1()
+            .border_color(if selected {
+                theme.accent.opacity(0.55)
+            } else {
+                theme.border
+            })
+            .bg(if selected {
+                theme.accent.opacity(0.14)
+            } else {
+                gpui::transparent_black()
+            })
+            .text_size(px(12.0))
+            .text_color(if selected {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .when(enabled, |el| {
+                el.cursor_pointer().hover(|s| s.bg(crate::theme::ink(0.06)))
+            })
+            .when(!enabled, |el| el.opacity(0.45))
+            .child(label.into())
+    }
+
+    fn model_row(
+        &self,
+        model: Option<&Model>,
+        selected: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = model.map(|model| model.id.clone());
+        let label = model
+            .map(|model| model.label.clone())
+            .unwrap_or_else(|| "Inherit from the parent chat".into());
+        let description = model.and_then(|model| model.description.clone());
+        div()
+            .id(SharedString::from(format!(
+                "subagent-model-{}",
+                id.as_deref().unwrap_or("inherit")
+            )))
+            .px(px(10.0))
+            .py(px(7.0))
+            .rounded(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .bg(if selected {
+                theme.ink(0.07)
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.ink(0.05)))
+            .on_click(cx.listener(move |page, _, _, cx| page.set_model(id.clone(), cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(label)),
+                    )
+                    .when_some(description, |el, description| {
+                        el.child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.75))
+                                .child(SharedString::from(description)),
+                        )
+                    }),
+            )
+            .child(div().w(px(16.0)).when(selected, |row| {
+                row.child(
+                    icons::icon(icons::CHECK)
+                        .size(px(12.0))
+                        .text_color(theme.accent),
+                )
+            }))
+            .into_any_element()
+    }
+
+    fn model_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let editor = self.editor.as_ref().unwrap();
+        let selected = editor.model.clone();
+        let query = editor.model_search.read(cx).text().trim().to_lowercase();
+        let mut menu = div()
+            .w(px(320.0))
+            .rounded(px(10.0))
+            .bg(theme.surface_overlay)
+            .border_1()
+            .border_color(theme.border_strong)
+            .on_mouse_down_out(cx.listener(|page, _, window, cx| {
+                if let Some(editor) = &mut page.editor {
+                    editor.model_menu_open = false;
+                    editor.model_trigger.clone().focus(window, cx);
+                }
+                cx.notify();
+            }))
+            .child(div().p(px(8.0)).child(editor.model_search.clone()))
+            .child(
+                div()
+                    .px(px(4.0))
+                    .child(self.model_row(None, selected.is_none(), theme, cx)),
+            );
+
+        match self.models.clone() {
+            Loadable::Ready(models) => {
+                let filtered: Vec<_> = models
+                    .iter()
+                    .filter(|model| {
+                        query.is_empty()
+                            || model.label.to_lowercase().contains(&query)
+                            || model.id.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if filtered.is_empty() {
+                    menu = menu.child(
+                        div()
+                            .p(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(if models.is_empty() {
+                                "No Pi models available on this device."
+                            } else {
+                                "No matching models."
+                            }),
+                    );
+                } else {
+                    menu = menu.child(
+                        div()
+                            .id("subagent-model-list")
+                            .max_h(px(260.0))
+                            .overflow_y_scroll()
+                            .px(px(4.0))
+                            .pb(px(4.0))
+                            .children(filtered.into_iter().map(|model| {
+                                self.model_row(
+                                    Some(model),
+                                    selected.as_deref() == Some(model.id.as_str()),
+                                    theme,
+                                    cx,
+                                )
+                            })),
+                    );
+                }
+            }
+            Loadable::Error(error) => menu = menu.child(widgets::error_strip(theme, error)),
+            _ => {
+                menu = menu.child(
+                    div()
+                        .p(px(12.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("Loading models…"),
+                )
+            }
+        }
+        popover::anchored_menu_below("subagent-model-popup", menu.into_any_element(), None)
+    }
+
+    /// Label for the model trigger, preferring the catalog's human name.
+    fn model_label(&self, editor: &Editor) -> String {
+        match editor.model.as_deref() {
+            None => "Inherit from the parent chat".into(),
+            Some(id) => self
+                .model_entry(id)
+                .map(|model| model.label.clone())
+                .unwrap_or_else(|| id.to_string()),
+        }
+    }
+
+    fn render_editor(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let editor = self.editor.as_ref().unwrap();
         let busy = self.busy.is_some();
         let creating = editor.original.is_none();
         let from_builtin = editor.from_builtin;
         let read_only = editor.read_only;
         let label = editor.ticket.label.clone();
+        let selected_tools = editor.tools.clone();
+        let custom_tools = editor.custom_tools();
+        let thinking = editor.thinking.clone();
+        let levels = self.available_levels(editor);
+        let model_unknown = editor.model.as_deref().is_some_and(|id| {
+            matches!(self.models, Loadable::Ready(_)) && self.model_entry(id).is_none()
+        });
+        let model_trigger_label = self.model_label(editor);
+        let menu = editor.model_menu_open.then(|| self.model_menu(theme, cx));
+        let editor = self.editor.as_ref().unwrap();
 
         let input_row =
             |label: &'static str, hint: Option<&'static str>, input: &Entity<ComposerInput>| {
@@ -627,15 +1014,215 @@ impl SubagentsPage {
                 "Description",
                 Some("Required: the extension ignores a profile without one, and the model reads it to pick an agent."),
                 &editor.description,
-            ))
-            .child(input_row("Model", None, &editor.model))
-            .child(input_row("Thinking", None, &editor.thinking))
-            .child(input_row(
-                "Tools",
-                Some("Comma-separated. Leave empty to allow every tool. The messaging tools are always added."),
-                &editor.tools,
-            ))
-            .child(input_row("System prompt", None, &editor.prompt));
+            ));
+
+        // Model — picked from the device's own catalog.
+        fields = fields.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(widgets::field_label(theme, "Model"))
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("subagent-model-trigger")
+                        .debug_selector(|| "subagent-model-trigger".into())
+                        .role(gpui::Role::Button)
+                        .aria_label("Subagent model")
+                        .track_focus(&editor.model_trigger)
+                        .relative()
+                        .w_full()
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .bg(theme.input_glass_bg())
+                        .hover(|s| widgets::ghost_hover(theme, s))
+                        .when(busy, |el| el.opacity(0.45))
+                        .when(!busy, |el| {
+                            el.on_click(cx.listener(|page, _, window, cx| {
+                                if let Some(editor) = &mut page.editor {
+                                    editor.model_menu_open = !editor.model_menu_open;
+                                    if editor.model_menu_open {
+                                        editor.model_search.focus_handle(cx).focus(window, cx);
+                                    }
+                                }
+                                cx.notify();
+                            }))
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text)
+                                .child(SharedString::from(model_trigger_label)),
+                        )
+                        .child(
+                            icons::icon(icons::ALT_ARROW_DOWN)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .children(menu),
+                )
+                .when(model_unknown, |el| {
+                    el.child(widgets::warning_strip(
+                        theme,
+                        "This model is not in the device's Pi catalog right now. It is kept as written until you pick another.",
+                    ))
+                }),
+        );
+
+        // Thinking — Pi's ladder, narrowed by what the model supports.
+        let mut thinking_row = div().flex().flex_row().flex_wrap().gap(px(6.0)).child(
+            Self::chip(
+                theme,
+                "subagent-thinking-inherit",
+                "Inherit",
+                thinking.is_none(),
+                !busy,
+            )
+            .on_click(cx.listener(|page, _, _, cx| {
+                if let Some(editor) = &mut page.editor {
+                    editor.thinking = None;
+                }
+                cx.notify();
+            })),
+        );
+        for level in &levels {
+            let level = *level;
+            let selected = thinking.as_deref() == Some(level);
+            thinking_row = thinking_row.child(
+                Self::chip(
+                    theme,
+                    SharedString::from(format!("subagent-thinking-{level}")),
+                    level,
+                    selected,
+                    !busy,
+                )
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    if let Some(editor) = &mut page.editor {
+                        editor.thinking = Some(level.to_string());
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        // A level the file carries that is not on the ladder stays selectable
+        // rather than vanishing on the next save.
+        if let Some(current) = thinking.as_deref()
+            && !levels.contains(&current)
+        {
+            thinking_row = thinking_row.child(Self::chip(
+                theme,
+                "subagent-thinking-custom",
+                format!("{current} (from the file)"),
+                true,
+                false,
+            ));
+        }
+        let mut thinking_column = div()
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .child(widgets::field_label(theme, "Thinking"))
+            .child(thinking_row);
+        if levels.is_empty() {
+            thinking_column = thinking_column.child(widgets::page_subtitle(
+                theme,
+                "The selected model has no reasoning levels, so Pi ignores this setting.",
+            ));
+        }
+        fields = fields.child(thinking_column);
+
+        // Tools — built-in toggles plus free-form extension/MCP names.
+        let mut tool_row = div().flex().flex_row().flex_wrap().gap(px(6.0));
+        for tool in BUILTIN_TOOLS {
+            let selected = selected_tools.iter().any(|t| t == tool);
+            tool_row = tool_row.child(
+                Self::chip(
+                    theme,
+                    SharedString::from(format!("subagent-tool-{tool}")),
+                    tool,
+                    selected,
+                    !busy,
+                )
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    page.toggle_tool(tool.to_string(), cx);
+                })),
+            );
+        }
+        for tool in &custom_tools {
+            let name = tool.clone();
+            tool_row = tool_row.child(
+                Self::chip(
+                    theme,
+                    SharedString::from(format!("subagent-custom-tool-{name}")),
+                    format!("{name}  ×"),
+                    true,
+                    !busy,
+                )
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    page.toggle_tool(name.clone(), cx);
+                })),
+            );
+        }
+        fields = fields.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(widgets::field_label(theme, "Tools"))
+                .child(tool_row)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .bg(theme.input_glass_bg())
+                                .child(editor.tool_entry.clone()),
+                        )
+                        .child(
+                            widgets::ghost_action(theme)
+                                .id("subagent-tool-add")
+                                .debug_selector(|| "subagent-tool-add".into())
+                                .flex_none()
+                                .text_color(theme.text)
+                                .hover(|s| widgets::ghost_hover(theme, s))
+                                .child("Add")
+                                .when(busy, |el| el.opacity(0.45))
+                                .when(!busy, |el| {
+                                    el.on_click(
+                                        cx.listener(|page, _, _, cx| page.add_custom_tool(cx)),
+                                    )
+                                }),
+                        ),
+                )
+                .child(widgets::page_subtitle(
+                    theme,
+                    if selected_tools.is_empty() {
+                        format!(
+                            "Nothing selected — the agent gets every tool. {MESSAGING_TOOLS} are always added."
+                        )
+                    } else {
+                        format!(
+                            "{} selected. {MESSAGING_TOOLS} are always added.",
+                            selected_tools.len()
+                        )
+                    },
+                )),
+        );
+
+        fields = fields.child(input_row("System prompt", None, &editor.prompt));
 
         fields = fields.child(
             div()
@@ -719,8 +1306,19 @@ impl SubagentsPage {
             .p(px(20.0))
             .on_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && page.busy.is_none() {
-                    page.editor = None;
-                    page.error = None;
+                    // Escape closes the model menu first, then the editor.
+                    let menu_open = page
+                        .editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.model_menu_open);
+                    if menu_open {
+                        if let Some(editor) = &mut page.editor {
+                            editor.model_menu_open = false;
+                        }
+                    } else {
+                        page.editor = None;
+                        page.error = None;
+                    }
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -729,11 +1327,7 @@ impl SubagentsPage {
             .into_any_element()
     }
 
-    fn render_delete_confirmation(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_delete_confirmation(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let confirmation = self.delete.as_ref().unwrap();
         let busy = self.busy.is_some();
         let enabled = !busy && self.target.read(cx).can_write(cx);
@@ -808,7 +1402,7 @@ impl SubagentsPage {
 impl Render for SubagentsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let body: gpui::AnyElement = match self.agents.clone() {
+        let body: AnyElement = match self.agents.clone() {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
                 .p(px(16.0))
                 .child(popover::skeleton_rows(
@@ -928,9 +1522,9 @@ mod tests {
     use gpui::AppContext;
     use std::sync::Arc;
 
-    /// A stand-in engine that serves the three subagent methods out of a real
-    /// temp runtime, so the page is exercised against the ACTUAL file format
-    /// rather than a hand-written fake reply.
+    /// A stand-in engine that serves the subagent methods out of a real temp
+    /// runtime, so the page is exercised against the ACTUAL file format rather
+    /// than a hand-written fake reply.
     struct SubagentFixture {
         paths: PiRuntimePaths,
     }
@@ -947,6 +1541,20 @@ mod tests {
                     serde_json::json!({"deviceId":"viewer", "workspaceScope":"local"})
                 }
                 methods::ENGINE_READY => serde_json::json!({}),
+                methods::LIST_MODELS => serde_json::json!([
+                    {
+                        "id": "claude-bridge/claude-fable-5-1",
+                        "label": "Fable 5.1",
+                        "description": "claude-bridge · 200k context",
+                        "reasoningLevels": ["minimal","low","medium","high","xhigh","max"],
+                    },
+                    {
+                        "id": "openai/gpt-tiny",
+                        "label": "GPT Tiny",
+                        "description": "openai · 8k context",
+                        "reasoningLevels": [],
+                    },
+                ]),
                 methods::LIST_PI_SUBAGENTS => {
                     serde_json::to_value(pi_subagents::list(&self.paths)).unwrap()
                 }
@@ -971,8 +1579,15 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn subagents_page_creates_customizes_and_resets_profiles(cx: &mut gpui::TestAppContext) {
+    struct Fixture {
+        page: Entity<SubagentsPage>,
+        paths: PiRuntimePaths,
+        target: Entity<DeviceTarget>,
+        _data: tempfile::TempDir,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    fn start(cx: &mut gpui::TestAppContext, builtin: &str) -> (Fixture, gpui::VisualTestContext) {
         cx.background_executor.allow_parking();
         let data = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -986,11 +1601,10 @@ mod tests {
             package_dir: current.join("pi"),
             agent_dir: data.path().join("agent"),
         };
-        // One built-in, exactly as the extension ships it.
         std::fs::create_dir_all(pi_subagents::builtin_dir(&paths)).unwrap();
         std::fs::write(
             pi_subagents::builtin_dir(&paths).join("reviewer.md"),
-            "---\nname: reviewer\ndescription: Verify completed work\ntools: read, grep\n---\nYou verify.\n",
+            builtin,
         )
         .unwrap();
 
@@ -1044,98 +1658,218 @@ mod tests {
             target
         });
 
-        let window = cx.open_window(gpui::size(px(1100.0), px(1400.0)), |_, cx| {
+        let window = cx.open_window(gpui::size(px(1100.0), px(1600.0)), |_, cx| {
             SubagentsPage::new(state, target.clone(), cx)
         });
         let page = window.root(cx).unwrap();
         pump_until(cx, || {
-            cx.update(|cx| matches!(page.read(cx).agents, Loadable::Ready(_)))
+            cx.update(|cx| {
+                matches!(page.read(cx).agents, Loadable::Ready(_))
+                    && matches!(page.read(cx).models, Loadable::Ready(_))
+            })
         });
+        let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        (
+            Fixture {
+                page,
+                paths,
+                target,
+                _data: data,
+                _runtime: runtime,
+            },
+            visual,
+        )
+    }
 
-        // The built-in is listed and marked as one.
-        cx.update(|cx| {
-            let agents = page.read(cx).agents.ready().unwrap().clone();
-            assert_eq!(agents.len(), 1);
-            assert_eq!(agents[0].name, "reviewer");
-            assert!(agents[0].builtin);
-            assert!(!agents[0].overrides_builtin);
-        });
-
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    fn draw(visual: &mut gpui::VisualTestContext) {
         visual.update(|w, cx| {
             w.refresh();
             w.draw(cx).clear();
         });
+    }
 
-        // Create a brand-new profile.
+    #[gpui::test]
+    fn typed_controls_write_catalog_values(cx: &mut gpui::TestAppContext) {
+        let (f, mut visual) = start(
+            cx,
+            "---\nname: reviewer\ndescription: Verify completed work\ntools: read, grep\n---\nYou verify.\n",
+        );
+        let page = f.page.clone();
+
+        draw(&mut visual);
         let new_button = visual.debug_bounds("subagent-new").unwrap();
         visual.simulate_click(new_button.center(), Default::default());
         page.update(cx, |page, cx| {
             let editor = page.editor.as_ref().expect("editor opens");
-            assert!(editor.original.is_none());
             editor.name.update(cx, |v, cx| v.set_text("planner", cx));
             editor
                 .description
                 .update(cx, |v, cx| v.set_text("Resolve a design decision", cx));
-            editor
-                .tools
-                .update(cx, |v, cx| v.set_text("read, bash , grep", cx));
-            editor.thinking.update(cx, |v, cx| v.set_text("xhigh", cx));
             editor.prompt.update(cx, |v, cx| {
                 v.set_text("You are the planner.\n\nSecond line.", cx)
             });
             cx.notify();
         });
-        visual.update(|w, cx| {
-            w.refresh();
-            w.draw(cx).clear();
+
+        // Model: the picker offers the device's catalog, and the trigger shows
+        // the human label rather than the provider/id string.
+        page.update(cx, |page, cx| {
+            page.set_model(Some("claude-bridge/claude-fable-5-1".into()), cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(page.model_label(editor), "Fable 5.1");
+            // That model has a ladder, so levels are offered.
+            assert_eq!(page.available_levels(editor).len(), THINKING_LEVELS.len());
+            page.editor.as_mut().unwrap().thinking = Some("xhigh".into());
         });
+
+        // Tools: built-in toggles plus a free-form extension tool.
+        page.update(cx, |page, cx| {
+            for tool in ["read", "grep", "bash"] {
+                page.toggle_tool(tool.into(), cx);
+            }
+            // Toggling twice clears it again.
+            page.toggle_tool("bash".into(), cx);
+            page.editor
+                .as_ref()
+                .unwrap()
+                .tool_entry
+                .update(cx, |v, cx| v.set_text("web_search, ask_user", cx));
+            page.add_custom_tool(cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(editor.tools, ["read", "grep", "web_search", "ask_user"]);
+            assert_eq!(editor.custom_tools(), ["web_search", "ask_user"]);
+            // The entry box clears after adding.
+            assert!(editor.tool_entry.read(cx).text().is_empty());
+        });
+
+        draw(&mut visual);
         let save = visual.debug_bounds("subagent-save").unwrap();
         visual.simulate_click(save.center(), Default::default());
         pump_until(cx, || cx.update(|cx| page.read(cx).editor.is_none()));
 
-        // It reached disk in the extension's own format, prompt newlines and
-        // comma-separated tools included.
         let written =
-            std::fs::read_to_string(pi_subagents::user_dir(&paths).join("planner.md")).unwrap();
-        assert!(written.contains("name: planner"), "{written}");
-        assert!(written.contains("tools: read, bash, grep"), "{written}");
-        assert!(written.contains("thinking: xhigh"), "{written}");
+            std::fs::read_to_string(pi_subagents::user_dir(&f.paths).join("planner.md")).unwrap();
         assert!(
-            written.contains("You are the planner.\n\nSecond line."),
+            written.contains("model: claude-bridge/claude-fable-5-1"),
             "{written}"
         );
-        cx.update(|cx| {
-            let agents = page.read(cx).agents.ready().unwrap().clone();
-            assert_eq!(agents.len(), 2);
-            assert_eq!(agents[0].name, "planner");
-            assert_eq!(agents[0].tools, ["read", "bash", "grep"]);
-        });
+        assert!(written.contains("thinking: xhigh"), "{written}");
+        assert!(
+            written.contains("tools: read, grep, web_search, ask_user"),
+            "{written}"
+        );
+    }
 
-        // Customizing the BUILT-IN writes an override, leaving the package
-        // file alone.
+    #[gpui::test]
+    fn a_model_without_reasoning_drops_the_thinking_level(cx: &mut gpui::TestAppContext) {
+        let (f, mut visual) = start(
+            cx,
+            "---\nname: reviewer\ndescription: Verify\nmodel: claude-bridge/claude-fable-5-1\nthinking: max\n---\nBody\n",
+        );
+        let page = f.page.clone();
+        draw(&mut visual);
+
         let builtin = cx.update(|cx| {
             page.read(cx)
                 .agents
                 .ready()
                 .unwrap()
                 .iter()
-                .find(|a| a.builtin)
+                .find(|a| a.name == "reviewer")
                 .cloned()
                 .unwrap()
-        });
-        cx.update(|cx| {
-            page.update(cx, |page, cx| {
-                page.agents = Loadable::Ready(page.agents.ready().unwrap().clone());
-                cx.notify();
-            })
         });
         visual.update(|w, cx| {
             page.update(cx, |page, cx| page.open_editor(Some(builtin), w, cx));
         });
+        cx.update(|cx| {
+            let page = page.read(cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(editor.thinking.as_deref(), Some("max"));
+            assert!(!page.available_levels(editor).is_empty());
+        });
+
+        // Switching to a model with no reasoning ladder clears the level and
+        // stops offering one, instead of writing a setting Pi ignores.
         page.update(cx, |page, cx| {
-            let editor = page.editor.as_ref().expect("editor opens");
+            page.set_model(Some("openai/gpt-tiny".into()), cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(editor.thinking, None);
+            assert!(page.available_levels(editor).is_empty());
+        });
+
+        // Inheriting the model again restores the full ladder.
+        page.update(cx, |page, cx| {
+            page.set_model(None, cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(page.available_levels(editor).len(), THINKING_LEVELS.len());
+        });
+    }
+
+    #[gpui::test]
+    fn an_unknown_model_survives_being_opened_and_saved(cx: &mut gpui::TestAppContext) {
+        let (f, mut visual) = start(
+            cx,
+            "---\nname: reviewer\ndescription: Verify\nmodel: offline/ghost-model\nthinking: ludicrous\n---\nBody\n",
+        );
+        let page = f.page.clone();
+        draw(&mut visual);
+
+        let builtin = cx.update(|cx| {
+            page.read(cx)
+                .agents
+                .ready()
+                .unwrap()
+                .iter()
+                .find(|a| a.name == "reviewer")
+                .cloned()
+                .unwrap()
+        });
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.open_editor(Some(builtin), w, cx));
+        });
+        cx.update(|cx| {
+            let page = page.read(cx);
+            let editor = page.editor.as_ref().unwrap();
+            // Not in the catalog, so the raw id is shown rather than a label.
+            assert_eq!(page.model_label(editor), "offline/ghost-model");
+            assert!(page.model_entry("offline/ghost-model").is_none());
+        });
+
+        page.update(cx, |page, cx| page.save(cx));
+        pump_until(cx, || cx.update(|cx| page.read(cx).editor.is_none()));
+
+        let written =
+            std::fs::read_to_string(pi_subagents::user_dir(&f.paths).join("reviewer.md")).unwrap();
+        assert!(written.contains("model: offline/ghost-model"), "{written}");
+        assert!(written.contains("thinking: ludicrous"), "{written}");
+    }
+
+    #[gpui::test]
+    fn builtins_are_customized_reset_and_the_editor_drops_on_device_switch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (f, mut visual) = start(
+            cx,
+            "---\nname: reviewer\ndescription: Verify completed work\ntools: read, grep\n---\nYou verify.\n",
+        );
+        let page = f.page.clone();
+
+        cx.update(|cx| {
+            let agents = page.read(cx).agents.ready().unwrap().clone();
+            assert_eq!(agents.len(), 1);
+            assert!(agents[0].builtin);
+        });
+
+        let builtin = cx.update(|cx| page.read(cx).agents.ready().unwrap()[0].clone());
+        visual.update(|w, cx| {
+            page.update(cx, |page, cx| page.open_editor(Some(builtin), w, cx));
+        });
+        page.update(cx, |page, cx| {
+            let editor = page.editor.as_ref().unwrap();
             assert!(editor.from_builtin);
+            // The built-in's tools arrive as selected chips, not as text.
+            assert_eq!(editor.tools, ["read", "grep"]);
             editor
                 .description
                 .update(cx, |v, cx| v.set_text("My stricter reviewer", cx));
@@ -1143,69 +1877,35 @@ mod tests {
         });
         pump_until(cx, || cx.update(|cx| page.read(cx).editor.is_none()));
         cx.update(|cx| {
-            let reviewer = page
-                .read(cx)
-                .agents
-                .ready()
-                .unwrap()
-                .iter()
-                .find(|a| a.name == "reviewer")
-                .cloned()
-                .unwrap();
-            assert!(!reviewer.builtin);
-            assert!(reviewer.overrides_builtin);
+            let reviewer = page.read(cx).agents.ready().unwrap()[0].clone();
+            assert!(!reviewer.builtin && reviewer.overrides_builtin);
             assert_eq!(reviewer.description, "My stricter reviewer");
         });
         assert!(
-            std::fs::read_to_string(pi_subagents::builtin_dir(&paths).join("reviewer.md"))
+            std::fs::read_to_string(pi_subagents::builtin_dir(&f.paths).join("reviewer.md"))
                 .unwrap()
                 .contains("Verify completed work"),
             "the shipped built-in must not be edited"
         );
 
-        // Resetting the override restores the built-in instead of removing it.
-        let override_row = cx.update(|cx| {
-            page.read(cx)
-                .agents
-                .ready()
-                .unwrap()
-                .iter()
-                .find(|a| a.overrides_builtin)
-                .cloned()
-                .unwrap()
-        });
+        let override_row = cx.update(|cx| page.read(cx).agents.ready().unwrap()[0].clone());
         page.update(cx, |page, cx| page.request_delete(&override_row, cx));
-        cx.update(|cx| {
-            let confirmation = page.read(cx).delete.as_ref().unwrap();
-            assert!(confirmation.restores_builtin);
-        });
-        visual.update(|w, cx| {
-            w.refresh();
-            w.draw(cx).clear();
-        });
+        cx.update(|cx| assert!(page.read(cx).delete.as_ref().unwrap().restores_builtin));
+        draw(&mut visual);
         let confirm = visual.debug_bounds("subagent-delete-confirm").unwrap();
         visual.simulate_click(confirm.center(), Default::default());
         pump_until(cx, || cx.update(|cx| page.read(cx).delete.is_none()));
         cx.update(|cx| {
-            let reviewer = page
-                .read(cx)
-                .agents
-                .ready()
-                .unwrap()
-                .iter()
-                .find(|a| a.name == "reviewer")
-                .cloned()
-                .unwrap();
+            let reviewer = page.read(cx).agents.ready().unwrap()[0].clone();
             assert!(reviewer.builtin, "the built-in returns");
             assert_eq!(reviewer.description, "Verify completed work");
         });
 
-        // A device switch drops the open editor rather than retargeting it.
         visual.update(|w, cx| {
             page.update(cx, |page, cx| page.open_editor(None, w, cx));
         });
         cx.update(|cx| assert!(page.read(cx).editor.is_some()));
-        target.update(cx, |t, cx| t.select(None, cx).unwrap());
+        f.target.update(cx, |t, cx| t.select(None, cx).unwrap());
         cx.run_until_parked();
         cx.update(|cx| assert!(page.read(cx).editor.is_none()));
     }
