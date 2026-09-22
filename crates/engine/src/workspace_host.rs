@@ -1817,15 +1817,13 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
                 .send()
                 .await;
             let Ok(response) = response else { continue };
-            if !response.status().is_success() {
-                continue;
-            }
-            let Ok(body) = response.json::<serde_json::Value>().await else {
-                continue;
+            let status = response.status();
+            let body = if status.is_success() {
+                response.json::<serde_json::Value>().await.ok()
+            } else {
+                None
             };
-            let connected = body
-                .get("hostConnected")
-                .and_then(serde_json::Value::as_bool);
+            let connected = relay_probe_answer(status, body.as_ref());
             let Some(inner) = weak.upgrade() else { return };
             refreshed |= inner.record_relay_probe(&device_id, connected, attempted_at);
         }
@@ -1833,6 +1831,35 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
             inner.publish();
         }
     }
+}
+
+/// What a `/device/{id}/status` response says about the peer's relay host:
+/// `Some(true)` live, `Some(false)` authoritatively not, `None` inconclusive.
+///
+/// Only an authoritative "not" earns offline backoff. Network failures, 5xx and
+/// unparsable bodies stay inconclusive, because they are not evidence about
+/// the peer. But two statuses are answers, not failures: 404 means the room has
+/// never had an owner, i.e. no host has ever joined it, and 403 means it
+/// belongs to someone else. Neither can change by asking again in 30 seconds.
+/// Treating them as inconclusive once kept three engines re-probing an
+/// unhosted device every sweep, forever -- ~350 billable Durable Object
+/// requests an hour, measured in production, and the largest line on the bill
+/// once the activity heartbeat moved onto the presence frame. A peer that later
+/// starts hosting is not delayed by this: its first presence beat clears the
+/// backoff at once.
+fn relay_probe_answer(
+    status: reqwest::StatusCode,
+    body: Option<&serde_json::Value>,
+) -> Option<bool> {
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
+        return Some(false);
+    }
+    if !status.is_success() {
+        return None;
+    }
+    body?
+        .get("hostConnected")
+        .and_then(serde_json::Value::as_bool)
 }
 
 impl WorkspaceHostInner {
@@ -2148,6 +2175,36 @@ mod tests {
         assert_eq!(second_hour, 2, "steady state is one probe per cap window");
         let backoff = super::lock(&host.inner.relay_probe_backoff);
         assert_eq!(backoff["peer"].delay, super::RELAY_PROBE_BACKOFF_CAP);
+    }
+
+    #[test]
+    fn relay_probe_treats_an_unhosted_or_foreign_room_as_an_answer_not_an_error() {
+        use reqwest::StatusCode;
+        use serde_json::json;
+        let answer = super::relay_probe_answer;
+        // The body decides only on success.
+        let live = json!({ "hostConnected": true });
+        let away = json!({ "hostConnected": false });
+        assert_eq!(answer(StatusCode::OK, Some(&live)), Some(true));
+        assert_eq!(answer(StatusCode::OK, Some(&away)), Some(false));
+        assert_eq!(answer(StatusCode::OK, Some(&json!({}))), None);
+        assert_eq!(answer(StatusCode::OK, None), None);
+        // A room with no owner has never been hosted, and a foreign room is not
+        // ours: both are authoritative, so they walk the offline backoff
+        // instead of being re-asked every sweep.
+        assert_eq!(answer(StatusCode::NOT_FOUND, None), Some(false));
+        assert_eq!(answer(StatusCode::FORBIDDEN, None), Some(false));
+        // Transient failures say nothing about the peer and must stay
+        // inconclusive, or an Edge hiccup would mark every device offline.
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::UNAUTHORIZED,
+        ] {
+            assert_eq!(answer(status, None), None, "{status}");
+        }
     }
 
     #[tokio::test]

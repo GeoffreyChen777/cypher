@@ -205,6 +205,28 @@ candidate filter would read back its own stamp, mistake it for a heartbeat and
 drop the backoff it had just set. `verified_at` distinguishes the two. A
 genuine beat still clears it instantly, so a returning device never waits.
 
+### A room that was never hosted is an answer, not an error
+
+Measured after the changes above shipped, `GET /device/{id}/status` was the
+largest line on the bill at ~360/hour, and 95% of those probes returned 404.
+The DeviceRoom answers 404 when it has no owner, i.e. no host has ever joined
+it; the engine treated every non-2xx as inconclusive and skipped the backoff,
+so three engines each re-asked every 30s sweep, forever.
+
+`relay_probe_answer` now treats 404 (never hosted) and 403 (not your room) as
+authoritative "not live", so they walk the ordinary offline backoff to its
+1800s cap. Network errors, 5xx, 429 and 401 stay inconclusive: they say nothing
+about the peer, and counting them would let one Edge hiccup mark every device
+offline. A device that later starts hosting is not delayed, because its first
+presence beat clears the backoff.
+
+That measurement came from `scripts/edge-billing-prod.py`, the production
+counterpart to `edge-billing-local.mjs`: it samples `wrangler tail` and
+attributes each event by its `entrypoint`. Two traps it handles: one client
+call produces both a Worker-level event and a Durable Object event, and only
+the latter is a DO request. And tail redacts id path segments, so it cannot tell
+you *which* device a probe targets, only how often and with what status.
+
 ### Presence no longer republishes everything
 
 Every inbound presence beat called `publish()`, which `send_replace`d four
