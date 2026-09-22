@@ -773,8 +773,11 @@ impl SubagentsPage {
         row.into_any_element()
     }
 
-    /// One selectable pill. Used for every enumerable value on this page so a
-    /// thinking level and a tool read as the same kind of choice.
+    /// One selectable chip. Used for every enumerable value on this page so a
+    /// thinking level and a tool read as the same kind of choice — and it
+    /// carries the 8px corner of [`widgets::ghost_action`] /
+    /// [`popover::btn_primary`], because it is a button among buttons, not a
+    /// [`widgets::badge`] (those are the round ones, and they are read-only).
     fn chip(
         theme: &Theme,
         id: impl Into<SharedString>,
@@ -786,7 +789,7 @@ impl SubagentsPage {
             .id(id.into())
             .px(px(10.0))
             .py(px(5.0))
-            .rounded_full()
+            .rounded(px(8.0))
             .border_1()
             .border_color(if selected {
                 theme.accent.opacity(0.55)
