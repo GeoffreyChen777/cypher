@@ -202,6 +202,13 @@ fn engine_bridge_url_is_injected_into_children() {
         Some(&Some(url)),
         "bridged children receive CYPHER_ENGINE_SOCKET"
     );
+    // The runtime's subagents patch only hosts child chats against a bridge
+    // version it knows; the version rides with the socket.
+    assert_eq!(
+        envs.get(std::ffi::OsStr::new("CYPHER_SUBAGENT_BRIDGE")),
+        Some(&Some(std::ffi::OsStr::new("2"))),
+        "bridged children learn the bridge protocol version"
+    );
 
     let plain = PiHarness::new(std::env::temp_dir().join("cypher-pi-bridge-sessions"))
         .with_executable(fixture_path());
@@ -213,6 +220,12 @@ fn engine_bridge_url_is_injected_into_children() {
             .get_envs()
             .any(|(k, value)| k == key && value.is_none()),
         "unbridged children must clear any inherited engine socket"
+    );
+    assert!(
+        cmd.as_std()
+            .get_envs()
+            .any(|(k, value)| k == "CYPHER_SUBAGENT_BRIDGE" && value.is_none()),
+        "unbridged children must clear any inherited bridge version"
     );
 }
 

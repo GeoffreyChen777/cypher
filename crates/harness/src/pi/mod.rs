@@ -82,6 +82,14 @@ pub(crate) const ENV_CYPHER_CHAT_ID: &str = "CYPHER_CHAT_ID";
 /// Local engine IPC socket path the extension's Cypher bridge helper dials
 /// (`StartSubagent` / `WatchAgentEvents`).
 pub(crate) const ENV_CYPHER_ENGINE_SOCKET: &str = "CYPHER_ENGINE_SOCKET";
+/// Bridge protocol the engine speaks, set with the socket: the runtime's
+/// subagents patch hosts child runs as Cypher child chats only when it reads a
+/// version it knows, so an older engine (which truncates the task to the
+/// 500-char label) keeps the extension's own child processes. `2` = the
+/// `StartSubagent` `prompt` + `address` fields and a lag-tolerant,
+/// de-duplicated `WatchAgentEvents`.
+pub(crate) const ENV_CYPHER_SUBAGENT_BRIDGE: &str = "CYPHER_SUBAGENT_BRIDGE";
+const SUBAGENT_BRIDGE_VERSION: &str = "2";
 const ENV_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 const ENV_PACKAGE_DIR: &str = "PI_PACKAGE_DIR";
 
@@ -912,12 +920,14 @@ impl PiHarness {
         // and therefore never receive a parent chat id.
         cmd.env_remove(ENV_CYPHER_CHAT_ID);
         cmd.env_remove(ENV_CYPHER_ENGINE_SOCKET);
+        cmd.env_remove(ENV_CYPHER_SUBAGENT_BRIDGE);
         cmd.env_remove("CYPHER_ENGINE_WS_URL");
         if let Some(chat_id) = host.chat_id.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_CHAT_ID, chat_id);
         }
         if let Some(url) = self.engine_socket.as_deref().filter(|s| !s.is_empty()) {
             cmd.env(ENV_CYPHER_ENGINE_SOCKET, url);
+            cmd.env(ENV_CYPHER_SUBAGENT_BRIDGE, SUBAGENT_BRIDGE_VERSION);
         }
         if let Some(child) = &host.child {
             cmd.env(ENV_ROLE, ROLE_CHILD);

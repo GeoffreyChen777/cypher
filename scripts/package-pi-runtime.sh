@@ -61,6 +61,21 @@ cp "$SPEC/provider-service.mjs" "$STAGE/"
 cp "$SPEC/package.json" "$SPEC/package-lock.json" "$SPEC/.npmrc" "$STAGE/npm/"
 npm ci --prefix "$STAGE/npm" --omit=dev --ignore-scripts
 
+# pi-claude-bridge serves only the models it has measured at 1M with the [1m]
+# id; claude-opus-5-5 is not measured yet, so it would run at 200K. Patch the
+# installed source (the bridge runs from TypeScript) rather than forking the
+# pinned git dependency. Temporary: the patch reports itself inert once upstream
+# lists the model. Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-claude-bridge-opus-5-5.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
+# pi-agent-squad runs each subagent as its own hidden child process, so the
+# Subagents inspector had nothing to open. Route its runs through the engine's
+# child-chat bridge instead (see the patch header). Missing anchors fail the
+# build on purpose.
+node "$SPEC/patches/pi-agent-squad-cypher-host.mjs" \
+  "$STAGE/npm/node_modules/pi-agent-squad"
+
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
 keep="${ESBUILD#@esbuild/}"
@@ -162,6 +177,7 @@ PI_PACKAGE_DIR="$STAGE/pi" CYPHER_PROVIDER_HELPER="$STAGE/provider-service.mjs" 
   "$STAGE/bin/node" --test "$SPEC/provider-service.test.mjs"
 PI_PACKAGE_DIR="$STAGE/pi" \
   "$STAGE/bin/node" --test "$ROOT/crates/harness/src/pi/engine-client.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"

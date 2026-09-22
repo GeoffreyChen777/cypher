@@ -685,61 +685,121 @@ fn strip_attachment_trailer(entry: &SessionMessageEntry) -> SessionMessageEntry 
     entry
 }
 
-/// Load one referenced session's transcript at send time: subscribe
-/// `WatchDocMessages` (with `targetDeviceId` when the chat's host device
-/// differs from the connected engine's) and read the first
-/// [`TranscriptFrame::Reset`] within a bounded budget, then drop the stream
-/// (dropping the receiver cancels it server-side). Returns an error string
-/// for any unreachable/malformed/timeout/early-close ref — the caller fails
-/// the send visibly rather than silently omitting it. Runs under `cx.spawn`,
-/// so the budget races the gpui background executor's timer (no tokio
-/// reactor).
+/// Load one referenced session's transcript at send time. A session hosted by
+/// the connected engine's device reads its doc directly. A session hosted
+/// elsewhere is read from its HOST over the relay (`targetDeviceId`, the
+/// authoritative copy) while that host is online; when the host is offline or
+/// the relay read fails, the engine's own synced replica serves instead — the
+/// same chat2 room the transcript view reads for remote chats — so sessions
+/// on a sleeping laptop stay referenceable from another device. An empty
+/// replica never stands in for a transcript: the send fails visibly rather
+/// than silently omitting the reference. Runs under `cx.spawn`, so every
+/// budget races the gpui background executor's timer (no tokio reactor).
 async fn read_session_reset(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     local_device_id: Option<&str>,
     chat_id: &str,
     device_id: &str,
+    host_online: bool,
 ) -> Result<Vec<SessionMessageEntry>, String> {
-    let mut params = serde_json::Map::new();
-    params.insert(
-        "chatId".into(),
-        serde_json::Value::String(chat_id.to_string()),
-    );
-    if local_device_id.is_some_and(|local| local != device_id) {
-        params.insert(
-            "targetDeviceId".into(),
-            serde_json::Value::String(device_id.to_string()),
-        );
+    if !local_device_id.is_some_and(|local| local != device_id) {
+        return read_session_transcript(engine, executor, chat_id, None, false).await;
+    }
+    let host_error = if host_online {
+        match read_session_transcript(engine, executor, chat_id, Some(device_id), false).await {
+            Ok(entries) => return Ok(entries),
+            Err(err) => {
+                tracing::warn!(%chat_id, %device_id, error = %err, "referenced session relay read failed; trying the synced replica");
+                err
+            }
+        }
+    } else {
+        "The referenced session's device is offline".to_string()
+    };
+    match read_session_transcript(engine, executor, chat_id, None, true).await {
+        Ok(entries) if !entries.is_empty() => Ok(entries),
+        _ => Err(format!(
+            "{host_error}, and this device has no synced copy of it yet."
+        )),
+    }
+}
+
+/// Read one `WatchDocMessages` stream within [`SESSION_LOAD_TIMEOUT`], then
+/// drop it (dropping the receiver cancels it server-side).
+///
+/// The serving engine's opening [`TranscriptFrame::Reset`] is its full
+/// transcript. With `settle` the caller is reading a replica of a chat hosted
+/// elsewhere, which may still be backfilling from the chat2 room: frames are
+/// folded until the transcript is non-empty and then quiet for
+/// [`SESSION_REPLICA_SETTLE`], so a checkpoint followed by its rows arrives
+/// whole. An empty replica at the deadline is returned for the caller to
+/// reject.
+async fn read_session_transcript(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    chat_id: &str,
+    target_device_id: Option<&str>,
+    settle: bool,
+) -> Result<Vec<SessionMessageEntry>, String> {
+    use futures::future::{Either, select};
+
+    let mut params = serde_json::json!({ "chatId": chat_id });
+    if let Some(target) = target_device_id {
+        params["targetDeviceId"] = serde_json::Value::String(target.to_string());
     }
     let mut rx = engine
         .client()
-        .subscribe(
-            methods::WATCH_DOC_MESSAGES,
-            serde_json::Value::Object(params),
-        )
+        .subscribe(methods::WATCH_DOC_MESSAGES, params)
         .await
         .map_err(|e| format!("Couldn't load the referenced session: {e}"))?;
     let mut deadline = Box::pin(executor.timer(SESSION_LOAD_TIMEOUT));
+    let mut current: Option<Vec<SessionMessageEntry>> = None;
     loop {
+        let quiet = current.as_ref().is_some_and(|entries| !entries.is_empty());
         let recv = rx.recv();
         futures::pin_mut!(recv);
-        match futures::future::select(recv, &mut deadline).await {
-            futures::future::Either::Left((Some(value), _)) => {
+        let settle_timer = executor.timer(if quiet {
+            SESSION_REPLICA_SETTLE
+        } else {
+            SESSION_LOAD_TIMEOUT
+        });
+        match select(recv, select(&mut deadline, settle_timer)).await {
+            Either::Left((Some(value), _)) => {
                 let frame: TranscriptFrame = serde_json::from_value(value).map_err(|e| {
                     format!("The referenced session's transcript was malformed: {e}")
                 })?;
-                if let TranscriptFrame::Reset { reset } = frame {
-                    return Ok(reset);
+                match current.as_mut() {
+                    // The opening frame is a reset; a stray leading Delta is
+                    // skipped while the budget lasts.
+                    None => {
+                        if let TranscriptFrame::Reset { reset } = frame {
+                            if !settle {
+                                return Ok(reset);
+                            }
+                            current = Some(reset);
+                        }
+                    }
+                    Some(entries) => {
+                        cypher_doc::transcript_delta::apply_transcript_frame(entries, frame)
+                            .map_err(|_| {
+                                "The referenced session changed while it was loading — try again."
+                                    .to_string()
+                            })?;
+                    }
                 }
-                // A Delta first frame (shouldn't happen — the opening frame
-                // is a reset): keep reading for the reset within the budget.
             }
-            futures::future::Either::Left((None, _)) => {
-                return Err("The referenced session's transcript closed before it loaded".into());
+            Either::Left((None, _)) => {
+                return match current {
+                    Some(entries) if !entries.is_empty() => Ok(entries),
+                    _ => Err("The referenced session's transcript closed before it loaded".into()),
+                };
             }
-            futures::future::Either::Right(_) => {
-                return Err("Timed out loading the referenced session".into());
+            Either::Right(_) => {
+                return match current {
+                    Some(entries) if quiet || settle => Ok(entries),
+                    _ => Err("Timed out loading the referenced session".into()),
+                };
             }
         }
     }
@@ -1160,6 +1220,11 @@ const MAX_SESSION_REFERENCE_CHARS: usize = 96 * 1024;
 /// Bounded budget to read the first `TranscriptFrame::Reset` of a referenced
 /// session's `WatchDocMessages` stream at send time.
 const SESSION_LOAD_TIMEOUT: Duration = Duration::from_secs(8);
+/// Quiet window after a synced replica first shows content: backfill lands as
+/// a checkpoint then its rows, so the read waits for frames to stop.
+const SESSION_REPLICA_SETTLE: Duration = Duration::from_millis(400);
+/// Session rows the mention popup lists at once; a query narrows the rest.
+const MAX_SESSION_CANDIDATES: usize = 8;
 /// Session chip/tooltip display-title cap (chars, not bytes).
 const MAX_SESSION_TITLE_CHARS: usize = 60;
 /// Cap on a referenced session's chat id (chars) — UUIDs are 36, so a pasted
@@ -1422,18 +1487,13 @@ fn session_send_cap_exceeded(text: &str) -> bool {
 /// an actionable error naming the first offending ref. The current chat and
 /// temporary child (Side Chat) chats can never be referenced legitimately —
 /// they are rejected synchronously so the draft/comments/attachments survive
-/// untouched. Cross-Project refs — a pasted/forged `cypher-session:` whose
-/// target row's `space_id` differs from the current chat's (the same exact
-/// identity Sidebar grouping keys on) — are rejected the same way: never
-/// silently dropped. `project` is the current chat's `space_id`; on the
-/// new-chat canvas (no current chat) it is the selected project the chat is
-/// minted into. Unknown ids still fail later in async loading (a row may
-/// exist that this snapshot hasn't synced yet).
+/// untouched. Sessions from any project or device of the active profile are
+/// valid. Unknown ids still fail later in async loading (a row may exist that
+/// this snapshot hasn't synced yet).
 fn session_refs_authoritative_error(
     refs: &[String],
     current_chat: Option<&str>,
     chats: &[Chat],
-    project: Option<&str>,
 ) -> Option<String> {
     for id in refs {
         if current_chat == Some(id.as_str()) {
@@ -1451,14 +1511,21 @@ fn session_refs_authoritative_error(
                     .into(),
             );
         }
-        if chat.space_id.as_deref() != project {
-            return Some(
-                "That session is in a different project — only sessions from this chat's project can be referenced. Remove the @session reference and try again."
-                    .into(),
-            );
-        }
     }
     None
+}
+
+/// The mention list's child index for candidate `active`: the "Sessions" and
+/// "Files" headers are also direct children of the scroll container, and
+/// both render only when session candidates exist.
+fn mention_scroll_child(active: usize, n_sessions: usize) -> usize {
+    if n_sessions == 0 {
+        active
+    } else if active < n_sessions {
+        active + 1
+    } else {
+        active + 2
+    }
 }
 
 /// Reconcile the mention popup's ONE active index after the candidate list
@@ -4263,28 +4330,38 @@ fn session_display_title(chat: &Chat) -> String {
     }
 }
 
-/// Local, deterministic `@session` candidates from synced chats: only durable
-/// root sessions of the CURRENT chat's project (canonical `space_id`, exact
-/// match — the same identity Sidebar grouping keys on), never children or the
-/// current chat. Non-archived sessions show for any query; archived sessions
-/// only appear once the query is non-empty. Ranking is stable: non-archived
-/// first, then most recently active, then title, then id.
+/// How close a candidate session is to the chat being composed: the current
+/// project (canonical `space_id`, Sidebar grouping's exact identity) first,
+/// then another project on the same host device, then any other device.
+fn session_proximity(chat: &Chat, project: Option<&str>, device: Option<&str>) -> u8 {
+    if chat.space_id.as_deref() == project {
+        0
+    } else if device == Some(chat.device_id.as_str()) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Local, deterministic `@session` candidates from synced chats: durable root
+/// sessions from ANY project and ANY device of the active profile, never
+/// children or the current chat. Non-archived sessions show for any query;
+/// archived sessions only appear once the query is non-empty. Ranking is
+/// stable: non-archived first, then proximity (current project, same device,
+/// other devices — see [`session_proximity`]), then most recently active,
+/// then title, then id. At most [`MAX_SESSION_CANDIDATES`] rows are returned
+/// so the file results stay visible under them.
 fn session_candidates(
     chats: &[Chat],
     query: &str,
     current_chat: Option<&str>,
     project: Option<&str>,
+    device: Option<&str>,
 ) -> Vec<MentionSession> {
     let query = query.trim().to_lowercase();
     let mut candidates: Vec<(&Chat, String)> = Vec::new();
     for chat in chats {
         if chat.is_child() || current_chat == Some(chat.id.as_str()) {
-            continue;
-        }
-        // Same-Project only (Sidebar's exact `space_id` grouping): a session
-        // in another project — or a project-less one when the current chat is
-        // in a project, and vice versa — is never a candidate.
-        if chat.space_id.as_deref() != project {
             continue;
         }
         if chat.archived && query.is_empty() {
@@ -4302,12 +4379,16 @@ fn session_candidates(
     candidates.sort_by(|(a, title_a), (b, title_b)| {
         a.archived
             .cmp(&b.archived)
+            .then_with(|| {
+                session_proximity(a, project, device).cmp(&session_proximity(b, project, device))
+            })
             .then_with(|| b.last_message_at.cmp(&a.last_message_at))
             .then_with(|| title_a.to_lowercase().cmp(&title_b.to_lowercase()))
             .then_with(|| a.id.cmp(&b.id))
     });
     candidates
         .into_iter()
+        .take(MAX_SESSION_CANDIDATES)
         .map(|(chat, title)| MentionSession {
             chat_id: chat.id.clone(),
             device_id: chat.device_id.clone(),
@@ -4380,6 +4461,8 @@ pub struct Composer {
     /// container's direct children, so keyboard `scroll_to_item(active)`
     /// maps 1:1 — the pickers' model-menu pattern).
     slash_scroll: ScrollHandle,
+    /// Scroll position of the `@` popup's list (see [`mention_scroll_child`]).
+    mention_scroll: ScrollHandle,
     /// Advertised commands per harness. Refetched when Settings → Agents
     /// toggles a Pi package (`HarnessCatalogChanged`). Settings → Commands
     /// hide/show filters this list in [`Self::refilter_slash`].
@@ -4652,6 +4735,7 @@ impl Composer {
             slash_prefetch: None,
             slash: SlashState::default(),
             slash_scroll: ScrollHandle::new(),
+            mention_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
             slash_owner: None,
             slash_generation: 0,
@@ -5390,29 +5474,33 @@ impl Composer {
         if !refining {
             self.mention.files.clear();
             self.mention.active = None;
+            self.mention_scroll.set_offset(Point::default());
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
         // Session candidates are local and deterministic — recomputed
         // synchronously on every edit (main transport only; temporary Side
-        // Chats never offer sessions). Candidates are durable root sessions
-        // of the CURRENT chat's project only (canonical `space_id`, exactly
-        // as Sidebar grouping keys): the new-chat canvas has no current
-        // chat, so the selected project — where the new chat is minted —
-        // governs there.
+        // Chats never offer sessions). Candidates span every project and
+        // device; the CURRENT chat's project and host device rank first. The
+        // new-chat canvas has no current chat, so the project and device the
+        // new chat is minted into govern there.
         self.mention.sessions = if let Some(token) = token.as_ref()
             && matches!(self.transport, ComposerTransport::Main)
         {
             let state = self.state.read(cx);
-            let project = match state.selected_chat_row() {
-                Some(chat) => chat.space_id.as_deref(),
-                None => state.selected_space_row().map(|space| space.id.as_str()),
+            let (project, device) = match state.selected_chat_row() {
+                Some(chat) => (chat.space_id.clone(), Some(chat.device_id.clone())),
+                None => (
+                    state.selected_space_row().map(|space| space.id.clone()),
+                    state.effective_device_id(),
+                ),
             };
             session_candidates(
                 &state.chats,
                 &token.query,
                 state.selected_chat.as_deref(),
-                project,
+                project.as_deref(),
+                device.as_deref(),
             )
         } else {
             Vec::new()
@@ -5526,6 +5614,12 @@ impl Composer {
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.mention.active =
             crate::popover::menu_step(self.mention.active, self.mention.count(), delta);
+        // Keep the keyboard-highlighted row in view, including the wrap from
+        // the last row back to the first.
+        if let Some(active) = self.mention.active {
+            self.mention_scroll
+                .scroll_to_item(mention_scroll_child(active, self.mention.sessions.len()));
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -5594,31 +5688,32 @@ impl Composer {
         cx.notify();
     }
 
-    /// The popup subtitle for a session row: "Archived", or the project ·
-    /// device label (best effort — missing rows just shorten it).
+    /// The popup subtitle for a session row: where the session lives —
+    /// "Archived", its project, its device, and "offline" when that device's
+    /// presence is stale (its context then comes from this device's synced
+    /// copy). Best effort: missing rows just shorten it.
     fn session_row_subtitle(&self, session: &MentionSession, cx: &App) -> String {
-        if session.archived {
-            return "Archived".to_string();
-        }
         let state = self.state.read(cx);
-        let project = session.project.as_deref().and_then(|id| {
+        let mut parts: Vec<String> = Vec::new();
+        if session.archived {
+            parts.push("Archived".to_string());
+        }
+        if let Some(project) = session.project.as_deref().and_then(|id| {
             state
                 .spaces
                 .iter()
                 .find(|s| s.id == id)
                 .map(|s| s.display_name().to_string())
-        });
-        let device = state
-            .devices
-            .iter()
-            .find(|d| d.id == session.device_id)
-            .map(|d| d.name.clone());
-        match (project, device) {
-            (Some(project), Some(device)) => format!("{project} · {device}"),
-            (Some(project), None) => project,
-            (None, Some(device)) => device,
-            (None, None) => String::new(),
+        }) {
+            parts.push(project);
         }
+        if let Some(device) = state.device_name(&session.device_id) {
+            parts.push(device.to_string());
+        }
+        if !state.device_online(&session.device_id, chrono::Utc::now()) {
+            parts.push("offline".to_string());
+        }
+        parts.join(" · ")
     }
 
     fn render_mention_popup(
@@ -5633,8 +5728,6 @@ impl Composer {
         let n_files = files.len();
         let mut card = crate::popover::popover_card(theme)
             .w(px(380.0))
-            .max_h(px(320.0))
-            .overflow_hidden()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && n_files == 0 && n_sessions == 0 {
             card = card.child(crate::popover::skeleton_rows(
@@ -5673,8 +5766,18 @@ impl Composer {
             }
         } else {
             // Sessions first, then files, under ONE keyboard active index.
+            // The scroll container owns the height cap; headers and rows are
+            // its direct children so `scroll_to_item` can follow the keyboard
+            // (see [`mention_scroll_child`]).
+            let mut list = div()
+                .id("mention-menu-scroll")
+                .max_h(px(312.0))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .track_scroll(&self.mention_scroll);
             if n_sessions > 0 {
-                card = card.child(
+                list = list.child(
                     div()
                         .px(px(10.0))
                         .pt(px(6.0))
@@ -5688,7 +5791,7 @@ impl Composer {
                     let subtitle = self.session_row_subtitle(session, cx);
                     let tooltip_title: SharedString = session.title.clone().into();
                     let tooltip_range = token.range.clone();
-                    card = card.child(
+                    list = list.child(
                         crate::popover::menu_row(
                             theme,
                             selected,
@@ -5713,6 +5816,8 @@ impl Composer {
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_1()
+                                .min_w_0()
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(
@@ -5734,6 +5839,9 @@ impl Composer {
                                     el.child(
                                         div()
                                             .flex_none()
+                                            .max_w(px(190.0))
+                                            .overflow_hidden()
+                                            .truncate()
                                             .text_size(px(11.0))
                                             .text_color(theme.text_faint)
                                             .child(SharedString::from(subtitle)),
@@ -5747,7 +5855,7 @@ impl Composer {
                 || (n_sessions > 0 && (self.mention.loading || self.mention.error.is_some()))
             {
                 if n_sessions > 0 {
-                    card = card.child(
+                    list = list.child(
                         div()
                             .px(px(10.0))
                             .pt(px(6.0))
@@ -5763,7 +5871,7 @@ impl Composer {
                         let path = result.path.clone();
                         let tooltip_path: SharedString = path.clone().into();
                         let tooltip_range = token.range.clone();
-                        card = card.child(
+                        list = list.child(
                             crate::popover::menu_row(
                                 theme,
                                 selected,
@@ -5788,6 +5896,8 @@ impl Composer {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_1()
+                                    .min_w_0()
                                     .items_center()
                                     .gap(px(8.0))
                                     .child(
@@ -5815,7 +5925,7 @@ impl Composer {
                 } else if let Some(error) = self.mention.error.clone() {
                     // Sessions stay visible; the failed file search is a note
                     // under the Files header instead of hiding them.
-                    card = card.child(
+                    list = list.child(
                         div()
                             .px(px(12.0))
                             .py(px(8.0))
@@ -5824,7 +5934,7 @@ impl Composer {
                             .child(error),
                     );
                 } else {
-                    card = card.child(crate::popover::skeleton_rows(
+                    list = list.child(crate::popover::skeleton_rows(
                         "file-mention-loading",
                         theme,
                         2,
@@ -5833,6 +5943,7 @@ impl Composer {
                     ));
                 }
             }
+            card = card.child(list);
         }
         let anchor = self
             .input
@@ -6196,6 +6307,8 @@ impl Composer {
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_1()
+                                .min_w_0()
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(
@@ -6634,29 +6747,29 @@ impl Composer {
         } else {
             self.state.read(cx).chats.clone()
         };
-        // Authoritative send validation against the snapshot: the current
-        // chat, temporary child chats, and cross-project refs are rejected
-        // synchronously (before anything is staged/cleared), with an
-        // actionable error and every draft/comment/attachment preserved.
-        // Unknown ids still fail later in async loading. The current chat's
-        // project is its canonical `space_id` (Sidebar grouping's exact
-        // identity) — an existing chat resolves its own row (a dangling
-        // space id is honored exactly); the new-chat canvas has no chat yet,
-        // so the selected project the chat is minted into governs.
-        let session_project: Option<String> = if is_new {
-            space_id.clone()
-        } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|chat| chat.space_id.clone())
-                .unwrap_or_else(|| space_id.clone())
+        // Host presence for the referenced sessions, snapshotted with the
+        // rows: an offline host is read from this device's synced replica
+        // instead of waiting out a relay read that can't succeed.
+        let offline_session_hosts: HashSet<String> = {
+            let state = self.state.read(cx);
+            let now = chrono::Utc::now();
+            session_ref_ids
+                .iter()
+                .filter_map(|id| session_chats.iter().find(|c| &c.id == id))
+                .filter(|chat| !state.device_online(&chat.device_id, now))
+                .map(|chat| chat.device_id.clone())
+                .collect()
         };
+        // Authoritative send validation against the snapshot: the current
+        // chat and temporary child chats are rejected synchronously (before
+        // anything is staged/cleared), with an actionable error and every
+        // draft/comment/attachment preserved. Sessions from other projects
+        // and other devices are legitimate references. Unknown ids still
+        // fail later in async loading.
         if let Some(message) = session_refs_authoritative_error(
             &session_ref_ids,
             (!is_new).then_some(chat_id.as_str()),
             &session_chats,
-            session_project.as_deref(),
         ) {
             self.failure = Some(message.into());
             cx.notify();
@@ -7005,6 +7118,7 @@ impl Composer {
                             local_device_id.as_deref(),
                             chat_id,
                             &chat.device_id,
+                            !offline_session_hosts.contains(&chat.device_id),
                         )
                         .await?;
                         // Strip attachment refs BEFORE the safe visible-content
@@ -9441,16 +9555,22 @@ mod tests {
             child_chat_row("child-1"),
         ];
         // Bare query: current + child excluded; archived hidden.
-        let out = session_candidates(&chats, "", Some("current"), Some("space"));
+        let out = session_candidates(&chats, "", Some("current"), Some("space"), Some("dev"));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].chat_id, "plain");
         // Non-empty query: archived becomes searchable.
-        let out = session_candidates(&chats, "old", Some("current"), Some("space"));
+        let out = session_candidates(&chats, "old", Some("current"), Some("space"), Some("dev"));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].chat_id, "archived");
         // Current and child stay excluded even when they match the query.
-        assert!(session_candidates(&chats, "cur", Some("current"), Some("space")).is_empty());
-        assert!(session_candidates(&chats, "child", Some("current"), Some("space")).is_empty());
+        assert!(
+            session_candidates(&chats, "cur", Some("current"), Some("space"), Some("dev"))
+                .is_empty()
+        );
+        assert!(
+            session_candidates(&chats, "child", Some("current"), Some("space"), Some("dev"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -9468,7 +9588,7 @@ mod tests {
             ),
             chat_row("mid", "dev", Some("Gamma mid"), false, None, None, Some(5)),
         ];
-        let out = session_candidates(&chats, "", None, None);
+        let out = session_candidates(&chats, "", None, None, None);
         assert_eq!(
             out.iter().map(|s| s.chat_id.as_str()).collect::<Vec<_>>(),
             vec!["recent", "mid", "old"],
@@ -9479,12 +9599,12 @@ mod tests {
             chat_row("a", "dev", Some("Zebra"), false, None, None, Some(1)),
             chat_row("b", "dev", Some("Apple"), false, None, None, Some(1)),
         ];
-        let out = session_candidates(&chats, "", None, None);
+        let out = session_candidates(&chats, "", None, None, None);
         assert_eq!(out[0].chat_id, "b", "Apple before Zebra");
     }
 
     #[test]
-    fn session_candidates_restrict_to_the_current_chats_project() {
+    fn session_candidates_span_projects_and_devices_nearest_first() {
         let chats = vec![
             chat_row(
                 "current",
@@ -9531,33 +9651,65 @@ mod tests {
                 None,
                 Some(8),
             ),
+            chat_row(
+                "remote",
+                "laptop",
+                Some("Remote session"),
+                false,
+                Some("s3"),
+                None,
+                Some(10),
+            ),
         ];
-        // A chat in s1 sees ONLY s1 sessions — another project and a
-        // project-less session never appear, even though they're newer.
-        let out = session_candidates(&chats, "", Some("current"), Some("s1"));
+        // Every project and device is offered: the current project first,
+        // then the same device's other projects (by recency), then other
+        // devices — even when they're newer.
+        let out = session_candidates(&chats, "", Some("current"), Some("s1"), Some("dev"));
         assert_eq!(
             out.iter().map(|s| s.chat_id.as_str()).collect::<Vec<_>>(),
-            vec!["s1-plain"],
-            "same-project sessions only; archived hidden on bare query"
+            vec!["s1-plain", "s2-plain", "no-project", "remote"],
+            "nearest first; archived hidden on bare query"
         );
-        // Archived same-project sessions stay searchable on a query.
-        let out = session_candidates(&chats, "archived", Some("current"), Some("s1"));
+        // Archived sessions stay searchable on a query.
+        let out = session_candidates(&chats, "archived", Some("current"), Some("s1"), Some("dev"));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].chat_id, "s1-archived");
-        // A project-less current chat sees ONLY project-less sessions.
-        let out = session_candidates(&chats, "", Some("current"), None);
+        // Another device's session is found by title.
+        let out = session_candidates(&chats, "remote", Some("current"), Some("s1"), Some("dev"));
         assert_eq!(out.len(), 1);
+        assert_eq!(out[0].chat_id, "remote");
+        assert_eq!(out[0].device_id, "laptop");
+        // A project-less current chat ranks project-less sessions first.
+        let out = session_candidates(&chats, "", Some("current"), None, Some("dev"));
         assert_eq!(out[0].chat_id, "no-project");
-        // Same project, no current chat (new-chat canvas in s1): every s1
-        // durable root is a candidate — including the row that is the
-        // "current" chat elsewhere — and nothing outside s1 appears.
-        let out = session_candidates(&chats, "", None, Some("s1"));
+        // New-chat canvas on the laptop: its sessions come first, and the
+        // "current" chat elsewhere is an ordinary candidate.
+        let out = session_candidates(&chats, "", None, Some("s3"), Some("laptop"));
+        assert_eq!(out[0].chat_id, "remote");
+        assert!(out.iter().any(|s| s.chat_id == "current"));
+    }
+
+    #[test]
+    fn session_candidates_cap_the_popup_rows() {
+        let chats: Vec<Chat> = (0..MAX_SESSION_CANDIDATES + 4)
+            .map(|ix| {
+                chat_row(
+                    &format!("chat-{ix}"),
+                    "dev",
+                    Some(&format!("Session {ix}")),
+                    false,
+                    None,
+                    None,
+                    Some(ix as i64),
+                )
+            })
+            .collect();
+        let out = session_candidates(&chats, "", None, None, None);
+        assert_eq!(out.len(), MAX_SESSION_CANDIDATES);
         assert_eq!(
-            out.iter().map(|s| s.chat_id.as_str()).collect::<Vec<_>>(),
-            vec!["current", "s1-plain"],
+            out[0].chat_id,
+            format!("chat-{}", MAX_SESSION_CANDIDATES + 3)
         );
-        // A cross-project id never matches even when the query names it.
-        assert!(session_candidates(&chats, "s2", Some("current"), Some("s1")).is_empty());
     }
 
     #[test]
@@ -9648,31 +9800,27 @@ mod tests {
             &["ok".into(), "current".into()],
             Some("current"),
             &chats,
-            None,
         );
         assert!(err.is_some());
         assert!(err.unwrap().contains("current chat"));
         // Referencing a temporary child (Side Chat) chat is rejected.
-        let err =
-            session_refs_authoritative_error(&["child-1".into()], Some("current"), &chats, None);
+        let err = session_refs_authoritative_error(&["child-1".into()], Some("current"), &chats);
         assert!(err.is_some());
         assert!(err.unwrap().contains("side chat"));
         // Legitimate refs pass.
         assert!(
-            session_refs_authoritative_error(&["ok".into()], Some("current"), &chats, None)
-                .is_none()
+            session_refs_authoritative_error(&["ok".into()], Some("current"), &chats).is_none()
         );
         // Unknown ids pass here — they still fail in async loading.
         assert!(
-            session_refs_authoritative_error(&["ghost".into()], Some("current"), &chats, None)
-                .is_none()
+            session_refs_authoritative_error(&["ghost".into()], Some("current"), &chats).is_none()
         );
         // No refs always pass.
-        assert!(session_refs_authoritative_error(&[], Some("current"), &chats, None).is_none());
+        assert!(session_refs_authoritative_error(&[], Some("current"), &chats).is_none());
     }
 
     #[test]
-    fn session_refs_authoritative_error_rejects_cross_project_refs() {
+    fn session_refs_authoritative_error_accepts_other_projects_and_devices() {
         let chats = vec![
             chat_row(
                 "current",
@@ -9683,7 +9831,6 @@ mod tests {
                 None,
                 None,
             ),
-            chat_row("s1-ok", "dev", Some("S1 ok"), false, Some("s1"), None, None),
             chat_row(
                 "s2-other",
                 "dev",
@@ -9702,67 +9849,20 @@ mod tests {
                 None,
                 None,
             ),
+            chat_row(
+                "remote",
+                "laptop",
+                Some("Remote"),
+                false,
+                Some("s3"),
+                None,
+                None,
+            ),
         ];
-        // Same-project ref passes (positive coverage).
-        assert!(
-            session_refs_authoritative_error(
-                &["s1-ok".into()],
-                Some("current"),
-                &chats,
-                Some("s1")
-            )
-            .is_none()
-        );
-        // Cross-project ref is rejected with an actionable, project-naming
-        // error (never silently dropped).
-        let err = session_refs_authoritative_error(
-            &["s2-other".into()],
-            Some("current"),
-            &chats,
-            Some("s1"),
-        );
-        let err = err.expect("cross-project ref rejected");
-        assert!(err.contains("different project"));
-        assert!(err.contains("project"));
-        // A project-less ref is cross-project for a spaced chat too.
-        assert!(
-            session_refs_authoritative_error(
-                &["no-project".into()],
-                Some("current"),
-                &chats,
-                Some("s1")
-            )
-            .is_some()
-        );
-        // A spaced ref is cross-project for a project-less current chat.
-        assert!(
-            session_refs_authoritative_error(&["s1-ok".into()], Some("current"), &chats, None)
-                .is_some()
-        );
-        // Project-less same-project ref passes.
-        assert!(
-            session_refs_authoritative_error(&["no-project".into()], Some("current"), &chats, None)
-                .is_none()
-        );
-        // New-chat canvas (no current chat, selected project s1): refs must
-        // belong to the project the chat is minted into.
-        assert!(
-            session_refs_authoritative_error(&["s1-ok".into()], None, &chats, Some("s1")).is_none()
-        );
-        assert!(
-            session_refs_authoritative_error(&["s2-other".into()], None, &chats, Some("s1"))
-                .is_some()
-        );
-        // Unknown ids still pass here (async loading fails them later).
-        assert!(
-            session_refs_authoritative_error(
-                &["ghost".into()],
-                Some("current"),
-                &chats,
-                Some("s1")
-            )
-            .is_none()
-        );
+        let refs = vec!["s2-other".into(), "no-project".into(), "remote".into()];
+        assert!(session_refs_authoritative_error(&refs, Some("current"), &chats).is_none());
+        // New-chat canvas (no current chat): the same refs are valid.
+        assert!(session_refs_authoritative_error(&refs, None, &chats).is_none());
     }
 
     #[test]
@@ -9779,6 +9879,19 @@ mod tests {
         // An index the shrunken list has outgrown is cleared.
         assert_eq!(reconcile_mention_active(Some(2), 2), None);
         assert_eq!(reconcile_mention_active(Some(5), 1), None);
+    }
+
+    #[test]
+    fn mention_scroll_child_skips_section_headers() {
+        // Files only: no headers, candidates map 1:1.
+        assert_eq!(mention_scroll_child(0, 0), 0);
+        assert_eq!(mention_scroll_child(4, 0), 4);
+        // Sessions header precedes session rows.
+        assert_eq!(mention_scroll_child(0, 2), 1);
+        assert_eq!(mention_scroll_child(1, 2), 2);
+        // Files header follows the last session row.
+        assert_eq!(mention_scroll_child(2, 2), 4);
+        assert_eq!(mention_scroll_child(5, 2), 7);
     }
 
     #[test]

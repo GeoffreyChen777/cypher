@@ -46,6 +46,12 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       packages.push(name === "pi-permission-control" ? { source, extensions: ["-index.ts"] } : source);
     }
     assert.ok(packages.length > 0, "Runtime must register its curated packages");
+    // Guards dist/pi-runtime/patches/pi-agent-squad-cypher-host.mjs: an
+    // unpatched squad still loads fine, it just hides every subagent session.
+    const squad = join(runtime, "npm/node_modules/pi-agent-squad");
+    await access(join(squad, "cypher-host.ts"));
+    assert.ok((await readFile(join(squad, "spawn.ts"), "utf8")).includes("CYPHER-RUNTIME-PATCH: cypher-host"),
+      "pi-agent-squad must host subagents as Cypher child chats");
     const extensions = [
       join(runtime, "extensions/cypher-provider-auth.ts"),
       join(runtime, "extensions/cypher-translation.ts"),
@@ -125,6 +131,14 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               assert.equal(responses.get("state").isStreaming, false);
               assert.ok(responses.get("models").models.some(model =>
                 model.provider === "cypher-ci" && model.id === "gpt-4o"));
+              // Guards dist/pi-runtime/patches/pi-claude-bridge-opus-5-5.mjs. The
+              // bridge registers its catalog unconditionally, so an unapplied
+              // patch would otherwise ship Opus 5.5 quietly capped at 200K.
+              const opus = responses.get("models").models.find(model =>
+                model.provider === "claude-bridge" && model.id === "claude-opus-5-5");
+              assert.ok(opus, "claude-bridge must offer claude-opus-5-5");
+              assert.equal(opus.contextWindow, 1_000_000,
+                "claude-bridge must serve claude-opus-5-5 at 1M");
               const names = new Set(responses.get("commands").commands.map(command => command.name));
               for (const name of ["provider", "login", "logout", "newapi-provider-add"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);
