@@ -1061,16 +1061,7 @@ impl CodeEditor {
     // ---- utf16 mapping (IME) ----
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
+        utf16_to_byte_offset(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -1236,6 +1227,25 @@ impl CodeEditor {
     }
 }
 
+/// UTF-16 offset → byte offset, measured *within `text`*.
+///
+/// The two are interchangeable only while the text stays in the BMP's
+/// single-byte range; every CJK character widens the byte offset by two past
+/// the UTF-16 one, so the string the offset was expressed against is the one it
+/// has to be resolved against.
+fn utf16_to_byte_offset(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for ch in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+        utf8_offset += ch.len_utf8();
+    }
+    utf8_offset
+}
+
 impl EntityInputHandler for CodeEditor {
     fn text_for_range(
         &mut self,
@@ -1339,10 +1349,18 @@ impl EntityInputHandler for CodeEditor {
         } else {
             Some(range.start..range.start + new_text.len())
         };
+        // `new_selected_range_utf16` is scoped to `new_text` (it comes straight
+        // from `setMarkedText:selectedRange:`), so it has to be measured inside
+        // `new_text` and only then rebased onto the document. Measuring it
+        // against the whole buffer drifts the caret by however much wider the
+        // preceding text is in UTF-8 than in UTF-16 — which is exactly what a
+        // line mixing CJK with Latin does.
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|r| r.start + range.start..r.end + range.start)
+            .map(|r| {
+                range.start + utf16_to_byte_offset(new_text, r.start)
+                    ..range.start + utf16_to_byte_offset(new_text, r.end)
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
         self.follow_cursor = true;
