@@ -2766,6 +2766,13 @@ impl DocHost {
                     self.harness_for(chat_id),
                     agent_prompt.clone(),
                 );
+                // The chat row carries the composer's current model pick: a
+                // parked run launched with other settings ends here, so the
+                // steer falls through to a fresh turn on the new model.
+                let wanted = self.chat_launch_config(chat_id);
+                if let Some(wanted) = &wanted {
+                    sessions.retire_stale_run(chat_id, wanted).await?;
+                }
                 match sessions
                     .steer_augmented(chat_id, prompt, steer_prompt, message_id.clone())
                     .await?
@@ -2789,6 +2796,10 @@ impl DocHost {
                             ));
                         };
                         request.prompt = prompt.clone();
+                        // A remembered request predates any model switch.
+                        if let Some(wanted) = &wanted {
+                            wanted.apply_to(&mut request);
+                        }
                         request.resume = None; // dispatch re-derives the harness session
                         // A reused config must not re-inline the PREVIOUS
                         // turn's images; this steer's own refs (if any) already
@@ -2944,6 +2955,14 @@ impl DocHost {
     /// row — cwd from the row, model/reasoning/options/sandbox from its config
     /// (composer defaults otherwise). `None` without a workspace host or row.
     // (Also the RespondInput dead-run fallback's config source.)
+    /// The chat row's current model settings, if the row has a config.
+    fn chat_launch_config(&self, chat_id: &str) -> Option<crate::sessions::LaunchConfig> {
+        let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
+        chat.config
+            .as_ref()
+            .map(crate::sessions::LaunchConfig::of_chat)
+    }
+
     pub(crate) fn request_from_chat_row(
         &self,
         chat_id: &str,

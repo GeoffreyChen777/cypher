@@ -33,8 +33,8 @@ use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, SubagentRun,
-    SubagentRunStatus, UserInputAnswer, UserInputQuestion,
+    AgentEvent, ChatConfig, DoneStatus, HarnessId, ReasoningLevel, RunRequest, Session,
+    SessionStatus, SubagentRun, SubagentRunStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -59,6 +59,46 @@ pub enum SteerOutcome {
 }
 
 type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+
+/// The model settings a run's harness process was launched with. A parked
+/// (persistent) process keeps them for its whole life, so a turn asking for
+/// different ones must not be routed into it — see
+/// [`SessionsEngine::retire_stale_run`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaunchConfig {
+    pub harness: HarnessId,
+    pub model: Option<String>,
+    pub reasoning: Option<ReasoningLevel>,
+    pub model_options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LaunchConfig {
+    pub fn of_request(harness: HarnessId, request: &RunRequest) -> Self {
+        Self {
+            harness,
+            model: request.model.clone(),
+            reasoning: request.reasoning,
+            model_options: request.model_options.clone(),
+        }
+    }
+
+    pub fn of_chat(config: &ChatConfig) -> Self {
+        Self {
+            harness: config.harness,
+            model: config.model.clone(),
+            reasoning: config.reasoning,
+            model_options: config.model_options.clone(),
+        }
+    }
+
+    /// Stamp these settings onto a request built from an older config.
+    pub fn apply_to(&self, request: &mut RunRequest) {
+        request.harness = Some(self.harness);
+        request.model = self.model.clone();
+        request.reasoning = self.reasoning;
+        request.model_options = self.model_options.clone();
+    }
+}
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -88,6 +128,8 @@ struct RunHandle {
     /// and re-dispatches each entry as a fresh turn, so an accepted message
     /// can never silently evaporate from a transcript that shows it as sent.
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
+    /// What the harness process was launched with (routed turns reuse it).
+    launch: LaunchConfig,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -593,6 +635,10 @@ impl SessionsEngine {
             .unwrap_or_else(|| visible_prompt.clone());
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
+        // A parked process launched with other model settings must not take
+        // this turn: end it here so the turn below spawns with the new ones.
+        self.retire_stale_run(chat_id, &LaunchConfig::of_request(harness_id, &request))
+            .await?;
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -726,6 +772,7 @@ impl SessionsEngine {
                 engine_tx,
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                launch: LaunchConfig::of_request(harness_id, &request),
             },
         );
         self.set_status(chat_id, SessionStatus::Working, true);
@@ -956,6 +1003,60 @@ impl SessionsEngine {
         Err(EngineError::Other(format!(
             "source run did not quiesce in time: {chat_id}"
         )))
+    }
+
+    /// Keep a chat's live run from serving a turn that wants different model
+    /// settings than its harness process was launched with (a mid-session
+    /// model/reasoning/harness switch). A PARKED run ends cleanly — the idle
+    /// reaper's path, no aborted stamp — so the caller's turn spawns fresh
+    /// (engine-owned resume keeps the conversation). A BUSY run keeps its
+    /// current turn (anything routed into it now still lands there); its
+    /// launch config is unchanged, so the first send after it parks ends it.
+    /// Either way the retained run config takes the new settings, so an
+    /// orphaned-steer re-dispatch or steer fallback uses them too.
+    pub async fn retire_stale_run(
+        &self,
+        chat_id: &str,
+        wanted: &LaunchConfig,
+    ) -> Result<(), EngineError> {
+        let target = lock(&self.inner.runs).get(chat_id).and_then(|h| {
+            (h.launch != *wanted).then(|| {
+                (
+                    h.run_id.clone(),
+                    h.interrupt_token.clone(),
+                    h.launch.clone(),
+                )
+            })
+        });
+        let Some((run_id, token, launched)) = target else {
+            return Ok(());
+        };
+        if let Some(request) = lock(&self.inner.last_requests).get_mut(chat_id) {
+            wanted.apply_to(request);
+        }
+        let parked = self
+            .session_status(chat_id)
+            .is_some_and(|session| session.status == SessionStatus::Idle);
+        if !parked {
+            return Ok(());
+        }
+        tracing::info!(
+            chat = %chat_id,
+            from = ?launched.model,
+            to = ?wanted.model,
+            "model settings changed; ending parked session so the next turn respawns"
+        );
+        // Harness token only: flipping the engine cancel watch would stamp
+        // the parked turn aborted.
+        token.cancel();
+        for _ in 0..500 {
+            if !self.is_live(chat_id, &run_id) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tracing::warn!(chat = %chat_id, "parked session ignored clean end; interrupting");
+        self.interrupt(chat_id).await.map(drop)
     }
 
     /// Pi package enablement changed: drop parked children so the next send
