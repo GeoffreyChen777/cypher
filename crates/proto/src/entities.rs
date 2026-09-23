@@ -295,6 +295,30 @@ pub struct Session {
     /// (the UI merges it with the doc's own tool parts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagents: Vec<SubagentRun>,
+    /// Latest context-window occupancy the agent reported (the composer's
+    /// context ring). Host-local run state: it rides `WatchSessions` from
+    /// this engine only and is never written to the workspace registry, so
+    /// another device's row always reads `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
+}
+
+/// Context-window occupancy: `used` tokens of a `size`-token window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub used: u64,
+    pub size: u64,
+}
+
+impl ContextUsage {
+    /// Filled fraction in `0.0..=1.0`; an unknown (zero) window reads empty.
+    pub fn fraction(&self) -> f32 {
+        if self.size == 0 {
+            return 0.0;
+        }
+        (self.used as f64 / self.size as f64).clamp(0.0, 1.0) as f32
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

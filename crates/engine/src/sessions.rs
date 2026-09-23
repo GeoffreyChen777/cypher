@@ -33,8 +33,8 @@ use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, ChatConfig, DoneStatus, HarnessId, ReasoningLevel, RunRequest, Session,
-    SessionStatus, SubagentRun, SubagentRunStatus, UserInputAnswer, UserInputQuestion,
+    AgentEvent, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
+    Session, SessionStatus, SubagentRun, SubagentRunStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1293,11 +1293,25 @@ impl Inner {
     /// watch (the Side Chat panel); normal chats update the public sessions
     /// watch AND the workspace session row (remote sidebars).
     fn publish_session(&self, chat_id: &str, session: &Session) {
+        if !self.publish_local(chat_id, session) {
+            return;
+        }
+        if let Some(ws) = self.workspace() {
+            ws.record_session(session);
+            ws.notify_session_event(session);
+        }
+    }
+
+    /// The engine-local half of [`Self::publish_session`]: refresh the
+    /// ephemeral watch or the public `WatchSessions` list, without touching
+    /// the workspace registry. Returns whether the chat is public (i.e.
+    /// whether a registry mirror would apply).
+    fn publish_local(&self, chat_id: &str, session: &Session) -> bool {
         if self.is_ephemeral(chat_id) {
             if let Some(tx) = lock(&self.ephemeral_tx).get(chat_id) {
                 let _ = tx.send_replace(Some(session.clone()));
             }
-            return;
+            return false;
         }
         let ephemeral = lock(&self.ephemeral);
         let mut list: Vec<Session> = lock(&self.statuses)
@@ -1310,10 +1324,7 @@ impl Inner {
         // send_replace: keep the current value fresh even with no receivers,
         // so late WatchSessions subscribers see the last transition.
         self.sessions_tx.send_replace(list);
-        if let Some(ws) = self.workspace() {
-            ws.record_session(session);
-            ws.notify_session_event(session);
-        }
+        true
     }
 
     /// Bump the session's freshness on stream activity WITHOUT a status
@@ -1349,6 +1360,37 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// Context-window gauge (ACP `usage_update`, pi session stats): update
+    /// the chat's session row's `context_usage` ONLY. Unlike subagent status
+    /// it is not a liveness signal, so `updated_at` stays put — a gauge
+    /// landing after a turn settled must not make a parked row read fresh.
+    /// An unchanged reading publishes nothing (Claude streams one per
+    /// message delta).
+    fn set_context_usage(&self, chat_id: &str, usage: ContextUsage) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let entry = statuses
+                .entry(chat_id.to_string())
+                .or_insert_with(|| Session {
+                    chat_id: chat_id.to_string(),
+                    device_id: self.device_id.clone(),
+                    status: SessionStatus::Idle,
+                    started_at: None,
+                    updated_at: Utc::now(),
+                    subagents: Vec::new(),
+                    context_usage: None,
+                });
+            if entry.context_usage == Some(usage) {
+                return;
+            }
+            entry.context_usage = Some(usage);
+            entry.clone()
+        };
+        // Local only: the registry never stores the gauge, so a mirror would
+        // be a durable no-op write per reading.
+        self.publish_local(chat_id, &session);
+    }
+
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
     /// session row's `subagents` + `updated_at` ONLY — no status transition,
     /// no `started_at` change, and a missing row is created Idle (a subagent
@@ -1369,6 +1411,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     subagents: Vec::new(),
+                    context_usage: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1390,6 +1433,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     subagents: Vec::new(),
+                    context_usage: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2039,6 +2083,13 @@ async fn drive_run(
         // `set_subagents`' own updated_at bump keeps the row fresh instead).
         if let AgentEvent::SubagentStatus { runs } = &event {
             inner.set_subagents(&chat_id, runs.clone());
+            continue;
+        }
+        // The context gauge is the same kind of projection: mirrored onto
+        // the local session row, never journaled, folded, or allowed to
+        // resume a parked session (Claude re-reports it after compaction).
+        if let AgentEvent::ContextUsage { used, size } = event {
+            inner.set_context_usage(&chat_id, ContextUsage { used, size });
             continue;
         }
         // A prompt's translation belongs to the USER entry it replaced, which

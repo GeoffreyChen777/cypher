@@ -13,6 +13,8 @@ A ground-up native rewrite of the original [zeron](../zeron) web app — a multi
 - Durable Objects stay **TypeScript** (decision + evidence: `docs/research/durable-objects-language.md`).
   Everything device-side is Rust.
 - Feature parity with zeron **except token-usage display** (poor fit for CRDTs; excluded).
+  The one usage surface is the composer's context ring: a context-window gauge the host
+  engine keeps on its local session projection (never written to a synced doc).
 - Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
   **mugen + pretext** (`docs/research/mugen-pretext.md`).
 - One binary, **headed or headless**. Smooth transitions/animations matching the original

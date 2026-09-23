@@ -763,6 +763,8 @@ impl From<RawSession> for Session {
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
             subagents: raw.subagents.unwrap_or_default(),
+            // Host-local gauge: never stored in the registry.
+            context_usage: None,
         }
     }
 }
@@ -840,6 +842,7 @@ mod tests {
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
             subagents: Vec::new(),
+            context_usage: None,
         }
     }
 

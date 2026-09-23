@@ -367,12 +367,22 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             let commands = parse_commands(update.get("availableCommands"));
             vec![AgentEvent::AvailableCommands { commands }]
         }
-        // Context-window gauge, not per-turn input/output tokens — cypher's
-        // Usage event feeds rate-limit probes, so a wrong mapping is worse
-        // than none. Mode/config/session-info updates carry nothing we render.
-        "usage_update" | "current_mode_update" | "config_option_update" | "session_info_update" => {
-            Vec::new()
+        // Context-window gauge (`used` of `size` tokens) — the composer's
+        // context ring, never per-turn input/output tokens (cypher's Usage
+        // event feeds rate-limit probes, so it must not be conflated). A
+        // frame without a known window (`size` 0/absent) carries no gauge.
+        "usage_update" => {
+            let used = update.get("used").and_then(Value::as_u64);
+            let size = update.get("size").and_then(Value::as_u64);
+            match (used, size) {
+                (Some(used), Some(size)) if size > 0 => {
+                    vec![AgentEvent::ContextUsage { used, size }]
+                }
+                _ => Vec::new(),
+            }
         }
+        // Mode/config/session-info updates carry nothing we render.
+        "current_mode_update" | "config_option_update" | "session_info_update" => Vec::new(),
         _ => Vec::new(),
     }
 }

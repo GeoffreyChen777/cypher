@@ -350,6 +350,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
         subagents: Vec::new(),
+        context_usage: None,
     }
 }
 

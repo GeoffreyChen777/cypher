@@ -19,6 +19,7 @@ pub mod changes;
 pub mod chat_style;
 pub mod comments;
 pub mod composer;
+pub mod context_ring;
 pub mod edge_fade;
 pub mod files;
 pub mod find;

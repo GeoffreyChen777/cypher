@@ -1515,6 +1515,77 @@ fn builtin_match<'a>(prompt: &'a str, name: &str) -> Option<Option<&'a str>> {
     })
 }
 
+/// `compact` RPC params: the optional `/compact <instructions>` argument.
+fn compact_params(instructions: Option<&str>) -> Map<String, Value> {
+    let mut params = Map::new();
+    if let Some(instructions) = instructions {
+        params.insert(
+            "customInstructions".into(),
+            Value::String(instructions.to_owned()),
+        );
+    }
+    params
+}
+
+/// The transcript line a finished `compact` RPC reports.
+fn compact_summary(data: &Value) -> String {
+    match (
+        data.get("tokensBefore").and_then(Value::as_u64),
+        data.get("estimatedTokensAfter").and_then(Value::as_u64),
+    ) {
+        (Some(before), Some(after)) => format!("Context compacted: {before} → {after} tokens"),
+        _ => "Context compacted.".to_owned(),
+    }
+}
+
+/// Response key a parked-turn built-in uses to hand its transcript line back
+/// through the `idle_prompt` slot (a real `prompt` ACK never carries it).
+const BUILTIN_TEXT_KEY: &str = "cypherBuiltinText";
+
+/// Pi's context gauge from a `get_session_stats` response. `tokens` is null
+/// right after a compaction (pi cannot know until the next LLM response), so
+/// the compaction's own estimate stands in when the caller has one.
+fn context_usage_event(stats: &Value, fallback_used: Option<&Value>) -> Option<AgentEvent> {
+    let usage = stats.get("contextUsage")?;
+    let size = usage
+        .get("contextWindow")
+        .and_then(Value::as_f64)
+        .filter(|size| *size > 0.0)?;
+    let used = usage
+        .get("tokens")
+        .and_then(Value::as_f64)
+        .or_else(|| fallback_used.and_then(Value::as_f64))?;
+    Some(AgentEvent::ContextUsage {
+        used: used.max(0.0).round() as u64,
+        size: size.round() as u64,
+    })
+}
+
+async fn read_context_usage(
+    client: &PiClient,
+    fallback_used: Option<&Value>,
+) -> Option<AgentEvent> {
+    let stats = client.request("get_session_stats", Map::new()).await.ok()?;
+    context_usage_event(&stats, fallback_used)
+}
+
+/// Refresh the context gauge without stalling the event loop: the stats
+/// request resolves on the client's reader task, and the reading lands as a
+/// run-state event whenever it arrives (the engine never folds it).
+fn refresh_context_usage(
+    client: &PiClient,
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    fallback_used: Option<Value>,
+) {
+    let client = client.clone();
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Some(event) = read_context_usage(&client, fallback_used.as_ref()).await {
+            let _ = send(&event_tx, event).await;
+        }
+    });
+}
+
 /// Emit a synthesized built-in command's terminal events: one TextDelta (also
 /// pushed into Done's `result`) then Done{Completed}. The run ends
 /// immediately — there is no agent stream for these commands, so the
@@ -1556,25 +1627,25 @@ async fn intercept_builtin(
     if intercept.compact
         && let Some(instructions) = builtin_match(prompt, "compact")
     {
-        let mut params = Map::new();
-        if let Some(instructions) = instructions {
-            params.insert(
-                "customInstructions".into(),
-                Value::String(instructions.to_owned()),
-            );
-        }
-        match client.request("compact", params).await {
+        match client
+            .request("compact", compact_params(instructions))
+            .await
+        {
             Ok(data) => {
-                let text = match (
-                    data.get("tokensBefore").and_then(Value::as_u64),
-                    data.get("estimatedTokensAfter").and_then(Value::as_u64),
-                ) {
-                    (Some(before), Some(after)) => {
-                        format!("Context compacted: {before} → {after} tokens")
-                    }
-                    _ => "Context compacted.".to_owned(),
-                };
-                finish_builtin(event_tx, session_file, text, last_assistant_text).await;
+                // The child is reaped right after this Done, so the gauge is
+                // read inline rather than via the spawned refresh.
+                if let Some(event) =
+                    read_context_usage(client, data.get("estimatedTokensAfter")).await
+                {
+                    let _ = send(event_tx, event).await;
+                }
+                finish_builtin(
+                    event_tx,
+                    session_file,
+                    compact_summary(&data),
+                    last_assistant_text,
+                )
+                .await;
             }
             Err(e) => {
                 // The request error already names the command (`compact: …`).
@@ -2168,18 +2239,34 @@ async fn run_session(session: Session) {
             // re-arms it once accepted (lifecycle events that landed first
             // disarm it via agent_started).
             prompt_is_command = text.trim_start().starts_with('/');
-            let mut params = Map::new();
-            params.insert("message".into(), Value::String(text));
-            // `streamingBehavior:"steer"` makes the parked restart atomic:
-            // an idle pi starts a fresh turn, a still-streaming pi queues the
-            // message as a steer — a plain prompt would be REJECTED while pi
-            // streams (the confirmed parked-session wedge).
-            params.insert("streamingBehavior".into(), Value::String("steer".into()));
             let client = client.clone();
             had_ui = false;
-            idle_prompt = Some(Box::pin(
-                async move { client.request("prompt", params).await },
-            ));
+            // A parked `/compact` is the built-in too: pi's `prompt` never
+            // runs TUI built-ins and would hand the text to the model. The
+            // RPC's summary rides back through the prompt slot; the accept
+            // arm streams it and the zero grace settles the turn.
+            let compact = intercept
+                .compact
+                .then(|| builtin_match(&text, "compact"))
+                .flatten()
+                .map(|instructions| compact_params(instructions));
+            idle_prompt = Some(match compact {
+                Some(params) => Box::pin(async move {
+                    let data = client.request("compact", params).await?;
+                    Ok(json!({ BUILTIN_TEXT_KEY: compact_summary(&data) }))
+                }),
+                None => {
+                    let mut params = Map::new();
+                    params.insert("message".into(), Value::String(text));
+                    // `streamingBehavior:"steer"` makes the parked restart
+                    // atomic: an idle pi starts a fresh turn, a
+                    // still-streaming pi queues the message as a steer — a
+                    // plain prompt would be REJECTED while pi streams (the
+                    // confirmed parked-session wedge).
+                    params.insert("streamingBehavior".into(), Value::String("steer".into()));
+                    Box::pin(async move { client.request("prompt", params).await })
+                }
+            });
         }
 
         tokio::select! {
@@ -2244,6 +2331,18 @@ async fn run_session(session: Session) {
                 // nothing will ever stream for it: one Done Errored ends the
                 // run (and the terminal bookkeeping reaps the child).
                 match res {
+                    Ok(data) if data.get(BUILTIN_TEXT_KEY).is_some() => {
+                        // A parked built-in finished: its line is the turn's
+                        // whole output, and the zero grace settles it through
+                        // the no-activity arm (Done + park, like any inert
+                        // command).
+                        let text = data[BUILTIN_TEXT_KEY].as_str().unwrap_or_default().to_owned();
+                        last_assistant_text.push_str(&text);
+                        if !send(&event_tx, AgentEvent::TextDelta { text }).await {
+                            break 'main;
+                        }
+                        no_activity = Box::pin(tokio::time::sleep(Duration::ZERO));
+                    }
                     Ok(_) => {
                         // Arm the no-activity grace NOW that the prompt is
                         // accepted. Lifecycle events that landed during the
@@ -2363,6 +2462,7 @@ async fn run_session(session: Session) {
                         }
                         "message_end" => {
                             if message_is_assistant(ev.get("message")) {
+                                refresh_context_usage(&client, &event_tx, None);
                                 if let Some(message) = ev.get("message") {
                                     if let Some(stop) = message.get("stopReason").and_then(Value::as_str)
                                     {
@@ -2482,6 +2582,10 @@ async fn run_session(session: Session) {
                                 continue;
                             }
                             in_turn = false;
+                            // The settled branch is final: its gauge reading
+                            // supersedes any per-message one that raced a
+                            // session write.
+                            refresh_context_usage(&client, &event_tx, None);
                             // Steers pi accepted but never delivered (the
                             // turn settled before the steer reply streamed)
                             // are stranded — an idle pi only QUEUES steers.
@@ -2544,7 +2648,17 @@ async fn run_session(session: Session) {
                                 break 'main;
                             }
                         }
-                        // agent_end/turn_*/queue_update/compaction_*/auto_retry_*/
+                        // Manual (parked `/compact`) and automatic compactions
+                        // both end here: re-read the gauge, falling back to the
+                        // compaction's own estimate while pi reports none.
+                        "compaction_end" => {
+                            let estimate = ev
+                                .get("result")
+                                .and_then(|r| r.get("estimatedTokensAfter"))
+                                .cloned();
+                            refresh_context_usage(&client, &event_tx, estimate);
+                        }
+                        // agent_end/turn_*/queue_update/compaction_start/auto_retry_*/
                         // summarization_*/bash_execution_update: nothing cypher
                         // renders — ignored.
                         _ => {}

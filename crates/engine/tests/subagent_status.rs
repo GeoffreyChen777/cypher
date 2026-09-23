@@ -16,8 +16,9 @@ use cypher_doc::{MessageRole, SessionMessageEntry};
 use cypher_engine::{EngineCore, HarnessRegistry};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel, Session,
-    SessionStatus, SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall,
+    AgentEvent, ContextUsage, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SandboxLevel, Session, SessionStatus, SteeringMode, SubagentRun, SubagentRunMode,
+    SubagentRunStatus, ToolCall,
 };
 
 const CHAT: &str = "chat-subagents";
@@ -332,6 +333,98 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
     rig.core.sessions.shutdown().await;
 }
 
+/// The context gauge (`AgentEvent::ContextUsage`) is the same kind of live
+/// projection: after a parked turn it lands on the LOCAL session row (the
+/// UI's `WatchSessions` source) without re-arming the session, restamping
+/// its freshness, or folding a transcript entry — and it never reaches the
+/// synced workspace registry.
+#[tokio::test]
+async fn context_usage_mirrors_locally_without_polluting_run_state() {
+    let rig = assemble("measure the context");
+    rig.core
+        .sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mock,
+            run_request("measure the context"),
+            None,
+        )
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    rig.feed
+        .send(AgentEvent::TextDelta {
+            text: "done".into(),
+        })
+        .unwrap();
+    rig.feed
+        .send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("hs-sa".into()),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+    let before_entries = assistant_entries(&rig.core).len();
+    let before_updated = rig.core.sessions.session_status(CHAT).map(|s| s.updated_at);
+
+    // Claude re-reports the gauge after a compaction, turn already parked.
+    rig.feed
+        .send(AgentEvent::ContextUsage {
+            used: 32_000,
+            size: 200_000,
+        })
+        .unwrap();
+    let expected = Some(ContextUsage {
+        used: 32_000,
+        size: 200_000,
+    });
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(CHAT)
+                .and_then(|s| s.context_usage)
+                == expected
+        },
+        "gauge lands on the session row",
+    )
+    .await;
+
+    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    assert_eq!(started_at(&rig.core), None);
+    assert_eq!(
+        rig.core.sessions.session_status(CHAT).map(|s| s.updated_at),
+        before_updated,
+        "the gauge is not a liveness signal"
+    );
+    assert_eq!(assistant_entries(&rig.core).len(), before_entries);
+
+    let watched = rig
+        .core
+        .sessions
+        .watch_sessions()
+        .borrow()
+        .iter()
+        .find(|s| s.chat_id == CHAT)
+        .and_then(|s| s.context_usage);
+    assert_eq!(watched, expected, "WatchSessions carries the gauge");
+
+    let rows = rig.core.workspace.read_sessions().unwrap();
+    let row = rows.iter().find(|s| s.chat_id == CHAT).expect("row");
+    assert_eq!(
+        row.context_usage, None,
+        "the registry never stores the gauge"
+    );
+
+    rig.core.sessions.shutdown().await;
+}
+
 /// During a LIVE turn, SubagentStatus still never folds into the transcript:
 /// it updates the projection only, and the run keeps its Working status.
 #[tokio::test]
@@ -598,6 +691,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         started_at: None,
         updated_at: now,
         subagents: vec![run("r-local")],
+        context_usage: None,
     };
     let remote = Session {
         chat_id: "chat-remote".into(),
@@ -606,6 +700,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         started_at: None,
         updated_at: now,
         subagents: vec![run("r-remote")],
+        context_usage: None,
     };
     rig.core.workspace.record_session(&local);
     rig.core.workspace.record_session(&remote);

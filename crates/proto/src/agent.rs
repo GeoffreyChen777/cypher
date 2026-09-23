@@ -450,6 +450,15 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Live context-window occupancy (ACP `usage_update`, pi
+    /// `get_session_stats.contextUsage`). Run-state only, like
+    /// `SubagentStatus`: the engine mirrors it onto the chat's local session
+    /// projection — never journaled, never folded, never a status driver.
+    #[serde(rename_all = "camelCase")]
+    ContextUsage {
+        used: u64,
+        size: u64,
+    },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.

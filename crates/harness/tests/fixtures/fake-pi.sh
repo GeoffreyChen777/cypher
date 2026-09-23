@@ -12,6 +12,27 @@ emit() { printf '%s\n' "$1"; }
 # pi ids are strings — keep the surrounding quotes in the echoed id.
 rid() { printf '%s' "$1" | sed 's/.*"id":"\([^"]*\)".*/"\1"/'; }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+# The harness reads the context gauge (`get_session_stats`) in the background
+# after assistant messages, settles, and compactions, so those requests can
+# interleave with any scripted command. Answered inline with $STATS_DATA —
+# empty by default (no gauge event), so scenarios stay deterministic.
+STATS_DATA='{}'
+stats_reply() {
+  emit "{\"id\":$(rid "$1"),\"type\":\"response\",\"command\":\"get_session_stats\",\"success\":true,\"data\":$STATS_DATA}"
+}
+# `next_cmd VAR`: read the next scripted command into VAR, answering any
+# gauge reads on the way.
+next_cmd() {
+  while read -r __line; do
+    if has "$__line" '"type":"get_session_stats"'; then
+      stats_reply "$__line"
+      continue
+    fi
+    eval "$1=\$__line"
+    return 0
+  done
+  return 1
+}
 # Parse --session-dir out of the CLI args so fork/clone results (and the
 # default session file) land INSIDE the managed root the controller validates
 # against — real pi stores every session under its --session-dir.
@@ -131,6 +152,10 @@ while read -r line; do
     emit "{\"id\":$(rid "$line"),\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}"
     ;;
 
+  *'"type":"get_session_stats"'*)
+    stats_reply "$line"
+    ;;
+
   *'"type":"compact"'*)
     # The harness-synthesized /compact built-in: refuse unless the custom
     # instructions were carried (proving the interception relayed them).
@@ -211,7 +236,7 @@ while read -r line; do
 
     *scenario:mcp-login*)
       emit '{"type":"extension_ui_request","id":"oauth-dialog","method":"input","title":"Complete OAuth\nhttps://auth.example/authorize?state=attempt&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback\nPaste callback"}'
-      read -r answer
+      next_cmd answer
       if has "$answer" '"id":"oauth-dialog"' && has "$answer" '"value":"http://localhost:8976/callback?state=attempt&code=fixture"'; then
         emit '{"type":"extension_ui_request","id":"oauth-done","method":"notify","message":"OAuth authentication successful","notifyType":"info"}'
         emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
@@ -281,7 +306,7 @@ while read -r line; do
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
       emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"src/main.rs"}}'
       emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"// main"}]},"isError":false}'
-      read -r steerline || exit 1
+      next_cmd steerline || exit 1
       if has "$steerline" '"type":"steer"' && has "$steerline" 'redirect please'; then
         emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
         # The steer reply is the next assistant message: the harness must
@@ -297,6 +322,30 @@ while read -r line; do
       ;;
 
 
+    *scenario:parked-compact*)
+      # A `/compact` sent to a PARKED child must run pi's `compact` RPC (pi's
+      # `prompt` never executes TUI built-ins), stream its summary, settle,
+      # and stay parked — while every gauge read reports context usage.
+      STATS_DATA='{"contextUsage":{"tokens":150000,"contextWindow":200000,"percent":75}}'
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      next_cmd second || exit 1
+      if has "$second" '"type":"compact"'; then
+        # Post-compaction pi reports no token count until the next LLM
+        # response: the harness falls back to the compaction's estimate.
+        STATS_DATA='{"contextUsage":{"tokens":null,"contextWindow":200000,"percent":null}}'
+        emit '{"type":"compaction_start","reason":"manual"}'
+        emit '{"type":"compaction_end","reason":"manual","result":{"summary":"s","firstKeptEntryId":"e1","tokensBefore":150000,"estimatedTokensAfter":32000},"aborted":false,"willRetry":false}'
+        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"tokensBefore\":150000,\"estimatedTokensAfter\":32000}}"
+        while next_cmd line; do :; done
+        exit 0
+      fi
+      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked /compact must run the compact RPC\"}"
+      exit 1
+      ;;
     *scenario:parked-noagent*)
       # A parked second turn whose prompt produces ZERO agent-lifecycle events
       # (notify only): the harness must re-arm the no-activity grace AFTER the
@@ -310,7 +359,7 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first turn"}}'
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first turn"}],"stopReason":"stop"}}'
       emit '{"type":"agent_settled"}'
-      read -r second || exit 1
+      next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'notify only'; then
         emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         # 150ms < the 200ms test grace: only a freshly re-armed timer reaches
@@ -333,14 +382,14 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"stop"}}'
       emit '{"type":"agent_settled"}'
-      read -r second || exit 1
+      next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'second turn'; then
         emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
         emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"second"}}'
         emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"second"}],"stopReason":"stop"}}'
         emit '{"type":"agent_settled"}'
-        read -r third || exit 1
+        next_cmd third || exit 1
         if has "$third" '"type":"prompt"' && has "$third" '"streamingBehavior":"steer"' && has "$third" 'third turn'; then
           emit "{\"id\":$(rid \"$third\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
           emit '{"type":"message_start","message":{"role":"assistant","id":"m3","content":[]}}'
@@ -366,12 +415,12 @@ while read -r line; do
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
       emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"x"}}'
       emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"x"}]},"isError":false}'
-      read -r steerline || exit 1
+      next_cmd steerline || exit 1
       if has "$steerline" '"type":"steer"' && has "$steerline" 'redirect'; then
         # Accepted, then settled WITHOUT ever delivering the steer reply.
         emit "{\"id\":$(rid \"$steerline\"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
         emit '{"type":"agent_settled"}'
-        read -r retry || exit 1
+        next_cmd retry || exit 1
         if has "$retry" '"type":"prompt"' && has "$retry" '"streamingBehavior":"steer"' && has "$retry" 'redirect'; then
           emit "{\"id\":$(rid \"$retry\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
           emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
@@ -402,7 +451,7 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
       emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"stop"}}'
       emit '{"type":"agent_settled"}'
-      read -r second || exit 1
+      next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'second message'; then
         # Pre-response notify, then acceptance, then the second turn.
         emit '{"type":"extension_ui_request","id":"u-2","method":"notify","message":"pre-response note","notifyType":"info"}'
@@ -420,7 +469,7 @@ while read -r line; do
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"working"}}'
-      read -r abortline || exit 1
+      next_cmd abortline || exit 1
       if has "$abortline" '"type":"abort"'; then
         # Fire-and-forget abort carries no id — the response needs none.
         emit '{"type":"response","command":"abort","success":true}'
@@ -434,7 +483,7 @@ while read -r line; do
     *scenario:ui-select*)
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       emit '{"type":"extension_ui_request","id":"u-1","method":"select","title":"Pick a runtime","options":["tokio","smol"]}'
-      read -r ans || exit 1
+      next_cmd ans || exit 1
       if has "$ans" '"type":"extension_ui_response"' && has "$ans" '"id":"u-1"' && has "$ans" '"value":"tokio"'; then
         emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
         emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"answered"}}'
@@ -450,7 +499,7 @@ while read -r line; do
       # harness must drain the UI request while the prompt RPC is still in
       # flight or the run deadlocks (Working forever, no question panel).
       emit '{"type":"extension_ui_request","id":"u-1","method":"select","title":"Pick a runtime","options":["tokio","smol"]}'
-      read -r ans || exit 1
+      next_cmd ans || exit 1
       if has "$ans" '"type":"extension_ui_response"' && has "$ans" '"id":"u-1"' && has "$ans" '"value":"tokio"'; then
         emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
@@ -514,7 +563,7 @@ while read -r line; do
       # parked prompt so the state can toggle in the opposite direction.
       emit '{"type":"extension_ui_request","id":"fast-1","method":"notify","message":"GPT Fast mode disabled.","notifyType":"info"}'
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
-      read -r second || exit 1
+      next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" '/fast'; then
         emit '{"type":"extension_ui_request","id":"fast-2","method":"notify","message":"GPT Fast mode enabled (service_tier: priority).","notifyType":"info"}'
         emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"

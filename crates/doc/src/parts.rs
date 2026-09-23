@@ -444,13 +444,15 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         }
         // AvailableCommands feeds the engine's per-harness command cache, not
         // the transcript. SubagentStatus is a live session projection (the
-        // engine consumes it before the fold) — never transcript content.
+        // engine consumes it before the fold) — never transcript content, and
+        // so is ContextUsage.
         // InputTranslation belongs to the USER entry the engine stamps
         // directly, never to the assistant segment being folded.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::SubagentStatus { .. }
+        | AgentEvent::ContextUsage { .. }
         | AgentEvent::InputTranslation { .. } => {}
     }
 }

@@ -208,8 +208,12 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
         },
     }));
 
-    // usage_update maps to nothing (context gauge, not per-turn tokens).
+    // usage_update is the context gauge, never per-turn tokens.
     assert!(!events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
+    assert!(events.contains(&AgentEvent::ContextUsage {
+        used: 1200,
+        size: 500_000,
+    }));
 
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }

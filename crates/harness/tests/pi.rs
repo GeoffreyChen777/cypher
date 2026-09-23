@@ -845,6 +845,74 @@ fn dones_so_far(events: &[AgentEvent]) -> usize {
 }
 
 #[tokio::test]
+async fn parked_compact_runs_the_builtin_and_reports_context_usage() {
+    // `/compact` routed to a PARKED child (the composer's context ring sends
+    // exactly this after a turn settles) must run pi's `compact` RPC — the
+    // fixture rejects it arriving as a prompt — stream the summary, settle
+    // Completed, and keep the child parked. The gauge rides alongside: the
+    // settled turn reads 150k/200k, and the post-compaction read (pi reports
+    // no tokens yet) falls back to the compaction's 32k estimate.
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:parked-compact"), controls)
+        .await
+        .expect("run starts");
+    let compacted_gauge = AgentEvent::ContextUsage {
+        used: 32_000,
+        size: 200_000,
+    };
+    let gauge = compacted_gauge.clone();
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut steer = Some(steer);
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let first_done = matches!(ev, AgentEvent::Done { .. }) && dones_so_far(&events) == 0;
+            events.push(ev);
+            if first_done && let Some(steer) = &steer {
+                steer
+                    .send(SteerMessage {
+                        prompt: "/compact".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .expect("compact mailbox send");
+            }
+            // Both turns settled and the post-compaction gauge landed: close
+            // the mailbox so the parked run ends.
+            if dones_so_far(&events) == 2 && events.contains(&gauge) {
+                steer = None;
+            }
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "Context compacted: 150000 → 32000 tokens".into()
+        }),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::ContextUsage {
+            used: 150_000,
+            size: 200_000,
+        }),
+        "{events:?}"
+    );
+    assert!(events.contains(&compacted_gauge), "{events:?}");
+}
+
+#[tokio::test]
 async fn parked_mailbox_restarts_via_prompt_not_idle_steer() {
     // The first turn settles and the child PERSISTS (a real pi keeps the
     // session open across turns). The second mailbox send must restart the

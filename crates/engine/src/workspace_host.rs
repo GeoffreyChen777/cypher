@@ -2059,6 +2059,7 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             subagents: Vec::new(),
+            context_usage: None,
         }
     }
 

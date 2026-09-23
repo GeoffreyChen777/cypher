@@ -4077,6 +4077,15 @@ pub enum ComposerTransport {
     SideChat(ComposerSideChat),
 }
 
+/// Whether a send consumes the composer's draft (text, staged attachments,
+/// comments) or leaves it untouched — a one-click command such as the context
+/// ring's `/compact` must not eat what the user is typing.
+#[derive(Clone, Copy)]
+enum SendDraft {
+    Take,
+    Keep,
+}
+
 /// The side-chat RPC identity: the temporary chat's id and the authoritative
 /// host device (`targetDeviceId` rides every side-chat RPC when it differs
 /// from the connected engine's).
@@ -4599,12 +4608,13 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
-        let picker_events = cx.subscribe(&pickers, |_: &mut Self, _, event, cx| match event {
+        let picker_events = cx.subscribe(&pickers, |this: &mut Self, _, event, cx| match event {
             crate::pickers::PickerEvent::OpenAgentSettings { target_device } => {
                 cx.emit(ComposerEvent::OpenAgentSettings {
                     target_device: target_device.clone(),
                 });
             }
+            crate::pickers::PickerEvent::CompactContext => this.compact_context(cx),
         });
         let hidden_slash_observe = cx
             .observe_global::<crate::settings::commands::HiddenSlashCommands>(
@@ -6583,6 +6593,28 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, steer: bool, cx: &mut Context<Self>) {
+        self.send_with(text, steer, SendDraft::Take, cx);
+    }
+
+    /// Compact the selected session (the context ring's click): `/compact`
+    /// rides an ordinary Run — every harness that offers the ring
+    /// understands it — but the user's draft, attachments and comments stay
+    /// put. Never mid-run (a steered `/compact` would reach the model as
+    /// text) and never over an in-flight send (replacing `send_task` would
+    /// cancel it).
+    fn compact_context(&mut self, cx: &mut Context<Self>) {
+        if self.sending
+            || self.run_live(cx)
+            || !matches!(self.transport, ComposerTransport::Main)
+            || self.state.read(cx).selected_chat.is_none()
+        {
+            return;
+        }
+        self.send_with("/compact".into(), false, SendDraft::Keep, cx);
+    }
+
+    fn send_with(&mut self, text: String, steer: bool, draft: SendDraft, cx: &mut Context<Self>) {
+        let take_draft = matches!(draft, SendDraft::Take);
         if !text.trim_start().starts_with('/')
             && let Some(id) = self.pickers.read(cx).unavailable_pi_model(cx)
         {
@@ -6600,7 +6632,7 @@ impl Composer {
         // surface) and session references are a main-surface feature, so the
         // block is main-only.
         if matches!(self.transport, ComposerTransport::Main) {
-            if block_slash_with_comments(!self.comments.is_empty(), &text) {
+            if take_draft && block_slash_with_comments(!self.comments.is_empty(), &text) {
                 self.failure = Some(
                     "Comments can't be sent with a slash command — remove the /command or the comments first."
                         .into(),
@@ -6750,11 +6782,14 @@ impl Composer {
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
         // strip empties the instant you hit send; a failure hands the files
         // back into the chat's stash.
-        let staged = self
-            .attachments
-            .remove(&self.current_key)
-            .unwrap_or_default();
-        self.preview = None;
+        let staged = if take_draft {
+            self.preview = None;
+            self.attachments
+                .remove(&self.current_key)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
 
@@ -6807,19 +6842,26 @@ impl Composer {
             cx.notify();
         });
 
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.drafts.remove(&self.current_key);
+        if take_draft {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.drafts.remove(&self.current_key);
+        }
         self.failure = None;
         self.sending = true;
         // Comments: snapshot for the command + failure restore, then clear
         // OPTIMISTICALLY (the indicator hides the instant you send). They
         // ride ONLY a normal Run/Steer — RespondInput/interrupt never carry
         // them. Acceptance clears permanently; a queue failure restores them.
-        let sent_comments = std::mem::take(&mut self.comments);
-        self.comment_edit = None;
-        if self.comments_popup.begin_close() {
-            crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
-        }
+        let sent_comments = if take_draft {
+            let sent = std::mem::take(&mut self.comments);
+            self.comment_edit = None;
+            if self.comments_popup.begin_close() {
+                crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+            }
+            sent
+        } else {
+            Vec::new()
+        };
         cx.emit(ComposerEvent::Sent {
             chat_id: chat_id.clone(),
             message_id: message_id.clone(),
@@ -7390,7 +7432,10 @@ impl Composer {
                         s.end_pending_send(&err_chat_id, &err_message_id);
                         cx.notify();
                     });
-                    composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    // A kept draft never left the input — nothing to restore.
+                    if take_draft {
+                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    }
                     if !staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
                         // while the send was in flight survive the hand-back.

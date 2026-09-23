@@ -59,7 +59,11 @@ pub fn bump_harness_catalog(cx: &mut App) {
 
 #[derive(Clone)]
 pub enum PickerEvent {
-    OpenAgentSettings { target_device: String },
+    OpenAgentSettings {
+        target_device: String,
+    },
+    /// The context ring was clicked: compact the selected session.
+    CompactContext,
 }
 
 impl gpui::EventEmitter<PickerEvent> for Pickers {}
@@ -2581,6 +2585,70 @@ impl Pickers {
 
     // Chip builder: every argument is one visual slot of the chip.
     #[allow(clippy::too_many_arguments)]
+    /// The context ring left of the model chip: the selected session's
+    /// latest context-window reading, clickable to compact when the harness
+    /// has `/compact` and no turn is running. `None` — no ring at all — until
+    /// the host engine has a reading (new chats, remote hosts, side chats).
+    fn context_ring_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.locked {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let chat_id = state.selected_chat.as_deref()?;
+        let usage = state.session_for(chat_id)?.context_usage?;
+        let busy = matches!(
+            state.indicator_for(chat_id, chrono::Utc::now()),
+            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+        );
+        let compactable = matches!(
+            self.effective_harness(cx),
+            Some(HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi)
+        );
+        let enabled = compactable && !busy;
+        let fraction = usage.fraction();
+        let summary: SharedString = crate::context_ring::usage_summary(usage).into();
+        let hint: SharedString = match (compactable, busy) {
+            (false, _) => "This agent can't compact its context",
+            (true, true) => "Compact once the agent finishes",
+            (true, false) => "Click to compact",
+        }
+        .into();
+        let id = "context-ring";
+        Some(
+            div()
+                .id(id)
+                .size(px(32.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+                .when(enabled, |el| {
+                    el.bg(motion::hover_blend(
+                        id,
+                        gpui::transparent_black(),
+                        theme.element_hover,
+                    ))
+                    .on_hover(motion::hover_listener(id))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PickerEvent::CompactContext)))
+                })
+                .tooltip(move |_, cx| {
+                    cx.new(|_| crate::context_ring::ContextRingTooltip {
+                        summary: summary.clone(),
+                        hint: hint.clone(),
+                    })
+                    .into()
+                })
+                .child(crate::context_ring::ring(
+                    fraction,
+                    theme.text_muted.opacity(0.25),
+                    crate::context_ring::fill_color(fraction, theme),
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn trigger_chip(
         &self,
         kind: PickerKind,
@@ -4219,12 +4287,14 @@ impl Render for Pickers {
                 cx,
             )
         });
+        let context_ring = self.context_ring_chip(&theme, cx);
         let right = div()
             .flex()
             .flex_row()
             .items_center()
             .flex_none()
             .gap(px(4.0))
+            .children(context_ring)
             // End-anchored: the menu's right edge sits flush with the chip's
             // right edge (user request), same as the footer's ref popover.
             .child(attach_overlay_end(
@@ -4325,8 +4395,9 @@ mod tests {
         let captured = emitted.clone();
         let _subscription = cx.update(|cx| {
             cx.subscribe(&pickers, move |_, event, _| {
-                let PickerEvent::OpenAgentSettings { target_device } = event;
-                *captured.borrow_mut() = Some(target_device.clone());
+                if let PickerEvent::OpenAgentSettings { target_device } = event {
+                    *captured.borrow_mut() = Some(target_device.clone());
+                }
             })
         });
         let window = cx.open_window(gpui::size(px(600.0), px(400.0)), |_, _| {
