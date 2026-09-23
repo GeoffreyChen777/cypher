@@ -163,7 +163,14 @@ export class Notifications {
         const chat = this.row("chats", chatId);
         if (!chat || chat.deleted || chat.fields.archived || chat.fields.deviceId !== deviceId ||
             typeof chat.fields.spaceId !== "string" || !this.row("spaces", chat.fields.spaceId)) {
-          return json({ ok: true, ignored: true });
+          // Name the rule that fired, in the order above: it lets a host tell a
+          // registry row that has not arrived yet from a chat that will never
+          // notify, and makes an ignored chat diagnosable from the host's log.
+          const reason = !chat || chat.deleted ? "chat"
+            : chat.fields.archived ? "archived"
+            : chat.fields.deviceId !== deviceId ? "device"
+            : "space";
+          return json({ ok: true, ignored: true, reason });
         }
         const subagents = (Array.isArray(body.subagents) ? body.subagents : []).slice(0, 32).map(value => {
           const run = object(value);
