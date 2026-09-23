@@ -140,6 +140,10 @@ root).
 - Tail sidecar: publish last-64 JSON on the debounced commit tick (dirty-flag, like
   the DO's current lazy recompute). Diff sidecar publish moves from `diff_sync.rs`'s
   DO PUT to the chat2 PUT unchanged.
+  **Superseded (2026-09-23):** hosts no longer publish the tail. Its reader was the
+  iOS fallback in M4, which native chat2 support removed; nothing else ever read it,
+  and it had grown to 18% of the Durable Object bill. The route remains for a future
+  instant-open reader (`docs/local-edge.md`).
 - Non-host owner devices may checkpoint as fallback if floor lag exceeds a high-water
   mark (any device holds the full doc; ~20 lines, ships later if ever needed — hosts
   must be online to execute commands anyway, so lag is bounded in practice).

@@ -132,10 +132,13 @@ different, so a short sample will mislead you:
 
 - **Active**: `PUT /chat2/{id}/tail` dominated at 62.5% of DO-bound HTTP. The
   tail rode the 1s snapshot-quiesce tick, so a streaming chat published once a
-  second. It now has a 10s floor (`TAIL_MIN_PUBLISH_MS`, `doc_host.rs`), with
-  the publish after the final change exempt so a settled chat is always exact.
-  Measured on a real streaming run: 9 publishes where the old code would have
-  sent ~171.
+  second. A 10s floor first cut that to 9 publishes where the old code sent
+  ~171 -- and it was still 18% of the bill, because the real finding came
+  later: nothing reads it. The tail was an iOS fallback made obsolete by native
+  chat2 support; no iOS build, no desktop build back to 0.3.18, and no request
+  in a 30-minute production capture (209 uploads, zero reads) ever fetched it.
+  Hosts no longer publish it. The Edge still serves `GET`/`PUT /chat2/{id}/tail`
+  so older hosts keep working and a future reader can bring it back.
 - **Idle**: `POST /notifications/activity` dominated at 75%. Both clients
   heartbeat every 15s. A repeat only refreshes state the Worker reads while the
   viewport is foreground **and** on a chat — `active()` requires foreground,
