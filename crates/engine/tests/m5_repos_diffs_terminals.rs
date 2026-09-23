@@ -492,6 +492,22 @@ async fn diff_capture_tracked_untracked_and_checksum() {
         .await
         .expect("changed capture");
     assert_ne!(snapshot.checksum, changed.checksum);
+
+    // Untracked files inside a brand-new directory list individually (porcelain
+    // status would otherwise collapse them into one `?? dir/` record).
+    std::fs::create_dir_all(repo_dir.join("new/deep")).expect("new dir");
+    std::fs::write(repo_dir.join("new/deep/c.txt"), "nested\n").expect("nested file");
+    let nested = capture_diff(&repos, &repo_dir)
+        .await
+        .expect("nested capture");
+    let c = nested
+        .files
+        .iter()
+        .find(|f| f.path == "new/deep/c.txt")
+        .expect("nested untracked summary");
+    assert_eq!(c.status, "added");
+    assert_eq!(c.additions, 1);
+    assert!(nested.patch.contains("diff --git a/new/deep/c.txt b/new/deep/c.txt"));
 }
 
 #[tokio::test]

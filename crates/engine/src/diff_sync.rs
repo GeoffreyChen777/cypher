@@ -1099,9 +1099,17 @@ pub async fn capture_diff_against(
     .await?;
     // Untracked listing via porcelain status; `--no-optional-locks` keeps this
     // read-only (a status-triggered index refresh would re-kick our own watcher).
+    // `--untracked-files=all` lists every file: the default collapses a new
+    // directory to one `?? dir/` record, which reads as a directory and drops.
     let status = capture_git(
         root,
-        &["--no-optional-locks", "status", "--porcelain", "-z"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+        ],
         2 * 1024 * 1024,
     )
     .await?;
