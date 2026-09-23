@@ -511,15 +511,18 @@ pub fn resort_offsets(
 /// rows always carry the folder · device subline).
 /// Session row height (FLIP estimate): one inset identity line plus the
 /// bottom breathing room between rows.
-const CHAT_ROW_HEIGHT: f32 = 33.0;
+const CHAT_ROW_HEIGHT: f32 = 30.0;
 
-/// Branch/worktree group header height (FLIP estimate): match the compact
-/// session-row rhythm while separating checkout sections.
-const BRANCH_GROUP_HEADER_HEIGHT: f32 = 33.0;
+/// Branch/worktree group header height: deliberately shorter than a session
+/// row so checkout sections read as captions, not as list items.
+const BRANCH_GROUP_HEADER_HEIGHT: f32 = 24.0;
 
-/// Project card header height (FLIP estimate): one project + target-machine
-/// identity line, inside the card's vertical padding.
-const GROUP_CARD_HEADER_HEIGHT: f32 = 32.0;
+/// Project card header height: one project + target-machine identity line.
+const GROUP_CARD_HEADER_HEIGHT: f32 = 36.0;
+
+/// Bottom padding of a card body with visible rows, so the last session
+/// doesn't sit on the card edge.
+const GROUP_CARD_BODY_PADDING: f32 = 4.0;
 /// Gap between the opaque project cards (the rows inside a card keep a 2px
 /// rhythm; the cards themselves breathe like the main/right cards).
 const GROUP_CARD_GAP: f32 = 8.0;
@@ -4776,19 +4779,24 @@ impl Shell {
     /// on the right (mini spinner while working, amber question mark while the
     /// run waits on an answer, emerald check for unseen finished turns,
     /// relative time otherwise). The row is inset from the project-card
-    /// edge; click selects and right-click opens the context
+    /// edge — or, when `nested` under a checkout section, from that
+    /// section's rail; click selects and right-click opens the context
     /// menu. The branch is NOT repeated per row — it lives in the
     /// branch/worktree group header above (see [`spaces`](crate::shell::spaces)).
+    /// `harness` is `None` when the sidebar hides agent marks (one runtime
+    /// throughout): the title then starts in line with the project title.
+    /// `Some(None)` keeps the mark's slot empty so titles stay aligned.
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
         &self,
         id: String,
         title: SharedString,
         time_ago: SharedString,
-        harness: Option<cypher_proto::HarnessId>,
+        harness: Option<Option<cypher_proto::HarnessId>>,
         status: ChatIndicator,
         selected: bool,
         pinned: bool,
+        nested: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4856,11 +4864,19 @@ impl Shell {
             .gap(px(8.0))
             .rounded(px(8.0))
             .mx(px(6.0))
-            .mb(px(4.0))
+            .mb(px(2.0))
             // Sessions are children of the project header: keep the selected
             // wash inset 6px, then indent the content so the agent mark lands
             // beneath the project title rather than at the card's left edge.
-            .pl(px(20.0))
+            // Under a checkout section the rail already carries the indent.
+            // Without an agent mark the title itself takes the mark's place,
+            // landing on the project title's 33px column either way.
+            .pl(px(match (nested, harness.is_some()) {
+                (false, true) => 20.0,
+                (false, false) => 27.0,
+                (true, true) => 8.0,
+                (true, false) => 11.0,
+            }))
             .pr(px(8.0))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
@@ -4890,24 +4906,23 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(15.0))
-                                    .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.82)),
-                            )
-                        },
-                    )
+                    .when_some(harness, |el, harness| {
+                        el.child(match harness.map(crate::pickers::harness_brand_icon) {
+                            Some((path, tint)) => icon(path)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(subline).opacity(0.82))
+                                .into_any_element(),
+                            None => div().size(px(14.0)).flex_none().into_any_element(),
+                        })
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.0))
-                            .line_height(px(17.0))
+                            .text_size(px(12.5))
+                            .line_height(px(16.0))
                             .child(title),
                     )
                     .when(pinned, |el| {

@@ -787,8 +787,9 @@ pub enum SidebarGroupKind {
 #[derive(Debug)]
 pub struct SidebarGroup<'a> {
     /// Stable key: `s:<space id>` live space, `np:<device id>` no-project,
-    /// `sc:<device id>` quick chats, `u:<missing space id>` unavailable. Status changes never re-key a
-    /// group, so cards keep their identity across renders.
+    /// `sc` quick chats (one card across every device), `u:<missing space
+    /// id>` unavailable. Status changes never re-key a group, so cards keep
+    /// their identity across renders.
     pub key: String,
     pub kind: SidebarGroupKind,
     /// Card title: the project's display name, "No project", or
@@ -797,7 +798,8 @@ pub struct SidebarGroup<'a> {
     /// Folder path for live spaces (muted truncated in the header); `None`
     /// for synthetic cards.
     pub path: Option<String>,
-    /// Host device name.
+    /// Host device name. Empty on a Quick chats card merged from several
+    /// devices (each session names its own host).
     pub device: String,
     /// Host device id (the sidebar device filter's key).
     pub device_id: String,
@@ -816,6 +818,48 @@ pub struct SidebarGroup<'a> {
     /// The card's chats in overview recency order, pinned sessions first
     /// (empty for quiet spaces).
     pub chats: Vec<(ChatIndicator, &'a Chat)>,
+}
+
+/// Fold every per-device Quick chats card into one `sc` card at the first
+/// (newest) one's position: quick chats are throwaway, so one card per host
+/// only repeated the same header. The merged sessions return to overview
+/// order; a card drawn from several hosts drops its single device name.
+fn merge_scratch_groups(groups: &mut Vec<SidebarGroup<'_>>) {
+    let Some(first) = groups
+        .iter()
+        .position(|g| g.kind == SidebarGroupKind::Scratch)
+    else {
+        return;
+    };
+    let mut chats = Vec::new();
+    let mut devices = HashSet::new();
+    let mut ix = first + 1;
+    while ix < groups.len() {
+        if groups[ix].kind == SidebarGroupKind::Scratch {
+            let group = groups.remove(ix);
+            devices.insert(group.device_id);
+            chats.extend(group.chats);
+        } else {
+            ix += 1;
+        }
+    }
+    let card = &mut groups[first];
+    card.key = "sc".into();
+    if chats.is_empty() {
+        return;
+    }
+    devices.remove(&card.device_id);
+    if !devices.is_empty() {
+        card.device.clear();
+    }
+    card.chats.extend(chats);
+    sort_active(&mut card.chats);
+    card.created_at = card
+        .chats
+        .iter()
+        .map(|(_, c)| c.created_at)
+        .max()
+        .unwrap_or(card.created_at);
 }
 
 /// A temporary Side Chat's forked state (round 21 refactor): a SECONDARY
@@ -1471,6 +1515,7 @@ impl AppState {
         if let Some(device) = view.device.as_deref() {
             groups.retain(|g| g.device_id == device);
         }
+        merge_scratch_groups(&mut groups);
         match view.sort {
             SidebarSort::Activity => {}
             SidebarSort::Name => {
@@ -1528,6 +1573,9 @@ impl AppState {
         let mut groups: Vec<SidebarGroup> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
         for (status, chat) in all {
+            // Quick chats are keyed per device here so the device filter can
+            // drop other hosts; `merge_scratch_groups` then folds whatever
+            // survives into the single `sc` card.
             let (key, kind) = match chat.space_id.as_deref() {
                 None if chat.is_scratch() => {
                     (format!("sc:{}", chat.device_id), SidebarGroupKind::Scratch)
@@ -3790,12 +3838,62 @@ mod tests {
         state.apply_chats(vec![quick, plain, foreign]);
         let groups = state.sidebar_groups(Utc::now());
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].key, "sc:dev-b");
+        assert_eq!(groups[0].key, "sc");
         assert_eq!(groups[0].kind, SidebarGroupKind::Scratch);
         assert_eq!(groups[0].title, "Quick chats");
+        assert_eq!(groups[0].device, "Laptop");
         assert_eq!(groups[1].key, "np:dev-b");
         let plain_ids: Vec<&str> = groups[1].chats.iter().map(|(_, c)| c.id.as_str()).collect();
         assert_eq!(plain_ids, ["np", "other"]);
+    }
+
+    #[test]
+    fn sidebar_groups_merge_quick_chats_across_devices() {
+        let mut state = AppState::new();
+        state.devices = vec![device("dev-a", "Desk"), device("dev-b", "Laptop")];
+        let quick = |id: &str, device: &str, at: i64| {
+            let mut row = chat(id, 0, Some(at));
+            row.space_id = None;
+            row.device_id = device.into();
+            row.cwd = Some(format!("/tmp/cypher-scratch/{id}"));
+            row
+        };
+        state.apply_chats(vec![
+            quick("b1", "dev-b", 30),
+            chat("s1", 0, Some(20)),
+            quick("a1", "dev-a", 25),
+            quick("b2", "dev-b", 10),
+        ]);
+        let scratch = |view: &SidebarView| {
+            let groups = state.sidebar_groups_with(Utc::now(), view);
+            let cards: Vec<_> = groups
+                .iter()
+                .filter(|g| g.kind == SidebarGroupKind::Scratch)
+                .map(|g| {
+                    let ids: Vec<String> = g.chats.iter().map(|(_, c)| c.id.clone()).collect();
+                    (g.key.clone(), g.device.clone(), ids)
+                })
+                .collect();
+            cards
+        };
+        // One card, newest first across hosts, no single device name.
+        assert_eq!(
+            scratch(&SidebarView::default()),
+            [(
+                "sc".to_string(),
+                String::new(),
+                vec!["b1".into(), "a1".into(), "b2".into()]
+            )]
+        );
+        // The device filter still narrows the merged card to one host.
+        let only_a = SidebarView {
+            device: Some("dev-a".into()),
+            ..SidebarView::default()
+        };
+        assert_eq!(
+            scratch(&only_a),
+            [("sc".to_string(), "Desk".to_string(), vec!["a1".into()])]
+        );
     }
 
     #[test]

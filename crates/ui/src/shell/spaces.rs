@@ -16,7 +16,7 @@ use crate::state::SidebarGroupKind;
 use crate::theme::MonoStyled;
 use cypher_proto::{Chat, ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The add-space palette (a command-K surface, summoned by ⌘K): search bar
 /// across the top, folder browser on the left, a Devices rail on the right,
@@ -112,11 +112,65 @@ struct GroupCard {
     color: Option<String>,
     title: String,
     device: String,
+    /// Whether the header may name its host at all: only when the sidebar
+    /// spans more than one device (and then only on hover, or while the
+    /// host is offline).
+    show_device: bool,
+    /// Whether session rows carry their agent mark: only when the sidebar
+    /// mixes runtimes — with a single one every row showed the same glyph.
+    show_harness: bool,
     offline: bool,
     space_id: Option<String>,
     /// Chats folded into branch/worktree groups (`g.path` of the source
-    /// group seeds the worktree detection); empty for quiet spaces.
+    /// group seeds the worktree detection); on a Quick chats card, one group
+    /// per host device instead. Empty for quiet spaces.
     groups: Vec<ChatGroup>,
+}
+
+impl GroupCard {
+    /// A lone ordinary checkout gets no section header: its sessions sit
+    /// directly under the project and the branch rides the project header
+    /// as a suffix. A lone linked worktree keeps its header — that checkout
+    /// is not the project root, and its plus targets the worktree.
+    fn inline_groups(&self) -> bool {
+        match self.groups.as_slice() {
+            [] => true,
+            [only] => !only.worktree,
+            _ => false,
+        }
+    }
+
+    fn chat_count(&self) -> usize {
+        self.groups.iter().map(|g| g.chats.len()).sum()
+    }
+}
+
+/// Quick chats have no checkout to name, so a merged card sections its
+/// sessions by host device instead (first appearance orders the sections,
+/// sessions keep their overview order). A single host is one section,
+/// which the card then renders inline.
+fn group_chats_by_device(
+    chats: Vec<(ChatIndicator, Chat)>,
+    device_name: impl Fn(&str) -> String,
+) -> Vec<ChatGroup> {
+    let mut groups: Vec<ChatGroup> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for (status, chat) in chats {
+        if let Some(&ix) = index.get(&chat.device_id) {
+            groups[ix].chats.push((status, chat));
+            continue;
+        }
+        index.insert(chat.device_id.clone(), groups.len());
+        groups.push(ChatGroup {
+            label: device_name(&chat.device_id),
+            branch: None,
+            worktree: false,
+            worktree_path: None,
+            icon: icons::MONITOR,
+            chats: vec![(status, chat)],
+        });
+    }
+    groups
 }
 
 /// Fold a card's chats into branch/worktree groups in their existing order.
@@ -822,26 +876,58 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         let cards: Vec<GroupCard> = {
             let view = self.sidebar_view();
-            let groups = self.state.read(cx).sidebar_groups_with(now, &view);
+            let state = self.state.read(cx);
+            let groups = state.sidebar_groups_with(now, &view);
+            // Host names only earn header space when the list spans several
+            // machines; a merged Quick chats card counts each session's host.
+            let hosts: HashSet<&str> = groups
+                .iter()
+                .flat_map(|g| {
+                    std::iter::once(g.device_id.as_str())
+                        .chain(g.chats.iter().map(|(_, c)| c.device_id.as_str()))
+                })
+                .collect();
+            let show_device = hosts.len() > 1;
+            // Config-less rows never had a mark, so they don't count as a
+            // runtime of their own.
+            let harnesses: HashSet<cypher_proto::HarnessId> = groups
+                .iter()
+                .flat_map(|g| g.chats.iter())
+                .filter_map(|(_, c)| c.config.as_ref().map(|c| c.harness))
+                .collect();
+            let show_harness = harnesses.len() > 1;
             groups
                 .into_iter()
-                .map(|g| GroupCard {
-                    key: g.key,
-                    kind: g.kind,
-                    pinned: g.pinned,
-                    icon: g.icon,
-                    color: g.color,
-                    title: g.title,
-                    device: g.device,
-                    offline: g.offline,
-                    space_id: g.space_id.map(str::to_string),
-                    groups: group_chats(
-                        g.chats
-                            .into_iter()
-                            .map(|(status, chat)| (status, chat.clone()))
-                            .collect(),
-                        g.path.as_deref(),
-                    ),
+                .map(|g| {
+                    let chats: Vec<(ChatIndicator, Chat)> = g
+                        .chats
+                        .into_iter()
+                        .map(|(status, chat)| (status, chat.clone()))
+                        .collect();
+                    let groups = if g.kind == SidebarGroupKind::Scratch {
+                        group_chats_by_device(chats, |id| {
+                            state
+                                .device_name(id)
+                                .unwrap_or("Unknown device")
+                                .to_string()
+                        })
+                    } else {
+                        group_chats(chats, g.path.as_deref())
+                    };
+                    GroupCard {
+                        key: g.key,
+                        kind: g.kind,
+                        pinned: g.pinned,
+                        icon: g.icon,
+                        color: g.color,
+                        title: g.title,
+                        device: g.device,
+                        show_device,
+                        show_harness,
+                        offline: g.offline,
+                        space_id: g.space_id.map(str::to_string),
+                        groups,
+                    }
                 })
                 .collect()
         };
@@ -855,32 +941,30 @@ impl Shell {
                 // header only; a collapsed branch group keeps its header and
                 // drops its rows.
                 let project_key = Self::project_group_key(&key);
-                // Quick chats have no checkout headers: rows sit directly
-                // under the card header.
-                let flat = card.kind == SidebarGroupKind::Scratch;
+                // A lone ordinary checkout has no section header: rows sit
+                // directly under the card header.
                 let height = super::GROUP_CARD_HEADER_HEIGHT
-                    + if self.sidebar_group_collapsed(&project_key) {
+                    + if self.sidebar_group_collapsed(&project_key) || card.chat_count() == 0 {
                         0.0
-                    } else if flat {
-                        card.groups
-                            .iter()
-                            .map(|g| g.chats.len() as f32 * super::CHAT_ROW_HEIGHT)
-                            .sum()
+                    } else if card.inline_groups() {
+                        super::GROUP_CARD_BODY_PADDING
+                            + card.chat_count() as f32 * super::CHAT_ROW_HEIGHT
                     } else {
-                        card.groups.iter().fold(0.0_f32, |acc, g| {
-                            let group_key = Self::branch_group_key(
-                                &key,
-                                g.worktree,
-                                &g.label,
-                                g.worktree_path.as_deref(),
-                            );
-                            acc + super::BRANCH_GROUP_HEADER_HEIGHT
-                                + if self.sidebar_group_collapsed(&group_key) {
-                                    0.0
-                                } else {
-                                    g.chats.len() as f32 * super::CHAT_ROW_HEIGHT
-                                }
-                        })
+                        super::GROUP_CARD_BODY_PADDING
+                            + card.groups.iter().fold(0.0_f32, |acc, g| {
+                                let group_key = Self::branch_group_key(
+                                    &key,
+                                    g.worktree,
+                                    &g.label,
+                                    g.worktree_path.as_deref(),
+                                );
+                                acc + super::BRANCH_GROUP_HEADER_HEIGHT
+                                    + if self.sidebar_group_collapsed(&group_key) {
+                                        0.0
+                                    } else {
+                                        g.chats.len() as f32 * super::CHAT_ROW_HEIGHT
+                                    }
+                            })
                     };
                 let element = self.render_group_card(&card, &selected, now, theme, cx);
                 (format!("g:{key}"), height, element)
@@ -890,12 +974,13 @@ impl Shell {
 
     /// One project card: an opaque floating surface (`theme.surface`, 12px
     /// radius, subtle shadow, clipped) whose single-line header owns the
-    /// prominent project label and muted target machine with a presence dot.
-    /// Real space headers host the rename/remove context menu on right-click;
-    /// synthetic cards have no menu. Below the header, chats are
-    /// grouped by checkout: a quiet branch/worktree header introduces each
-    /// group, then the compact rows (agent + title, then time) with
-    /// selection and context menu behavior.
+    /// prominent project label, a hover-revealed target machine and a
+    /// presence dot. Real space headers host the rename/remove context menu
+    /// on right-click; synthetic cards have no menu. Below the header, chats
+    /// are grouped by checkout: when there is more than one, a small section
+    /// label introduces each group and a hairline rail runs down its left
+    /// edge, tying the indented session rows to it; a lone ordinary checkout
+    /// skips both and lists its sessions directly.
     fn render_group_card(
         &self,
         group: &GroupCard,
@@ -909,11 +994,10 @@ impl Shell {
         let header = self.render_group_header(group, theme, cx);
         // Rows are the visible branch/worktree group headers and their session
         // rows: a collapsed project hides every group, a collapsed branch
-        // group keeps its header and drops its rows.
-        // Quick chats live in a temp folder: no checkout to name, so the
-        // branch/worktree group headers are skipped and every row sits
-        // directly under the card header.
-        let flat = group.kind == SidebarGroupKind::Scratch;
+        // group keeps its header and drops its rows. An inline card (one
+        // ordinary checkout) skips the header, and with it any stale branch
+        // collapse that would otherwise hide rows with no way back.
+        let flat = group.inline_groups();
         let rows: Vec<AnyElement> = if project_collapsed {
             Vec::new()
         } else {
@@ -928,8 +1012,7 @@ impl Shell {
                         chat_group.worktree_path.as_deref(),
                     );
                     let group_collapsed = !flat && self.sidebar_group_collapsed(&group_key);
-                    let mut elements: Vec<AnyElement> =
-                        Vec::with_capacity(chat_group.chats.len() + 1);
+                    let mut elements: Vec<AnyElement> = Vec::with_capacity(2);
                     if !flat {
                         elements.push(self.render_branch_group_header(
                             &group_key,
@@ -941,14 +1024,16 @@ impl Shell {
                         ));
                     }
                     if !group_collapsed {
-                        elements.extend(chat_group.chats.iter().map(|(status, chat)| {
+                        let chat_rows = chat_group.chats.iter().map(|(status, chat)| {
                             let time_ago: SharedString = format_time_ago(
                                 chat.last_message_at.unwrap_or(chat.created_at),
                                 now,
                             )
                             .into();
                             let is_selected = selected.as_deref() == Some(chat.id.as_str());
-                            let harness = chat.config.as_ref().map(|c| c.harness);
+                            let harness = group
+                                .show_harness
+                                .then(|| chat.config.as_ref().map(|c| c.harness));
                             self.render_chat_row(
                                 chat.id.clone(),
                                 transcript::single_line(
@@ -960,15 +1045,37 @@ impl Shell {
                                 *status,
                                 is_selected,
                                 chat.pinned,
+                                !flat,
                                 theme,
                                 cx,
                             )
-                        }));
+                        });
+                        let chat_rows: Vec<AnyElement> = chat_rows.collect();
+                        elements.push(if flat {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .children(chat_rows)
+                                .into_any_element()
+                        } else {
+                            // The rail sits under the section icon's centre
+                            // (10px inset + half the 11px glyph), so the
+                            // sessions read as hanging off their checkout.
+                            div()
+                                .ml(px(15.0))
+                                .border_l_1()
+                                .border_color(crate::theme::hairline(0.09))
+                                .flex()
+                                .flex_col()
+                                .children(chat_rows)
+                                .into_any_element()
+                        });
                     }
                     elements
                 })
                 .collect()
         };
+        let has_body = !rows.is_empty();
         div()
             .rounded(px(12.0))
             .bg(theme.surface)
@@ -978,15 +1085,19 @@ impl Shell {
             .flex_col()
             .child(header)
             .children(rows)
+            .when(has_body, |el| el.pb(px(super::GROUP_CARD_BODY_PADDING)))
             .into_any_element()
     }
 
-    /// One branch/worktree section label between the project and its sessions.
-    /// The icon aligns with the project icon, while a trailing hairline turns
-    /// the row into a clear section divider; session agent marks remain
-    /// indented beneath it. The label stays secondary but readable. A compact
-    /// disclosure chevron at the far right marks the whole row as a toggle —
-    /// clicking hides/shows the group's sessions.
+    /// One branch/worktree section label between the project and its sessions
+    /// (shown only when a project spans more than one checkout). It is a
+    /// small, muted caption on a short row — a level below the session
+    /// titles it introduces, so the three tiers read project → checkout →
+    /// session at a glance. Its icon sits on the card's 10px column, directly
+    /// above the rail that runs down the group's rows. The disclosure chevron
+    /// only surfaces on hover, except on a collapsed group, which keeps the
+    /// closed chevron and a count of its hidden sessions; clicking the row
+    /// hides/shows the group's sessions.
     fn render_branch_group_header(
         &self,
         key: &str,
@@ -998,25 +1109,29 @@ impl Shell {
     ) -> AnyElement {
         let toggle_key = key.to_string();
         // The row's hover group: hovering anywhere on the header reveals its
-        // trailing plus (nothing moves — the button is always laid out).
+        // chevron and trailing plus.
         let hover_key = format!("branch-add-hover-{key}");
+        let hover_t = motion::hover_t(&hover_key);
         let worktree = group.worktree;
         let worktree_path = group.worktree_path.clone();
         let branch = group.branch.clone();
-        // Quiet trailing disclosure marker (chevron-right closed,
-        // chevron-down open) kept smaller than the 13px branch icon.
-        let chevron = div().flex_none().size(px(10.0)).child(
-            icon(if collapsed {
-                icons::ALT_ARROW_RIGHT
-            } else {
-                icons::ALT_ARROW_DOWN
-            })
-            .size(px(9.0))
-            .text_color(theme.text_muted.opacity(0.5)),
-        );
+        let caption = theme.text_muted.opacity(0.6);
+        let chevron = div()
+            .flex_none()
+            .size(px(10.0))
+            .opacity(if collapsed { 1.0 } else { hover_t })
+            .child(
+                icon(if collapsed {
+                    icons::ALT_ARROW_RIGHT
+                } else {
+                    icons::ALT_ARROW_DOWN
+                })
+                .size(px(9.0))
+                .text_color(theme.text_muted.opacity(0.55)),
+            );
         let mut header = div()
             .id(SharedString::from(format!("branch-hdr-{key}")))
-            .h(px(33.0))
+            .h(px(super::BRANCH_GROUP_HEADER_HEIGHT))
             .flex_none()
             .flex()
             .flex_row()
@@ -1027,29 +1142,24 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_group(toggle_key.clone(), cx);
             }))
-            // Project and group icons share the 10px card column; sessions
-            // remain nested at 26px.
             .mx(px(10.0))
-            // Match the project header's icon/type scale; hierarchy comes
-            // from muted color, the divider, and indented session rows rather
-            // than from slightly mismatched glyph and font sizes.
-            .text_size(px(12.5))
-            .line_height(px(14.0))
+            .text_size(px(11.0))
+            .line_height(px(13.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(theme.text_muted.opacity(0.68))
+            .text_color(caption)
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
-                    .max_w(px(150.0))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(5.0))
                     .child(
                         icon(group.icon)
-                            .size(px(13.0))
+                            .size(px(11.0))
                             .flex_none()
-                            .text_color(theme.text_muted.opacity(0.72)),
+                            .text_color(caption),
                     )
                     .child(
                         div()
@@ -1058,13 +1168,15 @@ impl Shell {
                             .child(SharedString::from(group.label.clone())),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(12.0))
-                    .h(px(1.0))
-                    .bg(crate::theme::hairline(0.06)),
-            )
+            .when(collapsed, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_muted.opacity(0.5))
+                        .child(SharedString::from(group.chats.len().to_string())),
+                )
+            })
             .child(chevron);
         // Real-space groups get the trailing add plus at the far tail (after
         // the disclosure chevron), opening a canvas targeted at THIS checkout
@@ -1097,11 +1209,16 @@ impl Shell {
     }
 
     /// A project card's single-line header: folder icon + prominent project
-    /// name on the left, then the quiet right-aligned target-machine name and
-    /// a far-right presence dot (emerald online, faint offline). The header
-    /// toggles the whole card body (all branch/worktree groups + sessions) on
-    /// left-press; real-space headers open the rename/remove context menu on
-    /// right-click, while synthetic cards render no menu.
+    /// name (the strongest type in the sidebar) on the left — followed by the
+    /// branch when the card's lone checkout is inlined, or the hidden session
+    /// count when the card is collapsed — then the target-machine name and a
+    /// far-right presence dot (emerald online, faint offline). The machine
+    /// name only appears when the sidebar spans several hosts, and then only
+    /// on hover unless the host is offline; a project with no sessions dims
+    /// its title. The header toggles the whole card body (all branch/worktree
+    /// groups + sessions) on left-press; real-space headers open the
+    /// rename/remove context menu on right-click, while synthetic cards
+    /// render no menu.
     fn render_group_header(
         &self,
         group: &GroupCard,
@@ -1116,6 +1233,25 @@ impl Shell {
         let title = group.title.clone();
         let device: SharedString = group.device.clone().into();
         let offline = group.offline;
+        let hover_t = motion::hover_t(&hover_key);
+        // Offline hosts stay named so the dead machine is obvious; online
+        // ones fade in with the row hover (width too, so the title keeps the
+        // room while hidden).
+        let device_t = if !group.show_device || device.is_empty() {
+            0.0
+        } else if offline {
+            1.0
+        } else {
+            hover_t
+        };
+        let collapsed = self.sidebar_group_collapsed(&toggle_key);
+        let chat_count = group.chat_count();
+        let quiet = chat_count == 0;
+        let inline_branch: Option<SharedString> = (group.kind != SidebarGroupKind::Scratch
+            && group.inline_groups())
+        .then(|| group.groups.first().and_then(|g| g.branch.clone()))
+        .flatten()
+        .map(Into::into);
         let card_icon = if group.kind == SidebarGroupKind::Scratch {
             icons::CHAT_ROUND_LINE
         } else {
@@ -1149,8 +1285,8 @@ impl Shell {
             .items_center()
             .gap(px(7.0))
             .px(px(10.0))
-            .pt(px(8.0))
-            .pb(px(6.0))
+            .h(px(super::GROUP_CARD_HEADER_HEIGHT))
+            .flex_none()
             // The whole header toggles the card body on left-press.
             // Right-click stays the project menu; see `menu_space` below.
             .cursor_pointer()
@@ -1172,14 +1308,38 @@ impl Shell {
                     .child(self.render_card_glyph(group, card_icon, icon_tint, cx))
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
+                            .text_size(px(13.5))
+                            .line_height(px(18.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(if quiet {
+                                theme.text_muted.opacity(0.8)
+                            } else {
+                                theme.text
+                            })
                             .child(SharedString::from(title)),
                     )
+                    .when_some(inline_branch, |el, branch| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(120.0))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(3.0))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.55))
+                                .child(
+                                    icon(icons::GIT_BRANCH)
+                                        .size(px(10.0))
+                                        .flex_none()
+                                        .text_color(theme.text_muted.opacity(0.5)),
+                                )
+                                .child(div().min_w_0().truncate().child(branch)),
+                        )
+                    })
                     .when(pinned, |el| {
                         el.child(
                             icon(icons::PIN)
@@ -1187,19 +1347,36 @@ impl Shell {
                                 .flex_none()
                                 .text_color(theme.text_muted.opacity(0.6)),
                         )
+                    })
+                    .when(collapsed && chat_count > 0, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px(px(5.0))
+                                .rounded_full()
+                                .bg(crate::theme::wash(0.06))
+                                .text_size(px(10.0))
+                                .line_height(px(15.0))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child(SharedString::from(chat_count.to_string())),
+                        )
                     }),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .min_w_0()
-                    .max_w(px(96.0))
-                    .truncate()
-                    .text_right()
-                    .text_size(px(10.5))
-                    .text_color(theme.text_muted.opacity(0.62))
-                    .child(device),
-            )
+            .when(device_t > 0.0, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .min_w_0()
+                        .max_w(px(96.0 * device_t))
+                        .mr(px(-7.0 * (1.0 - device_t)))
+                        .opacity(device_t)
+                        .truncate()
+                        .text_right()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted.opacity(0.62))
+                        .child(device),
+                )
+            })
             .child(presence);
         if let Some(space_id) = menu_space {
             // Real-space headers also get the trailing add plus (after the
@@ -1245,7 +1422,7 @@ impl Shell {
         tint: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let glyph = icon(asset).size(px(13.0)).flex_none().text_color(tint);
+        let glyph = icon(asset).size(px(14.0)).flex_none().text_color(tint);
         let Some(space_id) = group.space_id.clone() else {
             return glyph.into_any_element();
         };
