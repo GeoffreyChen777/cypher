@@ -1143,6 +1143,18 @@ impl Auth {
 
     /// Desktop viewport activity, never engine liveness. Bind the request to
     /// the identity the UI observed; a login/organization switch fails closed.
+    /// Is the viewport reporting as the identity this engine is signed in as?
+    /// A UI whose account view is stale must not report activity into the
+    /// account that replaced it, whichever path the report takes.
+    pub fn notification_identity_matches(&self, expected_user: &str, expected_org: &str) -> bool {
+        let state = self.state();
+        state.user().map(|u| u.id.as_str()) == Some(expected_user)
+            && state.org_id() == Some(expected_org)
+            && expected_org
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
+
     pub async fn report_notification_activity(
         &self,
         expected_user: &str,
@@ -1153,13 +1165,7 @@ impl Auth {
             .access_token()
             .await
             .ok_or_else(|| EngineError::Other("not signed in".into()))?;
-        let state = self.state();
-        if state.user().map(|u| u.id.as_str()) != Some(expected_user)
-            || state.org_id() != Some(expected_org)
-            || !expected_org
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !self.notification_identity_matches(expected_user, expected_org) {
             return Err(EngineError::Other("notification identity changed".into()));
         }
         let url = format!(

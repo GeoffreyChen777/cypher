@@ -482,6 +482,16 @@ impl WorkspaceHost {
         // dies before the first debounced save.
         host.inner.save_snapshot();
         host.join_room();
+        if let Some(edge) = &host.inner.config.edge {
+            // The activity RPC lives on the auth service, which has no route
+            // to this host; the slot both already share is the meeting point.
+            // Weak, so a torn-down host is never kept alive by the slot.
+            let weak = Arc::downgrade(&host.inner);
+            edge.viewport_activity.set_immediate_beat(move || {
+                weak.upgrade()
+                    .is_some_and(|inner| inner.beat_activity_now())
+            });
+        }
         tokio::spawn(workspace_task(Arc::downgrade(&host.inner), changed_rx));
         if host.inner.config.edge.is_some() {
             tokio::spawn(relay_probe_task(Arc::downgrade(&host.inner)));
@@ -1692,6 +1702,23 @@ impl WorkspaceHostInner {
                 tracing::warn!(error = %err, "registry snapshot export failed");
             }
         }
+    }
+
+    /// Deliver the viewport's pending activity on the registry socket now, as
+    /// an extra presence beat. `false` when there is no live socket to carry
+    /// it, which is the caller's cue to spend an HTTP request instead.
+    fn beat_activity_now(&self) -> bool {
+        let Some(activity) = self
+            .config
+            .edge
+            .as_ref()
+            .and_then(|edge| edge.viewport_activity.pending())
+        else {
+            return false;
+        };
+        lock(&self.room)
+            .as_ref()
+            .is_some_and(|room| room.beat_with_activity_now(now_ms(), activity))
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.

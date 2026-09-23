@@ -267,3 +267,58 @@ async fn timed_out_http_sync_releases_single_flight_for_retry() {
     wait_until(|| transport.pushes.load(Ordering::SeqCst) >= 2).await;
     client.shutdown().await;
 }
+
+/// A viewport transition must reach the room promptly (the Worker's push
+/// suppression reads it) but needs no reply, so the engine sends it as an
+/// extra presence beat on the socket instead of an HTTP request. That is only
+/// safe if the call says truthfully whether a socket carried it: `false` is
+/// the engine's cue to fall back to HTTP, so a socketless client -- one on a
+/// network that blocks WebSockets -- stays exactly as prompt as before.
+#[tokio::test]
+async fn an_immediate_activity_beat_only_claims_success_on_a_live_socket() {
+    let activity = serde_json::json!({
+        "clientId": "c", "sequence": 1, "platform": "desktop",
+        "foreground": false, "interactionAgeMs": 0, "chatId": null
+    });
+
+    // No socket: the HTTPS bootstrap hands back a usable client before (and
+    // here, instead of) any WebSocket session.
+    let dead = RegistryClient::connect_via_transport(
+        Arc::new(StaticUrl("ws://127.0.0.1:1/registry".into())),
+        Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-socketless"))),
+        "dev-socketless",
+        FakeTransport::gated(),
+    )
+    .await
+    .unwrap();
+    assert!(!dead.stats().connected);
+    assert!(
+        !dead.beat_with_activity_now(1, activity.clone()),
+        "no live socket: the caller must fall back to HTTP"
+    );
+
+    // A live socket: the beat is claimed, and a peer actually receives it.
+    let server = MockRegistryServer::start().await;
+    let live = RegistryClient::connect_via_transport(
+        Arc::new(StaticUrl(server.url())),
+        Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-live"))),
+        "dev-live",
+        FakeTransport::gated(),
+    )
+    .await
+    .unwrap();
+    let peer = RegistryClient::connect(
+        &server.url(),
+        Arc::new(Mutex::new(cypher_doc::RegistryDoc::new("dev-peer"))),
+        "dev-peer",
+    )
+    .await
+    .unwrap();
+    wait_until(|| live.stats().connected).await;
+    assert!(live.beat_with_activity_now(424_242, activity));
+    wait_until(|| peer.presence().get("dev-live") == Some(&424_242)).await;
+
+    dead.shutdown().await;
+    live.shutdown().await;
+    peer.shutdown().await;
+}

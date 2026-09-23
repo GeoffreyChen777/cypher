@@ -1593,10 +1593,28 @@ impl RpcService for AuthRpc {
                 });
                 // A refresh of the same state rides the presence beat that is
                 // already going out every 15s, costing no request of its own.
-                // Only a transition spends an HTTP request, because only a
-                // transition needs the reply back.
                 if !self.auth.viewport_activity().record(activity.clone()) {
                     return RpcReply::value(&serde_json::json!({ "ok": true, "deferred": true }));
+                }
+                // A transition (another chat, or entering/leaving the
+                // foreground) must reach the Worker PROMPTLY -- its push
+                // suppression reads `foreground` -- but it needs no reply here:
+                // `readEventIds` is iOS-only and the desktop UI discards the
+                // badge. So it goes out now as an extra presence beat on the
+                // open socket (20:1) instead of as an HTTP request (1:1). Every
+                // alt-tab used to cost two billable requests this way, ~190 an
+                // hour in production. HTTP remains the path when no socket is
+                // live, so a socketless client is exactly as prompt as before.
+                // Same identity guard as the HTTP path; on a mismatch fall
+                // through so that path returns its error.
+                if self
+                    .auth
+                    .notification_identity_matches(&p.expected_user_id, &p.expected_org_id)
+                    && self.auth.viewport_activity().beat_now()
+                {
+                    return RpcReply::value(
+                        &serde_json::json!({ "ok": true, "viaPresence": true }),
+                    );
                 }
                 let response = self
                     .auth

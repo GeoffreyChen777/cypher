@@ -465,6 +465,21 @@ impl RegistryClient {
         let _ = self.presence_out.try_send((at, Some(activity)));
     }
 
+    /// Send a presence beat carrying `activity` NOW, for a viewport transition
+    /// that must reach the room promptly rather than on the next 15s beat.
+    ///
+    /// `false` when there is no live session to carry it (or its queue is
+    /// full), so the caller can fall back to a request of its own. A frame
+    /// accepted here can still be lost if the socket dies right after; the
+    /// next regular beat re-carries the same pending activity, so that costs
+    /// at most one beat interval of staleness, never a lost transition.
+    pub fn beat_with_activity_now(&self, at: i64, activity: serde_json::Value) -> bool {
+        self.stats
+            .connected
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.presence_out.try_send((at, Some(activity))).is_ok()
+    }
+
     /// Remote devices' live presence beats (entries within the 30s TTL),
     /// device → beat epoch ms.
     pub fn presence(&self) -> HashMap<String, i64> {

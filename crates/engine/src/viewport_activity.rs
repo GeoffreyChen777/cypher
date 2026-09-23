@@ -12,8 +12,11 @@
 //! cadence over an open socket, where inbound messages bill 20:1. Riding that
 //! frame makes the refresh effectively free.
 //!
-//! Transitions keep their own HTTP request: they are rare, and only they need
-//! the reply carrying `readEventIds` and the badge count.
+//! A transition -- another chat, or entering/leaving the foreground -- cannot
+//! wait for the next beat, because the Worker's push suppression reads it. It
+//! does not need a reply either (`readEventIds` is iOS-only, and the desktop UI
+//! discards the badge), so it goes out at once as an extra presence beat on the
+//! same socket. Only a client with no live socket spends an HTTP request.
 
 use std::sync::{Arc, Mutex};
 
@@ -24,7 +27,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Default)]
 pub struct ViewportActivity {
     pending: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Set by the workspace host: send the pending report on the registry
+    /// socket now, returning whether a live socket carried it.
+    immediate: Arc<Mutex<Option<ImmediateBeat>>>,
 }
+
+type ImmediateBeat = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl ViewportActivity {
     /// Store the latest report, returning `true` when it is a *transition* —
@@ -41,6 +49,25 @@ impl ViewportActivity {
         });
         *slot = Some(activity);
         transition
+    }
+
+    /// Register how to put the pending report on the wire immediately.
+    pub fn set_immediate_beat(&self, beat: impl Fn() -> bool + Send + Sync + 'static) {
+        *self.immediate.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(beat));
+    }
+
+    /// Send the pending report now as an extra presence beat. `false` when no
+    /// host is registered or its registry socket is not live -- the caller's
+    /// cue to spend an HTTP request instead.
+    pub fn beat_now(&self) -> bool {
+        // Clone the hook out so it never runs under this slot's lock: it reads
+        // `pending()`, which takes the other one.
+        let beat = self
+            .immediate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        beat.is_some_and(|beat| beat())
     }
 
     /// The report to carry on the next presence beat, if any.
@@ -111,6 +138,36 @@ mod tests {
         let pending = slot.pending().expect("a report is waiting");
         assert_eq!(pending["sequence"], 2);
         assert_eq!(pending["chatId"], "chat-a");
+    }
+
+    #[test]
+    fn beat_now_falls_back_until_a_live_host_carries_it() {
+        let slot = ViewportActivity::default();
+        slot.record(report(1, false, None));
+        // No workspace host registered yet (still booting, or no Edge).
+        assert!(!slot.beat_now());
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = live.clone();
+        slot.set_immediate_beat(move || flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!slot.beat_now(), "registered, but the socket is down");
+        live.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(slot.beat_now());
+    }
+
+    #[test]
+    fn the_hook_reads_the_pending_report_without_deadlocking() {
+        // The host's hook reads `pending()`; `beat_now` must not hold a lock
+        // across the call or this test hangs instead of failing.
+        let slot = ViewportActivity::default();
+        let seen = Arc::new(Mutex::new(None));
+        let (inner, record) = (slot.clone(), seen.clone());
+        slot.set_immediate_beat(move || {
+            *record.lock().unwrap() = inner.pending();
+            true
+        });
+        slot.record(report(3, true, Some("chat-q")));
+        assert!(slot.beat_now());
+        assert_eq!(seen.lock().unwrap().as_ref().unwrap()["chatId"], "chat-q");
     }
 
     #[test]
