@@ -1552,7 +1552,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cypher"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-doc"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "chrono",
  "cypher-proto",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-engine"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-env"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "libc",
  "sha2",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-harness"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-proto"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "chrono",
  "cypher-env",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-rpc"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-sync"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "chrono",
  "cypher-doc",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-syntax"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "thiserror 2.0.19",
  "tree-sitter",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-ui"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-update"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "cypher-env",
