@@ -21,6 +21,7 @@ fn main() {
         parts: vec![MessagePart::Text {
             id: "t0".into(),
             text: "Run the tests please".into(),
+            agent_text: None,
         }],
         created_at: 1_700_000_000_000,
         device_id: "device-rust".into(),

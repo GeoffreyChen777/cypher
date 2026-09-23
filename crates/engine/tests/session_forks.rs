@@ -1652,6 +1652,7 @@ impl PiForkBackend for RacingBackend {
                 parts: vec![cypher_doc::MessagePart::Text {
                     id: "t0".into(),
                     text: "sent while forking".into(),
+                    agent_text: None,
                 }],
                 created_at: 1,
                 device_id: "dev".into(),

@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         parts: vec![MessagePart::Text {
             id: "t".into(),
             text: "preview fixture ready".into(),
+            agent_text: None,
         }],
         created_at: 1,
         device_id: host.device_id.clone(),

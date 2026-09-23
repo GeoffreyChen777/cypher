@@ -58,6 +58,7 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         parts: vec![MessagePart::Text {
             id: "t1".into(),
             text: "hello from local mode".into(),
+            agent_text: None,
         }],
         created_at: 1_700_000_000_000,
         device_id: device.clone(),

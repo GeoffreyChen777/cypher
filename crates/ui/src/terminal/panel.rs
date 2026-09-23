@@ -1100,6 +1100,8 @@ impl TerminalPanel {
                 popup.offer(
                     chat_id,
                     text,
+                    // Terminal text is never a displayed translation.
+                    None,
                     event.position,
                     owner,
                     None,

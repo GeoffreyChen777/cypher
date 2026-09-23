@@ -104,7 +104,7 @@ impl BlockTree {
 // Full parse
 // ---------------------------------------------------------------------------
 
-fn options() -> Options {
+pub(crate) fn options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
 

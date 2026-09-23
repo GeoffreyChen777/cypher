@@ -30,6 +30,7 @@ fn entry(
         parts: vec![MessagePart::Text {
             id: "t0".into(),
             text: text.into(),
+            agent_text: None,
         }],
         created_at: 1_700_000_000_000,
         device_id: "lost-device".into(),

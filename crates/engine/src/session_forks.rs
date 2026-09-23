@@ -1019,6 +1019,7 @@ mod tests {
             parts: vec![MessagePart::Text {
                 id: format!("{id}-p"),
                 text: text.into(),
+                agent_text: None,
             }],
             created_at: 0,
             device_id: "dev".into(),
@@ -1035,6 +1036,7 @@ mod tests {
             parts: vec![MessagePart::Text {
                 id: format!("{id}-p"),
                 text: text.into(),
+                agent_text: None,
             }],
             created_at: 0,
             device_id: "dev".into(),
@@ -1194,6 +1196,7 @@ mod tests {
         e.parts[0] = MessagePart::Text {
             id: "p".into(),
             text: "prompt\n\nAttached images (local files — open them to view):\n- /a.png".into(),
+            agent_text: None,
         };
         assert_eq!(visible_text_of(&e), "prompt");
     }

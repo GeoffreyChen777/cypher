@@ -578,6 +578,7 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        let agent_prompt = agent_prompt_for(harness_id, agent_prompt);
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd);
@@ -1561,6 +1562,18 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
         .collect()
 }
 
+/// The effective prompt as `harness` may receive it. A quote selected from a
+/// displayed translation carries alignment input holding that translation;
+/// only Pi runs the extension that resolves and removes it, so every other
+/// agent gets it stripped here and reads the original passage the quote
+/// already holds.
+pub(crate) fn agent_prompt_for(harness: HarnessId, agent_prompt: Option<String>) -> Option<String> {
+    match harness {
+        HarnessId::Pi => agent_prompt,
+        _ => agent_prompt.map(|prompt| cypher_proto::agent_prompt::strip_alignment(&prompt)),
+    }
+}
+
 /// The persisted assistant text of a folded segment (workspace preview source).
 fn folded_text(parts: &[MessagePart]) -> String {
     parts
@@ -1925,6 +1938,27 @@ async fn drive_run(
         // `set_subagents`' own updated_at bump keeps the row fresh instead).
         if let AgentEvent::SubagentStatus { runs } = &event {
             inner.set_subagents(&chat_id, runs.clone());
+            continue;
+        }
+        // A prompt's translation belongs to the USER entry it replaced, which
+        // was written before the run saw it — stamped there directly, never
+        // folded into the assistant segment. Handled ahead of the parked gate
+        // because the extension translates a prompt BEFORE the turn it opens
+        // starts, while the session may still be parked from the last one.
+        if let AgentEvent::InputTranslation { source, text } = &event {
+            match doc_ref.stamp_user_agent_text(source, text) {
+                Ok(true) => {
+                    if let Some(host) = inner.doc_host() {
+                        host.flush_chat_sync(&chat_id);
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!(chat = %chat_id, "prompt translation matched no recent user entry");
+                }
+                Err(err) => {
+                    tracing::warn!(chat = %chat_id, error = %err, "prompt translation stamp failed");
+                }
+            }
             continue;
         }
 
@@ -2419,5 +2453,43 @@ async fn drive_run(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod agent_prompt_tests {
+    use super::*;
+    use cypher_proto::agent_prompt::{AgentQuote, PromptComment, QuoteAlign, comments_block, wrap};
+
+    /// Only Pi resolves a translated quote's alignment input; every other
+    /// agent must never receive the displayed translation it holds.
+    #[test]
+    fn only_pi_receives_alignment_input() {
+        let origin = AgentQuote::Align(QuoteAlign {
+            passage: "Original passage.".into(),
+            before: String::new(),
+            selected: "译文".into(),
+            after: String::new(),
+        });
+        let prompt = wrap(
+            &[comments_block(&[PromptComment::new(
+                "译文",
+                Some(&origin),
+                "why",
+            )])],
+            "go",
+        );
+        assert_eq!(
+            agent_prompt_for(HarnessId::Pi, Some(prompt.clone())).as_deref(),
+            Some(prompt.as_str())
+        );
+        for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Mock] {
+            let sent = agent_prompt_for(harness, Some(prompt.clone())).unwrap();
+            assert!(
+                !sent.contains("译文") && sent.contains("Original passage."),
+                "{sent}"
+            );
+        }
+        assert_eq!(agent_prompt_for(HarnessId::Codex, None), None);
     }
 }

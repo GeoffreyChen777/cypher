@@ -1456,25 +1456,39 @@ impl Shell {
                 crate::comments::CommentPopupEvent::CommentSaved {
                     chat_id,
                     quote,
+                    origin,
                     comment,
                 } => {
                     // The chat id was captured when the selection SETTLED —
                     // forward it; the composer's guard still drops a comment
                     // whose chat is no longer selected.
                     composer.update(cx, |composer, cx| {
-                        composer.add_comment(chat_id.clone(), quote.clone(), comment.clone(), cx)
+                        composer.add_comment(
+                            chat_id.clone(),
+                            quote.clone(),
+                            origin.clone(),
+                            comment.clone(),
+                            cx,
+                        )
                     });
                 }
                 crate::comments::CommentPopupEvent::SideChatRequested {
                     chat_id,
                     source,
                     selected_text,
+                    origin,
                 } => {
                     // Round 21: open a temporary Side Chat from the settled
                     // selection (the shell owns the StartSideChat call and
                     // the right-pane tab). The selected quote rides along so
                     // the engine validates + injects it on the first send.
-                    this.open_side_chat(chat_id.clone(), source.clone(), selected_text.clone(), cx);
+                    this.open_side_chat(
+                        chat_id.clone(),
+                        source.clone(),
+                        selected_text.clone(),
+                        origin.clone(),
+                        cx,
+                    );
                 }
             }
         });
@@ -2629,6 +2643,7 @@ impl Shell {
         parent_chat_id: String,
         source: cypher_proto::SideChatSource,
         selected_text: String,
+        origin: Option<cypher_proto::agent_prompt::AgentQuote>,
         cx: &mut Context<Self>,
     ) {
         let key = self.panel_key(cx);
@@ -2673,6 +2688,14 @@ impl Shell {
             "selectedText".into(),
             serde_json::Value::String(selected_text.clone()),
         );
+        // What the selection stands for in the agent's own words, when it
+        // was taken from a displayed translation.
+        if let Some(origin) = &origin {
+            params.insert(
+                "origin".into(),
+                serde_json::to_value(origin).unwrap_or_default(),
+            );
+        }
         {
             let state = self.state.read(cx);
             if let (Some(chat), Some(local)) = (

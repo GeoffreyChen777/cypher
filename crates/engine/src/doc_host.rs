@@ -426,6 +426,7 @@ impl ChatDocHandle {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: text.to_string(),
+                agent_text: None,
             }],
             created_at,
             device_id: self.device_id.clone(),
@@ -2849,8 +2850,14 @@ impl DocHost {
                 message_id,
                 agent_prompt,
             } => {
+                // A steer lands in the chat's running harness; strip the
+                // translation-only alignment input for any agent but Pi.
+                let steer_prompt = crate::sessions::agent_prompt_for(
+                    self.harness_for(chat_id),
+                    agent_prompt.clone(),
+                );
                 match sessions
-                    .steer_augmented(chat_id, prompt, agent_prompt.clone(), message_id.clone())
+                    .steer_augmented(chat_id, prompt, steer_prompt, message_id.clone())
                     .await?
                 {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),

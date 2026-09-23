@@ -169,6 +169,10 @@ const PROGRESS_THROTTLE: Duration = Duration::from_millis(500);
 pub(crate) const SUBAGENTS_STATUS_KEY: &str = "cypher.subagents.v1";
 /// Final-answer translation emitted by the Cypher translation extension.
 pub(crate) const TRANSLATION_STATUS_KEY: &str = "cypher.translation.v1";
+/// Prompt translation emitted by the same extension: the user's own words and
+/// the translation the agent received instead, so the transcript can keep the
+/// pair (`{version:1, source, text}`; capped like a final-answer frame).
+pub(crate) const INPUT_TRANSLATION_STATUS_KEY: &str = "cypher.translation.input.v1";
 /// Whole-snapshot byte cap for one translation frame.
 ///
 /// A frame carries the full replacement for the message's text, so append mode
@@ -284,6 +288,30 @@ fn parse_translation_status(text: &str) -> Option<String> {
         return None;
     }
     Some(translated.to_owned())
+}
+
+/// Parse a `cypher.translation.input.v1` `statusText` into `(source, text)`:
+/// the user's words and the translation the agent read in their place. Both
+/// must be non-empty; the whole-snapshot byte cap bounds the pair.
+fn parse_input_translation_status(text: &str) -> Option<(String, String)> {
+    if text.len() > TRANSLATION_STATUS_MAX_BYTES {
+        tracing::warn!(
+            target: "cypher_harness::pi",
+            bytes = text.len(),
+            "input translation status over cap; ignoring"
+        );
+        return None;
+    }
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.get("version").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let source = value.get("source").and_then(Value::as_str)?.trim();
+    let translated = value.get("text").and_then(Value::as_str)?.trim();
+    if source.is_empty() || translated.is_empty() {
+        return None;
+    }
+    Some((source.to_owned(), translated.to_owned()))
 }
 
 /// Strict per-run parse of one `cypher.subagents.v1` run object. `None` on
@@ -2593,6 +2621,21 @@ async fn run_session(session: Session) {
                                     break 'main;
                                 }
                             }
+                            if key == INPUT_TRANSLATION_STATUS_KEY {
+                                let text = payload
+                                    .get("statusText")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                if let Some((source, text)) = parse_input_translation_status(text)
+                                    && !send(
+                                        &event_tx,
+                                        AgentEvent::InputTranslation { source, text },
+                                    )
+                                    .await
+                                {
+                                    break 'main;
+                                }
+                            }
                             // Any other key stays TUI furniture (ignored).
                         }
                         // Deliberate: setWidget/setTitle/set_editor_text (and
@@ -3286,6 +3329,31 @@ mod tests {
         ] {
             assert!(
                 parse_translation_status(&bad).is_none(),
+                "must reject {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_input_translation_status_needs_both_sides_of_the_pair() {
+        assert_eq!(
+            parse_input_translation_status(
+                &json!({ "version": 1, "source": " 你好 ", "text": " Hello " }).to_string()
+            ),
+            Some(("你好".to_owned(), "Hello".to_owned()))
+        );
+        for bad in [
+            json!({ "version": 2, "source": "你好", "text": "Hello" }).to_string(),
+            json!({ "version": 1, "text": "Hello" }).to_string(),
+            json!({ "version": 1, "source": "你好" }).to_string(),
+            json!({ "version": 1, "source": "  ", "text": "Hello" }).to_string(),
+            json!({ "version": 1, "source": "你好", "text": "" }).to_string(),
+            json!({ "version": 1, "source": "x".repeat(TRANSLATION_STATUS_MAX_BYTES), "text": "y" })
+                .to_string(),
+            "not json".to_owned(),
+        ] {
+            assert!(
+                parse_input_translation_status(&bad).is_none(),
                 "must reject {bad}"
             );
         }

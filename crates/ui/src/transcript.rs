@@ -1085,7 +1085,9 @@ pub fn rows_for_entry(
                     group_last_part_ix,
                 );
                 match other {
-                    MessagePart::Text { id: part_id, text } => {
+                    MessagePart::Text {
+                        id: part_id, text, ..
+                    } => {
                         if text.trim().is_empty() {
                             continue;
                         }
@@ -4392,11 +4394,25 @@ impl Transcript {
                     })
                     .ok()
                     .flatten();
+                // A quote taken from a displayed translation maps back to the
+                // agent's own words now, against the transcript the selected
+                // rows were built from — by save time a commit may have moved
+                // on.
+                let origin = entity
+                    .update(cx, |this: &mut Transcript, cx| {
+                        crate::quote_origin::agent_quote(
+                            &this.state.read(cx).transcript,
+                            &snapshot.spans,
+                        )
+                    })
+                    .ok()
+                    .flatten();
                 if let Some(popup) = popup.upgrade() {
                     popup.update(cx, |popup, cx| {
                         popup.offer(
                             chat_id,
                             snapshot.text.clone(),
+                            origin,
                             anchor,
                             crate::comments::CommentOwner::Markdown(scope),
                             Some(crate::comments::CommentHead {
@@ -5884,6 +5900,7 @@ mod tests {
         MessagePart::Text {
             id: id.into(),
             text: text.into(),
+            agent_text: None,
         }
     }
 

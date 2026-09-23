@@ -37,6 +37,16 @@ use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 const PARENT: &str = "chat-parent";
 const SELECTED: &str = "the exact selected quote for this side chat";
 
+/// The first send's context block (`cypher_proto::agent_prompt` layout: one
+/// JSON line after the lead, then the request).
+fn side_context(prompt: &str) -> serde_json::Value {
+    let (head, _) = prompt
+        .split_once(cypher_proto::agent_prompt::REQUEST_MARKER)
+        .expect("request marker");
+    let json = &head[head.find('{').expect("context JSON")..];
+    serde_json::from_str(json).expect("context JSON parses")
+}
+
 /// One-liner harness that RECORDS every RunRequest (the effective-prompt
 /// assertion) and streams a quick Done.
 struct RecordingHarness {
@@ -216,9 +226,8 @@ async fn start_side_chat(core: &EngineCore) -> String {
 }
 
 async fn start_side_chat_with(core: &EngineCore, selected: &str) -> String {
-    let reply = rpc(
+    start_side_chat_params(
         core,
-        methods::START_SIDE_CHAT,
         serde_json::json!({
             "parentChatId": PARENT,
             "source": { "kind": "transcript", "anchorMessageId": "m1" },
@@ -226,7 +235,12 @@ async fn start_side_chat_with(core: &EngineCore, selected: &str) -> String {
         }),
     )
     .await
-    .expect("StartSideChat ok");
+}
+
+async fn start_side_chat_params(core: &EngineCore, params: serde_json::Value) -> String {
+    let reply = rpc(core, methods::START_SIDE_CHAT, params)
+        .await
+        .expect("StartSideChat ok");
     assert_eq!(
         reply.get("parentChatId").and_then(|v| v.as_str()),
         Some(PARENT)
@@ -286,16 +300,14 @@ async fn start_send_promote_flow() {
     );
     let first = rig.requests.lock().unwrap()[before].clone();
     assert!(
-        first
-            .prompt
-            .contains(&format!("Selected text:\n{SELECTED}")),
+        side_context(&first.prompt)["selectedText"] == SELECTED,
         "first send injects the selected quote in full: {}",
         first.prompt
     );
     assert!(
-        first
-            .prompt
-            .contains("Parent chat context:\nuser: parent first question"),
+        side_context(&first.prompt)["parentContext"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("user: parent first question")),
         "first send injects the bounded parent context: {}",
         first.prompt
     );
@@ -667,16 +679,14 @@ async fn failed_dispatch_keeps_first_send_context_for_retry() {
     );
     let first = rig.requests.lock().unwrap()[before].clone();
     assert!(
-        first
-            .prompt
-            .contains(&format!("Selected text:\n{SELECTED}")),
+        side_context(&first.prompt)["selectedText"] == SELECTED,
         "retry still injects the selected quote: {}",
         first.prompt
     );
     assert!(
-        first
-            .prompt
-            .contains("Parent chat context:\nuser: parent first question"),
+        side_context(&first.prompt)["parentContext"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("user: parent first question")),
         "retry still injects the parent context: {}",
         first.prompt
     );
@@ -846,16 +856,14 @@ async fn first_send_injects_quote_with_empty_parent_context() {
     );
     let first = rig.requests.lock().unwrap()[before].clone();
     assert!(
-        first
-            .prompt
-            .contains(&format!("Selected text:\n{SELECTED}")),
+        side_context(&first.prompt)["selectedText"] == SELECTED,
         "empty parent transcript still injects the selected quote: {}",
         first.prompt
     );
     assert!(
-        first
-            .prompt
-            .contains("Parent chat context:\n(no prior transcript context)"),
+        side_context(&first.prompt)["parentContext"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("(no prior transcript context)")),
         "empty parent transcript yields the safe marker: {}",
         first.prompt
     );
@@ -1145,6 +1153,59 @@ async fn promoted_chat_send_dispatches_as_normal_chat() {
     rig.core.shutdown().await;
 }
 
+/// A selection taken from a displayed translation reaches the side chat's
+/// agent as the parent agent's original passage, never as the translation;
+/// the alignment input rides beside it for the translation extension.
+#[tokio::test(flavor = "multi_thread")]
+async fn first_send_quotes_the_original_of_a_translated_selection() {
+    let rig = assemble();
+    seed_parent(&rig.core).await;
+    let side = start_side_chat_params(
+        &rig.core,
+        serde_json::json!({
+            "parentChatId": PARENT,
+            "source": { "kind": "transcript", "anchorMessageId": "m1" },
+            "selectedText": "很长",
+            "origin": {
+                "kind": "align",
+                "passage": "Second paragraph, long.",
+                "before": "第二段，",
+                "selected": "很长",
+                "after": "。",
+            },
+        }),
+    )
+    .await;
+    let before = rig.requests.lock().unwrap().len();
+    rpc(
+        &rig.core,
+        methods::SEND_SIDE_CHAT,
+        serde_json::json!({
+            "sideChatId": side,
+            "messageId": "s1",
+            "request": {
+                "prompt": "这是什么意思？",
+                "harness": "pi",
+                "cwd": "/tmp/repo",
+                "sandbox": "workspace-write",
+            },
+        }),
+    )
+    .await
+    .expect("SendSideChat ok");
+    wait_for(
+        || rig.requests.lock().unwrap().len() == before + 1,
+        "side run to reach the harness",
+    );
+    let first = rig.requests.lock().unwrap()[before].clone();
+    let context = side_context(&first.prompt);
+    assert_eq!(context["selectedText"], "Second paragraph, long.");
+    assert_eq!(context["cypherAlign"]["selected"], "很长");
+    assert!(first.prompt.ends_with("User request:\n这是什么意思？"));
+
+    rig.core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn first_send_prompt_frames_context_as_untrusted_reference() {
     // Round-21 final audit: the first-send effective prompt EXPLICITLY frames
@@ -1192,16 +1253,14 @@ async fn first_send_prompt_frames_context_as_untrusted_reference() {
     // Selected text, parent context and visible request unchanged (verbatim),
     // with the User request still last.
     assert!(
-        first
-            .prompt
-            .contains(&format!("Selected text:\n{SELECTED}")),
+        side_context(&first.prompt)["selectedText"] == SELECTED,
         "selected text verbatim: {}",
         first.prompt
     );
     assert!(
-        first
-            .prompt
-            .contains("Parent chat context:\nuser: parent first question"),
+        side_context(&first.prompt)["parentContext"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("user: parent first question")),
         "parent context still injected: {}",
         first.prompt
     );

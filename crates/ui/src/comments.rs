@@ -33,6 +33,10 @@ pub enum CommentPopupEvent {
     CommentSaved {
         chat_id: String,
         quote: String,
+        /// What the quote stands for in the agent's own words when it was
+        /// selected from a displayed translation (captured at settle time by
+        /// the surface).
+        origin: Option<cypher_proto::agent_prompt::AgentQuote>,
         comment: String,
     },
     /// The pill's "Side Chat" action (round 21): the user wants a temporary
@@ -45,6 +49,9 @@ pub enum CommentPopupEvent {
         chat_id: String,
         source: cypher_proto::SideChatSource,
         selected_text: String,
+        /// What the selection stands for in the agent's own words when it
+        /// was taken from a displayed translation.
+        origin: Option<cypher_proto::agent_prompt::AgentQuote>,
     },
 }
 
@@ -57,11 +64,13 @@ pub fn side_chat_request_event(
     chat_id: String,
     source: cypher_proto::SideChatSource,
     selected_text: String,
+    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
 ) -> CommentPopupEvent {
     CommentPopupEvent::SideChatRequested {
         chat_id,
         source,
         selected_text,
+        origin,
     }
 }
 
@@ -96,6 +105,9 @@ struct CommentOffer {
     chat_id: String,
     /// Normalized quoted text being commented on.
     quote: String,
+    /// What the quote stands for in the agent's own words, when a displayed
+    /// translation stood between the two ([`crate::quote_origin::agent_quote`]).
+    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
     /// Window-space anchor from the mouse-up event.
     anchor: Point<Pixels>,
     /// Who owns the offer (scoped dismissal).
@@ -118,6 +130,7 @@ struct CommentOffer {
 struct CommentEditor {
     chat_id: String,
     quote: String,
+    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
     anchor: Point<Pixels>,
     owner: CommentOwner,
     head: Option<CommentHead>,
@@ -195,6 +208,7 @@ impl CommentPopup {
         &mut self,
         chat_id: String,
         quote: String,
+        origin: Option<cypher_proto::agent_prompt::AgentQuote>,
         anchor: Point<Pixels>,
         owner: CommentOwner,
         head: Option<CommentHead>,
@@ -205,6 +219,7 @@ impl CommentPopup {
         self.offer = Some(CommentOffer {
             chat_id,
             quote: normalize_quote(&quote),
+            origin,
             anchor,
             owner,
             head,
@@ -318,7 +333,12 @@ impl CommentPopup {
         let Some(offer) = self.offer.take() else {
             return;
         };
-        cx.emit(side_chat_request_event(offer.chat_id, source, offer.quote));
+        cx.emit(side_chat_request_event(
+            offer.chat_id,
+            source,
+            offer.quote,
+            offer.origin,
+        ));
         self.editor = None;
         (offer.clear_selection)(cx);
         cx.notify();
@@ -335,6 +355,7 @@ impl CommentPopup {
         self.editor = Some(CommentEditor {
             chat_id: offer.chat_id,
             quote: offer.quote,
+            origin: offer.origin,
             anchor: offer.anchor,
             owner: offer.owner,
             head: offer.head,
@@ -366,6 +387,7 @@ impl CommentPopup {
         cx.emit(CommentPopupEvent::CommentSaved {
             chat_id: editor.chat_id,
             quote: editor.quote,
+            origin: editor.origin,
             comment,
         });
         self.offer = None;
@@ -666,13 +688,21 @@ mod tests {
                 anchor_message_id: Some("m1".into()),
             },
             normalized.clone(),
+            Some(cypher_proto::agent_prompt::AgentQuote::Passage {
+                text: "the agent's original".into(),
+            }),
         );
         match event {
             CommentPopupEvent::SideChatRequested {
                 chat_id,
                 source,
                 selected_text,
+                origin,
             } => {
+                assert_eq!(
+                    origin.as_ref().map(|o| o.fallback()),
+                    Some("the agent's original")
+                );
                 assert_eq!(chat_id, "chat-a");
                 assert_eq!(
                     source,

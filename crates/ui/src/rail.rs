@@ -582,6 +582,7 @@ mod tests {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: text.into(),
+                agent_text: None,
             }],
             created_at: 0,
             device_id: "d".into(),

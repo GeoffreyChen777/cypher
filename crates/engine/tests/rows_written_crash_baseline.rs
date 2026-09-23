@@ -28,6 +28,7 @@ fn entry(id: &str) -> SessionMessageEntry {
         parts: vec![MessagePart::Text {
             id: "t0".into(),
             text: id.into(),
+            agent_text: None,
         }],
         created_at: 1,
         device_id: "p0-host".into(),

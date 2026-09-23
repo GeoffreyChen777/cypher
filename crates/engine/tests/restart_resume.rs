@@ -342,6 +342,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: "long task".into(),
+                agent_text: None,
             }],
             created_at: 1,
             device_id: "dev-crash".into(),
@@ -356,6 +357,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: "partial…".into(),
+                agent_text: None,
             }],
             created_at: 2,
             device_id: "dev-crash".into(),
@@ -590,6 +592,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: "long task".into(),
+                agent_text: None,
             }],
             created_at: now - 60_000,
             device_id: "dev-crash".into(),
@@ -604,6 +607,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: "partial…".into(),
+                agent_text: None,
             }],
             created_at: now - 30_000,
             device_id: "dev-crash".into(),

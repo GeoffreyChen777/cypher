@@ -167,6 +167,7 @@ mod tests {
                 MessagePart::Text {
                     id: format!("{id}-t"),
                     text: "did the thing".into(),
+                    agent_text: None,
                 },
                 MessagePart::Tool {
                     id: format!("{id}-tool"),

@@ -487,6 +487,7 @@ pub fn overlay(
     let parts = vec![MessagePart::Text {
         id: "preview-text".into(),
         text: format!("{notice}{}", view.text),
+        agent_text: None,
     }];
     if let Some(entry) = entries.iter_mut().find(|e| e.id == c.segment_id) {
         if entry.role != MessageRole::Assistant
@@ -501,6 +502,7 @@ pub fn overlay(
             entry.parts.push(MessagePart::Text {
                 id: "preview-status".into(),
                 text: "\n\n> 暂存预览 · 正在显示已同步内容，等待预览确认".into(),
+                agent_text: None,
             });
         } else if covered {
             let text = entry
@@ -515,6 +517,7 @@ pub fn overlay(
             entry.parts = vec![MessagePart::Text {
                 id: "preview-text".into(),
                 text: format!("{notice}{text}"),
+                agent_text: None,
             }];
         } else {
             entry.parts = parts;
@@ -558,6 +561,7 @@ mod tests {
         vec![MessagePart::Text {
             id: "t".into(),
             text: value.into(),
+            agent_text: None,
         }]
     }
     #[test]

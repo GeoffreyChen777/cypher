@@ -3070,11 +3070,13 @@ impl RpcService for EngineRpc {
                     parent_chat_id: String,
                     source: SideChatSource,
                     selected_text: String,
+                    #[serde(default)]
+                    origin: Option<cypher_proto::agent_prompt::AgentQuote>,
                 }
                 let p: P = parse_params(params)?;
                 let created = self
                     .side_chats
-                    .start(&p.parent_chat_id, p.source, p.selected_text)
+                    .start(&p.parent_chat_id, p.source, p.selected_text, p.origin)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&created)
             }

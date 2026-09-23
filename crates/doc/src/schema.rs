@@ -69,6 +69,11 @@ struct DocPartJson {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    /// The agent's version of a translated text part (additive — absent on
+    /// old rows, old writers and untranslated text). A plain string, not a
+    /// LoroText: it is written whole, never streamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,10 +112,15 @@ struct DocPartJson {
 /// App parts → doc part json (mirror of `toDocParts`).
 fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
     Ok(match part {
-        MessagePart::Text { id, text } => DocPartJson {
+        MessagePart::Text {
+            id,
+            text,
+            agent_text,
+        } => DocPartJson {
             id: id.clone(),
             kind: "text".into(),
             text: Some(text.clone()),
+            agent_text: agent_text.clone(),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -182,6 +192,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             None => MessagePart::Text {
                 id: p.id,
                 text: String::new(),
+                agent_text: None,
             },
         },
         "input" => MessagePart::Input {
@@ -200,6 +211,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         _ => MessagePart::Text {
             id: p.id,
             text: p.text.unwrap_or_default(),
+            agent_text: p.agent_text,
         },
     }
 }
@@ -594,6 +606,62 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Stamp the agent's version of a user message: the translation the agent
+    /// received for a prompt the transcript shows as typed. The newest user
+    /// entry among the last [`USER_AGENT_TEXT_SCAN`] whose text is `source`
+    /// (outer whitespace ignored) and that carries no agent version yet wins
+    /// — a prompt repeated word for word is stamped once per delivery,
+    /// newest first, and a translation reported for text no recent entry
+    /// holds is dropped rather than attached to the wrong message. Returns
+    /// whether an entry was stamped.
+    pub fn stamp_user_agent_text(&self, source: &str, agent_text: &str) -> Result<bool, DocError> {
+        let source = source.trim();
+        if source.is_empty() || agent_text.trim().is_empty() || agent_text.trim() == source {
+            return Ok(false);
+        }
+        let messages = self.doc.get_list("messages");
+        let len = messages.len();
+        for i in (len.saturating_sub(USER_AGENT_TEXT_SCAN)..len).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let is_user = matches!(
+                entry.get("role"),
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == "user"
+            );
+            if !is_user {
+                continue;
+            }
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            // User entries are written as one text part (`write_user_message`).
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) = parts.get(0)
+            else {
+                continue;
+            };
+            if part.get("agentText").is_some() {
+                continue;
+            }
+            let matches = match part.get("text") {
+                Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
+                    t.to_string().trim() == source
+                }
+                _ => false,
+            };
+            if matches {
+                part.insert("agentText", agent_text.trim())?;
+                self.doc.commit();
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Seal one attachment against this chat: record the durable final path
     /// (and display file name) for `upload_id` in the `sealedAttachments`
     /// map. The seal is what unblocks a Run command whose `pending_attachments`
@@ -663,6 +731,12 @@ impl SessionDoc {
     }
 }
 
+/// How far back [`SessionDoc::stamp_user_agent_text`] looks for the prompt a
+/// translation belongs to. The translation lands while its own prompt is at
+/// or near the tail; a few steers queued behind it are the only entries that
+/// can come after.
+const USER_AGENT_TEXT_SCAN: usize = 32;
+
 fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Result<(), DocError> {
     map.insert("id", entry.id.as_str())?;
     map.insert(
@@ -704,6 +778,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(text) = &doc_part.text {
         let t = map.insert_container("text", LoroText::new())?;
         t.insert(0, text)?;
+    }
+    if let Some(agent_text) = &doc_part.agent_text {
+        map.insert("agentText", agent_text.as_str())?;
     }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
@@ -853,6 +930,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Text {
             id,
             text: text.to_owned(),
+            agent_text: obj
+                .get("agentText")
+                .and_then(|x| x.as_str())
+                .map(str::to_owned),
         });
     }
     if let Some(call) = obj
@@ -1013,9 +1094,25 @@ impl<'a> SegmentWriter<'a> {
                 Some(prev) => {
                     match (prev, part) {
                         (
-                            MessagePart::Text { text: old, .. },
-                            MessagePart::Text { text: new, .. },
+                            MessagePart::Text {
+                                text: old,
+                                agent_text: old_agent,
+                                ..
+                            },
+                            MessagePart::Text {
+                                text: new,
+                                agent_text: new_agent,
+                                ..
+                            },
                         ) if new.starts_with(old.as_str()) => {
+                            // An append-mode translation GROWS the text (the
+                            // original is its prefix) while stamping the
+                            // agent's version in the same step.
+                            if old_agent != new_agent {
+                                let part_map = part_map_at(&parts, i)?;
+                                write_agent_text(&part_map, new_agent.as_deref())?;
+                                dirty = true;
+                            }
                             // Trailing-text growth: append the suffix into the LoroText.
                             let delta = &new[old.len()..];
                             if !delta.is_empty() {
@@ -1121,12 +1218,28 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(diff_stats) = &doc_part.diff_stats {
         map.insert("diffStats", loro_value_from_json(diff_stats))?;
     }
+    if doc_part.kind == "text" {
+        write_agent_text(map, doc_part.agent_text.as_deref())?;
+    }
     if let Some(text) = &doc_part.text {
-        // Defensive path only — the fold never rewrites earlier text.
+        // A translation frame replaces the text wholesale; otherwise this is
+        // a defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
             t.update(text, Default::default())
                 .map_err(|e| DocError::Schema(e.to_string()))?;
         }
+    }
+    Ok(())
+}
+
+/// Set or clear a text part's `agentText` — a cleared value must actually be
+/// deleted, or a translation that fell back to the original would keep
+/// mapping quotes through a version that no longer stands.
+fn write_agent_text(map: &LoroMap, agent_text: Option<&str>) -> Result<(), DocError> {
+    match agent_text {
+        Some(agent_text) => map.insert("agentText", agent_text)?,
+        None if map.get("agentText").is_some() => map.delete("agentText")?,
+        None => {}
     }
     Ok(())
 }
@@ -1181,6 +1294,7 @@ mod tests {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: text.into(),
+                agent_text: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),
@@ -1201,7 +1315,8 @@ mod tests {
             entries[0].parts,
             vec![MessagePart::Text {
                 id: "t0".into(),
-                text: "hello".into()
+                text: "hello".into(),
+                agent_text: None,
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
@@ -1356,6 +1471,116 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    fn agent_text_of(doc: &SessionDoc) -> (String, Option<String>) {
+        match &doc.read_entries().unwrap()[0].parts[0] {
+            MessagePart::Text {
+                text, agent_text, ..
+            } => (text.clone(), agent_text.clone()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A replace-mode translation rewrites the text wholesale; the answer the
+    /// model wrote survives in Loro as the part's agent version.
+    #[test]
+    fn segment_writer_keeps_the_original_under_a_translation() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "The answer.".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        for frame in ["The answer.", "答", "答案。"] {
+            fold_event_into_parts(&mut folded, &AgentEvent::Translation { text: frame.into() });
+            writer.sync(&folded).unwrap();
+        }
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        assert_eq!(
+            agent_text_of(&doc),
+            ("答案。".to_string(), Some("The answer.".to_string()))
+        );
+    }
+
+    /// Append mode grows the text with the original as its prefix — the
+    /// writer's append path must still stamp the agent version.
+    #[test]
+    fn segment_writer_stamps_the_original_on_an_append_mode_growth() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(&mut folded, &AgentEvent::TextDelta { text: "Hi.".into() });
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::Translation {
+                text: "Hi.\n\n---\n\n你好。".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        assert_eq!(
+            agent_text_of(&doc),
+            ("Hi.\n\n---\n\n你好。".to_string(), Some("Hi.".to_string()))
+        );
+    }
+
+    /// A translation that fails puts the original back — nothing is
+    /// translated any more, so the agent version must be DELETED in Loro, not
+    /// just dropped from the fold's mirror.
+    #[test]
+    fn a_restored_original_clears_the_agent_version() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "Answer".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(&mut folded, &AgentEvent::Translation { text: "答".into() });
+        writer.sync(&folded).unwrap();
+        assert_eq!(agent_text_of(&doc).1.as_deref(), Some("Answer"));
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::Translation {
+                text: "Answer".into(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        assert_eq!(agent_text_of(&doc), ("Answer".to_string(), None));
+    }
+
+    #[test]
+    fn user_agent_text_stamps_the_newest_matching_unstamped_prompt() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        doc.push_message(&user_entry("m1", "你好")).unwrap();
+        doc.push_message(&user_entry("m2", "别的")).unwrap();
+        doc.push_message(&user_entry("m3", "你好")).unwrap();
+        // Outer whitespace on either side is not a difference.
+        assert!(doc.stamp_user_agent_text(" 你好\n", "Hello").unwrap());
+        assert!(doc.stamp_user_agent_text("你好", "Hi").unwrap());
+        // Every copy is stamped; nothing else matches.
+        assert!(!doc.stamp_user_agent_text("你好", "Hey").unwrap());
+        assert!(!doc.stamp_user_agent_text("missing", "x").unwrap());
+        // An "unchanged" translation is no translation.
+        assert!(!doc.stamp_user_agent_text("别的", "别的").unwrap());
+        let stamped: Vec<Option<String>> = doc
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| match &e.parts[0] {
+                MessagePart::Text { agent_text, .. } => agent_text.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(stamped, vec![Some("Hi".into()), None, Some("Hello".into())]);
     }
 
     /// Live progress is transient column state: a ToolCall creates the part
@@ -1576,6 +1801,7 @@ mod tests {
         let folded = vec![MessagePart::Text {
             id: "t0".into(),
             text: "hello".into(),
+            agent_text: None,
         }];
         // Streaming entries carry no completion — the turn is still open.
         assert_eq!(doc.read_entries().unwrap()[0].completed_at, None);

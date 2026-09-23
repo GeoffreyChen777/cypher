@@ -267,7 +267,8 @@ async fn queued_run_command_executes_end_to_end() {
         all[0].parts,
         vec![MessagePart::Text {
             id: "t0".into(),
-            text: "do the thing".into()
+            text: "do the thing".into(),
+            agent_text: None,
         }]
     );
     // Assistant entry: folded parts — merged text, then the resolved tool call with the
@@ -651,6 +652,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: "hi".into(),
+                agent_text: None,
             }],
             created_at: 1,
             device_id: device_id.into(),
@@ -664,6 +666,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             .sync(&[MessagePart::Text {
                 id: "t0".into(),
                 text: "doomed".into(),
+                agent_text: None,
             }])
             .unwrap();
         // No finish — the "process" dies here with the entry still streaming.
@@ -2175,7 +2178,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
         all[2].parts,
         vec![MessagePart::Text {
             id: "t0".into(),
-            text: "part two".into()
+            text: "part two".into(),
+            agent_text: None,
         }],
         "stale echo must not split the streaming text"
     );

@@ -140,9 +140,19 @@ pub enum MessageStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {
+    #[serde(rename_all = "camelCase")]
     Text {
         id: String,
         text: String,
+        /// The text as the AGENT has it, when that differs from what the
+        /// transcript displays — set only while a translation stands between
+        /// the two: an answer's original before its display translation
+        /// replaced it, or the translated prompt the agent received for a
+        /// user message shown as typed. Quotes taken from the displayed text
+        /// map back through it, so the agent is shown its own words. Additive
+        /// (absent on old rows, old writers, and untranslated text).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_text: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Tool {
@@ -212,7 +222,9 @@ impl MessagePart {
 
     pub fn byte_len(&self) -> usize {
         match self {
-            MessagePart::Text { text, .. } => text.len(),
+            MessagePart::Text {
+                text, agent_text, ..
+            } => text.len() + agent_text.as_ref().map_or(0, String::len),
             MessagePart::Tool {
                 call,
                 output,
@@ -265,6 +277,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Text {
                     id,
                     text: text.clone(),
+                    agent_text: None,
                 });
             }
         }
@@ -324,12 +337,28 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             //
             // A frame whose text is unchanged is a keepalive: it proves the
             // turn is alive, and diffs to nothing here and in the doc writer.
-            if let Some(MessagePart::Text { text: current, .. }) = out
+            //
+            // The text being overwritten is the answer as the model wrote it,
+            // and it exists nowhere else in the doc — kept as the part's
+            // `agent_text` the first time a frame changes it. A last frame
+            // that restores the original (a failed or unchanged translation)
+            // leaves nothing translated, so nothing is kept.
+            if let Some(MessagePart::Text {
+                text: current,
+                agent_text,
+                ..
+            }) = out
                 .iter_mut()
                 .rev()
                 .find(|part| matches!(part, MessagePart::Text { .. }))
             {
+                if agent_text.is_none() && current != text {
+                    *agent_text = Some(current.clone());
+                }
                 current.clone_from(text);
+                if agent_text.as_deref() == Some(current.as_str()) {
+                    *agent_text = None;
+                }
             }
         }
         AgentEvent::ToolResult {
@@ -416,10 +445,13 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // AvailableCommands feeds the engine's per-harness command cache, not
         // the transcript. SubagentStatus is a live session projection (the
         // engine consumes it before the fold) — never transcript content.
+        // InputTranslation belongs to the USER entry the engine stamps
+        // directly, never to the assistant segment being folded.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::AvailableCommands { .. }
-        | AgentEvent::SubagentStatus { .. } => {}
+        | AgentEvent::SubagentStatus { .. }
+        | AgentEvent::InputTranslation { .. } => {}
     }
 }
 
@@ -572,7 +604,11 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
 
     for part in parts {
         match part {
-            MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => {
+            MessagePart::Text {
+                id,
+                text,
+                agent_text,
+            } if text.len() > MSG_INLINE_MAX => {
                 // Chunk oversized text at char boundaries.
                 let mut start = 0usize;
                 let mut piece = 0usize;
@@ -592,6 +628,9 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
                             format!("{id}~{piece}")
                         },
                         text: text[start..end].to_string(),
+                        // The agent's version belongs to the part as a
+                        // whole, so it rides the first piece only.
+                        agent_text: if piece == 0 { agent_text.clone() } else { None },
                     };
                     push_part(&mut chunks, &mut current_bytes, sub);
                     start = end;
@@ -801,6 +840,7 @@ mod tests {
             MessagePart::Text {
                 id: "t0".into(),
                 text: big.clone(),
+                agent_text: None,
             },
             MessagePart::Tool {
                 id: "tool-1".into(),

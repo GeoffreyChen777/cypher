@@ -430,6 +430,20 @@ pub enum AgentEvent {
     Translation {
         text: String,
     },
+    /// The translation the agent received in place of a user's prompt. The
+    /// transcript keeps showing the prompt as typed; the engine stamps this
+    /// onto the user entry whose text is `source` as its agent version, so a
+    /// quote taken from the prompt can be mapped back to the words the agent
+    /// actually read. Never folded into an assistant segment and never
+    /// persisted to the run journal — the stamp on the user entry is the
+    /// record.
+    #[serde(rename_all = "camelCase")]
+    InputTranslation {
+        /// The user's own words the translation replaced (the request only,
+        /// never the reference context wrapped around it).
+        source: String,
+        text: String,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

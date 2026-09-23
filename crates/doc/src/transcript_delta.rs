@@ -92,12 +92,25 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         if p == n {
             continue;
         }
-        let (MessagePart::Text { id: pid, text: pt }, MessagePart::Text { id: nid, text: nt }) =
-            (p, n)
+        let (
+            MessagePart::Text {
+                id: pid,
+                text: pt,
+                agent_text: pa,
+            },
+            MessagePart::Text {
+                id: nid,
+                text: nt,
+                agent_text: na,
+            },
+        ) = (p, n)
         else {
             return None;
         };
-        if pid != nid || !nt.starts_with(pt.as_str()) || append.is_some() {
+        // An append carries text only: a change to the agent's version (an
+        // append-mode translation grows the text AND stamps the original)
+        // has to travel as a full upsert.
+        if pid != nid || pa != na || !nt.starts_with(pt.as_str()) || append.is_some() {
             return None;
         }
         append = Some(TextAppend {
@@ -262,6 +275,7 @@ mod tests {
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: text.into(),
+                agent_text: None,
             }],
             created_at: 0,
             device_id: "dev".into(),

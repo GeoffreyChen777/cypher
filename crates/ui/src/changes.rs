@@ -1589,6 +1589,8 @@ impl Changes {
                         popup.offer(
                             chat_id,
                             snapshot.text.clone(),
+                            // Diff text is never a displayed translation.
+                            None,
                             anchor,
                             crate::comments::CommentOwner::Markdown(scope),
                             Some(crate::comments::CommentHead {
