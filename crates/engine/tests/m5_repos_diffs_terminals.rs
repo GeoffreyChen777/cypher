@@ -507,7 +507,11 @@ async fn diff_capture_tracked_untracked_and_checksum() {
         .expect("nested untracked summary");
     assert_eq!(c.status, "added");
     assert_eq!(c.additions, 1);
-    assert!(nested.patch.contains("diff --git a/new/deep/c.txt b/new/deep/c.txt"));
+    assert!(
+        nested
+            .patch
+            .contains("diff --git a/new/deep/c.txt b/new/deep/c.txt")
+    );
 }
 
 #[tokio::test]
