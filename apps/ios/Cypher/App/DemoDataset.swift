@@ -121,6 +121,45 @@ final class DemoDataset {
                            chats: chats, sessions: sessions)
     }
 
+    /// `-demo-many`: enough devices and projects to scroll Home and overflow
+    /// its device tabs. Idle sessions only, so the standard fixtures keep
+    /// their statuses.
+    func addManyProjects() {
+        let now = nowMs()
+        let config = ChatConfig(harness: "pi", model: "demo/pi",
+                                reasoning: "high", sandbox: "workspace-write")
+        let extra: [(DeviceRow, [String])] = [
+            (DeviceRow(id: "dev-studio", name: "Studio's Mac mini", platform: "macos",
+                       lastSeenAt: now, createdAt: now - 86_400_000 * 20),
+             ["collabmd", "pi-extensions", "dotfiles", "blog"]),
+            (DeviceRow(id: "dev-gpu", name: "5090 Workstation", platform: "linux",
+                       lastSeenAt: now, createdAt: now - 86_400_000 * 15),
+             ["mvp-engine", "npu-slurm-setup", "Documents"]),
+            (DeviceRow(id: "dev-alpha", name: "DRC Alpha", platform: "linux",
+                       lastSeenAt: now - 86_400_000, createdAt: now - 86_400_000 * 40),
+             ["landing", "playground", "benchmarks", "infra", "notes"]),
+        ]
+        for (device, names) in extra {
+            devices.append(device)
+            for (ix, name) in names.enumerated() {
+                let space = Space(id: "space-\(device.id)-\(name)", deviceId: device.id,
+                                  path: "/Users/dev/Projects/\(name)", name: nil,
+                                  gitDetected: ix % 2 == 0, gitCheckedAt: now, checkoutId: nil,
+                                  createdAt: now - 86_400_000 * Int64(ix + 1))
+                spaces.append(space)
+                for n in 0..<(ix % 3) {
+                    let at = now - 3_600_000 * Int64(ix * 3 + n + 1)
+                    chats.append(Chat(id: "chat-\(space.id)-\(n)", deviceId: device.id,
+                                      title: "\(name) task \(n + 1)", archived: false,
+                                      cwd: space.path, branch: "main", checkoutId: nil,
+                                      config: config, lastMessagePreview: "Done.",
+                                      lastMessageAt: at, createdAt: at, spaceId: space.id,
+                                      lastSeenAt: at))
+                }
+            }
+        }
+    }
+
     // MARK: Fake filesystem (folder browser demo)
 
     static let fileTree: [String: [String]] = [

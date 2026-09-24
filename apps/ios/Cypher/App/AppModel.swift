@@ -118,6 +118,7 @@ final class AppModel {
         }
         if args.contains("-demo") {
             enterDemoMode()
+            if args.contains("-demo-many") { demo?.addManyProjects() }
             if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
                 let spec = args[ix + 1]
                 if spec.hasPrefix("chat:") {
