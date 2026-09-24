@@ -40,7 +40,34 @@ struct SessionView: View {
         return model.spaces.first { $0.id == spaceId }
     }
 
+    // `body` is split into layers (chrome → sheets → lifecycle) so each
+    // type-checks on its own: as one expression it took ~0.9s here, close to
+    // what timed out HomeView on CI's older Xcode.
     var body: some View {
+        withSheets
+            .onChange(of: chatId) { _, _ in workspaceDestination = nil }
+            .onChange(of: chat?.cwd) { _, _ in workspaceDestination = nil }
+            .onChange(of: chat?.deviceId) { _, _ in workspaceDestination = nil }
+            .onChange(of: path) { _, routes in
+                if routes.last != .chat(chatId) {
+                    commentDrafts.reset()
+                }
+            }
+            .onChange(of: model.workspace.map { ObjectIdentifier($0) }) { _, _ in
+                workspaceDestination = nil
+                // Account/workspace replacement invalidates an in-flight send's
+                // annotation snapshot even if the navigation path hasn't changed.
+                commentDrafts.reset()
+                commentDrafts.bind(to: chatId)
+            }
+            .onDisappear {
+                if path.last != .chat(chatId) { commentDrafts.reset() }
+                model.markSeen(chatId: chatId)
+                model.releaseSessionStore(chatId: chatId)
+            }
+    }
+
+    private var chrome: some View {
         Group {
             if let chat, let store = model.sessionStore(for: chat) {
                 content(chat: chat, store: store)
@@ -63,136 +90,123 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
-            if let chat {
-                // Static, left-aligned session header — model/effort changes
-                // moved into the composer's picker chips.
-                // Static text belongs in the native title slot. Putting a
-                // wide title in topBarLeading makes it a bar-button item that
-                // can morph with Back's Liquid Glass background during a pop.
-                ToolbarItem(placement: .principal) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(chat.displayTitle)
-                            .font(Theme.sans(13, weight: .medium))
-                            .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        if let subtitle {
-                            Text(subtitle)
-                                .font(Theme.sans(10.5))
-                                .foregroundStyle(Theme.textMuted.opacity(0.6))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+            if let chat { sessionToolbar(chat) }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func sessionToolbar(_ chat: Chat) -> some ToolbarContent {
+        // Static, left-aligned session header — model/effort changes
+        // moved into the composer's picker chips.
+        // Static text belongs in the native title slot. Putting a
+        // wide title in topBarLeading makes it a bar-button item that
+        // can morph with Back's Liquid Glass background during a pop.
+        ToolbarItem(placement: .principal) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(chat.displayTitle)
+                    .font(Theme.sans(13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(Theme.sans(10.5))
+                        .foregroundStyle(Theme.textMuted.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            // Keep the title bounded without creating a leading
+            // bar-button container or changing native Back behavior.
+            .frame(width: max(140, viewWidth - Self.headerChromeInset),
+                   alignment: .leading)
+        }
+        // Bare text on the bar, not a glass capsule.
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button("Files", systemImage: "folder") { workspaceDestination = .files }
+                Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                if !chat.isChild {
+                    Divider()
+                    Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
+                    if chat.archived {
+                        Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                            model.unarchive(chatId: chat.id)
+                        }
+                    } else {
+                        Button("Archive", systemImage: "archivebox") {
+                            model.archive(chatId: chat.id)
+                            leave()
                         }
                     }
-                    // Keep the title bounded without creating a leading
-                    // bar-button container or changing native Back behavior.
-                    .frame(width: max(140, viewWidth - Self.headerChromeInset),
-                           alignment: .leading)
-                }
-                // Bare text on the bar, not a glass capsule.
-                .sharedBackgroundVisibility(.hidden)
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("Files", systemImage: "folder") { workspaceDestination = .files }
-                        Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
-                        if !chat.isChild {
-                            Divider()
-                            Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
-                            if chat.archived {
-                                Button("Unarchive", systemImage: "tray.and.arrow.up") {
-                                    model.unarchive(chatId: chat.id)
-                                }
-                            } else {
-                                Button("Archive", systemImage: "archivebox") {
-                                    model.archive(chatId: chat.id)
-                                    leave()
-                                }
-                            }
-                            Button("Delete…", systemImage: "trash", role: .destructive) {
-                                actions.delete(chat)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
+                    Button("Delete…", systemImage: "trash", role: .destructive) {
+                        actions.delete(chat)
                     }
-                    .accessibilityLabel("Session menu")
-                    .accessibilityIdentifier("workspace-browser")
                 }
-                if let relation = chat.child,
-                   let parent = model.chat(id: relation.parentChatId),
-                   parent.id != chat.id, parent.deviceId == chat.deviceId {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            path = SessionNavigation.opening(parent.id, in: path)
-                        } label: {
-                            Image(systemName: "arrow.turn.up.left")
-                        }
-                        .accessibilityLabel("Return to parent session")
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .accessibilityLabel("Session menu")
+            .accessibilityIdentifier("workspace-browser")
+        }
+        if let relation = chat.child,
+           let parent = model.chat(id: relation.parentChatId),
+           parent.id != chat.id, parent.deviceId == chat.deviceId {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    path = SessionNavigation.opening(parent.id, in: path)
+                } label: {
+                    Image(systemName: "arrow.turn.up.left")
+                }
+                .accessibilityLabel("Return to parent session")
+            }
+        }
+    }
+
+    private var withSheets: some View {
+        chrome
+            .onAppear {
+                commentDrafts.bind(to: chatId)
+                model.markSeen(chatId: chatId)
+                if model.demo != nil, let destination = WorkspaceDestination(rawValue: model.launchSheet ?? "") {
+                    model.launchSheet = nil
+                    workspaceDestination = destination
+                }
+                if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
+                    let showList = model.launchSheet == "comments"
+                    model.launchSheet = nil
+                    commentDrafts.begin(quote: "The transcript stays glued to the bottom until you scroll up.")
+                    if showList, let source = commentDrafts.editor {
+                        _ = commentDrafts.save(source: source, quote: source.text,
+                                              comment: "Explain what happens when the keyboard opens.")
+                        commentDrafts.showList()
                     }
                 }
             }
-        }
-        .onAppear {
-            commentDrafts.bind(to: chatId)
-            model.markSeen(chatId: chatId)
-            if model.demo != nil, let destination = WorkspaceDestination(rawValue: model.launchSheet ?? "") {
-                model.launchSheet = nil
-                workspaceDestination = destination
-            }
-            if model.demo != nil, model.launchSheet == "comment" || model.launchSheet == "comments" {
-                let showList = model.launchSheet == "comments"
-                model.launchSheet = nil
-                commentDrafts.begin(quote: "The transcript stays glued to the bottom until you scroll up.")
-                if showList, let source = commentDrafts.editor {
-                    _ = commentDrafts.save(source: source, quote: source.text,
-                                          comment: "Explain what happens when the keyboard opens.")
-                    commentDrafts.showList()
+            .sessionActionPrompts(actions) { _ in leave() }
+            .environment(\.transcriptSelectionActions, chat.map(selectionActions))
+            .sheet(item: $sideChat, onDismiss: {
+                // Navigate once the sheet is gone: a path change during its
+                // dismissal can be dropped.
+                if let chatId = promotedSideChat {
+                    promotedSideChat = nil
+                    path = SessionNavigation.opening(chatId, in: path)
                 }
+            }) { store in
+                SideChatSheet(store: store) { chatId in
+                    promotedSideChat = chatId
+                }
+                // Closing discards it on the host; a no-op once it's a chat.
+                .onDisappear { store.close() }
             }
-        }
-        .sessionActionPrompts(actions) { _ in leave() }
-        .environment(\.transcriptSelectionActions, chat.map(selectionActions))
-        .sheet(item: $sideChat, onDismiss: {
-            // Navigate once the sheet is gone: a path change during its
-            // dismissal can be dropped.
-            if let chatId = promotedSideChat {
-                promotedSideChat = nil
-                path = SessionNavigation.opening(chatId, in: path)
+            .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
+            .sheet(isPresented: $commentDrafts.presented) {
+                CommentsPanel(drafts: commentDrafts)
             }
-        }) { store in
-            SideChatSheet(store: store) { chatId in
-                promotedSideChat = chatId
+            .sheet(item: $workspaceDestination) { destination in
+                if let chat { WorkspaceBrowserView(model: model, chat: chat, destination: destination) }
             }
-            // Closing discards it on the host; a no-op once it's a chat.
-            .onDisappear { store.close() }
-        }
-        .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
-        .sheet(isPresented: $commentDrafts.presented) {
-            CommentsPanel(drafts: commentDrafts)
-        }
-        .sheet(item: $workspaceDestination) { destination in
-            if let chat { WorkspaceBrowserView(model: model, chat: chat, destination: destination) }
-        }
-        .onChange(of: chatId) { _, _ in workspaceDestination = nil }
-        .onChange(of: chat?.cwd) { _, _ in workspaceDestination = nil }
-        .onChange(of: chat?.deviceId) { _, _ in workspaceDestination = nil }
-        .onChange(of: path) { _, routes in
-            if routes.last != .chat(chatId) {
-                commentDrafts.reset()
-            }
-        }
-        .onChange(of: model.workspace.map { ObjectIdentifier($0) }) { _, _ in
-            workspaceDestination = nil
-            // Account/workspace replacement invalidates an in-flight send's
-            // annotation snapshot even if the navigation path hasn't changed.
-            commentDrafts.reset()
-            commentDrafts.bind(to: chatId)
-        }
-        .onDisappear {
-            if path.last != .chat(chatId) { commentDrafts.reset() }
-            model.markSeen(chatId: chatId)
-            model.releaseSessionStore(chatId: chatId)
-        }
     }
 
     /// Fork and Side Chat on a selection — only what this session can do

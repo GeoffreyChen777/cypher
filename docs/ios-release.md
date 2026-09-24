@@ -30,6 +30,19 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (18), 2026-09-25
+
+- Build 17 never reached TestFlight: CI's Xcode 26.3 gave up type-checking
+  `HomeView.body` ("unable to type-check this expression in reasonable
+  time"), which Xcode 26.6 locally compiled in 550 ms. Build 18 splits that
+  body, and the similarly long `SessionView` and `NewSessionView` bodies, into
+  separately type-checked layers; each now checks in under 150 ms.
+- Same content as build 17 below. A Release device build and the 208
+  `CypherTests` pass locally; `release.py ios-context` accepts the tag.
+- Upload is left to `.github/workflows/ios.yml` via the
+  `cypher-ios-v0.2.0-b18` tag. Export compliance, tester groups, public links
+  and review submission remain separate explicit actions.
+
 ## Release: 0.2.0 (17), 2026-09-25
 
 - Covers the iOS commits since build 16: `88bc3a5` (Home tab flicker fix and
@@ -39,9 +52,7 @@ A `workflow_dispatch` run builds and verifies but never uploads.
   flag.
 - Release build for `generic/platform=iOS Simulator` succeeded locally with
   `CODE_SIGNING_ALLOWED=NO`; `release.py ios-context` accepts the tag.
-- Upload is left to `.github/workflows/ios.yml` via the
-  `cypher-ios-v0.2.0-b17` tag. Export compliance, tester groups, public links
-  and review submission remain separate explicit actions.
+- Tagged `cypher-ios-v0.2.0-b17`; the archive failed on CI (see build 18).
 
 ## Release: 0.2.0 (16), 2026-09-24
 

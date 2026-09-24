@@ -58,142 +58,168 @@ struct HomeView: View {
         model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined()
     }
 
+    // `body` is split into layers (list → routing → lifecycle) so each
+    // type-checks on its own: as one expression it timed out on CI's older
+    // Xcode ("unable to type-check this expression in reasonable time").
     var body: some View {
         NavigationStack(path: $path) {
-            List {
-                let groups = deviceGroups
-                let selected = groups.first { $0.id == deviceFilter }
-                // In the list, under the large title: a top safeAreaBar
-                // shifted the scroll inset while the title collapsed (the
-                // title flickered and slid under the tabs) and ran the scroll
-                // indicator across the tabs. A header rather than a row: a
-                // cell masks its content to the section's corner radius,
-                // which clipped the first tab.
-                if !groups.isEmpty {
-                    Section {} header: {
-                        DeviceTabs(deviceIds: groups.map(\.id), selection: $deviceFilter)
-                            .listRowInsets(EdgeInsets())
-                            // Out past the section margin to the screen edge.
-                            .padding(.horizontal, -DeviceTabs.margin)
-                            .textCase(nil)
-                    }
+            routedList
+                .onChange(of: path) { _, route in
+                    lastPathChangeAt = Date().timeIntervalSinceReferenceDate
+                    if case .chat(let id) = route.last { model.notifications.viewing(id) }
+                    else { model.notifications.viewing(nil) }
                 }
-                // One tab: one card. All: a card per device, named by a plain
-                // header (the tabs already carry presence), so rows never
-                // repeat their device.
-                ForEach(selected.map { [$0] } ?? groups) { group in
-                    Section {
-                        ForEach(group.spaces) { space in
-                            NavigationLink(value: Route.space(space.id)) {
-                                ProjectRow(space: space)
-                            }
-                            .groupedRowStyle()
+                // Notification taps navigate from `onChange`, NOT a `.task` on
+                // this root: `.task` is cancelled while a pushed session covers
+                // Home, so a tap taken inside a session was swallowed — and the
+                // stale request then fired on the way back, replacing the path
+                // in the middle of the pop transition (the reported crash).
+                // `onChange` stays live while covered, so the tap opens the
+                // session immediately, whichever screen the app was on.
+                .onChange(of: model.notifications.pendingNavigation?.id, initial: true) { _, _ in
+                    scheduleNotificationNavigation()
+                }
+                .onChange(of: chatsKey) { _, _ in
+                    scheduleNotificationNavigation()
+                }
+                .alert("Notification", isPresented: showsNavigationError) {
+                    Button("OK") { model.notifications.navigationError = nil }
+                } message: { Text(model.notifications.navigationError ?? "") }
+                .task(id: preloadKey) {
+                    model.preloadSessions()
+                }
+                .onAppear {
+                    if case .chat(let id) = path.last { model.notifications.viewing(id) }
+                    else { model.notifications.viewing(nil) }
+                    if let route = model.launchRoute {
+                        model.launchRoute = nil
+                        // Push the whole stack atomically — appending from a child's
+                        // onAppear mid-transition gets dropped by NavigationStack.
+                        if case .space(let id) = route, model.launchSheet == "newsession" {
+                            model.launchSheet = nil
+                            path = [route, .newSession(spaceId: id)]
+                        } else {
+                            path = [route]
                         }
-                    } header: {
-                        if selected == nil && groups.count > 1 {
-                            ListSectionHeader(title: model.deviceName(group.id))
-                        }
                     }
-                }
-                quickChatsSection(deviceId: selected?.id)
-                if selected == nil {
-                    otherSessionsSection
-                    ArchivedSection(spaceId: nil, orphanedOnly: true)
-                }
-            }
-            .sessionActionPrompts(actions)
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .background(Theme.surface.ignoresSafeArea())
-            .overlay {
-                if model.spaces.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty {
-                    emptyState
-                }
-            }
-            .background(NavigationProbeView(probe: navigation))
-            .navigationTitle("Projects")
-            .navigationSubtitle(subtitle)
-            .navigationBarTitleDisplayMode(.large)
-            .navigationDestination(for: Route.self) { route in
-                switch route {
-                case .space(let id): SpaceView(spaceId: id, path: $path)
-                case .chat(let id): SessionView(chatId: id, path: $path).id(id)
-                case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
-                case .quickChat(let deviceId):
-                    NewSessionView(spaceId: "", path: $path, quickDeviceId: deviceId)
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    accountMenu
-                }
-                // Account and Add are unrelated: separate glass groups.
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
-                ToolbarItem(placement: .topBarTrailing) {
-                    quickChatMenu
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
+                    if model.launchSheet == "newspace" {
+                        model.launchSheet = nil
                         showNewSpace = true
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .accessibilityLabel("New project")
+                }
+        }
+    }
+
+    private var projectList: some View {
+        List {
+            let groups = deviceGroups
+            let selected = groups.first { $0.id == deviceFilter }
+            // In the list, under the large title: a top safeAreaBar
+            // shifted the scroll inset while the title collapsed (the
+            // title flickered and slid under the tabs) and ran the scroll
+            // indicator across the tabs. A header rather than a row: a
+            // cell masks its content to the section's corner radius,
+            // which clipped the first tab.
+            if !groups.isEmpty {
+                Section {} header: {
+                    DeviceTabs(deviceIds: groups.map(\.id), selection: $deviceFilter)
+                        .listRowInsets(EdgeInsets())
+                        // Out past the section margin to the screen edge.
+                        .padding(.horizontal, -DeviceTabs.margin)
+                        .textCase(nil)
                 }
             }
+            // One tab: one card. All: a card per device, named by a plain
+            // header (the tabs already carry presence), so rows never
+            // repeat their device.
+            ForEach(selected.map { [$0] } ?? groups) { group in
+                Section {
+                    ForEach(group.spaces) { space in
+                        NavigationLink(value: Route.space(space.id)) {
+                            ProjectRow(space: space)
+                        }
+                        .groupedRowStyle()
+                    }
+                } header: {
+                    if selected == nil && groups.count > 1 {
+                        ListSectionHeader(title: model.deviceName(group.id))
+                    }
+                }
+            }
+            quickChatsSection(deviceId: selected?.id)
+            if selected == nil {
+                otherSessionsSection
+                ArchivedSection(spaceId: nil, orphanedOnly: true)
+            }
+        }
+        .sessionActionPrompts(actions)
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Theme.surface.ignoresSafeArea())
+        .overlay {
+            if model.spaces.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty {
+                emptyState
+            }
+        }
+        .background(NavigationProbeView(probe: navigation))
+        .navigationTitle("Projects")
+        .navigationSubtitle(subtitle)
+        .navigationBarTitleDisplayMode(.large)
+    }
+
+    private var routedList: some View {
+        projectList
+            .navigationDestination(for: Route.self, destination: destination)
+            .toolbar { homeToolbar }
             .sheet(isPresented: $showNewSpace) {
                 NewSpaceSheet { spaceId in
                     path.append(.space(spaceId))
                 }
             }
             .sheet(isPresented: $showNotifications) { NotificationSettingsView() }
-            .onChange(of: path) { _, route in
-                lastPathChangeAt = Date().timeIntervalSinceReferenceDate
-                if case .chat(let id) = route.last { model.notifications.viewing(id) }
-                else { model.notifications.viewing(nil) }
-            }
-            // Notification taps navigate from `onChange`, NOT a `.task` on
-            // this root: `.task` is cancelled while a pushed session covers
-            // Home, so a tap taken inside a session was swallowed — and the
-            // stale request then fired on the way back, replacing the path
-            // in the middle of the pop transition (the reported crash).
-            // `onChange` stays live while covered, so the tap opens the
-            // session immediately, whichever screen the app was on.
-            .onChange(of: model.notifications.pendingNavigation?.id, initial: true) { _, _ in
-                scheduleNotificationNavigation()
-            }
-            .onChange(of: chatsKey) { _, _ in
-                scheduleNotificationNavigation()
-            }
-            .alert("Notification", isPresented: Binding(
-                get: { model.notifications.navigationError != nil },
-                set: { if !$0 { model.notifications.navigationError = nil } }
-            )) {
-                Button("OK") { model.notifications.navigationError = nil }
-            } message: { Text(model.notifications.navigationError ?? "") }
-            .task(id: (model.overviewChats + model.projectlessChats + model.quickChats).map(\.id).joined()) {
-                model.preloadSessions()
-            }
-            .onAppear {
-                if case .chat(let id) = path.last { model.notifications.viewing(id) }
-                else { model.notifications.viewing(nil) }
-                if let route = model.launchRoute {
-                    model.launchRoute = nil
-                    // Push the whole stack atomically — appending from a child's
-                    // onAppear mid-transition gets dropped by NavigationStack.
-                    if case .space(let id) = route, model.launchSheet == "newsession" {
-                        model.launchSheet = nil
-                        path = [route, .newSession(spaceId: id)]
-                    } else {
-                        path = [route]
-                    }
-                }
-                if model.launchSheet == "newspace" {
-                    model.launchSheet = nil
-                    showNewSpace = true
-                }
-            }
+    }
+
+    @ViewBuilder
+    private func destination(_ route: Route) -> some View {
+        switch route {
+        case .space(let id): SpaceView(spaceId: id, path: $path)
+        case .chat(let id): SessionView(chatId: id, path: $path).id(id)
+        case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
+        case .quickChat(let deviceId):
+            NewSessionView(spaceId: "", path: $path, quickDeviceId: deviceId)
         }
+    }
+
+    @ToolbarContentBuilder
+    private var homeToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            accountMenu
+        }
+        // Account and Add are unrelated: separate glass groups.
+        ToolbarSpacer(.fixed, placement: .topBarTrailing)
+        ToolbarItem(placement: .topBarTrailing) {
+            quickChatMenu
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                showNewSpace = true
+            } label: {
+                Image(systemName: "plus")
+            }
+            .accessibilityLabel("New project")
+        }
+    }
+
+    private var showsNavigationError: Binding<Bool> {
+        Binding(
+            get: { model.notifications.navigationError != nil },
+            set: { if !$0 { model.notifications.navigationError = nil } }
+        )
+    }
+
+    /// Sessions to preload: re-run when the visible set changes.
+    private var preloadKey: String {
+        (model.overviewChats + model.projectlessChats + model.quickChats).map(\.id).joined()
     }
 
 

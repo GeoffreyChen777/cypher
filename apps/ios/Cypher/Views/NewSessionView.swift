@@ -91,7 +91,31 @@ struct NewSessionView: View {
         return HarnessCatalog.defaultReasoning(for: selectedModel)
     }
 
+    // `body` is split into layers (layout → sheets → lifecycle) so each
+    // type-checks on its own; one long chain risks CI's older Xcode giving up
+    // ("unable to type-check this expression in reasonable time").
     var body: some View {
+        withSheets
+            .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
+                          maxSelectionCount: 8, matching: .images)
+            .onChange(of: pickerItems) { _, items in
+                guard !items.isEmpty else { return }
+                stage(items)
+            }
+            .onAppear {
+                focused = true
+                if model.launchAutosend {
+                    model.launchAutosend = false
+                    draft = "Sketch the plan for porting the diff pane."
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                        send()
+                    }
+                }
+            }
+    }
+
+    private var layout: some View {
         VStack(spacing: 0) {
             // Canvas — tap dismisses the keyboard, like the old app.
             ZStack {
@@ -148,93 +172,87 @@ struct NewSessionView: View {
         .navigationTitle(quickDeviceId == nil ? "New session" : "Quick chat")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(quickDeviceId == nil ? "New session" : "Quick chat")
-                        .font(Theme.sans(13, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    if let quickDeviceId {
-                        Text("No project · \(model.deviceName(quickDeviceId))")
-                            .font(Theme.sans(10.5))
-                            .foregroundStyle(Theme.textMuted.opacity(0.6))
-                            .lineLimit(1)
-                    } else if let space {
-                        Text("\(space.displayName) · \(model.deviceName(space.deviceId))")
-                            .font(Theme.sans(10.5))
-                            .foregroundStyle(Theme.textMuted.opacity(0.6))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+        .toolbar { titleToolbar }
+    }
+
+    @ToolbarContentBuilder
+    private var titleToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(quickDeviceId == nil ? "New session" : "Quick chat")
+                    .font(Theme.sans(13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                if let quickDeviceId {
+                    Text("No project · \(model.deviceName(quickDeviceId))")
+                        .font(Theme.sans(10.5))
+                        .foregroundStyle(Theme.textMuted.opacity(0.6))
+                        .lineLimit(1)
+                } else if let space {
+                    Text("\(space.displayName) · \(model.deviceName(space.deviceId))")
+                        .font(Theme.sans(10.5))
+                        .foregroundStyle(Theme.textMuted.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            // Bound the title while leaving room for native Back.
+            .frame(width: max(140, viewWidth - 170), alignment: .leading)
+        }
+        // Bare text on the bar, not a glass capsule.
+        .sharedBackgroundVisibility(.hidden)
+    }
+
+    private var catalogTaskKey: String {
+        "\(targetDeviceId ?? "")/\(model.connected)/\(targetDeviceId.map { model.deviceOnline($0) } ?? false)/\(scenePhase)/\(catalogRevision)"
+    }
+
+    private var withSheets: some View {
+        layout
+            .sheet(isPresented: $showRefPicker) {
+                RefPickerSheet(refs: refs, selected: selectedRef) { ref in
+                    await pickRef(ref)
+                }
+            }
+            .sheet(isPresented: $showCheckoutPicker) {
+                CheckoutPickerSheet(kind: checkoutKind,
+                                    selectedRefHasWorktree: selectedRefRow?.worktreePath != nil) { kind in
+                    pickCheckout(kind)
+                }
+            }
+            .task(id: "\(spaceId)/\(space?.deviceId ?? "")") {
+                // Load refs for the branch chip (git spaces only).
+                guard let space, space.gitDetected else { return }
+                if let loaded = await model.listRefs(space: space) {
+                    guard !Task.isCancelled, self.space?.deviceId == space.deviceId else { return }
+                    refs = loaded
+                    if selectedRef == nil {
+                        selectedRef = loaded.first(where: \.current)?.name ?? loaded.first?.name
                     }
                 }
-                // Bound the title while leaving room for native Back.
-                .frame(width: max(140, viewWidth - 170), alignment: .leading)
             }
-            // Bare text on the bar, not a glass capsule.
-            .sharedBackgroundVisibility(.hidden)
-        }
-        .sheet(isPresented: $showRefPicker) {
-            RefPickerSheet(refs: refs, selected: selectedRef) { ref in
-                await pickRef(ref)
+            .task(id: catalogTaskKey) {
+                guard let targetDeviceId else { return }
+                await catalog.load(deviceId: targetDeviceId, fetch: model.listPiModels)
             }
-        }
-        .sheet(isPresented: $showCheckoutPicker) {
-            CheckoutPickerSheet(kind: checkoutKind,
-                                selectedRefHasWorktree: selectedRefRow?.worktreePath != nil) { kind in
-                pickCheckout(kind)
+            .sheet(isPresented: $showPicker) {
+                ModelPickerSheet(harness: .constant(harness), modelId: Binding(
+                    get: { selectedModel?.id ?? "" },
+                    set: { rememberModel($0) }
+                ), reasoning: Binding(
+                    get: { reasoning },
+                    set: { storedReasoning = $0 ?? "" }
+                ), lockedHarness: true, harnesses: harnesses, catalogs: [harness: models],
+                   loading: catalog.loading, onRefresh: { catalogRevision += 1 })
             }
-        }
-        .task(id: "\(spaceId)/\(space?.deviceId ?? "")") {
-            // Load refs for the branch chip (git spaces only).
-            guard let space, space.gitDetected else { return }
-            if let loaded = await model.listRefs(space: space) {
-                guard !Task.isCancelled, self.space?.deviceId == space.deviceId else { return }
-                refs = loaded
-                if selectedRef == nil {
-                    selectedRef = loaded.first(where: \.current)?.name ?? loaded.first?.name
-                }
+            .onChange(of: showPicker) { _, showing in
+                if showing { catalogRevision += 1 }
             }
-        }
-        .task(id: "\(targetDeviceId ?? "")/\(model.connected)/\(targetDeviceId.map { model.deviceOnline($0) } ?? false)/\(scenePhase)/\(catalogRevision)") {
-            guard let targetDeviceId else { return }
-            await catalog.load(deviceId: targetDeviceId, fetch: model.listPiModels)
-        }
-        .sheet(isPresented: $showPicker) {
-            ModelPickerSheet(harness: .constant(harness), modelId: Binding(
-                get: { selectedModel?.id ?? "" },
-                set: { rememberModel($0) }
-            ), reasoning: Binding(
-                get: { reasoning },
-                set: { storedReasoning = $0 ?? "" }
-            ), lockedHarness: true, harnesses: harnesses, catalogs: [harness: models],
-               loading: catalog.loading, onRefresh: { catalogRevision += 1 })
-        }
-        .onChange(of: showPicker) { _, showing in
-            if showing { catalogRevision += 1 }
-        }
-        .sheet(isPresented: $showTraitPicker) {
-            TraitPickerSheet(reasoning: Binding(
-                get: { reasoning },
-                set: { storedReasoning = $0 ?? "" }
-            ), levels: selectedModel?.reasoningLevels ?? [])
-        }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
-                      maxSelectionCount: 8, matching: .images)
-        .onChange(of: pickerItems) { _, items in
-            guard !items.isEmpty else { return }
-            stage(items)
-        }
-        .onAppear {
-            focused = true
-            if model.launchAutosend {
-                model.launchAutosend = false
-                draft = "Sketch the plan for porting the diff pane."
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 800_000_000)
-                    send()
-                }
+            .sheet(isPresented: $showTraitPicker) {
+                TraitPickerSheet(reasoning: Binding(
+                    get: { reasoning },
+                    set: { storedReasoning = $0 ?? "" }
+                ), levels: selectedModel?.reasoningLevels ?? [])
             }
-        }
     }
 
     // MARK: Composer
