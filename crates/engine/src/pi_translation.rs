@@ -17,9 +17,11 @@ const FILE_NAME: &str = "translation.json";
 #[serde(rename_all = "kebab-case")]
 pub enum TranslationOutputMode {
     /// Replace the original final response once translation is complete.
-    #[default]
     Replace,
     /// Keep the original response and append the translated response below it.
+    /// The transcript folds the original away behind a collapsed toggle, so
+    /// this reads like `Replace` with the original one click away.
+    #[default]
     Append,
 }
 
@@ -45,7 +47,7 @@ impl Default for PiTranslationSettings {
             target_language: "English".into(),
             translation_model: String::new(),
             enabled_models: Vec::new(),
-            output_mode: TranslationOutputMode::Replace,
+            output_mode: TranslationOutputMode::Append,
             translate_user_messages: true,
             translate_final_responses: true,
         }
@@ -259,7 +261,7 @@ mod tests {
             target_language: "English".into(),
             translation_model: "openai/gpt-4o-mini".into(),
             enabled_models: vec!["openai/gpt-5".into()],
-            output_mode: TranslationOutputMode::Append,
+            output_mode: TranslationOutputMode::Replace,
             ..Default::default()
         };
         save(&paths, settings.clone()).unwrap();
@@ -295,7 +297,7 @@ mod tests {
             ..Default::default()
         };
         let mut edited = previous.clone();
-        edited.output_mode = TranslationOutputMode::Append;
+        edited.output_mode = TranslationOutputMode::Replace;
         edited.target_language = "Chinese".into();
         edited.enabled_models.remove(0);
         assert!(edited.new_model_selections(&previous).is_empty());

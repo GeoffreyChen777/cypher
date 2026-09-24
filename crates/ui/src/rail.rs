@@ -59,8 +59,17 @@ fn first_reply_text(entries: &[SessionMessageEntry]) -> Option<String> {
         .find(|e| e.role == MessageRole::Assistant)
         .and_then(|entry| {
             entry.parts.iter().find_map(|part| match part {
-                MessagePart::Text { text, .. } if !text.trim().is_empty() => {
-                    Some(text.trim().to_string())
+                MessagePart::Text {
+                    text, agent_text, ..
+                } if !text.trim().is_empty() => {
+                    // An append-mode translation previews as the transcript
+                    // shows it: the translation, original folded away.
+                    let shown = agent_text
+                        .as_deref()
+                        .and_then(|agent| crate::quote_origin::appended_translation(text, agent))
+                        .filter(|translation| !translation.trim().is_empty())
+                        .unwrap_or(text);
+                    Some(shown.trim().to_string())
                 }
                 _ => None,
             })

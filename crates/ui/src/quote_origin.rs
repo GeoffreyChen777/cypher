@@ -34,6 +34,15 @@ use crate::markdown::selection::{Span, row_of_key};
 /// (`renderTranslation` in `dist/pi-runtime/extensions/cypher-translation.ts`).
 const APPEND_SEPARATOR: &str = "\n\n---\n\n";
 
+/// The translation half of an append-mode rendering: `display` is the
+/// agent's original, the separator, then the translation. `None` for a
+/// replace-mode translation or untranslated text.
+pub fn appended_translation<'a>(display: &'a str, agent: &str) -> Option<&'a str> {
+    display
+        .strip_prefix(agent)
+        .and_then(|rest| rest.strip_prefix(APPEND_SEPARATOR))
+}
+
 /// What a settled transcript selection stands for in the agent's words, or
 /// `None` when no part of it was translated — the quote is then the agent's
 /// own text already and must be used exactly as selected.
@@ -174,10 +183,7 @@ fn shown_in_elements(passage: String, members: &[(&Span, usize)]) -> QuoteAlign 
 /// the selection sits in the original half of an append-mode rendering: that
 /// text IS the original, so the exact selection stands.
 fn map_answer(display: &str, agent: &str, members: &[(&Span, usize)]) -> Option<String> {
-    if let Some(translation) = display
-        .strip_prefix(agent)
-        .and_then(|rest| rest.strip_prefix(APPEND_SEPARATOR))
-    {
+    if let Some(translation) = appended_translation(display, agent) {
         // Display blocks: the original's, the separator rule, the translation's.
         let original_blocks = parse_full(agent).len();
         if members.iter().all(|(_, block)| *block < original_blocks) {

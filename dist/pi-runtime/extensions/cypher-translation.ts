@@ -53,7 +53,7 @@ const DEFAULTS: TranslationSettings = {
   targetLanguage: "English",
   translationModel: "",
   enabledModels: [],
-  outputMode: "replace",
+  outputMode: "append",
   translateUserMessages: true,
   translateFinalResponses: true,
 };
@@ -117,7 +117,7 @@ function settings(): TranslationSettings {
       // Migrate settings written by the first version of this extension.
       translationModel: parsed.translationModel ?? parsed.model ?? "",
       enabledModels: Array.isArray(parsed.enabledModels) ? parsed.enabledModels : [],
-      outputMode: parsed.outputMode === "append" ? "append" : "replace",
+      outputMode: parsed.outputMode === "replace" ? "replace" : "append",
     };
   } catch {
     return DEFAULTS;

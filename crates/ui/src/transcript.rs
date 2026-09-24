@@ -553,6 +553,14 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// The toggle over an append-mode translation's original answer. The
+    /// `blocks` rows that follow it — the original's blocks and the separator
+    /// rule — are dropped from the list while the toggle is closed (the
+    /// default, see [`fold_translation_originals`]), so the answer reads like
+    /// a replace-mode translation with the original one click away.
+    TranslationOriginal {
+        blocks: usize,
+    },
 }
 
 /// A transcript row: stable id + content version (diff key) + block payload.
@@ -615,7 +623,8 @@ fn row_match_count(row: &Row, query: &str) -> u32 {
         RowKind::ToolGroup { .. }
         | RowKind::Worked { .. }
         | RowKind::InputChip { .. }
-        | RowKind::ErrorChip { .. } => 0,
+        | RowKind::ErrorChip { .. }
+        | RowKind::TranslationOriginal { .. } => 0,
     };
     count.min(u32::MAX as usize) as u32
 }
@@ -1190,13 +1199,32 @@ pub fn rows_for_entry(
                 );
                 match other {
                     MessagePart::Text {
-                        id: part_id, text, ..
+                        id: part_id,
+                        text,
+                        agent_text,
                     } => {
                         if text.trim().is_empty() {
                             continue;
                         }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
+                        // Block rows keep their ids either way (quotes map
+                        // back through them), so the toggle only ever hides
+                        // or shows rows — see `fold_translation_originals`.
+                        if let Some(blocks) = agent_text
+                            .as_deref()
+                            .and_then(|agent| appended_original_blocks(text, agent, &tree))
+                        {
+                            rows.push(Row {
+                                id: format!("{key}.original").into(),
+                                version: (blocks as u64) << 1,
+                                turn_start: false,
+                                entry_id: entry_id.clone(),
+                                role: entry.role,
+                                timestamp: None,
+                                kind: RowKind::TranslationOriginal { blocks },
+                            });
+                        }
                         // Live and completed parts split identically — one row
                         // per top-level block, same ids, so the live→complete
                         // handoff never changes row identity. The version is a
@@ -1331,6 +1359,42 @@ pub fn rows_for_entry(
         last.version ^= 1 << 62;
     }
     rows
+}
+
+/// How many top-level blocks of an append-mode translation's `tree` belong to
+/// the folded original: the original's own blocks plus the separator rule.
+/// `None` unless `text` is `agent`, the separator and a translation that has
+/// begun — until then (and whenever the rendering doesn't parse as expected,
+/// e.g. an original ending inside an open code fence) the text shows whole.
+fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree) -> Option<usize> {
+    crate::quote_origin::appended_translation(text, agent)?;
+    let rule = tree
+        .blocks
+        .iter()
+        .position(|top| top.range.start >= agent.len())?;
+    (rule > 0 && rule + 1 < tree.blocks.len() && matches!(tree.blocks[rule].block, Block::Rule))
+        .then_some(rule + 1)
+}
+
+/// Drop the rows each CLOSED translation-original toggle covers. `open` holds
+/// the ids of toggles the user expanded; every other toggle stays collapsed.
+pub fn fold_translation_originals(
+    rows: &mut Vec<Row>,
+    open: &std::collections::HashSet<SharedString>,
+) {
+    let mut hide = 0usize;
+    rows.retain(|row| {
+        if hide > 0 {
+            hide -= 1;
+            return false;
+        }
+        if let RowKind::TranslationOriginal { blocks } = row.kind
+            && !open.contains(&row.id)
+        {
+            hide = blocks;
+        }
+        true
+    });
 }
 
 /// `CYPHER_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -1684,10 +1748,13 @@ pub fn worked_label(created_at: i64, completed_at: Option<i64>) -> Option<Shared
 /// text. `None` when the turn ended on a tool/chip (no answer to separate) or
 /// never left the text (a plain reply is not a work log).
 fn worked_rule_at(rows: &[Row]) -> Option<usize> {
+    // A folded original is part of the answer, not work before it.
     let is_md = |r: &Row| {
         matches!(
             r.kind,
-            RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. }
+            RowKind::Markdown { .. }
+                | RowKind::LiveMarkdown { .. }
+                | RowKind::TranslationOriginal { .. }
         )
     };
     if !rows.last().is_some_and(is_md) {
@@ -1901,6 +1968,10 @@ pub struct Transcript {
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
     tool_overflow: std::collections::HashSet<SharedString>,
+    /// Append-mode translation toggles the user opened, by row id; every
+    /// other original stays folded ([`fold_translation_originals`]).
+    /// Render-local like `folds`.
+    translation_originals: std::collections::HashSet<SharedString>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -2151,6 +2222,7 @@ impl Transcript {
             folds: HashMap::new(),
             tool_details: HashMap::new(),
             tool_overflow: std::collections::HashSet::new(),
+            translation_originals: std::collections::HashSet::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -3115,6 +3187,7 @@ impl Transcript {
             self.tree_cache.clear();
             self.folds.clear();
             self.tool_overflow.clear();
+            self.translation_originals.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -3140,6 +3213,7 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
+            fold_translation_originals(&mut rows, &self.translation_originals);
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
@@ -4072,6 +4146,9 @@ impl Transcript {
             } => input_chip(header.clone(), *resolved, &theme),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::Worked { label } => worked_rule(label.clone(), &theme),
+            RowKind::TranslationOriginal { .. } => {
+                self.render_translation_original(&row.id, &theme, cx)
+            }
         };
 
         // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
@@ -4706,6 +4783,62 @@ impl Transcript {
             None => None,
         };
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
+    }
+
+    /// The toggle over an append-mode translation's original: a chevron tile
+    /// and a quiet label, styled like a tool group's header. Clicking rebuilds
+    /// the rows, which shows or hides the original's blocks below it.
+    fn render_translation_original(
+        &self,
+        row_id: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.translation_originals.contains(row_id);
+        let key = row_id.clone();
+        div()
+            .w_full()
+            .flex()
+            .child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-toggle")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(4.0))
+                    .h(px(26.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.text_color(theme.text))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.translation_originals.remove(&key) {
+                            this.translation_originals.insert(key.clone());
+                        }
+                        this.sync(cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .flex_none()
+                            .rounded(px(5.0))
+                            .bg(crate::theme::ink(0.06))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(SharedString::from(if open { "▾" } else { "▸" })),
+                    )
+                    .child(SharedString::from(if open {
+                        "Hide original"
+                    } else {
+                        "Show original"
+                    })),
+            )
+            .into_any_element()
     }
 
     fn render_tool_group(
@@ -6203,6 +6336,69 @@ mod tests {
             Some("pending text".into())
         );
         assert!(message_for_copy(&entries, &echoes, "missing").is_none());
+    }
+
+    #[test]
+    fn append_translation_folds_its_original_behind_a_toggle() {
+        let original = "The answer.\n\n- one\n- two";
+        let translated = "答案。\n\n- 一\n- 二";
+        let part = MessagePart::Text {
+            id: "t0".into(),
+            text: format!("{original}\n\n---\n\n{translated}"),
+            agent_text: Some(original.into()),
+        };
+        let entry = assistant("m1", MessageStatus::Complete, vec![part]);
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+        // Toggle, the original's two blocks, the rule, the translation's two.
+        assert_eq!(
+            ids,
+            [
+                "m1#t0.original",
+                "m1#t0.0",
+                "m1#t0.1",
+                "m1#t0.2",
+                "m1#t0.3",
+                "m1#t0.4"
+            ]
+        );
+        assert!(matches!(
+            rows[0].kind,
+            RowKind::TranslationOriginal { blocks: 3 }
+        ));
+        assert!(rows[0].turn_start);
+
+        // Collapsed by default: the translation keeps its block ids (quotes
+        // map back through them), everything before it is folded away.
+        let mut folded = rows.clone();
+        fold_translation_originals(&mut folded, &Default::default());
+        let ids: Vec<&str> = folded.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, ["m1#t0.original", "m1#t0.3", "m1#t0.4"]);
+        assert!(folded.last().unwrap().timestamp.is_some());
+
+        let mut open = rows.clone();
+        fold_translation_originals(&mut open, &["m1#t0.original".into()].into());
+        assert_eq!(open.len(), rows.len());
+    }
+
+    #[test]
+    fn append_translation_shows_whole_until_the_translation_starts() {
+        let original = "The answer.";
+        // Replace mode, and an append rendering whose translation is empty.
+        for text in ["答案。".to_string(), format!("{original}\n\n---\n\n")] {
+            let part = MessagePart::Text {
+                id: "t0".into(),
+                text,
+                agent_text: Some(original.into()),
+            };
+            let entry = assistant("m1", MessageStatus::Streaming, vec![part]);
+            let rows = rows_for_entry(&entry, false, &mut parse);
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| matches!(r.kind, RowKind::TranslationOriginal { .. }))
+            );
+        }
     }
 
     #[test]
