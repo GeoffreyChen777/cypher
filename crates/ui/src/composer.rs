@@ -8310,51 +8310,47 @@ impl Composer {
                         },
                         &theme,
                     ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.0))
-                            .children(copy.selected.lines().map(|line| {
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .gap(px(10.0))
-                                    .px(px(10.0))
-                                    .py(px(9.0))
-                                    .rounded(px(10.0))
-                                    .border_1()
-                                    .border_color(theme.border_strong)
-                                    .bg(crate::theme::ink(0.07))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .size(px(20.0))
-                                            .mt(px(-1.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(6.0))
-                                            .bg(theme.text)
-                                            .child(
-                                                crate::icons::icon(crate::icons::CHECK)
-                                                    .size(px(12.0))
-                                                    .text_color(theme.on_solid),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(13.0))
-                                            .line_height(px(18.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child(SharedString::from(line.to_owned())),
-                                    )
-                            })),
-                    ),
+                    .child(div().flex().flex_col().gap(px(6.0)).children(
+                        copy.selected.lines().map(|line| {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_start()
+                                .gap(px(10.0))
+                                .px(px(10.0))
+                                .py(px(9.0))
+                                .rounded(px(10.0))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .bg(crate::theme::ink(0.07))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .size(px(20.0))
+                                        .mt(px(-1.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(6.0))
+                                        .bg(theme.text)
+                                        .child(
+                                            crate::icons::icon(crate::icons::CHECK)
+                                                .size(px(12.0))
+                                                .text_color(theme.on_solid),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(13.0))
+                                        .line_height(px(18.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(line.to_owned())),
+                                )
+                        }),
+                    )),
             );
         }
         if !question.options.is_empty() {
@@ -8372,11 +8368,17 @@ impl Composer {
         }
         if !pick_only {
             let (label, hint) = if optional_comment.is_some() {
-                ("Add a comment (optional)", Some("Leave it blank to send your pick as is."))
+                (
+                    "Add a comment (optional)",
+                    Some("Leave it blank to send your pick as is."),
+                )
             } else if question.options.is_empty() {
                 ("Your answer", None)
             } else {
-                ("Or write your own", Some("Typed text replaces the ticked options."))
+                (
+                    "Or write your own",
+                    Some("Typed text replaces the ticked options."),
+                )
             };
             body = body.child(
                 div()
@@ -8435,7 +8437,11 @@ impl Composer {
                 ))
             })
             .when(!pick_only, |el| {
-                el.child(wizard_key_hint("↵", if last { "submit" } else { "next" }, &theme))
+                el.child(wizard_key_hint(
+                    "↵",
+                    if last { "submit" } else { "next" },
+                    &theme,
+                ))
             })
             .children(esc_action.map(|action| wizard_key_hint("esc", action, &theme)));
         let back = if optional_comment.is_some() {
@@ -10541,7 +10547,11 @@ mod tests {
 
         let plain = question("q", &[], false);
         let w = Wizard::new("req".into(), vec![plain.clone()]);
-        assert_eq!(w.current(), Some(&plain), "a plain free-text page is untouched");
+        assert_eq!(
+            w.current(),
+            Some(&plain),
+            "a plain free-text page is untouched"
+        );
         assert!(parse_listed_options("Q\n\nOptions (select one or more):\nno numbers").is_none());
     }
 
