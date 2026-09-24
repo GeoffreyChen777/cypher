@@ -906,22 +906,44 @@ pub struct Wizard {
     /// question): the swap is instant, with no entrance fade. Decided once, at
     /// mount — see [`WIZARD_HANDOFF_QUIET_MS`].
     pub quiet_entry: bool,
+    /// Per page: what the card shows beyond the wire question.
+    views: Vec<PageView>,
     picked: Vec<Vec<usize>>,
     typed: Vec<String>,
+}
+
+/// Display-side reading of one page, recovered from the wire question.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageView {
+    /// Per-option description (pi-ask-user's multi-select fallback carries
+    /// them inline in its prompt).
+    pub descriptions: Vec<Option<String>>,
+    /// pi-ask-user's "type custom response" sentinel option: a way out of the
+    /// list, not one of the answers, so the card styles it apart.
+    pub custom_ix: Option<usize>,
+    /// A text prompt listing options, turned into checkboxes: the answer goes
+    /// back as the one comma-separated string that prompt asked for.
+    pub joined: bool,
 }
 
 impl Wizard {
     pub fn new(request_id: String, questions: Vec<UserInputQuestion>) -> Self {
         let n = questions.len();
+        let (questions, views) = questions.into_iter().map(read_page).unzip();
         Self {
             request_id,
             questions,
             page: 0,
             slash: None,
             quiet_entry: false,
+            views,
             picked: vec![Vec::new(); n],
             typed: vec![String::new(); n],
         }
+    }
+
+    pub fn view(&self) -> PageView {
+        self.views.get(self.page).cloned().unwrap_or_default()
     }
 
     pub fn for_slash(mut self, command: impl Into<SharedString>) -> Self {
@@ -1024,7 +1046,8 @@ impl Wizard {
                 let labels = if !typed.is_empty() {
                     vec![typed.to_string()]
                 } else {
-                    self.picked
+                    let labels: Vec<String> = self
+                        .picked
                         .get(ix)
                         .map(|picked| {
                             picked
@@ -1032,7 +1055,13 @@ impl Wizard {
                                 .filter_map(|&p| q.options.get(p).cloned())
                                 .collect()
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    let joined = self.views.get(ix).is_some_and(|v| v.joined);
+                    if joined && !labels.is_empty() {
+                        vec![labels.join(", ")]
+                    } else {
+                        labels
+                    }
                 };
                 UserInputAnswer {
                     question_id: q.id.clone(),
@@ -1078,15 +1107,126 @@ fn wizard_pick_only(question: &UserInputQuestion) -> bool {
     !question.options.is_empty() && !question.multi_select
 }
 
-fn wizard_context_card(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
-    div().mt(px(12.0)).child(
-        div()
-            .text_size(px(11.0))
-            .line_height(px(16.0))
-            .font_weight(gpui::FontWeight::NORMAL)
-            .text_color(theme.text_faint)
-            .child(SharedString::from(context.to_owned())),
-    )
+/// pi-ask-user's freeform sentinel (`FREEFORM_SENTINEL` in its index.ts).
+const ASK_USER_CUSTOM_OPTION: &str = "\u{270f}\u{fe0f} Type custom response...";
+
+/// The heading pi-ask-user's RPC fallback puts over a multi-select option
+/// list it asks the user to TYPE their picks against.
+const ASK_USER_MULTI_OPTIONS: &str = "\n\nOptions (select one or more):\n";
+
+/// Recover what the RPC dialog flattened: a multi-select prompt's option list
+/// becomes real checkboxes (with their descriptions), and the freeform
+/// sentinel is marked so the card can render it as a way out.
+fn read_page(mut question: UserInputQuestion) -> (UserInputQuestion, PageView) {
+    let mut view = PageView::default();
+    if question.options.is_empty()
+        && !question.multi_select
+        && let Some((prompt, options)) = parse_listed_options(&question.question)
+    {
+        question.question = prompt;
+        question.multi_select = true;
+        let (titles, descriptions) = options.into_iter().unzip();
+        question.options = titles;
+        view.descriptions = descriptions;
+        view.joined = true;
+    }
+    view.custom_ix = question.options.iter().position(|label| {
+        label == ASK_USER_CUSTOM_OPTION || label.trim_start().starts_with('\u{270f}')
+    });
+    (question, view)
+}
+
+/// One listed option: its title and, when given, its description.
+type ListedOption = (String, Option<String>);
+
+/// Split `prompt\n\nOptions (select one or more):\n1. title — description`
+/// into the prompt and its `(title, description)` rows. Lines that don't
+/// start the next number continue the previous description.
+fn parse_listed_options(prompt: &str) -> Option<(String, Vec<ListedOption>)> {
+    let prompt = prompt.replace("\r\n", "\n");
+    let (before, list) = prompt.split_once(ASK_USER_MULTI_OPTIONS)?;
+    let mut options: Vec<ListedOption> = Vec::new();
+    for line in list.lines() {
+        let next = format!("{}. ", options.len() + 1);
+        if let Some(row) = line.strip_prefix(&next) {
+            let option = match row.split_once(" — ") {
+                Some((title, description)) => {
+                    (title.trim().to_owned(), Some(description.trim().to_owned()))
+                }
+                None => (row.trim().to_owned(), None),
+            };
+            options.push(option);
+        } else if let Some((_, description)) = options.last_mut() {
+            let line = line.trim();
+            if !line.is_empty() {
+                let text = description.get_or_insert_with(String::new);
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(line);
+            }
+        } else if !line.trim().is_empty() {
+            return None;
+        }
+    }
+    if options.is_empty() || options.iter().any(|(title, _)| title.is_empty()) {
+        return None;
+    }
+    Some((before.trim().to_owned(), options))
+}
+
+fn wizard_context_block(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
+    div()
+        .mt(px(10.0))
+        .pl(px(10.0))
+        .border_l_2()
+        .border_color(crate::theme::ink(0.12))
+        .text_size(px(12.5))
+        .line_height(px(18.0))
+        .text_color(theme.text_muted)
+        .child(SharedString::from(context.to_owned()))
+}
+
+/// Section label inside the card ("Pick one", "Your answer", …).
+fn wizard_section_label(label: &str, theme: &crate::theme::Theme) -> gpui::Div {
+    div()
+        .mb(px(8.0))
+        .text_size(px(11.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_faint)
+        .child(SharedString::from(label.to_owned()))
+}
+
+/// A keyboard hint in the card footer: a small keycap and what it does.
+fn wizard_key_hint(key: &str, action: &str, theme: &crate::theme::Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .child(
+            div()
+                .h(px(18.0))
+                .min_w(px(18.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(crate::theme::ink(0.03))
+                .text_size(px(10.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(SharedString::from(key.to_owned())),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(action.to_owned())),
+        )
 }
 
 fn split_question_context(prompt: &str) -> (String, Option<String>) {
@@ -6588,8 +6728,11 @@ impl Composer {
             // Enter inside the panel's free-text input submits the page — it
             // must never fall through and send a chat message under a panel
             // that is still on screen. `wizard_advance` folds the typed text
-            // in on the way.
-            self.wizard_advance(cx);
+            // in on the way. Nothing to send yet: stay (an empty answer
+            // would reach the agent as a dismissal).
+            if self.wizard_ready(cx) {
+                self.wizard_advance(cx);
+            }
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
@@ -7865,7 +8008,9 @@ impl Composer {
             }
         } else if key == "enter" {
             if !input_focused {
-                self.wizard_advance(cx);
+                if self.wizard_ready(cx) {
+                    self.wizard_advance(cx);
+                }
                 cx.stop_propagation();
             }
         } else if key == "escape" && (!input_focused || input_empty) {
@@ -7884,24 +8029,37 @@ impl Composer {
 
     // ---- render pieces ----
 
-    /// Question card: pinned chrome (title + close), a divided scroll body
-    /// (prompt / context / options / comment), and a footer for paging.
+    /// Whether the current page has an answer to advance with. Empty labels
+    /// are the cancel signal on the wire, so Enter and the primary button
+    /// both wait for a pick or typed text (an optional comment may be blank).
+    fn wizard_ready(&self, cx: &App) -> bool {
+        self.wizard.as_ref().is_some_and(|wizard| {
+            let optional = wizard
+                .current()
+                .is_some_and(|q| optional_comment_copy(&q.header, &q.question).is_some());
+            optional || wizard.page_has_pick() || !self.input.read(cx).is_empty()
+        })
+    }
+
+    /// Question card, top to bottom by importance: who is asking (and the
+    /// step), the question itself, its context, the answer (options and/or a
+    /// text field), then a footer of keyboard hints and the page's actions.
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
         };
-        let counter = wizard.counter();
         let Some(question) = wizard.current().cloned() else {
             return gpui::Empty.into_any_element();
         };
+        let view = wizard.view();
         let page = wizard.page;
-        let last = page + 1 >= wizard.questions.len();
+        let pages = wizard.questions.len();
+        let last = page + 1 >= pages;
         let typed_empty = self.input.read(cx).is_empty();
         let pick_only = wizard_pick_only(&question);
         let optional_comment = optional_comment_copy(&question.header, &question.question);
-        let can_advance = optional_comment.is_some() || wizard.page_has_pick() || !typed_empty;
-        let show_header = !pick_only && question.header.trim() != question.question.trim();
+        let can_advance = self.wizard_ready(cx);
         let prompt = if question.question.is_empty() {
             question.header.clone()
         } else {
@@ -7910,75 +8068,136 @@ impl Composer {
         let chrome_title = wizard
             .slash
             .clone()
-            .unwrap_or_else(|| SharedString::from("Question"));
+            .unwrap_or_else(|| SharedString::from("Agent question"));
+        let multi = question.multi_select;
+
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             let picked = wizard.is_picked(ix) && typed_empty;
+            let custom = view.custom_ix == Some(ix);
+            let description = view.descriptions.get(ix).cloned().flatten();
+            let hover_key = format!("wizard-option-{ix}");
+            let number = (ix < 9).then(|| SharedString::from(format!("{}", ix + 1)));
+
+            // Leading marker: the option's number key (a checkbox on
+            // multi-select pages); a solid check once picked.
+            let marker = div()
+                .flex_none()
+                .size(px(20.0))
+                .mt(px(if description.is_some() { 0.0 } else { -1.0 }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(if multi { 5.0 } else { 6.0 }))
+                .when(picked, |el| el.bg(theme.text))
+                .when(!picked && multi, |el| {
+                    el.border_1().border_color(theme.border_strong)
+                })
+                .when(!picked && !multi, |el| el.bg(crate::theme::ink(0.06)))
+                .map(|el| {
+                    if picked {
+                        el.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(12.0))
+                                .text_color(theme.on_solid),
+                        )
+                    } else if custom {
+                        el.child(
+                            crate::icons::icon(crate::icons::PEN)
+                                .size(px(11.0))
+                                .text_color(theme.text_muted),
+                        )
+                    } else if multi {
+                        el
+                    } else {
+                        el.text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .children(number.clone())
+                    }
+                });
+
+            let text = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .font_weight(if custom {
+                            gpui::FontWeight::NORMAL
+                        } else {
+                            gpui::FontWeight::MEDIUM
+                        })
+                        .text_color(if custom { theme.text_muted } else { theme.text })
+                        .child(SharedString::from(if custom {
+                            "Write a different answer…".to_owned()
+                        } else {
+                            label.clone()
+                        })),
+                )
+                .children(description.map(|description| {
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(description))
+                }));
+
             div()
                 .id(("wizard-option", ix))
                 .w_full()
                 .min_w_0()
                 .flex()
                 .flex_row()
-                .items_center()
+                .items_start()
                 .gap(px(10.0))
-                .px(px(12.0))
-                .py(px(10.0))
+                .px(px(10.0))
+                .py(px(9.0))
                 .rounded(px(10.0))
                 .border_1()
+                .when(custom && !picked, |el| el.border_dashed())
                 .border_color(if picked {
                     theme.border_strong
                 } else {
                     theme.border
                 })
                 .bg(if picked {
-                    crate::theme::ink(0.08)
+                    crate::theme::ink(0.07)
                 } else {
                     motion::hover_blend(
-                        &format!("wizard-option-{ix}"),
-                        crate::theme::ink(0.02),
+                        &hover_key,
+                        crate::theme::ink(if custom { 0.0 } else { 0.02 }),
                         crate::theme::ink(0.05),
                     )
                 })
-                .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
+                .on_hover(motion::hover_listener(hover_key))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(SharedString::from(label.clone())),
-                )
-                .when(ix < 9, |el| {
-                    el.child(
+                .child(marker)
+                .child(text)
+                // Multi-select and the custom row keep their number key on the
+                // trailing edge, where it doesn't read as a checkbox state.
+                .when(multi || custom, |el| {
+                    el.children(number.map(|number| {
                         div()
                             .flex_none()
-                            .size(px(20.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .bg(crate::theme::ink(if picked { 0.14 } else { 0.05 }))
                             .text_size(px(11.0))
-                            .text_color(if picked {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.65)
-                            })
-                            .child(SharedString::from(format!("{}", ix + 1))),
-                    )
+                            .line_height(px(18.0))
+                            .text_color(theme.text_faint)
+                            .child(number)
+                    }))
                 })
         });
 
+        // ---- top row: who is asking, and where in the set this page is ----
         let header = div()
             .flex_none()
-            .h(px(44.0))
-            .px(px(12.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .h(px(40.0))
+            .pl(px(16.0))
+            .pr(px(8.0))
             .flex()
             .flex_row()
             .items_center()
@@ -7987,7 +8206,7 @@ impl Composer {
                 crate::icons::icon(if wizard.slash.is_some() {
                     crate::icons::TUNING
                 } else {
-                    crate::icons::CHAT_ROUND_LINE
+                    crate::icons::QUESTION_CIRCLE
                 })
                 .size(px(14.0))
                 .flex_none()
@@ -7995,34 +8214,48 @@ impl Composer {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.5))
+                    .flex_none()
+                    .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
                     .child(chrome_title),
             )
-            .when(wizard.questions.len() > 1, |el| {
+            .when(pages > 1, |el| {
                 el.child(
                     div()
-                        .h(px(22.0))
-                        .px(px(8.0))
+                        .flex_none()
+                        .ml(px(4.0))
                         .flex()
+                        .flex_row()
                         .items_center()
-                        .rounded(px(8.0))
-                        .bg(crate::theme::ink(0.06))
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(counter)),
+                        .gap(px(3.0))
+                        .children((0..pages).map(|ix| {
+                            div()
+                                .w(px(12.0))
+                                .h(px(3.0))
+                                .rounded_full()
+                                .bg(if ix <= page {
+                                    theme.text_muted
+                                } else {
+                                    crate::theme::ink(0.12)
+                                })
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!("{} of {}", page + 1, pages))),
                 )
             })
+            .child(div().flex_1())
             .child(
                 div()
                     .id("wizard-cancel")
                     .flex_none()
-                    .size(px(28.0))
-                    .rounded(px(8.0))
+                    .size(px(26.0))
+                    .rounded(px(7.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -8031,212 +8264,226 @@ impl Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
                     .child(
                         crate::icons::icon(crate::icons::CLOSE)
-                            .size(px(13.0))
+                            .size(px(12.0))
                             .text_color(theme.text_muted),
                     ),
             );
 
+        // ---- body: the question, its context, then the answer ----
         let mut body = div()
             .id("wizard-scroll")
             .min_w_0()
             .max_h(px(WIZARD_CONTENT_MAX_HEIGHT))
             .overflow_y_scroll()
             .px(px(16.0))
-            .py(px(14.0))
+            .pt(px(2.0))
+            .pb(px(16.0))
             .flex()
             .flex_col();
-        if show_header {
-            body = body.child(
-                div()
-                    .mb(px(8.0))
-                    .text_size(px(10.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(crate::popover::tracked_upper(
-                        &question.header,
-                    ))),
-            );
+        let (question_text, context) = match optional_comment.as_ref() {
+            Some(copy) => (copy.question.clone(), copy.context.clone()),
+            None => split_question_context(&prompt),
+        };
+        body = body.child(
+            div()
+                .text_size(px(15.0))
+                .line_height(px(21.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(SharedString::from(question_text)),
+        );
+        if let Some(context) = context {
+            body = body.child(wizard_context_block(&context, &theme));
         }
-        if let Some(copy) = optional_comment.clone() {
+        if let Some(copy) = optional_comment.as_ref() {
+            // What the user already picked, shown as the answer it is.
             body = body.child(
                 div()
-                    .text_size(px(15.0))
-                    .line_height(px(21.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(copy.question)),
-            );
-            if let Some(context) = copy.context {
-                body = body.child(wizard_context_card(&context, &theme));
-            }
-            body = body.child(
-                div()
-                    .mt(px(12.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.accent.opacity(0.22))
-                    .bg(theme.surface_raised)
-                    .px(px(12.0))
-                    .py(px(10.0))
+                    .mt(px(16.0))
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
+                    .child(wizard_section_label(
+                        if copy.selected_label == "Selected options" {
+                            "Your picks"
+                        } else {
+                            "Your pick"
+                        },
+                        &theme,
+                    ))
                     .child(
                         div()
-                            .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.accent)
-                            .child(SharedString::from(copy.selected_label.to_uppercase())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .line_height(px(18.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(copy.selected)),
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .children(copy.selected.lines().map(|line| {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_start()
+                                    .gap(px(10.0))
+                                    .px(px(10.0))
+                                    .py(px(9.0))
+                                    .rounded(px(10.0))
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .bg(crate::theme::ink(0.07))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .size(px(20.0))
+                                            .mt(px(-1.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(6.0))
+                                            .bg(theme.text)
+                                            .child(
+                                                crate::icons::icon(crate::icons::CHECK)
+                                                    .size(px(12.0))
+                                                    .text_color(theme.on_solid),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(13.0))
+                                            .line_height(px(18.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(line.to_owned())),
+                                    )
+                            })),
                     ),
-            );
-        } else {
-            let (question_text, context) = split_question_context(&prompt);
-            body = body.child(
-                div()
-                    .text_size(px(15.0))
-                    .line_height(px(21.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from(question_text)),
-            );
-            if let Some(context) = context {
-                body = body.child(wizard_context_card(&context, &theme));
-            }
-        }
-        if question.multi_select {
-            body = body.child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from("Select one or more options.")),
             );
         }
         if !question.options.is_empty() {
             body = body.child(
                 div()
-                    .mt(px(14.0))
-                    .pt(px(14.0))
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .mt(px(16.0))
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
-                    .children(options),
+                    // Single-select needs no label: the numbered rows say it.
+                    .when(multi, |el| {
+                        el.child(wizard_section_label("Pick any that apply", &theme))
+                    })
+                    .child(div().flex().flex_col().gap(px(6.0)).children(options)),
             );
         }
-        if optional_comment.is_some() {
+        if !pick_only {
+            let (label, hint) = if optional_comment.is_some() {
+                ("Add a comment (optional)", Some("Leave it blank to send your pick as is."))
+            } else if question.options.is_empty() {
+                ("Your answer", None)
+            } else {
+                ("Or write your own", Some("Typed text replaces the ticked options."))
+            };
             body = body.child(
                 div()
-                    .mt(px(14.0))
-                    .pt(px(14.0))
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .mt(px(16.0))
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("Add context — optional")),
-                    )
+                    .child(wizard_section_label(label, &theme))
                     .child(
                         div()
                             .w_full()
                             .min_h(px(56.0))
                             .rounded(px(10.0))
                             .border_1()
-                            .border_color(theme.border)
+                            .border_color(theme.border_strong)
                             .bg(theme.surface_card)
                             .px(px(12.0))
                             .py(px(8.0))
                             .child(self.input.clone()),
                     )
-                    .child(
+                    .children(hint.map(|hint| {
                         div()
-                            .text_size(px(11.0))
+                            .mt(px(6.0))
+                            .text_size(px(11.5))
                             .text_color(theme.text_faint)
-                            .child(SharedString::from(
-                                "Leave blank to submit the selection without a comment.",
-                            )),
-                    ),
-            );
-        } else if !pick_only {
-            body = body.child(
-                div()
-                    .mt(px(14.0))
-                    .pt(px(14.0))
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .w_full()
-                            .min_h(px(56.0))
-                            .rounded(px(10.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_card)
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .child(self.input.clone()),
-                    ),
+                            .child(SharedString::from(hint))
+                    })),
             );
         }
 
-        let show_footer = !pick_only || page > 0 || wizard.questions.len() > 1;
-        let footer = show_footer.then(|| {
-            div()
-                .flex_none()
-                .h(px(52.0))
-                .px(px(12.0))
-                .border_t_1()
-                .border_color(theme.border)
-                .flex()
-                .flex_row()
-                .justify_between()
-                .items_center()
-                .child(if optional_comment.is_some() {
-                    crate::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
-                        .id("wizard-comment-skip")
-                        .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
-                        .into_any_element()
-                } else if page > 0 {
-                    crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                        .id("wizard-back")
-                        .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                        .into_any_element()
+        // ---- footer: keyboard hints on the left, actions on the right ----
+        let option_count = question.options.len().min(9);
+        let esc_action = if page > 0 {
+            Some("back")
+        } else if pick_only {
+            Some("dismiss")
+        } else {
+            None
+        };
+        let hints = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .when(option_count > 0, |el| {
+                let keys = if option_count == 1 {
+                    "1".to_owned()
                 } else {
-                    gpui::Empty.into_any_element()
-                })
-                .child(
+                    format!("1–{option_count}")
+                };
+                el.child(wizard_key_hint(
+                    &keys,
+                    if multi { "toggle" } else { "choose" },
+                    &theme,
+                ))
+            })
+            .when(!pick_only, |el| {
+                el.child(wizard_key_hint("↵", if last { "submit" } else { "next" }, &theme))
+            })
+            .children(esc_action.map(|action| wizard_key_hint("esc", action, &theme)));
+        let back = if optional_comment.is_some() {
+            Some(
+                crate::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
+                    .id("wizard-comment-skip")
+                    .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+                    .into_any_element(),
+            )
+        } else if page > 0 {
+            Some(
+                crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                    .id("wizard-back")
+                    .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        // A single-select page answers on the click itself; a primary button
+        // appears only where the answer needs confirming.
+        let show_primary = !pick_only || pages > 1;
+        let footer = div()
+            .flex_none()
+            .h(px(48.0))
+            .pl(px(16.0))
+            .pr(px(10.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(hints)
+            .children(back)
+            .when(show_primary, |el| {
+                el.child(
                     crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                         .id("wizard-submit")
                         .px(px(14.0))
-                        .when(!can_advance, |el| el.opacity(0.4))
+                        .when(!can_advance, |el| el.opacity(0.4).cursor_default())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let ready = this.wizard.as_ref().is_some_and(|wizard| {
-                                let typed = !this.input.read(cx).is_empty();
-                                let optional = wizard.current().is_some_and(|q| {
-                                    optional_comment_copy(&q.header, &q.question).is_some()
-                                });
-                                optional || wizard.page_has_pick() || typed
-                            });
-                            if ready {
+                            if this.wizard_ready(cx) {
                                 this.wizard_advance(cx);
                             }
                         })),
                 )
-        });
+            });
 
         div()
             .id("question-panel")
@@ -8260,7 +8507,7 @@ impl Composer {
             .flex_col()
             .child(header)
             .child(body)
-            .children(footer)
+            .child(footer)
             .into_any_element()
     }
 
@@ -10263,6 +10510,55 @@ mod tests {
             panic!()
         };
         assert_eq!(answers[0].labels, vec!["a different answer"]);
+    }
+
+    /// pi-ask-user's RPC multi-select arrives as a text prompt listing the
+    /// options; the card turns it into checkboxes and answers with the one
+    /// comma-separated string that prompt asks for.
+    #[test]
+    fn listed_options_prompt_becomes_checkboxes_with_descriptions() {
+        let mut listed = question("q", &[], false);
+        listed.question = "Which suites?\n\nContext:\nCI is slow.\n\nOptions (select one or more):\n1. Unit — fast\n2. E2E — two devices,\nboth signed in\n3. Golden".into();
+        let mut w = Wizard::new("req".into(), vec![listed]);
+        let page = w.current().unwrap().clone();
+        assert_eq!(page.question, "Which suites?\n\nContext:\nCI is slow.");
+        assert_eq!(page.options, vec!["Unit", "E2E", "Golden"]);
+        assert!(page.multi_select);
+        assert_eq!(
+            w.view().descriptions,
+            vec![
+                Some("fast".into()),
+                Some("two devices,\nboth signed in".into()),
+                None
+            ]
+        );
+        assert_eq!(w.select(0), WizardStep::Stay);
+        w.select(2);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["Unit, Golden"]);
+
+        let plain = question("q", &[], false);
+        let w = Wizard::new("req".into(), vec![plain.clone()]);
+        assert_eq!(w.current(), Some(&plain), "a plain free-text page is untouched");
+        assert!(parse_listed_options("Q\n\nOptions (select one or more):\nno numbers").is_none());
+    }
+
+    #[test]
+    fn custom_response_sentinel_is_marked_but_still_answers_verbatim() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q", &["a", ASK_USER_CUSTOM_OPTION], false)],
+        );
+        assert_eq!(w.view().custom_ix, Some(1));
+        w.select(1);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec![ASK_USER_CUSTOM_OPTION]);
+        let w = Wizard::new("req".into(), vec![question("q", &["a", "b"], false)]);
+        assert_eq!(w.view().custom_ix, None);
     }
 
     #[test]
