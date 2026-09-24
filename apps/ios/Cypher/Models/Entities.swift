@@ -65,6 +65,17 @@ struct Chat: Identifiable, Hashable {
 
     var isChild: Bool { child != nil }
 
+    /// A quick chat (proto scratch.rs): no project, and the cwd is the
+    /// host's `…/cypher-scratch/<chat id>` folder. The folder shape IS the
+    /// identity — there is no flag on the row.
+    var isScratch: Bool {
+        guard spaceId == nil, var path = cwd else { return false }
+        while path.hasSuffix("/") { path.removeLast() }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count >= 2 && parts[parts.count - 1] == Substring(id)
+            && parts[parts.count - 2] == "cypher-scratch"
+    }
+
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
         return "New session"
@@ -89,6 +100,36 @@ struct SessionRow: Hashable {
     var startedAt: Int64?
     var updatedAt: Int64
     var subagents: [SubagentRun] = []
+    /// The agent's context-window occupancy (entities.rs `context_usage`).
+    /// Rides the row's next write while a turn runs, so it can trail a live
+    /// turn by ~20s; settles immediately.
+    var contextUsage: ContextUsage? = nil
+}
+
+/// entities.rs `ContextUsage`: tokens in the context window, of its size.
+struct ContextUsage: Hashable {
+    var used: Int64
+    var size: Int64
+
+    /// Clamped to 0…1; an unknown (zero) size reads as empty.
+    var fraction: Double {
+        size > 0 ? min(max(Double(used) / Double(size), 0), 1) : 0
+    }
+
+    /// workspace.rs: lenient — a malformed value drops the reading, never
+    /// the row.
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue,
+              let used = object["used"]?.int64Value,
+              let size = object["size"]?.int64Value else { return nil }
+        self.used = used
+        self.size = size
+    }
+
+    init(used: Int64, size: Int64) {
+        self.used = used
+        self.size = size
+    }
 }
 
 // MARK: - Derived display status (entities.rs / state.rs ports)
@@ -271,6 +312,30 @@ let commandDefaultTtlMs: Int64 = 86_400_000
 /// cypher-proto RunRequest (agent.rs:81). `reasoning` is lowercase
 /// ("high"/"xhigh"/…), `sandbox` kebab-case ("workspace-write"), harness ids
 /// kebab-case ("claude-code").
+/// proto session_fork.rs `SessionForkResponse`, tagged by `kind`.
+enum ForkResponse: Decodable, Equatable {
+    /// `composerText`: forking before a user message hands its text back
+    /// for editing.
+    case created(chatId: String, title: String?, composerText: String?)
+    case unavailable(message: String)
+
+    private enum Keys: String, CodingKey { case kind, chat, composerText, message }
+    private struct Row: Decodable { var id: String; var title: String? }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "created":
+            let row = try c.decode(Row.self, forKey: .chat)
+            self = .created(chatId: row.id, title: row.title,
+                            composerText: try c.decodeIfPresent(String.self, forKey: .composerText))
+        default:
+            self = .unavailable(message: try c.decodeIfPresent(String.self, forKey: .message)
+                                ?? "This session can't be forked here.")
+        }
+    }
+}
+
 struct RunRequest: Codable {
     var prompt: String
     /// Harness id ("claude-code") picked at send time; rides the command so

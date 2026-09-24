@@ -34,6 +34,16 @@ final class ComposerDraft {
         revision += 1
         text = ""
     }
+
+    /// Bumped by `replace`, so the editor moves its caret to the end.
+    private(set) var caretRequest = 0
+
+    /// Rewrite the whole draft from outside the editor (a picked slash
+    /// command) — same editor, caret after the new text.
+    func replace(with value: String) {
+        text = value
+        caretRequest += 1
+    }
 }
 
 /// Shared glass shell + input + action row. `chips` render in the expanded
@@ -42,6 +52,8 @@ struct ComposerShell<Chips: View>: View {
     @Binding var draft: String
     /// Changes only after an accepted send, never on individual keystrokes.
     var editorRevision = 0
+    /// See ComposerDraft.replace.
+    var caretRequest = 0
     var placeholder = "Message"
     var sendEnabled: Bool
     var showStop: Bool
@@ -183,7 +195,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var input: some View {
         ComposerTextInput(text: $draft, focus: focus, editorID: editorID, enabled: !busy,
-                          placeholder: placeholder)
+                          placeholder: placeholder, caretToEnd: caretRequest)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
@@ -274,6 +286,9 @@ struct ComposerView: View {
     let runLive: Bool
     let catalog: RemotePiCatalog
     var connectionRetry = 0
+    /// A side chat: it runs the parent's model — no model/effort chips, no
+    /// context ring (there's no session row to read or config to write).
+    var sideChat = false
 
     @State private var draftState = ComposerDraft()
     private var text: String { draftState.text }
@@ -285,6 +300,7 @@ struct ComposerView: View {
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
     @State private var catalogRevision = 0
+    @State private var commands = RemoteCommandCatalog()
 
     private var harness: String { chat.config?.harness ?? "" }
 
@@ -300,8 +316,36 @@ struct ComposerView: View {
         harness == "pi" && (model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId)))
     }
 
+    /// Slash commands skip the model gate, as on the desktop: `/compact`
+    /// must work on a chat whose model the host no longer offers.
     private var canSend: Bool {
-        canControl && (runLive || currentModel != nil)
+        canControl && (runLive || currentModel != nil || isSlashDraft)
+    }
+
+    private var isSlashDraft: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+    }
+
+    private var sessionRow: SessionRow? { model.sessionRow(chatId: chat.id) }
+
+    private var compactAvailability: CompactAvailability {
+        if harness != "pi" { return .unsupported }
+        guard canControl else { return .offline }
+        let status = effectiveStatus(sessionRow, now: nowMs())
+        if runLive || uploading || status == .working || status == .awaitingInput { return .busy }
+        return .ready
+    }
+
+    /// Compact is its own Run (`/compact`, never a steer); the draft,
+    /// attachments and pending comments stay where they are.
+    private func compact() {
+        guard compactAvailability == .ready else { return }
+        uploadError = store.sendRun(prompt: "/compact", chat: chat)
+            ? nil : "Couldn't queue Compact. Please retry."
+    }
+
+    private func loadCommands(force: Bool = false) async {
+        await commands.load(deviceId: chat.deviceId, force: force, fetch: model.listCommands)
     }
 
     private var currentReasoning: String? {
@@ -331,9 +375,19 @@ struct ComposerView: View {
             if let commentDrafts {
                 PendingCommentsBar(drafts: commentDrafts)
             }
+            if canControl, let query = SlashMenu.query(in: text) {
+                SlashMenuView(catalog: commands, query: query) { command in
+                    draftState.replace(with: SlashMenu.accept(command))
+                } onRetry: {
+                    Task { await loadCommands(force: true) }
+                }
+                .padding(.horizontal, 16)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
             ComposerShell(
                 draft: draftState.binding,
                 editorRevision: draftState.revision,
+                caretRequest: draftState.caretRequest,
                 sendEnabled: canSend,
                 showStop: runLive && canControl,
                 busy: uploading,
@@ -349,13 +403,18 @@ struct ComposerView: View {
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 autoFocus: model.launchFocusComposer
             ) {
-                ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model") {
-                    showModelPicker = true
-                }
-                .disabled(harness != "pi" || !canControl)
-                if let currentReasoning {
-                    ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
-                        showTraitPicker = true
+                if !sideChat {
+                    if let usage = sessionRow?.contextUsage {
+                        ContextRingChip(usage: usage, availability: compactAvailability, onCompact: compact)
+                    }
+                    ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model") {
+                        showModelPicker = true
+                    }
+                    .disabled(harness != "pi" || !canControl)
+                    if let currentReasoning {
+                        ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
+                            showTraitPicker = true
+                        }
                     }
                 }
             }
@@ -394,12 +453,20 @@ struct ComposerView: View {
         }
         .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)") {
             guard harness == "pi" else { return }
+            // Prefetch, so the first `/` opens a filled menu.
+            async let commandList: Void = canControl ? loadCommands() : ()
             await catalog.load(deviceId: chat.deviceId, fetch: model.listPiModels)
+            await commandList
         }
+        .motionAnimation(Motion.fadeQuick, value: SlashMenu.query(in: text) != nil)
         .onChange(of: showModelPicker) { _, showing in
             if showing { catalogRevision += 1 }
         }
         .onAppear {
+            // A fork before a prompt hands that prompt back for editing.
+            if draftState.text.isEmpty, let seeded = model.takePendingDraft(chatId: chat.id) {
+                draftState.replace(with: seeded)
+            }
             if model.launchSheet == "config" {
                 model.launchSheet = nil
                 showModelPicker = true

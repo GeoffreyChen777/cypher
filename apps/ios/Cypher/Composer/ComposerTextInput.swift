@@ -28,6 +28,9 @@ struct ComposerTextInput: UIViewRepresentable {
     let editorID: String
     let enabled: Bool
     var placeholder = "Message"
+    /// Bumped when the draft is replaced wholesale (a picked slash command):
+    /// the caret moves to the end instead of keeping its old offset.
+    var caretToEnd = 0
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text, focus: focus) }
 
@@ -64,6 +67,12 @@ struct ComposerTextInput: UIViewRepresentable {
             view.selectedRange = NSRange(location: start, length: min(selection.length, length - start))
             view.invalidateIntrinsicContentSize()
         }
+        if coordinator.caretToEnd != caretToEnd {
+            coordinator.caretToEnd = caretToEnd
+            if view.markedTextRange == nil {
+                view.selectedRange = NSRange(location: (view.text as NSString).length, length: 0)
+            }
+        }
         coordinator.reconcileFocus(view, enabled: enabled)
     }
 
@@ -84,6 +93,7 @@ struct ComposerTextInput: UIViewRepresentable {
         var text: Binding<String>
         let focus: ComposerFocus
         let id = UUID()
+        var caretToEnd = 0
         private var active = false
         private var request = 0
 

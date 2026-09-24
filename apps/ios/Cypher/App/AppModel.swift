@@ -362,6 +362,157 @@ final class AppModel {
         return workspace?.overviewChats ?? []
     }
 
+    /// Active sessions outside any live project (see WorkspaceStore).
+    var projectlessChats: [Chat] {
+        if let demo {
+            let liveIds = Set(demo.spaces.map(\.id))
+            return sortActive(demo.chats.filter {
+                !$0.isChild && !$0.archived && !$0.isScratch && !($0.spaceId.map(liveIds.contains) ?? false)
+            })
+        }
+        return workspace?.projectlessChats ?? []
+    }
+
+    /// Active quick chats across devices.
+    var quickChats: [Chat] {
+        if let demo {
+            return sortActive(demo.chats.filter { !$0.isChild && !$0.archived && $0.isScratch })
+        }
+        return workspace?.quickChats ?? []
+    }
+
+    /// Registered devices, online first then by name (the quick-chat
+    /// palette's order, minus "this device": the phone isn't one).
+    var devices: [DeviceRow] {
+        let all = demo?.devices ?? workspace?.devices ?? []
+        return all.sorted { a, b in
+            let (oa, ob) = (deviceOnline(a.id), deviceOnline(b.id))
+            if oa != ob { return oa }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    /// Quick chat's first two steps: the host makes the scratch folder, then
+    /// the chat row is minted there without a project. Returns the chat id.
+    func createQuickChat(deviceId: String, config: ChatConfig) async throws -> String {
+        let chatId = UUID().uuidString.lowercased()
+        if let demo {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            demo.chats.append(Chat(id: chatId, deviceId: deviceId, title: nil, archived: false,
+                                   cwd: "/tmp/cypher-scratch/\(chatId)", branch: nil, checkoutId: nil,
+                                   config: config, lastMessagePreview: nil, lastMessageAt: nil,
+                                   createdAt: nowMs(), spaceId: nil, lastSeenAt: nowMs()))
+            return chatId
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        let cwd = try await workspace.createScratchDir(deviceId: deviceId, chatId: chatId)
+        workspace.createQuickChat(chatId: chatId, deviceId: deviceId, cwd: cwd, config: config)
+        return chatId
+    }
+
+    enum ForkOutcome: Equatable {
+        case created(chatId: String)
+        case failed(String)
+    }
+
+    /// Fork retries reuse their request id (the host dedupes on it); a
+    /// definite answer retires it (shell.rs fork_request_ids).
+    @ObservationIgnored private var forkRequestIds: [String: String] = [:]
+    /// Drafts waiting for a session's composer (a fork's edited prompt).
+    @ObservationIgnored private var pendingDrafts: [String: String] = [:]
+
+    /// Session Fork v1: a new chat from this transcript up to `anchor` —
+    /// before a user message (its text comes back as the draft), or after
+    /// an assistant reply.
+    func forkSession(_ chat: Chat, anchor: MessageEntry) async -> ForkOutcome {
+        if let demo { return demoFork(chat, anchor: anchor, demo: demo) }
+        guard let workspace else { return .failed("Not connected") }
+        let key = "\(chat.id)#\(anchor.id)"
+        let requestId = forkRequestIds[key] ?? UUID().uuidString.lowercased()
+        forkRequestIds[key] = requestId
+        do {
+            let response = try await workspace.forkSession(deviceId: chat.deviceId, requestId: requestId,
+                                                           sourceChatId: chat.id, anchorMessageId: anchor.id)
+            forkRequestIds[key] = nil
+            switch response {
+            case .created(let chatId, _, let composerText):
+                if let composerText, !composerText.isEmpty { pendingDrafts[chatId] = composerText }
+                return .created(chatId: chatId)
+            case .unavailable(let message):
+                return .failed(message)
+            }
+        } catch RelayError.rpc(let message) where message.lowercased().contains("unknown method") {
+            forkRequestIds[key] = nil
+            return .failed("Forking needs a newer Cypher on \(deviceName(chat.deviceId)).")
+        } catch {
+            return .failed("Couldn't fork — \(error.localizedDescription)")
+        }
+    }
+
+    /// The composer's seeded draft for a session, once.
+    func takePendingDraft(chatId: String) -> String? {
+        pendingDrafts.removeValue(forKey: chatId)
+    }
+
+    private func demoFork(_ chat: Chat, anchor: MessageEntry, demo: DemoDataset) -> ForkOutcome {
+        let entries = demo.sessionStore(for: chat.id).entries
+        guard let ix = entries.firstIndex(where: { $0.id == anchor.id }) else { return .failed("Message not found") }
+        let isUser = anchor.role == .user
+        let copied = Array(entries.prefix(isUser ? ix : ix + 1))
+        let id = "chat-\(UUID().uuidString.lowercased().prefix(8))"
+        var fork = chat
+        fork.id = id
+        fork.title = String("\(chat.displayTitle) — Fork".prefix(120))
+        fork.createdAt = nowMs()
+        fork.lastMessageAt = nowMs()
+        fork.lastSeenAt = nowMs()
+        demo.chats.append(fork)
+        demo.sessionStore(for: id).setEntries(copied)
+        if isUser {
+            let text = anchor.parts.compactMap { part -> String? in
+                if case .text(_, let t) = part { return t }
+                return nil
+            }.joined(separator: "\n")
+            pendingDrafts[id] = parseUserMessageImages(text).text
+        }
+        return .created(chatId: id)
+    }
+
+    /// A side chat about `quote`, on the parent's host.
+    func sideChat(parent: Chat, quote: String, anchorEntryId: String?) -> SideChatStore? {
+        if let demo {
+            return SideChatStore(parent: parent, quote: quote, anchorEntryId: anchorEntryId,
+                                 relay: nil, config: DemoDataset.dummyConfig, demo: demo)
+        }
+        guard let workspace, let config else { return nil }
+        return SideChatStore(parent: parent, quote: quote, anchorEntryId: anchorEntryId,
+                             relay: workspace.relayClient(for: parent.deviceId), config: config)
+    }
+
+    /// Rename (desktop Rename…): trimmed; an empty title is ignored.
+    func renameChat(chatId: String, title: String) {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        if let demo {
+            if let ix = demo.chats.firstIndex(where: { $0.id == chatId }) { demo.chats[ix].title = title }
+            return
+        }
+        workspace?.rename(chatId: chatId, title: title)
+    }
+
+    /// Permanently delete a session (and its subagent children). Returns a
+    /// notice when part of the cleanup couldn't happen.
+    func deleteChat(_ chat: Chat) async -> String? {
+        if let demo {
+            demo.chats.removeAll { $0.id == chat.id || $0.child?.parentChatId == chat.id }
+            return nil
+        }
+        guard let workspace else { return "Not connected" }
+        let notice = await workspace.deleteChat(chat, hostOnline: deviceOnline(chat.deviceId))
+        sessionStores.removeValue(forKey: chat.id)?.stop()
+        return notice
+    }
+
     func chats(in spaceId: String) -> [Chat] {
         if let demo {
             return sortActive(demo.chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
@@ -400,6 +551,21 @@ final class AppModel {
             return nowMs() - seen < presenceFreshMs
         }
         return workspace?.deviceOnline(deviceId) ?? false
+    }
+
+    /// The session row (live status, context usage) behind a chat.
+    func sessionRow(chatId: String) -> SessionRow? {
+        demo?.sessions[chatId] ?? workspace?.sessions[chatId]
+    }
+
+    /// The Pi slash commands on the chat's host device.
+    func listCommands(deviceId: String) async throws -> [SlashCommand] {
+        if demo != nil {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            return DemoDataset.slashCommands
+        }
+        guard let workspace, deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        return try await workspace.listCommands(deviceId: deviceId, harness: "pi")
     }
 
     /// The phone never resolves a local Runtime or substitutes a model list.
@@ -662,7 +828,7 @@ final class AppModel {
     /// and keep their rooms syncing, so opening a session never shows a
     /// loading state.
     func preloadSessions() {
-        for chat in overviewChats {
+        for chat in overviewChats + projectlessChats + quickChats {
             _ = sessionStore(for: chat)
         }
     }

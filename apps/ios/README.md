@@ -70,6 +70,30 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   bottom by jumping to the last row's id, never to an estimated offset, so
   opening doesn't lay out the rows in between (3,000 rows: ~0.3s, down from
   3–4s of hidden loader on iOS 26–27).
+- **Session actions:** long-press a session row (or swipe) to Rename, Archive or
+  Delete; the session's top-right menu has the same. Delete asks first, tells
+  the host (`Mutate deleteChat`, which also removes its subagent children and
+  purges the host's doc), then removes the rows here even if the host is
+  offline; a quick chat's scratch folder is removed too. The desktop's
+  "Delete worktree too?" follow-up is not ported.
+- **Quick chat:** Home's speech-bubble button starts a project-less session on
+  a chosen online device (`CreateScratchDir` on the host, then a row without a
+  space). Quick chats get their own Home section; other project-less sessions
+  appear under Other Sessions.
+- **Slash commands:** typing `/` opens the host's Pi commands (`ListCommands`),
+  filtered by name; picking one fills `/name `. The desktop's default hide
+  rules apply (its customized list is local to each desktop). Commands are sent
+  as ordinary text and skip the model-availability gate.
+- **Context ring:** the composer shows the session's context usage (registry
+  `sessions.contextUsage`, which can trail a live turn by ~20s). Tapping it
+  shows the reading and a Compact action (`/compact` as its own run), offered
+  only while the session is idle.
+- **Fork / Side Chat:** select transcript text for "Edit in Fork" (before a
+  prompt; its text returns as the draft), "Fork from Here" (after a reply) and
+  "Side Chat" — a temporary chat about the selection, hosted in the parent
+  host's memory and streamed over the device relay; closing the sheet discards
+  it, "Open as Chat" keeps it. A side chat whose device link drops for good,
+  or that sits unwatched ~5 minutes on the host, ends.
 - **Files / Changes:** separate options in the chat's top-right menu open read-only remote directory
   navigation, UTF-8 file previews and working-tree Git diffs with per-file
   patches. Changes uses a continuous, collapsible list in a locally bundled

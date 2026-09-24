@@ -63,6 +63,16 @@ final class SessionStore {
     private let offline: Bool
     /// Demo hook: invoked instead of the command plane when offline.
     @ObservationIgnored var demoResponder: ((String, Bool) -> Void)?
+    /// For a transcript that isn't a synced doc (a side chat, fed through
+    /// `setEntries`): sends, stops and answers go straight to the host
+    /// instead of the doc's command ledger. Returns whether it was accepted.
+    @ObservationIgnored var directTransport: DirectTransport?
+
+    struct DirectTransport {
+        var send: (_ prompt: String, _ messageId: String) -> Bool
+        var interrupt: () -> Bool
+        var respondInput: (_ requestId: String, _ answers: [UserInputAnswer]) -> Bool
+    }
 
     init(chatId: String, config: AppConfig, offline: Bool = false) {
         self.chatId = chatId
@@ -93,6 +103,11 @@ final class SessionStore {
     func setEntries(_ new: [MessageEntry]) {
         durableEntries = new
         entries = new
+        // Echoes whose real entry has landed are done.
+        if !pendingSends.isEmpty {
+            let ids = Set(new.map(\.id))
+            pendingSends.removeAll { ids.contains($0.messageId) }
+        }
         revision &+= 1
         transcriptCache.prewarm(entries: entries)
     }
@@ -403,7 +418,7 @@ final class SessionStore {
         return joinContinuations(raw)
     }
 
-    nonisolated private static func entryFrom(_ value: LoroValue) -> MessageEntry? {
+    nonisolated static func entryFrom(_ value: LoroValue) -> MessageEntry? {
         guard let m = value.mapValue,
               let id = m["id"]?.stringValue,
               let roleStr = m["role"]?.stringValue,
@@ -509,6 +524,7 @@ final class SessionStore {
     @discardableResult
     func sendRun(prompt: String, chat: Chat, attachments: [String] = [], agentPrompt: String? = nil) -> Bool {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
+        if let directTransport { return sendDirect(prompt, isSteer: false, via: directTransport) }
         if offline {
             demoResponder?(prompt, false)
             return true
@@ -537,6 +553,7 @@ final class SessionStore {
     @discardableResult
     func sendSteer(prompt: String, agentPrompt: String? = nil) -> Bool {
         guard !CommentPrompt.blocksSlash(prompt, hasComments: agentPrompt != nil) else { return false }
+        if let directTransport { return sendDirect(prompt, isSteer: true, via: directTransport) }
         if offline {
             demoResponder?(prompt, true)
             return true
@@ -556,16 +573,28 @@ final class SessionStore {
 
     @discardableResult
     func sendInterrupt() -> Bool {
-        queueCommand(kind: "interrupt", payload: ["kind": "interrupt"])
+        if let directTransport { return directTransport.interrupt() }
+        return queueCommand(kind: "interrupt", payload: ["kind": "interrupt"])
     }
 
     @discardableResult
     func respondInput(requestId: String, answers: [UserInputAnswer]) -> Bool {
-        queueCommand(kind: "respondInput", payload: [
+        if let directTransport { return directTransport.respondInput(requestId, answers) }
+        return queueCommand(kind: "respondInput", payload: [
             "kind": "respondInput",
             "requestId": requestId,
             "answers": answers.map(encodableJSON),
         ])
+    }
+
+    /// A direct send, echoed optimistically like a queued one (the host's
+    /// entry carries the same message id and replaces the echo).
+    private func sendDirect(_ prompt: String, isSteer: Bool, via transport: DirectTransport) -> Bool {
+        let messageId = UUID().uuidString.lowercased()
+        guard transport.send(prompt, messageId) else { return false }
+        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs(), isSteer: isSteer))
+        revision &+= 1
+        return true
     }
 
     /// schema.rs queue_command, field for field.

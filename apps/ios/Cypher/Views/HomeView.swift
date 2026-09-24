@@ -9,6 +9,8 @@ enum Route: Hashable {
     case space(String)
     case chat(String)
     case newSession(spaceId: String)
+    /// A project-less session on a device (its folder is made on send).
+    case quickChat(deviceId: String)
 }
 
 enum SessionNavigation {
@@ -35,6 +37,7 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showNotifications = false
+    @State private var actions = SessionActions()
     /// The in-flight notification navigation (see `scheduleNotificationNavigation`).
     @State private var notificationTask: Task<Void, Never>?
     /// When `path` last changed — a push/pop is likely still animating for a
@@ -92,16 +95,18 @@ struct HomeView: View {
                         }
                     }
                 }
+                quickChatsSection(deviceId: selected?.id)
                 if selected == nil {
                     otherSessionsSection
                     ArchivedSection(spaceId: nil, orphanedOnly: true)
                 }
             }
+            .sessionActionPrompts(actions)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Theme.surface.ignoresSafeArea())
             .overlay {
-                if model.spaces.isEmpty && orphanedChats.isEmpty {
+                if model.spaces.isEmpty && orphanedChats.isEmpty && model.quickChats.isEmpty {
                     emptyState
                 }
             }
@@ -114,6 +119,8 @@ struct HomeView: View {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
                 case .chat(let id): SessionView(chatId: id, path: $path).id(id)
                 case .newSession(let spaceId): NewSessionView(spaceId: spaceId, path: $path)
+                case .quickChat(let deviceId):
+                    NewSessionView(spaceId: "", path: $path, quickDeviceId: deviceId)
                 }
             }
             .toolbar {
@@ -122,6 +129,9 @@ struct HomeView: View {
                 }
                 // Account and Add are unrelated: separate glass groups.
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) {
+                    quickChatMenu
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showNewSpace = true
@@ -161,7 +171,7 @@ struct HomeView: View {
             )) {
                 Button("OK") { model.notifications.navigationError = nil }
             } message: { Text(model.notifications.navigationError ?? "") }
-            .task(id: model.overviewChats.map(\.id).joined()) {
+            .task(id: (model.overviewChats + model.projectlessChats + model.quickChats).map(\.id).joined()) {
                 model.preloadSessions()
             }
             .onAppear {
@@ -255,6 +265,29 @@ struct HomeView: View {
         .accessibilityLabel("Account")
     }
 
+    /// Quick chat: pick the device (desktop's palette — offline devices are
+    /// listed but can't be picked; the host has to make the folder).
+    private var quickChatMenu: some View {
+        Menu {
+            Section("Quick chat on") {
+                ForEach(model.devices) { device in
+                    Button {
+                        path.append(.quickChat(deviceId: device.id))
+                    } label: {
+                        Text(device.name)
+                        if !model.deviceOnline(device.id) { Text("Offline") }
+                    }
+                    .disabled(!model.deviceOnline(device.id))
+                }
+            }
+        } label: {
+            Image(systemName: "bubble.left")
+        }
+        .disabled(model.devices.isEmpty)
+        .accessibilityLabel("Quick chat")
+        .accessibilityIdentifier("quick-chat")
+    }
+
     /// Always one line, so the large title never jumps: connection state
     /// first, then live activity, then the plain project count.
     private var subtitle: String {
@@ -297,11 +330,31 @@ struct HomeView: View {
         return groups
     }
 
-    /// Preserve access to history whose project row is gone; never invent a
-    /// project/device association for an orphaned chat.
+    /// Sessions with no live project — desktop "No project" chats, and
+    /// history whose project row is gone; never invent a project/device
+    /// association for them. (This filtered `overviewChats`, which only
+    /// holds live-project chats, so the section never showed anything.)
     private var orphanedChats: [Chat] {
-        model.overviewChats.filter { chat in
-            !model.spaces.contains(where: { $0.id == chat.spaceId })
+        model.projectlessChats
+    }
+
+    /// Quick chats, every device in one card (state.rs merge_scratch_groups);
+    /// a device tab narrows it to that device.
+    @ViewBuilder private func quickChatsSection(deviceId: String?) -> some View {
+        let chats = model.quickChats.filter { deviceId == nil || $0.deviceId == deviceId }
+        if !chats.isEmpty {
+            let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
+            Section {
+                ForEach(chats) { chat in
+                    NavigationLink(value: Route.chat(chat.id)) {
+                        ChatRow(chat: chat, showLocation: true, statusSlot: statusSlot)
+                    }
+                    .groupedRowStyle()
+                    .sessionRowActions(chat)
+                }
+            } header: {
+                ListSectionHeader(title: "Quick chats")
+            }
         }
     }
 
@@ -315,6 +368,7 @@ struct HomeView: View {
                         ChatRow(chat: chat, showLocation: true, statusSlot: statusSlot)
                     }
                     .groupedRowStyle()
+                    .sessionRowActions(chat)
                 }
             } header: {
                 ListSectionHeader(title: "Other Sessions")
@@ -541,6 +595,8 @@ struct ChatRow: View {
     /// space has been renamed, or when the session runs in a worktree off to
     /// the side.
     private var location: String {
+        // The folder is named after the chat id — the device says it all.
+        if chat.isScratch { return model.deviceName(chat.deviceId) }
         let space = model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
             ?? "?"

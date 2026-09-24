@@ -7,6 +7,27 @@ extension NSAttributedString.Key {
     static let cypherInlineCode = NSAttributedString.Key("cypher.inlineCode")
 }
 
+/// The transcript entry a piece of selectable text belongs to.
+struct TranscriptEntryContext: Equatable {
+    var entryId: String
+    var role: MessageRole
+    /// Complete (a user prompt the host has, a finished reply) — only
+    /// settled entries can anchor a fork.
+    var settled: Bool
+}
+
+/// What a selection's edit menu may offer beyond Comment; nil = not here
+/// (the session can't fork right now, or this transcript is a side chat).
+struct TranscriptSelectionActions {
+    var fork: ((TranscriptEntryContext) -> Void)?
+    var sideChat: ((TranscriptEntryContext, String) -> Void)?
+}
+
+extension EnvironmentValues {
+    @Entry var transcriptEntry: TranscriptEntryContext? = nil
+    @Entry var transcriptSelectionActions: TranscriptSelectionActions? = nil
+}
+
 @MainActor
 enum TranscriptTextStyle {
     static func inline(_ runs: [InlineRun], size: CGFloat = MD.textSize,
@@ -132,6 +153,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
     var wraps = true
     var hugsContent = false
     @Environment(\.commentDrafts) private var drafts
+    @Environment(\.transcriptEntry) private var entry
+    @Environment(\.transcriptSelectionActions) private var actions
 
     func makeUIView(context: Context) -> TranscriptUITextView {
         let storage = NSTextStorage()
@@ -161,11 +184,15 @@ struct SelectableTranscriptText: UIViewRepresentable {
         view.selectionEnded = { [weak view, weak coordinator = context.coordinator] in
             if let view { coordinator?.applyLatest(to: view) }
         }
+        context.coordinator.entry = entry
+        context.coordinator.actions = actions
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
         return view
     }
 
     func updateUIView(_ view: TranscriptUITextView, context: Context) {
+        context.coordinator.entry = entry
+        context.coordinator.actions = actions
         context.coordinator.update(view, attributed: attributed, drafts: drafts)
     }
 
@@ -186,6 +213,8 @@ struct SelectableTranscriptText: UIViewRepresentable {
 }
 
 final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
+    var entry: TranscriptEntryContext?
+    var actions: TranscriptSelectionActions?
     private var latest: NSAttributedString?
     private weak var drafts: CommentDrafts?
     private var applying = false
@@ -223,12 +252,38 @@ final class TranscriptSelectionCoordinator: NSObject, UITextViewDelegate {
         }
     }
 
+    /// Fork (desktop: "Fork before this message" on a prompt, "after this
+    /// response" on a reply). A prompt's fork hands its text back to edit.
+    func forkAction(in textView: UITextView) -> UIAction? {
+        guard let entry, entry.settled, entry.role != .system, let fork = actions?.fork else { return nil }
+        let title = entry.role == .user ? "Edit in Fork" : "Fork from Here"
+        return UIAction(title: title, image: UIImage(systemName: "arrow.triangle.branch")) { [weak textView] _ in
+            textView?.selectedRange = NSRange(location: 0, length: 0)
+            textView?.resignFirstResponder()
+            fork(entry)
+        }
+    }
+
+    /// A temporary side chat about the selected text.
+    func sideChatAction(in textView: UITextView, range: NSRange) -> UIAction? {
+        guard let entry, let sideChat = actions?.sideChat else { return nil }
+        let quote = CommentPrompt.selectedText(textView.text ?? "", range: range)
+        guard !CommentPrompt.normalize(quote).isEmpty else { return nil }
+        return UIAction(title: "Side Chat", image: UIImage(systemName: "bubble.left.and.bubble.right")) { [weak textView] _ in
+            textView?.selectedRange = NSRange(location: 0, length: 0)
+            textView?.resignFirstResponder()
+            sideChat(entry, quote)
+        }
+    }
+
     func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
                   suggestedActions: [UIMenuElement]) -> UIMenu? {
-        guard let comment = commentAction(in: textView, range: range) else {
-            return UIMenu(children: suggestedActions)
-        }
-        return UIMenu(children: [comment] + suggestedActions)
+        let ours: [UIMenuElement] = [
+            commentAction(in: textView, range: range),
+            sideChatAction(in: textView, range: range),
+            forkAction(in: textView),
+        ].compactMap { $0 }
+        return UIMenu(children: ours + suggestedActions)
     }
 }
 

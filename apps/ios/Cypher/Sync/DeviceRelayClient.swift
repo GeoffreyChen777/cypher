@@ -2,6 +2,9 @@
 // `client` peer and speaks ControlRpc to the HOST engine over a virtual
 // socket (crates/rpc/src/device_room.rs + edge/src/device-room.ts).
 //
+// Streaming calls (`subscribe`) get `{id, item}` frames until `{id, done}`
+// or `{id, err}`; dropping the stream sends `{id, cancel: true}`.
+//
 // Frame codec (binary WS messages): uleb128(headerLen) ‖ headerJSON ‖ payload.
 // Header key order MUST be {"s","k","to","from"} (byte parity with both
 // implementations); clients never set `to`/`from` — the DO stamps `from`.
@@ -27,6 +30,12 @@ enum RelayError: LocalizedError {
     }
 }
 
+/// A reply whose content doesn't matter — only that the host accepted the
+/// call (any `ok` payload, including null).
+struct IgnoredReply: Decodable {
+    init(from decoder: Decoder) throws {}
+}
+
 actor DeviceRelayClient {
     static let rpcKind = "rpc"
     static let relayKind = " relay"  // leading space is intentional
@@ -39,6 +48,9 @@ actor DeviceRelayClient {
     private var pingTask: Task<Void, Never>?
     private var nextId: UInt64 = 1
     private var pending: [UInt64: CheckedContinuation<Result<Data, RelayError>, Never>] = [:]
+    /// Open streaming calls. An id belongs to a unary waiter or a stream,
+    /// never both.
+    private var streams: [UInt64: AsyncThrowingStream<Data, Error>.Continuation] = [:]
     private var connected = false
 
     init(deviceId: String, config: AppConfig) {
@@ -107,6 +119,11 @@ actor DeviceRelayClient {
         for (_, continuation) in waiting {
             continuation.resume(returning: .failure(error))
         }
+        let open = streams
+        streams.removeAll()
+        for (_, continuation) in open {
+            continuation.finish(throwing: error)
+        }
     }
 
     private func sendPing() async {
@@ -173,6 +190,55 @@ actor DeviceRelayClient {
         }
     }
 
+    /// A streaming ControlRpc call (`WatchDocMessages`, `WatchSideChatStatus`
+    /// …): each `item` payload as JSON data, in order. The stream finishes on
+    /// `done`, throws on `err` or a dropped link (no automatic resubscribe —
+    /// the caller decides), and cancelling it tells the host to stop.
+    nonisolated func subscribe(method: String, params: [String: Any]) -> AsyncThrowingStream<Data, Error> {
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        Task { await self.openStream(method: method, params: params, continuation: continuation) }
+        return stream
+    }
+
+    private func openStream(method: String, params: [String: Any],
+                            continuation: AsyncThrowingStream<Data, Error>.Continuation) async {
+        do {
+            try await connect()
+        } catch {
+            continuation.finish(throwing: error)
+            return
+        }
+        let id = nextId
+        nextId += 1
+        streams[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.closeStream(id: id) }
+        }
+        let frame: [String: Any] = ["id": id, "method": method, "params": params]
+        guard let payload = try? JSONSerialization.data(withJSONObject: frame), let socket else {
+            finishStream(id: id, error: .notConnected)
+            return
+        }
+        do {
+            try await socket.send(.data(Self.encodeFrame(header: #"{"s":"rpc","k":"rpc"}"#, payload: payload)))
+        } catch {
+            finishStream(id: id, error: .notConnected)
+            teardown(error: .notConnected)
+        }
+    }
+
+    private func finishStream(id: UInt64, error: RelayError?) {
+        guard let continuation = streams.removeValue(forKey: id) else { return }
+        if let error { continuation.finish(throwing: error) } else { continuation.finish() }
+    }
+
+    /// The consumer let go: stop the host's side of a still-open stream.
+    private func closeStream(id: UInt64) async {
+        guard streams.removeValue(forKey: id) != nil, let socket,
+              let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "cancel": true]) else { return }
+        try? await socket.send(.data(Self.encodeFrame(header: #"{"s":"rpc","k":"rpc"}"#, payload: payload)))
+    }
+
     private func send(_ data: Data, for id: UInt64) async {
         guard let socket else {
             failCall(id: id, error: .notConnected)
@@ -223,8 +289,20 @@ actor DeviceRelayClient {
         guard let text = String(data: payload, encoding: .utf8) else { return }
         for line in text.split(separator: "\n") {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let id = (obj["id"] as? NSNumber)?.uint64Value,
-                  let continuation = pending.removeValue(forKey: id) else { continue }
+                  let id = (obj["id"] as? NSNumber)?.uint64Value else { continue }
+            if let stream = streams[id] {
+                if let err = obj["err"] as? String {
+                    finishStream(id: id, error: .rpc(err))
+                } else if obj.keys.contains("item"),
+                          let item = try? JSONSerialization.data(withJSONObject: obj["item"] ?? NSNull(),
+                                                                 options: .fragmentsAllowed) {
+                    stream.yield(item)
+                } else if obj["done"] != nil {
+                    finishStream(id: id, error: nil)
+                }
+                continue
+            }
+            guard let continuation = pending.removeValue(forKey: id) else { continue }
             if let err = obj["err"] as? String {
                 continuation.resume(returning: .failure(.rpc(err)))
             } else if obj.keys.contains("ok"),

@@ -39,6 +39,9 @@ struct TranscriptRow: Identifiable {
     /// deriving it in the view body forced an `enumerated()` copy of the whole
     /// row array on every frame; now the body just reads it.
     var topGap: CGFloat = 0
+    /// The owning entry's role — what a selection's actions may do with it
+    /// (fork before a prompt / after a reply; never a system row).
+    var role: MessageRole = .assistant
 }
 
 /// A settled part's parse, keyed by content so a completed block is parsed
@@ -59,8 +62,10 @@ enum TranscriptRowBuilder {
         var rows: [TranscriptRow] = []
         var live = Set<String>()
         for entry in entries {
+            let first = rows.count
             rowsForEntry(entry, into: &rows, parsers: &parsers,
                          completed: &completed, live: &live)
+            for ix in first..<rows.count { rows[ix].role = entry.role }
         }
         // Optimistic echo: pending sends share their client-minted id, so the
         // host's real entry replaces them without a flicker.
@@ -72,7 +77,8 @@ enum TranscriptRowBuilder {
                                       kind: .user(text: pending.text, isSteer: pending.isSteer),
                                       entryId: pending.messageId,
                                       timestamp: nil,
-                                      partKey: nil))
+                                      partKey: nil,
+                                      role: .user))
         }
         // Drop memos for parts that no longer exist. The count guard keeps the
         // common (append-only) rebuild from copying the dict every token.

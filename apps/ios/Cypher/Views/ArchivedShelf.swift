@@ -93,16 +93,7 @@ struct ArchivedSection: View {
             .padding(.vertical, 2)
         }
         .groupedRowStyle()
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button {
-                withAnimation(Motion.resort) {
-                    model.unarchive(chatId: chat.id)
-                }
-            } label: {
-                Label("Unarchive", systemImage: "tray.and.arrow.up")
-            }
-            .tint(.gray)
-        }
+        .archivedSessionRowActions(chat)
     }
 
     private func showMore(remaining: Int) -> some View {

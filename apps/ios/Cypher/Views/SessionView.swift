@@ -27,6 +27,10 @@ struct SessionView: View {
     @State private var catalog = RemotePiCatalog()
     @State private var connectionRetry = 0
     @State private var workspaceDestination: WorkspaceDestination?
+    @State private var actions = SessionActions()
+    @State private var forking = false
+    @State private var sideChat: SideChatStore?
+    @State private var promotedSideChat: String?
 
 
     private var chat: Chat? { model.chat(id: chatId) }
@@ -91,6 +95,23 @@ struct SessionView: View {
                     Menu {
                         Button("Files", systemImage: "folder") { workspaceDestination = .files }
                         Button("Changes", systemImage: "plus.forwardslash.minus") { workspaceDestination = .changes }
+                        if !chat.isChild {
+                            Divider()
+                            Button("Rename…", systemImage: "pencil") { actions.rename(chat) }
+                            if chat.archived {
+                                Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                                    model.unarchive(chatId: chat.id)
+                                }
+                            } else {
+                                Button("Archive", systemImage: "archivebox") {
+                                    model.archive(chatId: chat.id)
+                                    leave()
+                                }
+                            }
+                            Button("Delete…", systemImage: "trash", role: .destructive) {
+                                actions.delete(chat)
+                            }
+                        }
                     } label: {
                         Image(systemName: "ellipsis")
                     }
@@ -129,6 +150,22 @@ struct SessionView: View {
                 }
             }
         }
+        .sessionActionPrompts(actions) { _ in leave() }
+        .environment(\.transcriptSelectionActions, chat.map(selectionActions))
+        .sheet(item: $sideChat, onDismiss: {
+            // Navigate once the sheet is gone: a path change during its
+            // dismissal can be dropped.
+            if let chatId = promotedSideChat {
+                promotedSideChat = nil
+                path = SessionNavigation.opening(chatId, in: path)
+            }
+        }) { store in
+            SideChatSheet(store: store) { chatId in
+                promotedSideChat = chatId
+            }
+            // Closing discards it on the host; a no-op once it's a chat.
+            .onDisappear { store.close() }
+        }
         .environment(\.commentDrafts, chat?.config?.harness == "pi" ? commentDrafts : nil)
         .sheet(isPresented: $commentDrafts.presented) {
             CommentsPanel(drafts: commentDrafts)
@@ -158,11 +195,55 @@ struct SessionView: View {
         }
     }
 
+    /// Fork and Side Chat on a selection — only what this session can do
+    /// right now (transcript.rs fork_gate: Pi, a root chat, not mid-run,
+    /// host reachable; side chats need a reachable Pi host too).
+    private func selectionActions(for chat: Chat) -> TranscriptSelectionActions {
+        let reachable = model.demo != nil || (model.connected && model.deviceOnline(chat.deviceId))
+        guard chat.config?.harness == "pi", reachable else { return TranscriptSelectionActions() }
+        let live = liveStatus(chat: chat)
+        let canFork = !chat.isChild && live != .working && live != .awaitingInput && !forking
+        return TranscriptSelectionActions(
+            fork: canFork ? { entry in fork(chat, at: entry) } : nil,
+            sideChat: { entry, quote in
+                sideChat = model.sideChat(parent: chat, quote: quote, anchorEntryId: entry.entryId)
+            })
+    }
+
+    private func fork(_ chat: Chat, at context: TranscriptEntryContext) {
+        guard let anchor = model.sessionStore(for: chat)?.entries.first(where: { $0.id == context.entryId })
+        else { return }
+        forking = true
+        controlError = nil
+        Task { @MainActor in
+            let outcome = await model.forkSession(chat, anchor: anchor)
+            forking = false
+            switch outcome {
+            case .created(let forkId):
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                // Only follow it if the reader is still here (shell.rs).
+                if path.last == .chat(chat.id) {
+                    path = SessionNavigation.opening(forkId, in: path)
+                }
+            case .failed(let message):
+                controlError = message
+            }
+        }
+    }
+
+    /// Back out of this session (it was archived or deleted from its menu).
+    private func leave() {
+        if let ix = path.lastIndex(of: .chat(chatId)) {
+            path = Array(path.prefix(ix))
+        }
+    }
+
     /// "space @ device" — short, like the home dropdown's rows. The space
     /// NAME (not the cwd basename: they differ for renamed spaces and
     /// worktree sessions), falling back to the cwd when the space row is gone.
     private var subtitle: String? {
         guard let chat else { return nil }
+        if chat.isScratch { return "Quick chat @ \(model.deviceName(chat.deviceId))" }
         let space = model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
             ?? "?"
@@ -235,8 +316,14 @@ struct SessionView: View {
                         .padding(.trailing, 20)
                     }
                     .frame(minHeight: 44)
-                    if let controlError {
+                    if forking {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("Forking…").font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                        }
+                    } else if let controlError {
                         Text(controlError).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                            .padding(.horizontal, 20)
                     }
                     Group {
                         if let request = store.openInputRequest, chat.config?.harness == "pi" {

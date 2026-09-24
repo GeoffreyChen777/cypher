@@ -29,6 +29,9 @@ final class WorkspaceStore {
     /// wall clock, which we never trust for freshness).
     static let presenceTtlMs: Int64 = 30_000
 
+    /// Chats being deleted: hidden at once while the host is told first
+    /// (see `deleteChat`), so the list never waits on the network.
+    @ObservationIgnored private var deleting: Set<String> = []
     @ObservationIgnored private var doc: RegistryDoc
     @ObservationIgnored private var client: RegistryClient?
     @ObservationIgnored private var saver: RegistrySaver?
@@ -206,7 +209,8 @@ final class WorkspaceStore {
 
         chats = doc.overlayRows(kind: "chats").compactMap { row in
             let f = row.fields
-            guard let deviceId = f["deviceId"]?.stringValue else { return nil }
+            guard let deviceId = f["deviceId"]?.stringValue,
+                  !deleting.contains(f["id"]?.stringValue ?? row.id) else { return nil }
             let child = SubagentProjection.decode(f["child"], as: ChildChat.self)
             // Don't promote a malformed child relation into the root list.
             if let rawChild = f["child"], rawChild != .null, child == nil { return nil }
@@ -244,7 +248,8 @@ final class WorkspaceStore {
             rows[chatId] = SessionRow(chatId: chatId, deviceId: deviceId, status: status,
                                       startedAt: f["startedAt"]?.int64Value,
                                       updatedAt: f["updatedAt"]?.int64Value ?? 0,
-                                      subagents: SubagentProjection.snapshot(f["subagents"]))
+                                      subagents: SubagentProjection.snapshot(f["subagents"]),
+                                      contextUsage: ContextUsage(f["contextUsage"]))
         }
         sessions = rows
     }
@@ -269,6 +274,22 @@ final class WorkspaceStore {
         sortActive(chats.filter { !$0.isChild && !$0.archived && $0.spaceId == spaceId })
     }
 
+    /// Active sessions outside any live project (desktop "No project"
+    /// groups: project-less chats, or ones whose project was removed).
+    /// Quick chats are listed on their own.
+    var projectlessChats: [Chat] {
+        let liveSpaceIds = Set(spaces.map(\.id))
+        return sortActive(chats.filter {
+            !$0.isChild && !$0.archived && !$0.isScratch
+                && !($0.spaceId.map(liveSpaceIds.contains) ?? false)
+        })
+    }
+
+    /// Active quick chats, every device merged (state.rs merge_scratch_groups).
+    var quickChats: [Chat] {
+        sortActive(chats.filter { !$0.isChild && !$0.archived && $0.isScratch })
+    }
+
     /// Archived chats under an optional space scope, recency order — feeds the
     /// Archived shelf (shell/spaces.rs `render_archived_section`). Unlike
     /// `overviewChats`, a live space is not required: an archived session of a
@@ -289,6 +310,24 @@ final class WorkspaceStore {
     // MARK: Device relay (folder browsing / direct host RPCs)
 
     @ObservationIgnored private var relayClients: [String: DeviceRelayClient] = [:]
+
+    /// The host relay, for features that manage their own calls (side chats).
+    func relayClient(for deviceId: String) -> DeviceRelayClient {
+        relay(for: deviceId)
+    }
+
+    /// ForkSession on the source chat's host (session_forks.rs). The host
+    /// builds the new Pi session and mints its row; idempotent per
+    /// `requestId`, which is also the new chat's id. The helper can take
+    /// ~30s, plus quiescing the source.
+    func forkSession(deviceId: String, requestId: String, sourceChatId: String,
+                     anchorMessageId: String) async throws -> ForkResponse {
+        try await relay(for: deviceId).call(method: "ForkSession", params: [
+            "requestId": requestId,
+            "sourceChatId": sourceChatId,
+            "anchorMessageId": anchorMessageId,
+        ], timeoutSeconds: 90)
+    }
 
     private func relay(for deviceId: String) -> DeviceRelayClient {
         if let existing = relayClients[deviceId] { return existing }
@@ -359,6 +398,14 @@ final class WorkspaceStore {
             ModelInfo(id: $0.id, label: $0.label, description: $0.description,
                       reasoningLevels: $0.reasoningLevels ?? [])
         }
+    }
+
+    /// The harness's slash commands on the target device (Pi discovers
+    /// them by spawning itself — a cold call can take most of 10s, hence the
+    /// longer deadline). Forwardable, so the host answers directly.
+    func listCommands(deviceId: String, harness: String) async throws -> [SlashCommand] {
+        try await relay(for: deviceId)
+            .call(method: "ListCommands", params: ["harness": harness], timeoutSeconds: 20)
     }
 
     /// SwitchRef — `git checkout` in the given folder on the target device.
@@ -479,10 +526,71 @@ final class WorkspaceStore {
         updateChat(chatId, set: ["config": value])
     }
 
-    /// Tombstone a chat (and its session-status row) in one batch. The
-    /// per-chat session doc remains — this removes the index entry only.
-    func deleteChat(chatId: String) {
-        doc.deleteRows([("chats", chatId), ("sessions", chatId)])
+    /// Delete a session, desktop `delete_chat` order. The host is told
+    /// FIRST (`Mutate deleteChat` over its relay): only the engine that
+    /// receives the op purges its doc snapshot and interrupts + deletes the
+    /// chat's subagent children — it finds them by looking up rows our
+    /// tombstones would already have removed. Then the tombstones land here
+    /// regardless (an offline host still loses the rows), children included,
+    /// and a quick chat's scratch folder is removed. The chat's own run is
+    /// not interrupted, as on the desktop.
+    ///
+    /// Returns a notice for a partial failure, nil when all went through.
+    func deleteChat(_ chat: Chat, hostOnline: Bool) async -> String? {
+        deleting.insert(chat.id)
+        project()
+        defer { deleting.remove(chat.id) }
+        let host = relay(for: chat.deviceId)
+        var hostReached = false
+        if hostOnline {
+            let reply: IgnoredReply? = try? await host.call(
+                method: "Mutate", params: ["op": "deleteChat", "chatId": chat.id], timeoutSeconds: 8)
+            hostReached = reply != nil
+        }
+        var keys: [(kind: String, id: String)] = [("chats", chat.id), ("sessions", chat.id)]
+        for child in chats where child.child?.parentChatId == chat.id {
+            keys.append(("chats", child.id))
+            keys.append(("sessions", child.id))
+        }
+        doc.deleteRows(keys)
+        afterLocalWrite()
+        guard chat.isScratch, let cwd = chat.cwd else { return nil }
+        guard hostReached else {
+            return "The session was deleted, but its quick-chat folder stays on the device until it's back online."
+        }
+        do {
+            let _: IgnoredReply = try await host.call(
+                method: "DeleteScratchDir", params: ["chatId": chat.id, "path": cwd], timeoutSeconds: 15)
+            return nil
+        } catch {
+            return "The session was deleted, but its quick-chat folder couldn't be removed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Quick chat step 1 (composer.rs first send): the host makes this
+    /// chat's `…/cypher-scratch/<chatId>` folder and returns its path.
+    func createScratchDir(deviceId: String, chatId: String) async throws -> String {
+        struct Reply: Decodable { var path: String }
+        let reply: Reply = try await relay(for: deviceId)
+            .call(method: "CreateScratchDir", params: ["chatId": chatId], timeoutSeconds: 20)
+        return reply.path
+    }
+
+    /// Quick chat step 2: `createChat`'s full-row upsert without a project,
+    /// under the id the scratch folder was made for.
+    func createQuickChat(chatId: String, deviceId: String, cwd: String, config chatConfig: ChatConfig) {
+        var set: [String: JSONValue] = [
+            "id": .string(chatId),
+            "deviceId": .string(deviceId),
+            "archived": .bool(false),
+            "cwd": .string(cwd),
+            "createdAt": .int(nowMs()),
+            "roomGen": .int(2),
+        ]
+        if let cfg = JSONValue(encodable: chatConfig) {
+            set["config"] = cfg
+        }
+        doc.write(kind: "chats", id: chatId, op: .upsert, set: set)
         afterLocalWrite()
     }
 

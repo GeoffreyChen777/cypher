@@ -8,6 +8,7 @@ struct SpaceView: View {
     @Environment(AppModel.self) private var model
     let spaceId: String
     @Binding var path: [Route]
+    @State private var actions = SessionActions()
 
     private var space: Space? {
         model.spaces.first { $0.id == spaceId }
@@ -28,23 +29,12 @@ struct SpaceView: View {
                         ChatRow(chat: chat, showLocation: false, statusSlot: statusSlot)
                     }
                     .groupedRowStyle()
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button {
-                            // withAnimation, not a value-keyed .animation: the
-                            // row leaves THIS section and lands in the archived
-                            // shelf — one coordinated List diff.
-                            withAnimation(Motion.resort) {
-                                model.archive(chatId: chat.id)
-                            }
-                        } label: {
-                            Label("Archive", systemImage: "archivebox")
-                        }
-                        .tint(.gray)
-                    }
+                    .sessionRowActions(chat)
                 }
             }
             ArchivedSection(spaceId: spaceId)
         }
+        .sessionActionPrompts(actions)
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.surface.ignoresSafeArea())

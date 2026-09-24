@@ -2,6 +2,8 @@
 // app's canvas (faded app icon + "What are we building?" + glass composer with
 // picker chips) and the desktop's new-session canvas (composer expanded with
 // in-pill pickers). The space already fixes device + folder; the composer
+// (A quick chat has no space: just a device, and the host makes a scratch
+// folder for it on send — composer.rs's project-less first send.)
 // carries the agent/model chip, and sending mints the chat, queues the first
 // run, and swaps straight into the live session.
 
@@ -13,6 +15,8 @@ struct NewSessionView: View {
     @Environment(\.scenePhase) private var scenePhase
     let spaceId: String
     @Binding var path: [Route]
+    /// Set for a quick chat: the device it runs on, no project.
+    var quickDeviceId: String? = nil
 
     // Sticky run config (the old app persisted these to prefs.db).
     private let harness = "pi"
@@ -40,7 +44,18 @@ struct NewSessionView: View {
     @State private var viewWidth: CGFloat = 0
 
     private var space: Space? {
-        model.spaces.first { $0.id == spaceId }
+        guard quickDeviceId == nil else { return nil }
+        return model.spaces.first { $0.id == spaceId }
+    }
+
+    /// Where the session will run: the quick chat's device or the space's.
+    private var targetDeviceId: String? {
+        quickDeviceId ?? space?.deviceId
+    }
+
+    /// This canvas's own route, swapped for the session on send.
+    private var route: Route {
+        quickDeviceId.map { .quickChat(deviceId: $0) } ?? .newSession(spaceId: spaceId)
     }
 
     private var harnesses: [HarnessInfo] {
@@ -48,16 +63,16 @@ struct NewSessionView: View {
     }
 
     private var models: [ModelInfo] {
-        catalog.models(for: space?.deviceId ?? "")
+        catalog.models(for: targetDeviceId ?? "")
     }
 
     private var storedModel: String {
         let picks = (try? JSONDecoder().decode([String: String].self, from: Data(storedModels.utf8))) ?? [:]
-        return picks[space?.deviceId ?? ""] ?? ""
+        return picks[targetDeviceId ?? ""] ?? ""
     }
 
     private func rememberModel(_ id: String) {
-        guard let deviceId = space?.deviceId else { return }
+        guard let deviceId = targetDeviceId else { return }
         var picks = (try? JSONDecoder().decode([String: String].self, from: Data(storedModels.utf8))) ?? [:]
         picks[deviceId] = id
         if let data = try? JSONEncoder().encode(picks), let json = String(data: data, encoding: .utf8) {
@@ -97,11 +112,11 @@ struct NewSessionView: View {
             .contentShape(Rectangle())
             .onTapGesture { focused = false }
 
-            if let space, !model.deviceOnline(space.deviceId), model.demo == nil {
-                offlineNotice(space: space)
+            if let targetDeviceId, !model.deviceOnline(targetDeviceId), model.demo == nil {
+                offlineNotice(deviceId: targetDeviceId)
             }
             PiCatalogNotice(catalog: catalog,
-                            deviceName: model.deviceName(space?.deviceId ?? "")) {
+                            deviceName: model.deviceName(targetDeviceId ?? "")) {
                 catalogRevision += 1
             }
 
@@ -130,16 +145,21 @@ struct NewSessionView: View {
         }
         .background(Theme.bg.ignoresSafeArea())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
-        .navigationTitle("New session")  // feeds the back menu
+        .navigationTitle(quickDeviceId == nil ? "New session" : "Quick chat")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("New session")
+                    Text(quickDeviceId == nil ? "New session" : "Quick chat")
                         .font(Theme.sans(13, weight: .medium))
                         .foregroundStyle(Theme.text)
-                    if let space {
+                    if let quickDeviceId {
+                        Text("No project · \(model.deviceName(quickDeviceId))")
+                            .font(Theme.sans(10.5))
+                            .foregroundStyle(Theme.textMuted.opacity(0.6))
+                            .lineLimit(1)
+                    } else if let space {
                         Text("\(space.displayName) · \(model.deviceName(space.deviceId))")
                             .font(Theme.sans(10.5))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
@@ -175,9 +195,9 @@ struct NewSessionView: View {
                 }
             }
         }
-        .task(id: "\(space?.deviceId ?? "")/\(model.connected)/\(space.map { model.deviceOnline($0.deviceId) } ?? false)/\(scenePhase)/\(catalogRevision)") {
-            guard let space else { return }
-            await catalog.load(deviceId: space.deviceId, fetch: model.listPiModels)
+        .task(id: "\(targetDeviceId ?? "")/\(model.connected)/\(targetDeviceId.map { model.deviceOnline($0) } ?? false)/\(scenePhase)/\(catalogRevision)") {
+            guard let targetDeviceId else { return }
+            await catalog.load(deviceId: targetDeviceId, fetch: model.listPiModels)
         }
         .sheet(isPresented: $showPicker) {
             ModelPickerSheet(harness: .constant(harness), modelId: Binding(
@@ -360,12 +380,12 @@ struct NewSessionView: View {
     }
 
     private var targetReady: Bool {
-        guard let space else { return false }
-        return model.demo != nil || (model.connected && model.deviceOnline(space.deviceId))
+        guard let targetDeviceId else { return false }
+        return model.demo != nil || (model.connected && model.deviceOnline(targetDeviceId))
     }
 
-    private func offlineNotice(space: Space) -> some View {
-        Text("\(model.deviceName(space.deviceId)) is offline. Reconnect it to start a session. Your draft stays here.")
+    private func offlineNotice(deviceId: String) -> some View {
+        Text("\(model.deviceName(deviceId)) is offline. Reconnect it to start a session. Your draft stays here.")
             .font(Theme.sans(12))
             .foregroundStyle(Theme.warning.opacity(0.9))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -380,6 +400,10 @@ struct NewSessionView: View {
     /// live session (composer.rs on-send: current checkout as-is, reuse the
     /// picked ref's worktree, or CreateWorktree off the base first).
     private func send() {
+        if let quickDeviceId {
+            sendQuickChat(deviceId: quickDeviceId)
+            return
+        }
         guard let space, canSend, let selectedModel else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
@@ -411,45 +435,75 @@ struct NewSessionView: View {
                 return
             }
             guard let chatId = model.createChat(space: space, config: config,
-                                                branch: branch, cwd: cwd),
-                  let chat = model.chat(id: chatId),
-                  let store = model.sessionStore(for: chat) else {
+                                                branch: branch, cwd: cwd) else {
                 attachError = "Couldn't create the session. Check your connection and retry."
                 busy = false
                 return
             }
-            // Upload staged images now that the chat's store exists; the doc
-            // entry must never point at files that don't (ComposerView.send).
-            var paths: [String] = []
-            for att in attachments {
-                do {
-                    let path = try await store.uploadAttachment(name: att.name, data: att.data)
-                    AttachmentImageCache.shared.seed(deviceId: chat.deviceId, path: path,
-                                                     name: att.name, data: att.data)
-                    paths.append(path)
-                } catch {
-                    attachError = "Attachment upload failed — \(error.localizedDescription)"
-                    busy = false
-                    return
-                }
+            await startSession(chatId: chatId, prompt: prompt)
+        }
+    }
+
+    /// Quick chat (composer.rs first send without a project): the host makes
+    /// the scratch folder under the new chat's id, the row is minted without
+    /// a space, then the first run is queued like any session's.
+    private func sendQuickChat(deviceId: String) {
+        guard canSend, let selectedModel else { return }
+        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        busy = true
+        let config = ChatConfig(harness: harness, model: selectedModel.id,
+                                reasoning: reasoning, sandbox: "workspace-write")
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                let chatId = try await model.createQuickChat(deviceId: deviceId, config: config)
+                await startSession(chatId: chatId, prompt: prompt)
+            } catch {
+                attachError = "Couldn't create the quick chat's folder on \(model.deviceName(deviceId)) — \(error.localizedDescription). Your draft has been kept."
             }
-            guard targetReady,
-                  store.sendRun(prompt: paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths),
-                                chat: chat, attachments: paths) else {
-                attachError = "Couldn't queue the message. Your draft has been kept."
+        }
+    }
+
+    /// Upload the staged images into the new chat, queue its first run and
+    /// swap the canvas for the live session.
+    private func startSession(chatId: String, prompt: String) async {
+        guard let chat = model.chat(id: chatId),
+              let store = model.sessionStore(for: chat) else {
+            attachError = "Couldn't create the session. Check your connection and retry."
+            busy = false
+            return
+        }
+        // Upload staged images now that the chat's store exists; the doc
+        // entry must never point at files that don't (ComposerView.send).
+        var paths: [String] = []
+        for att in attachments {
+            do {
+                let path = try await store.uploadAttachment(name: att.name, data: att.data)
+                AttachmentImageCache.shared.seed(deviceId: chat.deviceId, path: path,
+                                                 name: att.name, data: att.data)
+                paths.append(path)
+            } catch {
+                attachError = "Attachment upload failed — \(error.localizedDescription)"
+                busy = false
                 return
             }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            draft = ""
-            attachments = []
-            busy = false
-            // Replace the canvas with the live session (in-place swap, no
-            // back-through-canvas).
-            if path.last == .newSession(spaceId: spaceId) {
-                path.removeLast()
-            }
-            path.append(.chat(chatId))
         }
+        guard targetReady,
+              store.sendRun(prompt: paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths),
+                            chat: chat, attachments: paths) else {
+            attachError = "Couldn't queue the message. Your draft has been kept."
+            return
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        draft = ""
+        attachments = []
+        busy = false
+        // Replace the canvas with the live session (in-place swap, no
+        // back-through-canvas).
+        if path.last == route {
+            path.removeLast()
+        }
+        path.append(.chat(chatId))
     }
 }
 

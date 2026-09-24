@@ -16,7 +16,7 @@ final class DemoDataset {
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
-    private static let dummyConfig = AppConfig(
+    static let dummyConfig = AppConfig(
         edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
         userId: "demo", orgId: "demo", deviceId: "ios-demo", deviceName: "iPhone")
 
@@ -81,7 +81,12 @@ final class DemoDataset {
         ]
         var sessions: [String: SessionRow] = [
             "chat-veil": SessionRow(chatId: "chat-veil", deviceId: "dev-mac", status: .working,
-                                    startedAt: now - 95_000, updatedAt: now - 5_000),
+                                    startedAt: now - 95_000, updatedAt: now - 5_000,
+                                    contextUsage: ContextUsage(used: 124_000, size: 200_000)),
+            // Idle, near full: the composer's context ring in amber.
+            "chat-tabs": SessionRow(chatId: "chat-tabs", deviceId: "dev-mac", status: .idle,
+                                    startedAt: nil, updatedAt: now - 900_000,
+                                    contextUsage: ContextUsage(used: 162_000, size: 200_000)),
             "chat-picker": SessionRow(chatId: "chat-picker", deviceId: "dev-mac",
                                       status: .awaitingInput, startedAt: now - 400_000,
                                       updatedAt: now - 10_000),
@@ -159,6 +164,19 @@ final class DemoDataset {
             }
         }
     }
+
+    /// Pi's discovery shape: extension commands, then the synthesized
+    /// built-ins. `skill:` rows are hidden by the default rules.
+    static let slashCommands: [SlashCommand] = [
+        SlashCommand(name: "goal", description: "Keep working toward a goal until it's met",
+                     inputHint: "goal"),
+        SlashCommand(name: "review", description: "Review the working tree's changes", inputHint: nil),
+        SlashCommand(name: "subagents", description: "List the subagent profiles", inputHint: nil),
+        SlashCommand(name: "skill:frontend-design", description: "Load the frontend skill", inputHint: nil),
+        SlashCommand(name: "compact", description: "Compact the session's context",
+                     inputHint: "custom instructions"),
+        SlashCommand(name: "export-html", description: "Export the session as HTML", inputHint: "path"),
+    ]
 
     // MARK: Fake filesystem (folder browser demo)
 

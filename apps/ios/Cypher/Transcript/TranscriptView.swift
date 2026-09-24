@@ -642,6 +642,8 @@ struct TranscriptView: View {
         }
         .padding(.top, row.topGap)
         .padding(.horizontal, 16)
+        .environment(\.transcriptEntry, TranscriptEntryContext(entryId: row.entryId, role: row.role,
+                                                               settled: row.timestamp != nil))
         .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
     }
 }
