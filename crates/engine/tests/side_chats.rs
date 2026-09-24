@@ -51,7 +51,12 @@ fn side_context(prompt: &str) -> serde_json::Value {
 /// assertion) and streams a quick Done.
 struct RecordingHarness {
     requests: Arc<Mutex<Vec<RunRequest>>>,
+    /// When armed, the next run withholds its Done until the sender fires or
+    /// drops, so a test can observe the run while it is still Working.
+    hold: Hold,
 }
+
+type Hold = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>;
 
 #[async_trait]
 impl Harness for RecordingHarness {
@@ -79,6 +84,7 @@ impl Harness for RecordingHarness {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.requests.lock().unwrap().push(request);
+        let hold = self.hold.lock().unwrap().take();
         let events: Vec<Result<AgentEvent, HarnessError>> = vec![
             Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Pi,
@@ -91,28 +97,36 @@ impl Harness for RecordingHarness {
             Ok(AgentEvent::TextDelta {
                 text: "side answer".into(),
             }),
+        ];
+        let done = futures::stream::once(async move {
+            if let Some(hold) = hold {
+                let _ = hold.await;
+            }
             Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,
                 result: Some("side answer".into()),
                 error: None,
                 session_id: None,
-            }),
-        ];
-        Ok(futures::stream::iter(events).boxed())
+            })
+        });
+        Ok(futures::stream::iter(events).chain(done).boxed())
     }
 }
 
 struct Rig {
     core: EngineCore,
     requests: Arc<Mutex<Vec<RunRequest>>>,
+    hold: Hold,
     _dir: tempfile::TempDir,
 }
 
 fn assemble() -> Rig {
     let registry = HarnessRegistry::new();
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let hold = Hold::default();
     registry.register(Arc::new(RecordingHarness {
         requests: requests.clone(),
+        hold: hold.clone(),
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
@@ -120,6 +134,7 @@ fn assemble() -> Rig {
     Rig {
         core,
         requests,
+        hold,
         _dir: dir,
     }
 }
@@ -135,6 +150,7 @@ fn assemble_arc() -> (
     let requests = Arc::new(Mutex::new(Vec::new()));
     registry.register(Arc::new(RecordingHarness {
         requests: requests.clone(),
+        hold: Hold::default(),
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = Arc::new(
@@ -380,7 +396,11 @@ async fn start_send_promote_flow() {
         });
     }
 
-    // SECOND send: no injection.
+    // SECOND send: no injection. Its Done is held until the watch has
+    // streamed Working — the watch keeps only the latest value, so an
+    // instant run could settle before the collector ever saw Working.
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *rig.hold.lock().unwrap() = Some(hold);
     let before2 = rig.requests.lock().unwrap().len();
     rpc(
         &rig.core,
@@ -407,6 +427,11 @@ async fn start_send_promote_flow() {
         "side question two"
     );
     wait_for(
+        || statuses.lock().unwrap().iter().any(|s| s == "working"),
+        "status watch to stream Working",
+    );
+    let _ = release.send(());
+    wait_for(
         || {
             rig.core
                 .sessions
@@ -415,16 +440,9 @@ async fn start_send_promote_flow() {
         },
         "second side run to settle",
     );
-    // Give the collector a beat to drain the watch's current value.
-    std::thread::sleep(Duration::from_millis(100));
-    let seen = statuses.lock().unwrap().clone();
-    assert!(
-        seen.iter().any(|s| s == "working"),
-        "status watch streams Working: {seen:?}"
-    );
-    assert!(
-        seen.iter().any(|s| s == "idle"),
-        "status watch streams the settled Idle: {seen:?}"
+    wait_for(
+        || statuses.lock().unwrap().last().is_some_and(|s| s == "idle"),
+        "status watch to stream the settled Idle",
     );
 
     // Promote: normal root chat with a quote-derived title + the parent's
