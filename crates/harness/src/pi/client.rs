@@ -41,7 +41,10 @@ pub(crate) enum Incoming {
     Eof,
 }
 
-type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
+/// Awaiting requests by id. `None` once the reader has stopped: every waiter
+/// was failed then, and a request registered afterwards would never resolve,
+/// so it is refused instead.
+type Pending = Arc<Mutex<Option<HashMap<String, oneshot::Sender<Result<Value, String>>>>>>;
 
 #[derive(Clone)]
 pub(crate) struct PiClient {
@@ -56,7 +59,7 @@ impl PiClient {
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(write_loop(stdin, writer_rx));
-        let pending: Pending = Arc::default();
+        let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         tokio::spawn(read_loop(stdout, Arc::clone(&pending), incoming_tx));
         (
@@ -79,15 +82,23 @@ impl PiClient {
     ) -> Result<Value, HarnessError> {
         let id = format!("z{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("pending lock")
-            .insert(id.clone(), tx);
+        match self.pending.lock().expect("pending lock").as_mut() {
+            Some(waiters) => {
+                waiters.insert(id.clone(), tx);
+            }
+            None => {
+                return Err(HarnessError::Protocol(format!(
+                    "{command}: pi exited before responding"
+                )));
+            }
+        }
         params.insert("id".into(), Value::String(id.clone()));
         params.insert("type".into(), Value::String(command.into()));
         let line = serde_json::to_string(&Value::Object(params)).expect("serializable");
         if self.writer.send(line).is_err() {
-            self.pending.lock().expect("pending lock").remove(&id);
+            if let Some(waiters) = self.pending.lock().expect("pending lock").as_mut() {
+                waiters.remove(&id);
+            }
             return Err(HarnessError::Protocol(format!(
                 "{command}: pi stdin closed"
             )));
@@ -146,11 +157,22 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
     }
 }
 
-/// Parse stdout lines: responses resolve the pending map, extension UI
-/// requests and events forward in order. Non-JSON noise is skipped; on EOF
-/// all pending requests fail (their senders drop) and one final
-/// [`Incoming::Eof`] is delivered.
+/// Parse stdout lines until the child or the session goes away, then fail
+/// every awaiting request and refuse new ones. Only a real EOF / read error
+/// is signalled as [`Incoming::Eof`]; a dropped receiver has nobody to tell.
 async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incoming>) {
+    let eof = read_lines(stdout, &pending, &tx).await;
+    pending.lock().expect("pending lock").take();
+    if eof {
+        let _ = tx.send(Incoming::Eof).await;
+    }
+}
+
+/// Parse stdout lines: responses resolve the pending map, extension UI
+/// requests and events forward in order. Non-JSON noise is skipped.
+/// Returns `true` on EOF / read error, `false` once the session dropped its
+/// receiver.
+async fn read_lines(stdout: ChildStdout, pending: &Pending, tx: &mpsc::Sender<Incoming>) -> bool {
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::with_capacity(1024);
     loop {
@@ -179,7 +201,12 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
                 let Some(id) = msg.get("id").and_then(Value::as_str).map(str::to_owned) else {
                     continue;
                 };
-                let Some(sender) = pending.lock().expect("pending lock").remove(&id) else {
+                let sender = pending
+                    .lock()
+                    .expect("pending lock")
+                    .as_mut()
+                    .and_then(|waiters| waiters.remove(&id));
+                let Some(sender) = sender else {
                     // A fire-and-forget command's response: nobody awaits it.
                     continue;
                 };
@@ -211,17 +238,67 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
                     payload: msg,
                 };
                 if tx.send(incoming).await.is_err() {
-                    return;
+                    return false;
                 }
             }
             _ => {
                 if tx.send(Incoming::Event(msg)).await.is_err() {
-                    return;
+                    return false;
                 }
             }
         }
     }
-    // EOF/read error: fail every awaiting request, then signal the loop.
-    pending.lock().expect("pending lock").clear();
-    let _ = tx.send(Incoming::Eof).await;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::process::{Child, Command};
+
+    fn spawn(script: &str) -> (Child, PiClient, mpsc::Receiver<Incoming>) {
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let (client, incoming) = PiClient::new(stdin, stdout);
+        (child, client, incoming)
+    }
+
+    async fn request_settles(client: &PiClient) -> Result<Value, HarnessError> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("get_session_stats", Map::new()),
+        )
+        .await
+        .expect("request settles instead of hanging")
+    }
+
+    #[tokio::test]
+    async fn request_after_eof_fails_instead_of_hanging() {
+        // The child keeps stdin open (so the write succeeds) but closes
+        // stdout: a request registered after the reader drained the pending
+        // map must fail, not wait for a response that can never arrive.
+        let (_child, client, mut incoming) = spawn("exec 1>&-; sleep 5");
+        assert!(matches!(incoming.recv().await, Some(Incoming::Eof)));
+        assert!(request_settles(&client).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn dropped_session_fails_awaiting_requests() {
+        // The session stops listening while a request is in flight: the
+        // reader's next forward fails, and the waiter must be released with
+        // it even though the child is still alive.
+        let (_child, client, incoming) =
+            spawn(r#"read -r _; printf '{"type":"agent_start"}\n'; sleep 5"#);
+        drop(incoming);
+        assert!(request_settles(&client).await.is_err());
+    }
 }
