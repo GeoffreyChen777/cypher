@@ -961,12 +961,16 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
 }
 
 /// The comments a prompt carried, right-aligned above its bubble: each quote
-/// (one muted line) over what the user wrote about it.
+/// (one muted line) over what the user wrote about it. Both texts select
+/// like the bubble's, keyed `{row}:{n}` in paint order ahead of its `:u`.
 fn user_comments(
+    row_id: &SharedString,
     comments: &[MessageComment],
     wide: bool,
     pending: bool,
     theme: &Theme,
+    scope: crate::markdown::selection::SelectionScope,
+    selection: Option<render::SelectionUi>,
 ) -> gpui::Div {
     let mut list = div()
         .min_w_0()
@@ -974,39 +978,75 @@ fn user_comments(
         .when(wide, |el| el.max_w(gpui::relative(0.8)))
         .flex()
         .flex_col()
-        .items_end()
         .gap(px(6.0))
         .when(pending, |el| el.opacity(0.65));
-    for comment in comments {
+    for (ix, comment) in comments.iter().enumerate() {
+        let quote = selectable_text(
+            format!("{row_id}:{}", ix * 2).into(),
+            crate::composer::comment_quote_preview(&comment.quote).into(),
+            theme.text_muted,
+            theme,
+            scope,
+            selection.clone(),
+        );
+        let text = selectable_text(
+            format!("{row_id}:{}", ix * 2 + 1).into(),
+            comment.comment.clone().into(),
+            theme.text,
+            theme,
+            scope,
+            selection.clone(),
+        );
         list = list.child(
             div()
-                .min_w_0()
-                .max_w_full()
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
                 .pl(px(10.0))
                 .border_l_2()
                 .border_color(theme.border)
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(crate::composer::comment_quote_preview(
-                            &comment.quote,
-                        ))),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from(comment.comment.clone())),
-                ),
+                .child(div().text_size(px(11.5)).line_height(px(16.0)).child(quote))
+                .child(div().text_size(px(13.0)).line_height(px(18.0)).child(text)),
         );
     }
     div().w_full().flex().justify_end().pb(px(6.0)).child(list)
+}
+
+/// One plain run of transcript text registered for drag selection under
+/// `key` (see [`user_bubble_text`]).
+fn selectable_text(
+    key: std::sync::Arc<str>,
+    text: SharedString,
+    color: gpui::Hsla,
+    theme: &Theme,
+    scope: crate::markdown::selection::SelectionScope,
+    selection: Option<render::SelectionUi>,
+) -> AnyElement {
+    let styled = StyledText::new(text.clone()).with_runs(vec![TextRun {
+        len: text.len(),
+        font: gpui::font(theme.font_sans.clone()),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }]);
+    let layout = styled.layout().clone();
+    let sel_theme = theme.clone();
+    let underlay = canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            render::paint_text_selection(
+                window, scope, &key, &text, &layout, &sel_theme, selection,
+            );
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
+        .into_any_element()
 }
 
 fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
@@ -3865,7 +3905,15 @@ impl Transcript {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
                 }
                 if !comments.is_empty() {
-                    column = column.child(user_comments(comments, wide, pending, &theme));
+                    column = column.child(user_comments(
+                        &row.id,
+                        comments,
+                        wide,
+                        pending,
+                        &theme,
+                        self.scope,
+                        Some(self.selection_ui_for(&row.id, cx)),
+                    ));
                 }
                 if !text.is_empty() {
                     if renders_as_command_chip(&text, &mentions, &attachments) {
