@@ -339,11 +339,11 @@ while read -r line; do
         STATS_DATA='{"contextUsage":{"tokens":null,"contextWindow":200000,"percent":null}}'
         emit '{"type":"compaction_start","reason":"manual"}'
         emit '{"type":"compaction_end","reason":"manual","result":{"summary":"s","firstKeptEntryId":"e1","tokensBefore":150000,"estimatedTokensAfter":32000},"aborted":false,"willRetry":false}'
-        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"tokensBefore\":150000,\"estimatedTokensAfter\":32000}}"
+        emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"compact\",\"success\":true,\"data\":{\"tokensBefore\":150000,\"estimatedTokensAfter\":32000}}"
         while next_cmd line; do :; done
         exit 0
       fi
-      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked /compact must run the compact RPC\"}"
+      emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked /compact must run the compact RPC\"}"
       exit 1
       ;;
     *scenario:parked-noagent*)
@@ -361,7 +361,7 @@ while read -r line; do
       emit '{"type":"agent_settled"}'
       next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'notify only'; then
-        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+        emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         # 150ms < the 200ms test grace: only a freshly re-armed timer reaches
         # this notify; a stale turn-1 timer fires immediately on re-poll.
         sleep 0.15
@@ -370,7 +370,7 @@ while read -r line; do
         while read -r line; do :; done
         exit 0
       fi
-      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked mailbox must restart via prompt\"}"
+      emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked mailbox must restart via prompt\"}"
       exit 1
       ;;
     *scenario:parked-double*)
@@ -384,24 +384,24 @@ while read -r line; do
       emit '{"type":"agent_settled"}'
       next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'second turn'; then
-        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+        emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
         emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"second"}}'
         emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"second"}],"stopReason":"stop"}}'
         emit '{"type":"agent_settled"}'
         next_cmd third || exit 1
         if has "$third" '"type":"prompt"' && has "$third" '"streamingBehavior":"steer"' && has "$third" 'third turn'; then
-          emit "{\"id\":$(rid \"$third\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+          emit "{\"id\":$(rid "$third"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
           emit '{"type":"message_start","message":{"role":"assistant","id":"m3","content":[]}}'
           emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"third"}}'
           emit '{"type":"message_end","message":{"role":"assistant","id":"m3","content":[{"type":"text","text":"third"}],"stopReason":"stop"}}'
           emit '{"type":"agent_settled"}'
           exit 0
         fi
-        emit "{\"id\":$(rid \"$third\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"third must be a parked prompt\"}"
+        emit "{\"id\":$(rid "$third"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"third must be a parked prompt\"}"
         exit 1
       fi
-      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"second must be a parked prompt\"}"
+      emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"second must be a parked prompt\"}"
       exit 1
       ;;
     *scenario:parked-stranded*)
@@ -418,21 +418,21 @@ while read -r line; do
       next_cmd steerline || exit 1
       if has "$steerline" '"type":"steer"' && has "$steerline" 'redirect'; then
         # Accepted, then settled WITHOUT ever delivering the steer reply.
-        emit "{\"id\":$(rid \"$steerline\"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
         emit '{"type":"agent_settled"}'
         next_cmd retry || exit 1
         if has "$retry" '"type":"prompt"' && has "$retry" '"streamingBehavior":"steer"' && has "$retry" 'redirect'; then
-          emit "{\"id\":$(rid \"$retry\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+          emit "{\"id\":$(rid "$retry"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
           emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
           emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"redirected"}}'
           emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"redirected"}],"stopReason":"stop"}}'
           emit '{"type":"agent_settled"}'
           exit 0
         fi
-        emit "{\"id\":$(rid \"$retry\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stranded steer must retry as a parked prompt\"}"
+        emit "{\"id\":$(rid "$retry"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stranded steer must retry as a parked prompt\"}"
         exit 1
       fi
-      emit "{\"id\":$(rid \"$steerline\"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"expected a mid-turn steer\"}"
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"expected a mid-turn steer\"}"
       exit 1
       ;;
     *scenario:parked*)
@@ -455,14 +455,14 @@ while read -r line; do
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" 'second message'; then
         # Pre-response notify, then acceptance, then the second turn.
         emit '{"type":"extension_ui_request","id":"u-2","method":"notify","message":"pre-response note","notifyType":"info"}'
-        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+        emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
         emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"second"}}'
         emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"second"}],"stopReason":"stop"}}'
         emit '{"type":"agent_settled"}'
         exit 0
       fi
-      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked mailbox must restart via prompt, not steer\"}"
+      emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"parked mailbox must restart via prompt, not steer\"}"
       exit 1
       ;;
     *scenario:interrupt*)
@@ -566,11 +566,11 @@ while read -r line; do
       next_cmd second || exit 1
       if has "$second" '"type":"prompt"' && has "$second" '"streamingBehavior":"steer"' && has "$second" '/fast'; then
         emit '{"type":"extension_ui_request","id":"fast-2","method":"notify","message":"GPT Fast mode enabled (service_tier: priority).","notifyType":"info"}'
-        emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+        emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
         while read -r line; do :; done
         exit 0
       fi
-      emit "{\"id\":$(rid \"$second\"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stateful command must reuse the parked process\"}"
+      emit "{\"id\":$(rid "$second"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stateful command must reuse the parked process\"}"
       exit 1
       ;;
 
