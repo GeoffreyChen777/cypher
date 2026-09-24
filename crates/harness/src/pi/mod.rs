@@ -1780,7 +1780,7 @@ fn bridge_ui_request(
     let request_input = std::sync::Arc::clone(&request_input);
     // Owned copies for the spawned task (the caller's refs are not 'static).
     let id = id.to_owned();
-    let is_confirm = method == "confirm";
+    let method = method.to_owned();
     tokio::spawn(async move {
         let answers = (request_input)(vec![question.clone()])
             .await
@@ -1789,16 +1789,31 @@ fn bridge_ui_request(
             .iter()
             .find(|a| a.question_id == question.id)
             .and_then(|a| a.labels.first());
-        let payload = if is_confirm {
-            json!({ "confirmed": picked.map(|l| l == "Confirm").unwrap_or(false) })
-        } else {
-            match picked.filter(|l| !l.is_empty()) {
-                Some(value) => json!({ "value": value }),
-                None => json!({ "cancelled": true }),
-            }
-        };
-        client.respond_ui(&id, payload);
+        client.respond_ui(
+            &id,
+            ui_response_payload(&method, picked.map(String::as_str)),
+        );
     });
+}
+
+/// The `extension_ui_response` body for one answered dialog. No label at all
+/// is the cancel signal. An EMPTY label is a real answer for input/editor —
+/// pi-ask-user's optional comment submitted blank ("press Enter to skip")
+/// must reach it as `""`, or pi resolves the input as cancelled and the
+/// option the user picked in the stage before is thrown away. A select has
+/// no empty option, so there an empty label still cancels.
+fn ui_response_payload(method: &str, picked: Option<&str>) -> Value {
+    match method {
+        "confirm" => json!({ "confirmed": picked == Some("Confirm") }),
+        "input" | "editor" => match picked {
+            Some(value) => json!({ "value": value }),
+            None => json!({ "cancelled": true }),
+        },
+        _ => match picked.filter(|l| !l.is_empty()) {
+            Some(value) => json!({ "value": value }),
+            None => json!({ "cancelled": true }),
+        },
+    }
 }
 
 /// One steer command as a 'static future (the client clone is moved in so the
@@ -2980,6 +2995,47 @@ fn mime_for_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_response_keeps_a_blank_input_answer_distinct_from_cancel() {
+        // pi-ask-user's optional comment submitted blank is an answer.
+        assert_eq!(
+            ui_response_payload("input", Some("")),
+            json!({ "value": "" })
+        );
+        assert_eq!(
+            ui_response_payload("editor", Some("")),
+            json!({ "value": "" })
+        );
+        assert_eq!(
+            ui_response_payload("input", Some("hi")),
+            json!({ "value": "hi" })
+        );
+        assert_eq!(
+            ui_response_payload("input", None),
+            json!({ "cancelled": true })
+        );
+        assert_eq!(
+            ui_response_payload("select", Some("A")),
+            json!({ "value": "A" })
+        );
+        assert_eq!(
+            ui_response_payload("select", Some("")),
+            json!({ "cancelled": true })
+        );
+        assert_eq!(
+            ui_response_payload("select", None),
+            json!({ "cancelled": true })
+        );
+        assert_eq!(
+            ui_response_payload("confirm", Some("Confirm")),
+            json!({ "confirmed": true })
+        );
+        assert_eq!(
+            ui_response_payload("confirm", None),
+            json!({ "confirmed": false })
+        );
+    }
 
     #[test]
     fn expected_model_providers_read_newapi_and_claude_bridge() {

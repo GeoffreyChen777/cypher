@@ -1059,6 +1059,13 @@ impl Wizard {
                     let joined = self.views.get(ix).is_some_and(|v| v.joined);
                     if joined && !labels.is_empty() {
                         vec![labels.join(", ")]
+                    } else if labels.is_empty()
+                        && optional_comment_copy(&q.header, &q.question).is_some()
+                    {
+                        // A blank optional comment is an answer, not a
+                        // dismissal: no labels at all would reach pi-ask-user
+                        // as a cancel and drop the option already picked.
+                        vec![String::new()]
                     } else {
                         labels
                     }
@@ -7845,6 +7852,13 @@ impl Composer {
         }
     }
 
+    /// Skip pi-ask-user's optional comment: send the pick without one. This
+    /// answers the stage (blank) — cancelling it would discard the pick.
+    fn wizard_skip_comment(&mut self, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text("", cx));
+        self.wizard_advance(cx);
+    }
+
     /// Dismiss a slash-command picker: empty answers map to Pi's
     /// `cancelled: true`, so the extension handler returns and the run ends.
     fn wizard_cancel(&mut self, cx: &mut Context<Self>) {
@@ -8448,7 +8462,7 @@ impl Composer {
             Some(
                 crate::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
                     .id("wizard-comment-skip")
-                    .on_click(cx.listener(|this, _, _, cx| this.wizard_cancel(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.wizard_skip_comment(cx)))
                     .into_any_element(),
             )
         } else if page > 0 {
@@ -10569,6 +10583,39 @@ mod tests {
         assert_eq!(answers[0].labels, vec![ASK_USER_CUSTOM_OPTION]);
         let w = Wizard::new("req".into(), vec![question("q", &["a", "b"], false)]);
         assert_eq!(w.view().custom_ix, None);
+    }
+
+    /// Regression (user report): picking an option and then submitting or
+    /// skipping pi-ask-user's optional comment came back to the model as
+    /// "cancelled". A blank comment must answer `""`, never empty labels.
+    #[test]
+    fn blank_optional_comment_answers_empty_text_not_a_cancel() {
+        let comment = UserInputQuestion {
+            id: "c".into(),
+            header: "Optional comment".into(),
+            question: "Which mode?\n\nSelected option:\n- Safe mode".into(),
+            options: Vec::new(),
+            multi_select: false,
+        };
+        let mut w = Wizard::new("req".into(), vec![comment.clone()]);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec![String::new()]);
+
+        let mut w = Wizard::new("req".into(), vec![comment]);
+        w.set_typed("keep it short".into());
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["keep it short"]);
+
+        // Any other options-less page left blank still sends no labels.
+        let mut w = Wizard::new("req".into(), vec![question("q", &[], false)]);
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert!(answers[0].labels.is_empty());
     }
 
     #[test]
