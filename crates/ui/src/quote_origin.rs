@@ -334,7 +334,7 @@ fn list_item_ranges(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
 /// as typed (one element; the span's text is the displayed prompt), so
 /// paragraphs are the blank-line-separated runs of it.
 fn map_prompt(agent: &str, members: &[(&Span, usize)]) -> Option<QuoteAlign> {
-    let agent = crate::attachments::parse_user_message_images(agent).text;
+    let agent = crate::attachments::parse_user_message_attachments(agent).text;
     let (first, _) = members.first()?;
     let (last, _) = members.last()?;
     let shown_text = first.text.as_str();

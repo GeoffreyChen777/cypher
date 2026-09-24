@@ -368,3 +368,82 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
     );
     core.shutdown().await;
 }
+
+/// Arbitrary files ride the same queue-first path as images: a Run queued with
+/// an image AND a non-image (non-ASCII name) executes once both seal, the
+/// agent gets both final paths, and — because a non-image is present — the
+/// trailer switches to the `Attached files` header (image-only sends keep the
+/// historical `Attached images` bytes, asserted above).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_image_files_upload_seal_and_reach_the_agent() {
+    let (core, harness, _tmp) = assemble().await;
+    let client = cypher_rpc::memory_client(core.rpc_service());
+    let files = [
+        ("up-file-img", "shot.png", b"\x89PNG\r\n\x1a\n".to_vec()),
+        (
+            "up-file-pdf",
+            "季度 报告.pdf",
+            b"%PDF-1.7\n%\xe2\xe3\n".to_vec(),
+        ),
+    ];
+    let pending = files
+        .iter()
+        .map(|(id, name, _)| PendingAttachment {
+            upload_id: (*id).into(),
+            file_name: (*name).into(),
+        })
+        .collect();
+    let command = serde_json::to_value(run_payload("msg-files", pending)).unwrap();
+    client
+        .call(
+            cypher_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": CHAT, "command": command }),
+        )
+        .await
+        .expect("QueueCommand");
+
+    let mut paths = Vec::new();
+    for (id, name, bytes) in &files {
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        client
+            .call(
+                cypher_rpc::methods::UPLOAD_CHUNK,
+                serde_json::json!({ "uploadId": id, "seq": 0, "data": data }),
+            )
+            .await
+            .expect("UploadChunk");
+        let committed = client
+            .call(
+                cypher_rpc::methods::UPLOAD_COMMIT,
+                serde_json::json!({ "uploadId": id, "fileName": name, "chatId": CHAT }),
+            )
+            .await
+            .expect("UploadCommit");
+        let path = committed["path"].as_str().expect("path").to_string();
+        assert_eq!(&std::fs::read(&path).unwrap(), bytes, "{name} bytes intact");
+        paths.push(path);
+    }
+    assert!(
+        paths[1].ends_with("-季度_报告.pdf"),
+        "unicode letters survive name sanitizing: {}",
+        paths[1]
+    );
+
+    wait_for(
+        || !harness.requests.lock().unwrap().is_empty(),
+        "run executes after both seals",
+    )
+    .await;
+    let req = harness.requests.lock().unwrap()[0].clone();
+    assert_eq!(req.attachments, paths, "both final paths reach the harness");
+    assert!(
+        req.prompt
+            .contains("\n\nAttached files (local files — open them to view):\n"),
+        "mixed send uses the files header: {}",
+        req.prompt
+    );
+    for path in &paths {
+        assert!(req.prompt.contains(&format!("- {path}")), "ref for {path}");
+    }
+    core.shutdown().await;
+}

@@ -18,6 +18,9 @@ import SwiftUI
 
 /// The body used for image-only sends.
 let attachmentOnlyText = "See the attached image(s)."
+/// The body desktop uses for a text-less send carrying any non-image file
+/// (cypher_proto::attachment_refs) — hidden in bubbles like the image one.
+let fileAttachmentOnlyText = "See the attached file(s)."
 
 /// use-attachments.ts `withAttachments`: plain local paths appended to the
 /// text — the files are staged on the device that runs the agent.
@@ -53,7 +56,10 @@ func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
     for (ix, raw) in lines.enumerated() where ix > 0 {
         let line = raw.trimmingCharacters(in: .whitespaces)
         if lines[ix - 1].trimmingCharacters(in: .whitespaces).isEmpty,
-           line.lowercased().hasPrefix("attached images (local files"),
+           // Desktop switches to "Attached files" when a send carries any
+           // non-image file (cypher_proto::attachment_refs); accept both.
+           line.lowercased().hasPrefix("attached images (local files")
+               || line.lowercased().hasPrefix("attached files (local files"),
            line.hasSuffix("):") {
             markerIx = ix
             break
@@ -75,7 +81,8 @@ func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
     }
     let body = lines[..<(markerIx - 1)].joined(separator: "\n")
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    return ParsedUserMessage(text: body == attachmentOnlyText ? "" : body,
+    let placeholder = body == attachmentOnlyText || body == fileAttachmentOnlyText
+    return ParsedUserMessage(text: placeholder ? "" : body,
                              attachments: attachments)
 }
 

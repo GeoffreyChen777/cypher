@@ -123,30 +123,14 @@ pub(crate) fn active_branch_user_entries(
     users
 }
 
-/// Strip the image-attachment trailer (`…\n\nAttached images (local files` …
-/// `):` …) from a user message's text, returning the visible prompt. The
-/// trailer rides cypher prompt text AND the pi session user entries; prompt
-/// mapping compares the VISIBLE text, so both sides are normalized through
-/// this. Mirrors the UI's `parseUserMessageImages` marker (case-insensitive
-/// line start, `):` end).
+/// Strip the attachment-refs trailer (`…\n\nAttached images|files (local
+/// files` … `):` …) from a user message's text, returning the visible prompt.
+/// The trailer rides cypher prompt text AND the pi session user entries;
+/// prompt mapping compares the VISIBLE text, so both sides are normalized
+/// through this — the shared [`cypher_proto::attachment_refs`] marker, same
+/// as the UI parser.
 pub fn strip_attachment_trailer(content: &str) -> &str {
-    let lower = content.to_ascii_lowercase();
-    let needle = "\n\nattached images (local files";
-    let mut from = 0usize;
-    while let Some(rel) = lower[from..].find(needle) {
-        let gap = from + rel;
-        let line_start = gap + 2;
-        let line_end = content[line_start..]
-            .find('\n')
-            .map(|p| line_start + p)
-            .unwrap_or(content.len());
-        let line = content[line_start..line_end].trim_end_matches('\r');
-        if line.ends_with("):") {
-            return content[..gap].trim_end();
-        }
-        from = line_start;
-    }
-    content
+    cypher_proto::attachment_refs::strip(content)
 }
 
 /// Does a pi user entry's text correspond to a Cypher visible prompt? Either

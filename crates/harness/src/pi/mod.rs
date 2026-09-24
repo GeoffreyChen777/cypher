@@ -2928,14 +2928,19 @@ async fn run_session(session: Session) {
 }
 
 /// `RunRequest.attachments` (absolute paths already staged on the run device)
-/// → pi `prompt`/`steer` `images` blocks. Only image/* files inline — other
-/// attachments have no pi content block and are left to the prompt text refs.
+/// → pi `prompt`/`steer` `images` blocks. Only the formats provider vision
+/// APIs accept inline (PNG/JPEG/GIF/WebP) — an image block in any other type
+/// (BMP, SVG, TIFF…) is rejected by the provider and fails the whole turn.
+/// Everything else is left to the prompt text refs.
 fn inline_images(paths: &[String]) -> Option<Value> {
     use base64::Engine as _;
     let mut images: Vec<Value> = Vec::new();
     for path in paths {
         let mime = mime_for_path(path);
-        if !mime.starts_with("image/") {
+        if !matches!(
+            mime.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
             continue;
         }
         let Ok(bytes) = std::fs::read(path) else {
@@ -3253,6 +3258,12 @@ mod tests {
         assert_eq!(images[0]["type"], "image");
         // Nothing image-shaped → None.
         assert!(inline_images(&[txt.display().to_string()]).is_none());
+        // Image types providers reject never inline (they'd fail the turn).
+        let bmp = dir.path().join("scan.bmp");
+        let svg = dir.path().join("logo.svg");
+        std::fs::write(&bmp, b"BM").unwrap();
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        assert!(inline_images(&[bmp.display().to_string(), svg.display().to_string()]).is_none());
     }
 
     #[test]

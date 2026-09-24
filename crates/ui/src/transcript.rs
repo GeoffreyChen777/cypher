@@ -507,9 +507,10 @@ pub enum RowKind {
         /// once per entry change in [`rows_for_entry`] (rows are cached by
         /// fingerprint), never per frame. Empty for ordinary prompts.
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
-        /// Image refs parsed out of the message text (message-attachments.ts):
-        /// thumbnails load from the owning device via ReadAttachmentChunk.
-        attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
+        /// Attachment refs parsed out of the message text (message-attachments.ts):
+        /// image thumbnails load from the owning device via
+        /// ReadAttachmentChunk; other files render as tiles.
+        attachments: Arc<Vec<crate::attachments::UserAttachment>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -579,7 +580,7 @@ pub struct Row {
 fn renders_as_command_chip(
     text: &str,
     mentions: &[crate::composer::SentMentionSpan],
-    attachments: &[crate::attachments::UserImageAttachment],
+    attachments: &[crate::attachments::UserAttachment],
 ) -> bool {
     crate::composer::slash_command_label(text).is_some()
         && mentions.is_empty()
@@ -825,7 +826,7 @@ fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
     let text = if entry.role == MessageRole::User {
         // Match the visible user bubble: no attachment transport paths or
         // internal file/session mention URLs on the clipboard.
-        let parsed = crate::attachments::parse_user_message_images(&text);
+        let parsed = crate::attachments::parse_user_message_attachments(&text);
         crate::composer::sent_mention_display(&parsed.text)
             .map(|(display, _)| display)
             .unwrap_or(parsed.text)
@@ -996,7 +997,7 @@ pub fn rows_for_entry(
             .join("\n\n");
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
-        let parsed = crate::attachments::parse_user_message_images(&raw);
+        let parsed = crate::attachments::parse_user_message_attachments(&raw);
         // File mentions render as chips here too, not just in the composer.
         // The projection is pure over the text, so the raw-length row version
         // below stays a valid cache/diff key.
@@ -3269,7 +3270,7 @@ impl Transcript {
         let mut keys = std::collections::HashSet::new();
         for row in &self.rows {
             if let RowKind::User { attachments, .. } = &row.kind {
-                for att in attachments.iter() {
+                for att in attachments.iter().filter(|att| att.is_image) {
                     for dev in &devices {
                         keys.insert((dev.clone(), att.path.clone()));
                     }
@@ -3396,15 +3397,17 @@ impl Transcript {
         self.attachment_retries.insert(key, task);
     }
 
-    /// The right-aligned thumbnail strip above a user bubble.
+    /// Attachments above a user bubble, right-aligned: image thumbnails in a
+    /// fixed-height strip, then non-image files as stacked bars (icon + name).
     fn render_user_attachments(
         &mut self,
         row_id: &SharedString,
-        atts: &[crate::attachments::UserImageAttachment],
+        atts: &[crate::attachments::UserAttachment],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
         let device_ids = self.attachment_device_ids(cx);
+        let theme = Theme::of(cx).clone();
         let mut strip = div()
             .w_full()
             .h(px(ATT_STRIP_H))
@@ -3416,14 +3419,37 @@ impl Transcript {
             .overflow_hidden()
             .px(px(4.0))
             .pt(px(4.0));
+        // Plain files need no read-back (the engine only serves image types):
+        // each bar renders from the path alone.
+        let mut bars = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(crate::attachments::FILE_BAR_GAP))
+            .px(px(4.0))
+            .pt(px(4.0))
+            // Same clearance above the bubble as the thumbnail strip leaves
+            // under its thumbs (ATT_STRIP_H - top pad - ATT_THUMB_H).
+            .pb(px(ATT_STRIP_H - 4.0 - ATT_THUMB_H));
+        let (mut has_thumbs, mut has_bars) = (false, false);
         for (aix, att) in atts.iter().enumerate() {
-            let state = self.attachment_state(&device_ids, &att.path, cx);
+            if !att.is_image {
+                bars = bars.child(crate::attachments::file_bar(
+                    crate::attachments::display_file_name(&att.name),
+                    &theme,
+                ));
+                has_bars = true;
+                continue;
+            }
+            has_thumbs = true;
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
                 .h(px(ATT_THUMB_H))
                 .rounded(px(8.0))
                 .overflow_hidden();
+            let state = self.attachment_state(&device_ids, &att.path, cx);
             let thumb: AnyElement = match state {
                 AttachmentSnapshot::Loaded(image) => {
                     let preview = crate::attachments::PreviewImage {
@@ -3477,7 +3503,13 @@ impl Transcript {
             };
             strip = strip.child(thumb);
         }
-        strip.into_any_element()
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .when(has_thumbs, |column| column.child(strip))
+            .when(has_bars, |column| column.child(bars))
+            .into_any_element()
     }
 
     // ---- rendering ----

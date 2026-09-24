@@ -1767,6 +1767,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "gpui_tokio",
+ "image",
  "objc",
  "pulldown-cmark",
  "reqwest_client",

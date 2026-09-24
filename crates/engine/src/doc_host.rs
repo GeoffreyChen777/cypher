@@ -3057,26 +3057,14 @@ impl DocHost {
     }
 }
 
-/// The `Attached images (local files …)` trailer the host appends to a Run's
-/// visible prompt (and its effective annotated prompt) from SEALED final paths
-/// at execute time — byte-identical to the composer's `with_attachments` so
-/// existing transcript parsing/rendering keep working. Pending refs never
+/// The attachment-refs trailer the host appends to a Run's visible prompt
+/// (and its effective annotated prompt) from SEALED final paths at execute
+/// time — the shared [`cypher_proto::attachment_refs`] transport, so it is
+/// byte-identical to the composer's `with_attachments`. Pending refs never
 /// reach this point: the composer queues the Run without a trailer, and only
 /// sealed paths enter the prompt here. Pure.
 pub fn attachment_refs_trailer(text: &str, paths: &[String]) -> String {
-    if paths.is_empty() {
-        return text.to_string();
-    }
-    let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
-    let body = if text.is_empty() {
-        "See the attached image(s)."
-    } else {
-        text
-    };
-    format!(
-        "{body}\n\nAttached images (local files — open them to view):\n{}",
-        refs.join("\n")
-    )
+    cypher_proto::attachment_refs::with_refs(text, paths)
 }
 
 /// The resumed-turn prompt for answers to a question whose run died: each

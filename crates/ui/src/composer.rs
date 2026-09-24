@@ -238,17 +238,29 @@ pub const STRIP_GAP: f32 = 8.0;
 pub const STRIP_PAD_TOP: f32 = 12.0;
 pub const STRIP_PAD_X: f32 = 16.0;
 
-/// Height the wrap strip adds to the pill for `count` staged thumbnails at an
-/// `inner_width` pill content width (0 when empty). Mirrors flex-wrap: as many
-/// 56px thumbs per row as fit with 8px gaps inside the 16px side insets.
-pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
-    if count == 0 {
+/// Height the attachment strip adds to the pill for `images` staged thumbnails
+/// and `files` staged file bars at an `inner_width` pill content width (0 when
+/// empty). Mirrors the layout: thumbs flex-wrap (as many 56px thumbs per row as
+/// fit with 8px gaps inside the 16px side insets), then one bar per line below.
+pub fn attachment_strip_height(images: usize, files: usize, inner_width: f32) -> f32 {
+    if images == 0 && files == 0 {
         return 0.0;
     }
-    let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
-    let per_row = (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1);
-    let rows = count.div_ceil(per_row);
-    STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
+    let mut height = STRIP_PAD_TOP;
+    if images > 0 {
+        let usable = (inner_width - 2.0 * STRIP_PAD_X).max(STRIP_THUMB);
+        let per_row = (((usable + STRIP_GAP) / (STRIP_THUMB + STRIP_GAP)).floor() as usize).max(1);
+        let rows = images.div_ceil(per_row);
+        height += rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP;
+    }
+    if files > 0 {
+        if images > 0 {
+            height += STRIP_GAP;
+        }
+        height +=
+            files as f32 * attachments::FILE_BAR_H + (files - 1) as f32 * attachments::FILE_BAR_GAP;
+    }
+    height
 }
 
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
@@ -649,7 +661,7 @@ fn strip_attachment_trailer(entry: &SessionMessageEntry) -> SessionMessageEntry 
     let mut entry = entry.clone();
     for part in &mut entry.parts {
         if let MessagePart::Text { text, .. } = part {
-            *text = crate::attachments::parse_user_message_images(text).text;
+            *text = crate::attachments::parse_user_message_attachments(text).text;
         }
     }
     entry
@@ -4771,10 +4783,11 @@ impl Composer {
                 .collect();
             if cypher_env::var("ATTACH_PREVIEW").is_some_and(|v| v == "1")
                 && let Some(first) = staged.first()
+                && let Some(image) = first.image()
             {
                 composer.preview = Some(attachments::PreviewImage {
                     name: first.name.clone().into(),
-                    image: first.image.clone(),
+                    image: image.clone(),
                 });
                 composer.preview_focus_pending = true;
             }
@@ -4822,15 +4835,12 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stage image files (picker / drop / pasted paths). Non-images are
-    /// skipped silently (matching the original's `image/*` filter); read
-    /// failures and oversize files surface in the failure notice.
+    /// Stage files (picker / drop / pasted paths): images preview as
+    /// thumbnails, anything else as a file tile. Folders, read failures, and
+    /// oversize files surface in the failure notice.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut staged = Vec::new();
         for path in &paths {
-            if attachments::format_by_extension(path).is_none() {
-                continue;
-            }
             match attachments::stage_file(path) {
                 Ok(att) => staged.push(att),
                 Err(message) => {
@@ -5280,94 +5290,116 @@ impl Composer {
         crate::frost::composer_accessory(trigger).into_any_element()
     }
 
-    /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
-    /// `flex flex-wrap gap-2 px-4 pt-3`, 56px rounded thumbs, a remove button
-    /// revealed on hover, click opens the full-size preview.
+    /// The staged-attachment strip (attachment-ui.tsx AttachmentStrip): image
+    /// thumbs in a `flex flex-wrap gap-2 px-4 pt-3` row (56px, click opens the
+    /// full-size preview), then non-image files as stacked bars (icon + name).
+    /// Every item reveals a remove button on hover. Layout must match
+    /// [`attachment_strip_height`].
     fn render_attachment_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let staged = self.staged();
         if staged.is_empty() {
             return None;
         }
-        let mut strip = div()
+        let mut thumbs = div().flex().flex_row().flex_wrap().gap(px(STRIP_GAP));
+        let mut bars = div()
             .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(STRIP_GAP))
-            .px(px(STRIP_PAD_X))
-            .pt(px(STRIP_PAD_TOP));
+            .flex_col()
+            .items_start()
+            .gap(px(attachments::FILE_BAR_GAP));
+        let (mut has_thumbs, mut has_bars) = (false, false);
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage {
-                name: att.name.clone().into(),
-                image: att.image.clone(),
-            };
             let remove_id = att.id.clone();
-            strip = strip.child(
-                div()
-                    .group(group.clone())
-                    .relative()
-                    .child(
-                        div()
-                            .id(("composer-att-thumb", ix))
-                            .size(px(STRIP_THUMB))
-                            .rounded(px(8.0))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.preview = Some(preview.clone());
-                                this.preview_focus_pending = true;
-                                cx.notify();
-                            }))
-                            .child(
-                                img(att.image.clone())
-                                    .size_full()
-                                    // Own radii — the frame's rounding only
-                                    // clips rectangularly (7 = 8 - border).
-                                    .rounded(px(7.0))
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                    )
-                    // Own layer: inside the frosted pill everything shares one
-                    // draw order and images render last, so without it the
-                    // thumbnail paints OVER this button (user report).
-                    .child(crate::frost::layered(
-                        div()
-                            .id(("composer-att-remove", ix))
-                            .absolute()
-                            .top(px(-6.0))
-                            .right(px(-6.0))
-                            .size(px(18.0))
-                            .rounded_full()
-                            .bg(theme.bg)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .shadow_sm()
-                            .opacity(0.0)
-                            .group_hover(group, |s| s.opacity(1.0))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // The button overhangs the thumbnail, whose
-                                // hitbox is right underneath — don't let the
-                                // same click also open the preview.
-                                cx.stop_propagation();
-                                this.remove_attachment(&remove_id, cx);
-                            }))
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    )),
-            );
+            let body = match att.image() {
+                Some(image) => {
+                    let preview = attachments::PreviewImage {
+                        name: att.name.clone().into(),
+                        image: image.clone(),
+                    };
+                    div()
+                        .id(("composer-att-thumb", ix))
+                        .size(px(STRIP_THUMB))
+                        .rounded(px(8.0))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.10))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.preview = Some(preview.clone());
+                            this.preview_focus_pending = true;
+                            cx.notify();
+                        }))
+                        .child(
+                            img(image.clone())
+                                .size_full()
+                                // Own radii — the frame's rounding only
+                                // clips rectangularly (7 = 8 - border).
+                                .rounded(px(7.0))
+                                .object_fit(ObjectFit::Cover),
+                        )
+                        .into_any_element()
+                }
+                None => attachments::file_bar(&att.name, theme).into_any_element(),
+            };
+            let item = div()
+                .group(group.clone())
+                .relative()
+                .max_w_full()
+                .child(body)
+                // Own layer: inside the frosted pill everything shares one
+                // draw order and images render last, so without it the
+                // thumbnail paints OVER this button (user report).
+                .child(crate::frost::layered(
+                    div()
+                        .id(("composer-att-remove", ix))
+                        .absolute()
+                        .top(px(-6.0))
+                        .right(px(-6.0))
+                        .size(px(18.0))
+                        .rounded_full()
+                        .bg(theme.bg)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .shadow_sm()
+                        .opacity(0.0)
+                        .group_hover(group, |s| s.opacity(1.0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // The button overhangs the thumbnail, whose
+                            // hitbox is right underneath — don't let the
+                            // same click also open the preview.
+                            cx.stop_propagation();
+                            this.remove_attachment(&remove_id, cx);
+                        }))
+                        .child(
+                            crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        ),
+                ));
+            if att.image().is_some() {
+                thumbs = thumbs.child(item);
+                has_thumbs = true;
+            } else {
+                bars = bars.child(item);
+                has_bars = true;
+            }
         }
-        Some(strip)
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(STRIP_GAP))
+                .px(px(STRIP_PAD_X))
+                .pt(px(STRIP_PAD_TOP))
+                .when(has_thumbs, |strip| strip.child(thumbs))
+                .when(has_bars, |strip| strip.child(bars)),
+        )
     }
 
-    /// Paperclip: the native image picker (the original's hidden
-    /// `<input type=file accept=image/* multiple>`).
+    /// Paperclip: the native file picker (any file type — images preview,
+    /// everything else stages as a file tile).
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -6806,11 +6838,13 @@ impl Composer {
             .collect();
         let echo_text = attachments::with_attachments(&text, &echo_paths);
         for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+            // Plain files render as tiles from the path alone — nothing to seed.
+            let Some(image) = att.image() else { continue };
+            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
             if let Some(local) = local_device_id.as_deref()
                 && local != device_id
             {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
+                attachments::seed_attachment(local, path, &att.name, image.clone());
             }
         }
 
@@ -7070,9 +7104,10 @@ impl Composer {
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
                     for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        let Some(image) = att.image() else { continue };
+                        attachments::seed_attachment(&seed_device, path, &att.name, image.clone());
                         if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
                         }
                     }
                     content = attachments::with_attachments(&text, &attachment_paths);
@@ -7297,18 +7332,19 @@ impl Composer {
                             let seed_device =
                                 host_device_id.clone().unwrap_or_else(|| device_id.clone());
                             for (path, att) in attachment_paths.iter().zip(&staged) {
+                                let Some(image) = att.image() else { continue };
                                 attachments::seed_attachment(
                                     &seed_device,
                                     path,
                                     &att.name,
-                                    att.image.clone(),
+                                    image.clone(),
                                 );
                                 if seed_device != device_id {
                                     attachments::seed_attachment(
                                         &device_id,
                                         path,
                                         &att.name,
-                                        att.image.clone(),
+                                        image.clone(),
                                     );
                                 }
                             }
@@ -8579,9 +8615,10 @@ impl Render for Composer {
         // `morph_t`) animates. Steady state renders exactly the target.
         // Staged attachments add the wrap strip's height to the pill in BOTH
         // modes (attachment-ui.tsx AttachmentStrip sits above the input row).
-        let staged_count = self.staged().len();
+        let staged_images = self.staged().iter().filter(|a| a.image().is_some()).count();
+        let staged_files = self.staged().len() - staged_images;
         let strip_width_hint = if last_width > 0.0 { last_width } else { 720.0 };
-        let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        let strip_h = attachment_strip_height(staged_images, staged_files, strip_width_hint);
         let base_height = if expanded {
             composer_total_height(content_height)
         } else {
@@ -8815,6 +8852,32 @@ impl Render for Composer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attachment_strip_height_stacks_file_bars_under_thumbs() {
+        use crate::attachments::{FILE_BAR_GAP, FILE_BAR_H};
+        assert_eq!(attachment_strip_height(0, 0, 600.0), 0.0);
+        // One row of thumbs only (unchanged from the thumbs-only layout).
+        assert_eq!(
+            attachment_strip_height(2, 0, 600.0),
+            STRIP_PAD_TOP + STRIP_THUMB
+        );
+        // Bars only: one per line.
+        assert_eq!(
+            attachment_strip_height(0, 2, 600.0),
+            STRIP_PAD_TOP + 2.0 * FILE_BAR_H + FILE_BAR_GAP
+        );
+        // Both: thumbs row, gap, bars.
+        assert_eq!(
+            attachment_strip_height(1, 1, 600.0),
+            STRIP_PAD_TOP + STRIP_THUMB + STRIP_GAP + FILE_BAR_H
+        );
+        // Narrow pill: thumbs wrap to two rows, bars unaffected.
+        assert_eq!(
+            attachment_strip_height(2, 1, 2.0 * STRIP_PAD_X + STRIP_THUMB),
+            STRIP_PAD_TOP + 2.0 * STRIP_THUMB + 2.0 * STRIP_GAP + FILE_BAR_H
+        );
+    }
+
     #[test]
     fn chat_line_height_expands_the_compact_composer_without_clipping() {
         assert_eq!(

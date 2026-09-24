@@ -26,6 +26,7 @@ use gpui::{
 
 use crate::state::EngineHandle;
 use crate::theme::ink;
+use cypher_proto::attachment_refs;
 use cypher_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
@@ -40,42 +41,32 @@ const MAX_READ_CHUNKS: usize = 1_000;
 // Text transport (message-attachments.ts)
 // ---------------------------------------------------------------------------
 
-/// The body used for image-only sends (`use-attachments.ts`).
-pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
-
 /// How attachments ride the prompt (use-attachments.ts `withAttachments`):
 /// plain local paths appended to the text — the files are staged on the device
 /// that runs the agent, so the agent can open them with its own tools; the
-/// same text is what persists as the user doc entry.
+/// same text is what persists as the user doc entry. The format itself lives in
+/// [`cypher_proto::attachment_refs`] (shared with the host's queue-first
+/// trailer and the Pi fork matcher).
 pub fn with_attachments(text: &str, paths: &[String]) -> String {
-    if paths.is_empty() {
-        return text.to_string();
-    }
-    let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
-    let body = if text.is_empty() {
-        ATTACHMENT_ONLY_TEXT
-    } else {
-        text
-    };
-    format!(
-        "{body}\n\nAttached images (local files — open them to view):\n{}",
-        refs.join("\n")
-    )
+    attachment_refs::with_refs(text, paths)
 }
 
 /// An attachment ref parsed back out of a user message's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserImageAttachment {
+pub struct UserAttachment {
     pub id: String,
     pub path: String,
     pub name: String,
+    /// Previewable image (thumbnail + read-back) vs a plain file tile —
+    /// decided by the path's extension, never by the trailer header.
+    pub is_image: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUserMessage {
-    /// The visible prompt (the refs trailer stripped; empty for image-only sends).
+    /// The visible prompt (the refs trailer stripped; empty for text-less sends).
     pub text: String,
-    pub attachments: Vec<UserImageAttachment>,
+    pub attachments: Vec<UserAttachment>,
 }
 
 fn name_from_path(path: &str) -> String {
@@ -85,57 +76,44 @@ fn name_from_path(path: &str) -> String {
         .map(str::trim)
         .unwrap_or_default();
     if name.is_empty() {
-        "image".to_string()
+        "file".to_string()
     } else {
         name.to_string()
     }
 }
 
-/// Find the refs trailer: a blank line, then a line starting (case-insensitive)
-/// with `Attached images (local files` and ending `):`. Returns
-/// `(body_end, refs_start)` byte offsets — the tolerant equivalent of zeron's
-/// `ATTACHED_IMAGES_RE`.
-fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
-    let lower = content.to_ascii_lowercase();
-    let needle = "\n\nattached images (local files";
-    let mut from = 0usize;
-    while let Some(rel) = lower[from..].find(needle) {
-        let gap = from + rel;
-        let line_start = gap + 2;
-        let line_end = content[line_start..]
-            .find('\n')
-            .map(|p| line_start + p)
-            .unwrap_or(content.len());
-        let line = content[line_start..line_end].trim_end_matches('\r');
-        if line.ends_with("):") {
-            let refs_start = (line_end + 1).min(content.len());
-            return Some((gap, refs_start));
+/// The name a file tile shows: the committed upload path's `{id8}-` prefix
+/// (uploads.rs `commit`) is storage detail, not part of the user's file name.
+pub fn display_file_name(name: &str) -> &str {
+    match name.split_once('-') {
+        Some((prefix, rest))
+            if prefix.len() == 8
+                && !rest.is_empty()
+                && prefix.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            rest
         }
-        from = line_start;
+        _ => name,
     }
-    None
 }
 
 /// message-attachments.ts `parseUserMessageImages`: split the visible prompt
 /// from its attachment-ref trailer.
-pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
-    let Some((body_end, refs_start)) = find_refs_marker(content) else {
+pub fn parse_user_message_attachments(content: &str) -> ParsedUserMessage {
+    let Some((body_end, refs_start)) = attachment_refs::find_marker(content) else {
         return ParsedUserMessage {
             text: content.to_string(),
             attachments: Vec::new(),
         };
     };
     let body = content[..body_end].trim_end();
-    let attachments: Vec<UserImageAttachment> = content[refs_start..]
-        .lines()
-        .filter_map(|line| {
-            let path = line.trim_start().strip_prefix("- ")?.trim();
-            (!path.is_empty()).then(|| path.to_string())
-        })
+    let attachments: Vec<UserAttachment> = attachment_refs::parse_refs(content, refs_start)
+        .into_iter()
         .enumerate()
-        .map(|(index, path)| UserImageAttachment {
+        .map(|(index, path)| UserAttachment {
             id: format!("{index}:{path}"),
             name: name_from_path(&path),
+            is_image: attachment_refs::is_image_path(&path),
             path,
         })
         .collect();
@@ -146,7 +124,7 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         };
     }
     ParsedUserMessage {
-        text: if body.trim() == ATTACHMENT_ONLY_TEXT {
+        text: if attachment_refs::is_placeholder_body(body) {
             String::new()
         } else {
             body.to_string()
@@ -156,16 +134,24 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
 }
 
 /// message-attachments.ts `userMessageRailText`: what the rail/sidebar shows
-/// for a user message ("Attached image" / "N attached images" when image-only).
+/// for a text-less send ("Attached image", "2 attached files", "3 attachments").
 pub fn user_message_rail_text(content: &str) -> String {
-    let parsed = parse_user_message_images(content);
+    let parsed = parse_user_message_attachments(content);
     if !parsed.text.trim().is_empty() {
         return parsed.text;
     }
-    match parsed.attachments.len() {
+    let atts = &parsed.attachments;
+    let noun = if atts.iter().all(|a| a.is_image) {
+        "image"
+    } else if atts.iter().all(|a| !a.is_image) {
+        "file"
+    } else {
+        return format!("{} attachments", atts.len());
+    };
+    match atts.len() {
         0 => content.to_string(),
-        1 => "Attached image".to_string(),
-        n => format!("{n} attached images"),
+        1 => format!("Attached {noun}"),
+        n => format!("{n} attached {noun}s"),
     }
 }
 
@@ -173,26 +159,47 @@ pub fn user_message_rail_text(content: &str) -> String {
 // Staging (use-attachments.ts intake)
 // ---------------------------------------------------------------------------
 
-/// An image staged in the composer, before upload. The raw bytes live inside
-/// the [`Image`] (gpui decodes them at paint; the same Arc feeds thumbnails,
-/// the lightbox, the upload, and the post-send cache seed).
+/// A file staged in the composer, before upload.
 #[derive(Clone)]
 pub struct StagedAttachment {
     pub id: String,
-    /// File name with a type-matching extension (use-attachments.ts
-    /// `ensureExtension` — agents sniff images by extension).
+    /// The uploaded file name. Images carry a type-matching extension
+    /// (use-attachments.ts `ensureExtension` — agents sniff images by
+    /// extension); other files keep their own name.
     pub name: String,
-    pub image: Arc<Image>,
+    pub content: StagedContent,
+}
+
+#[derive(Clone)]
+pub enum StagedContent {
+    /// A previewable image. The raw bytes live inside the [`Image`] (gpui
+    /// decodes them at paint; the same Arc feeds thumbnails, the lightbox,
+    /// the upload, and the post-send cache seed).
+    Image(Arc<Image>),
+    /// Any other file: uploaded as-is and shown as a file tile. The agent
+    /// opens it from the committed path with its own tools.
+    File(Arc<Vec<u8>>),
 }
 
 impl StagedAttachment {
     pub fn bytes(&self) -> &[u8] {
-        &self.image.bytes
+        match &self.content {
+            StagedContent::Image(image) => &image.bytes,
+            StagedContent::File(bytes) => bytes,
+        }
+    }
+
+    pub fn image(&self) -> Option<&Arc<Image>> {
+        match &self.content {
+            StagedContent::Image(image) => Some(image),
+            StagedContent::File(_) => None,
+        }
     }
 }
 
-/// Image formats the whole pipeline supports: intersection of gpui's decoders
-/// and the engine's `mime_by_ext` read-back jail.
+/// Image formats staged as previewable images: intersection of gpui's
+/// decoders and the engine's `mime_by_ext` read-back jail (the same set as
+/// [`attachment_refs::is_image_path`]). Anything else stages as a plain file.
 pub fn format_by_extension(path: &Path) -> Option<ImageFormat> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "png" => Some(ImageFormat::Png),
@@ -224,35 +231,94 @@ pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
     }
 }
 
-/// Stage a file from disk (picker / drop / pasted path). `Err` carries the
+/// Re-encode formats agents can't view as PNG. macOS puts screenshots on the
+/// clipboard as uncompressed TIFF: the Pi harness can't inline it (provider
+/// vision APIs take PNG/JPEG/GIF/WebP only), so the agent got a bare path it
+/// had to convert itself — and the upload was several MB instead of a few
+/// hundred KB. BMP has the same problem. Anything else (or a decode failure)
+/// passes through untouched.
+pub fn normalize_for_agent(format: ImageFormat, bytes: Vec<u8>) -> (ImageFormat, Vec<u8>) {
+    let source = match format {
+        ImageFormat::Tiff => image::ImageFormat::Tiff,
+        ImageFormat::Bmp => image::ImageFormat::Bmp,
+        _ => return (format, bytes),
+    };
+    let png = image::load_from_memory_with_format(&bytes, source).and_then(|decoded| {
+        let mut out = std::io::Cursor::new(Vec::new());
+        decoded.write_to(&mut out, image::ImageFormat::Png)?;
+        Ok(out.into_inner())
+    });
+    match png {
+        Ok(png) => (ImageFormat::Png, png),
+        Err(err) => {
+            tracing::warn!(?format, error = %err, "attachment PNG re-encode failed; keeping original");
+            (format, bytes)
+        }
+    }
+}
+
+/// Swap `name`'s extension for `format`'s (after [`normalize_for_agent`]
+/// changed the bytes' type).
+fn with_format_extension(name: &str, format: ImageFormat) -> String {
+    let stem = Path::new(name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "image".to_string());
+    format!("{stem}.{}", format.extension())
+}
+
+/// Stage a file from disk (picker / drop / pasted path): images become
+/// previewable attachments, anything else a plain file. `Err` carries the
 /// user-facing message (mirrors the old `onError` copy).
 pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
     let display_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "image".to_string());
-    let Some(format) = format_by_extension(path) else {
-        return Err(format!("{display_name} is not a supported image."));
-    };
+        .unwrap_or_else(|| "file".to_string());
     let meta = std::fs::metadata(path).map_err(|_| format!("{display_name} could not be read."))?;
+    if meta.is_dir() {
+        return Err(format!(
+            "{display_name} is a folder — attach the files inside it instead."
+        ));
+    }
     if meta.len() > MAX_ATTACHMENT_BYTES {
         return Err(format!("{display_name} is too large (24 MB max)."));
     }
     let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
+    let Some(format) = format_by_extension(path) else {
+        return Ok(StagedAttachment {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: display_name,
+            content: StagedContent::File(Arc::new(bytes)),
+        });
+    };
+    let (staged_format, bytes) = normalize_for_agent(format, bytes);
+    let name = if staged_format == format {
+        ensure_extension(&display_name, format)
+    } else {
+        with_format_extension(&display_name, staged_format)
+    };
     Ok(StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension(&display_name, format),
-        image: Arc::new(Image::from_bytes(format, bytes)),
+        name,
+        content: StagedContent::Image(Arc::new(Image::from_bytes(staged_format, bytes))),
     })
 }
 
 /// Stage an image pasted from the clipboard.
 pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
-    let format = image.format;
+    let (format, image) = match image.format {
+        ImageFormat::Tiff | ImageFormat::Bmp => {
+            let (format, bytes) = normalize_for_agent(image.format, image.bytes.clone());
+            (format, Image::from_bytes(format, bytes))
+        }
+        format => (format, image),
+    };
     StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
         name: ensure_extension("image", format),
-        image: Arc::new(image),
+        content: StagedContent::Image(Arc::new(image)),
     }
 }
 
@@ -699,6 +765,51 @@ pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image
 }
 
 // ---------------------------------------------------------------------------
+// File bar (non-image attachments)
+// ---------------------------------------------------------------------------
+
+/// Height of a non-image attachment bar (composer strip and transcript).
+pub const FILE_BAR_H: f32 = 30.0;
+/// Vertical gap between stacked file bars.
+pub const FILE_BAR_GAP: f32 = 6.0;
+/// Widest a bar grows before the name truncates.
+pub const FILE_BAR_MAX_W: f32 = 280.0;
+
+/// A non-image attachment: a horizontal rounded bar with a document glyph and
+/// the file name (truncated). Sized to its content up to [`FILE_BAR_MAX_W`];
+/// shared by the composer strip and the transcript.
+pub fn file_bar(name: &str, theme: &crate::theme::Theme) -> gpui::Div {
+    div()
+        .h(px(FILE_BAR_H))
+        .max_w(px(FILE_BAR_MAX_W))
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .pl(px(10.0))
+        .pr(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(crate::theme::hairline(0.11))
+        .bg(crate::theme::ink(0.035))
+        .child(
+            crate::icons::icon(crate::icons::DOCUMENT)
+                .flex_none()
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(theme.text)
+                .child(SharedString::from(name.to_string())),
+        )
+}
+
+// ---------------------------------------------------------------------------
 // Preview lightbox (attachment-ui.tsx AttachmentPreviewDialog)
 // ---------------------------------------------------------------------------
 
@@ -777,7 +888,7 @@ mod tests {
     fn with_attachments_round_trips_through_parse() {
         let paths = vec!["/data/uploads/ab-cat.png".to_string(), "/x/dog.jpg".into()];
         let content = with_attachments("look at these", &paths);
-        let parsed = parse_user_message_images(&content);
+        let parsed = parse_user_message_attachments(&content);
         assert_eq!(parsed.text, "look at these");
         assert_eq!(parsed.attachments.len(), 2);
         assert_eq!(parsed.attachments[0].path, "/data/uploads/ab-cat.png");
@@ -789,8 +900,8 @@ mod tests {
     #[test]
     fn image_only_send_hides_placeholder_body() {
         let content = with_attachments("", &["/a/b.png".to_string()]);
-        assert!(content.starts_with(ATTACHMENT_ONLY_TEXT));
-        let parsed = parse_user_message_images(&content);
+        assert!(content.starts_with(attachment_refs::IMAGES_ONLY_TEXT));
+        let parsed = parse_user_message_attachments(&content);
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.attachments.len(), 1);
     }
@@ -798,23 +909,68 @@ mod tests {
     #[test]
     fn plain_text_passes_through_unchanged() {
         assert_eq!(with_attachments("hello", &[]), "hello");
-        let parsed = parse_user_message_images("hello\n\nno images here");
+        let parsed = parse_user_message_attachments("hello\n\nno images here");
         assert!(parsed.attachments.is_empty());
         assert_eq!(parsed.text, "hello\n\nno images here");
     }
 
     #[test]
     fn marker_is_case_insensitive_and_requires_ref_lines() {
-        let parsed = parse_user_message_images(
+        let parsed = parse_user_message_attachments(
             "hi\n\nATTACHED IMAGES (local files — open them to view):\n- /p/q.png",
         );
         assert_eq!(parsed.attachments.len(), 1);
         // A trailer with no valid `- path` lines is left as plain text.
-        let empty = parse_user_message_images(
+        let empty = parse_user_message_attachments(
             "hi\n\nAttached images (local files — open them to view):\nnothing",
         );
         assert!(empty.attachments.is_empty());
         assert!(empty.text.contains("Attached images"));
+    }
+
+    #[test]
+    fn files_parse_as_non_image_refs_with_clean_display_names() {
+        let paths = vec![
+            "/u/1f36c26d-shot.png".to_string(),
+            "/u/0a1b2c3d-季度_报告.pdf".to_string(),
+        ];
+        let content = with_attachments("", &paths);
+        assert!(content.contains("Attached files (local files"));
+        let parsed = parse_user_message_attachments(&content);
+        assert_eq!(parsed.text, "", "file placeholder body is hidden");
+        assert!(parsed.attachments[0].is_image);
+        assert!(!parsed.attachments[1].is_image);
+        assert_eq!(
+            display_file_name(&parsed.attachments[1].name),
+            "季度_报告.pdf"
+        );
+        // Only a real 8-hex upload prefix is stripped.
+        assert_eq!(display_file_name("my-notes.txt"), "my-notes.txt");
+        assert_eq!(display_file_name("deadbeef-"), "deadbeef-");
+        // An older host writes the images header even for a PDF: the ref
+        // still renders as a file (decided by path, not header).
+        let legacy = "x\n\nAttached images (local files — open them to view):\n- /u/a.pdf";
+        assert!(!parse_user_message_attachments(legacy).attachments[0].is_image);
+    }
+
+    #[test]
+    fn non_image_files_stage_as_plain_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("季度 报告.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let staged = stage_file(&pdf).unwrap();
+        assert_eq!(staged.name, "季度 报告.pdf");
+        assert!(staged.image().is_none());
+        assert_eq!(staged.bytes(), b"%PDF-1.7");
+
+        let bare = dir.path().join("Makefile");
+        std::fs::write(&bare, b"").unwrap();
+        assert_eq!(stage_file(&bare).unwrap().bytes(), b"");
+
+        let folder = dir.path().join("src");
+        std::fs::create_dir(&folder).unwrap();
+        let err = stage_file(&folder).err().expect("folders are rejected");
+        assert!(err.contains("is a folder"), "{err}");
     }
 
     #[test]
@@ -826,6 +982,10 @@ mod tests {
         let with_text = with_attachments("fix this", &["/a/b.png".to_string()]);
         assert_eq!(user_message_rail_text(&with_text), "fix this");
         assert_eq!(user_message_rail_text("plain"), "plain");
+        let file = with_attachments("", &["/a/b.pdf".to_string()]);
+        assert_eq!(user_message_rail_text(&file), "Attached file");
+        let mixed = with_attachments("", &["/a/b.pdf".to_string(), "/c/d.png".into()]);
+        assert_eq!(user_message_rail_text(&mixed), "2 attachments");
     }
 
     #[test]
@@ -843,6 +1003,49 @@ mod tests {
     }
 
     #[test]
+    fn tiff_and_bmp_are_staged_as_png() {
+        let pixels = image::RgbImage::from_pixel(3, 2, image::Rgb([200, 10, 40]));
+        for (source, ext, format) in [
+            (image::ImageFormat::Tiff, "tiff", ImageFormat::Tiff),
+            (image::ImageFormat::Bmp, "bmp", ImageFormat::Bmp),
+        ] {
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            pixels.write_to(&mut encoded, source).unwrap();
+            let encoded = encoded.into_inner();
+
+            // Clipboard paste (macOS screenshots arrive as TIFF).
+            let pasted = stage_clipboard_image(Image::from_bytes(format, encoded.clone()));
+            assert_eq!(pasted.name, "image.png", "{ext}");
+            assert_eq!(pasted.image().unwrap().format, ImageFormat::Png);
+            let decoded = image::load_from_memory(pasted.bytes()).unwrap().to_rgb8();
+            assert_eq!(decoded, pixels);
+
+            // File from disk: the extension follows the new bytes.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("Screen Shot.{ext}"));
+            std::fs::write(&path, &encoded).unwrap();
+            let staged = stage_file(&path).unwrap();
+            assert_eq!(staged.name, "Screen Shot.png");
+            assert_eq!(staged.image().unwrap().format, ImageFormat::Png);
+        }
+    }
+
+    #[test]
+    fn agent_ready_formats_and_bad_bytes_pass_through() {
+        let (format, bytes) = normalize_for_agent(ImageFormat::Jpeg, b"jpeg".to_vec());
+        assert_eq!(
+            (format, bytes.as_slice()),
+            (ImageFormat::Jpeg, &b"jpeg"[..])
+        );
+        // Undecodable TIFF: keep the original rather than dropping the file.
+        let (format, bytes) = normalize_for_agent(ImageFormat::Tiff, b"nope".to_vec());
+        assert_eq!(
+            (format, bytes.as_slice()),
+            (ImageFormat::Tiff, &b"nope"[..])
+        );
+    }
+
+    #[test]
     fn supported_formats_match_engine_jail() {
         for (ext, expect) in [
             ("png", Some(ImageFormat::Png)),
@@ -851,7 +1054,15 @@ mod tests {
             ("svg", Some(ImageFormat::Svg)),
             ("ico", None),
             ("txt", None),
+            ("tiff", Some(ImageFormat::Tiff)),
+            ("heic", None),
         ] {
+            // Staging and transcript rendering agree on what's an image.
+            assert_eq!(
+                attachment_refs::is_image_path(&format!("f.{ext}")),
+                expect.is_some(),
+                "is_image_path {ext}"
+            );
             assert_eq!(
                 format_by_extension(Path::new(&format!("f.{ext}"))),
                 expect,

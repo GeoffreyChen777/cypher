@@ -48,7 +48,7 @@ fn user_text(entry: &SessionMessageEntry) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     // Attachment refs ride the message text — the rail shows the visible
-    // prompt, or "Attached image(s)" for image-only sends
+    // prompt, or "Attached image" / "2 attached files" for text-less sends
     // (message-attachments.ts `userMessageRailText`).
     crate::attachments::user_message_rail_text(&raw)
 }

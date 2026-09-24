@@ -329,7 +329,10 @@ fn sanitize(file_name: &str) -> String {
     let cleaned: String = base
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            // Unicode letters/digits survive ("报告.pdf" must not become
+            // "__.pdf"); spaces, separators, and shell metacharacters don't,
+            // so the path stays trivially quotable for the agent's tools.
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
                 c
             } else {
                 '_'
@@ -374,6 +377,8 @@ mod tests {
     fn sanitize_names() {
         assert_eq!(sanitize("../../etc/passwd"), "passwd");
         assert_eq!(sanitize("my photo (1).png"), "my_photo__1_.png");
+        assert_eq!(sanitize("季度 报告.pdf"), "季度_报告.pdf");
+        assert_eq!(sanitize("a$(rm -rf).sh"), "a__rm_-rf_.sh");
         assert_eq!(sanitize(""), "upload");
     }
 

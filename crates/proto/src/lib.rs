@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod agent_prompt;
+pub mod attachment_refs;
 pub mod entities;
 pub mod motion;
 pub mod scratch;
