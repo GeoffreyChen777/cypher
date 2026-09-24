@@ -298,10 +298,11 @@ final class DemoDataset {
 
                     // Duration follows the streaming cadence EMA.
                     let duration = min(max(ema * 3, 120), 400)
+                    guard row === liveRow, duration != 0 else { return }
                     ```
 
-                    The row keeps one `RowVeil` while streaming and drops it on the \
-                    live→complete flip, exactly like the desktop lifecycle.
+                    The row keeps one `RowVeil` while streaming (`row === liveRow`) and \
+                    drops it on the live→complete flip, exactly like the desktop lifecycle.
                     """),
                 ], createdAt: now - 3_400_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]

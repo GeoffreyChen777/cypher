@@ -102,8 +102,11 @@ extension Theme {
         return .custom(name, size: size)
     }
 
+    /// Built from `monoUI` (a `Font.custom` can't carry font features), so
+    /// it scales with Dynamic Type from `size` itself, as `.custom` did.
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .custom(fontMonoName, size: size).weight(weight)
+        let font = Font(monoUI(UIFontMetrics.default.scaledValue(for: size)))
+        return weight == .regular ? font : font.weight(weight)
     }
 
     static func sansUI(_ size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
@@ -115,9 +118,20 @@ extension Theme {
         return UIFont(descriptor: descriptor, size: size)
     }
 
+    /// Coding ligatures OFF — the desktop's `mono_features` (theme.rs). Not a
+    /// taste call: the bundled Geist Mono 1.700 ships `===`, `==`, `=>`, `!==`
+    /// … as a default-on many-to-one `liga` whose glyph is one cell wide but
+    /// inks two cells to its left, so `a === b` paints the bars over the text
+    /// before it and the rest of the line slides two cells back.
     static func monoUI(_ size: CGFloat) -> UIFont {
-        UIFont(name: fontMonoName, size: size)
-            ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        guard let font = UIFont(name: fontMonoName, size: size) else {
+            return .monospacedSystemFont(ofSize: size, weight: .regular)
+        }
+        let off = ["liga", "calt", "dlig"].map {
+            [kCTFontOpenTypeFeatureTag as UIFontDescriptor.FeatureKey: $0,
+             kCTFontOpenTypeFeatureValue as UIFontDescriptor.FeatureKey: 0] as [UIFontDescriptor.FeatureKey: Any]
+        }
+        return UIFont(descriptor: font.fontDescriptor.addingAttributes([.featureSettings: off]), size: size)
     }
 }
 
