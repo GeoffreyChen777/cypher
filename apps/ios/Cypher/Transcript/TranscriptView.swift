@@ -41,6 +41,7 @@ struct TranscriptView: View {
 
     @State private var veils = VeilStore()
     @State private var folds: [String: Bool] = [:]
+    @State private var turns = TurnTracker()
     /// One-shot guard for the first non-empty projection.
     @State private var hydrated = false
     /// Gates the reveal: false until the transcript has landed at the bottom.
@@ -70,6 +71,7 @@ struct TranscriptView: View {
                                                  pendingSends: store.pendingSends)
         let floor = windowStart(of: allRows)
         let rows = floor > 0 ? Array(allRows[floor...]) : allRows
+        let rounds = store.transcriptCache.rounds
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if floor > 0 {
@@ -108,6 +110,9 @@ struct TranscriptView: View {
             .frame(maxWidth: .infinity)
         }
         .accessibilityIdentifier("chat-transcript")
+        // The indicator would run through the turn scrubber's ticks; it
+        // steps aside only while they show.
+        .scrollIndicators(turns.revealed ? .hidden : .automatic)
         .scrollPosition($scrollPosition)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
         .defaultScrollAnchor(.bottom)
@@ -285,6 +290,8 @@ struct TranscriptView: View {
             // raw threshold kept the button up for a pinned feed.
             let show = !scroll.pinned && new > Self.jumpThreshold
             if scroll.showJump != show { scroll.showJump = show }
+            let atBottom = scroll.pinned || new <= Self.stickThreshold
+            if turns.atBottom != atBottom { turns.atBottom = atBottom }
         }
         .onChange(of: contentSignature(rows)) {
             // Until the reveal, settleToBottom owns positioning (it follows
@@ -327,6 +334,13 @@ struct TranscriptView: View {
             .frame(height: 130)
             .ignoresSafeArea(edges: .top)
             .allowsHitTesting(false)
+        }
+        .overlay(alignment: .trailing) {
+            // Revealed with the transcript: it indexes rows being settled.
+            if rounds.count > 1, settled {
+                TurnScrubber(rounds: rounds, tracker: turns) { jumpToRound($0) }
+                    .transition(.opacity)
+            }
         }
         // The bottom dissolve lives on SessionView's composer inset (one
         // continuous gradient from above the status strip to the physical
@@ -468,6 +482,46 @@ struct TranscriptView: View {
         scroll.restoreTopRowId = rows[floor].id
     }
 
+    /// Puts a round's prompt at the top. Takes the scroll from the pin (a
+    /// pinned feed would be pulled straight back to the tail), and glides
+    /// only short hops: an animated scroll renders every row it passes.
+    private func jumpToRound(_ index: Int) {
+        let rows = store.transcriptCache.rows(revision: store.revision, entries: store.entries,
+                                              pendingSends: store.pendingSends)
+        let rounds = store.transcriptCache.rounds
+        guard rounds.indices.contains(index) else { return }
+        let target = rounds[index]
+        let fromRow = turns.current.flatMap { rounds.indices.contains($0) ? rounds[$0].rowIndex : nil }
+            ?? rows.count
+        scroll.pinned = false
+        turns.set(index)
+        let floor = windowStart(of: rows)
+        if target.rowIndex < floor {
+            // Above the rendered window: open it down to the target (same
+            // update as the scroll, so the id resolves against the new rows).
+            windowFloor = max(0, min(floor - Self.windowRows, target.rowIndex))
+        }
+        let glide = !reduceMotion && target.rowIndex >= floor && abs(target.rowIndex - fromRow) <= 40
+        scroll.animatingUntil = Date().timeIntervalSinceReferenceDate + (glide ? 0.4 : 0)
+        if glide {
+            withAnimation(.smooth(duration: 0.3)) {
+                scrollPosition.scrollTo(id: target.rowId, anchor: .top)
+            }
+        } else {
+            scrollPosition.scrollTo(id: target.rowId, anchor: .top)
+        }
+        // A glide aims at the lazy stack's ESTIMATED offset for rows it hasn't
+        // measured, and a fast scrub retargets mid-flight — either can leave
+        // it rounds short. Once motion ends, land the latest target by id.
+        scroll.turnJump &+= 1
+        let jump = scroll.turnJump
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(glide ? 380 : 120))
+            guard jump == scroll.turnJump, !scroll.userScrolling else { return }
+            scrollPosition.scrollTo(id: target.rowId, anchor: .top)
+        }
+    }
+
     /// The bottom pad's measured global maxY, if THIS view reported it since
     /// the last invalidation.
     private var padFrame: CGFloat? {
@@ -588,6 +642,7 @@ struct TranscriptView: View {
         }
         .padding(.top, row.topGap)
         .padding(.horizontal, 16)
+        .modifier(TurnAnchor(round: store.transcriptCache.roundIndex[row.id], tracker: turns, scroll: scroll))
     }
 }
 
@@ -616,6 +671,8 @@ final class ScrollState {
     /// SessionView, which owns the inset).
     @ObservationIgnored var padGlobalMaxY: CGFloat = 0
     @ObservationIgnored var padOwner: UUID?
+    /// Latest turn-scrubber jump; an older jump's trailing landing yields.
+    @ObservationIgnored var turnJump: UInt64 = 0
     /// Window paging: the row to hold at the top once a prepended page lands.
     @ObservationIgnored var restoreTopRowId: String?
     @ObservationIgnored var insetTopGlobalY: CGFloat = 0
@@ -662,6 +719,11 @@ final class TranscriptBuilderCache {
     private var cachedRevision: UInt64?
     private var cachedRows: [TranscriptRow] = []
     private var prewarming = false
+    /// The conversation's rounds, for the turn scrubber — rebuilt with the
+    /// rows, so read them after `rows(...)`.
+    private(set) var rounds: [TranscriptRound] = []
+    /// Round index by the id of the row that starts it.
+    private(set) var roundIndex: [String: Int] = [:]
 
     /// Rows for the store's current `revision`. Rows only change when the doc
     /// does — gate on the revision and hand back the same array.
@@ -672,6 +734,11 @@ final class TranscriptBuilderCache {
         cachedRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
                                                parsers: &parsers, completed: &completed)
         cachedRevision = revision
+        let rounds = TranscriptRound.rounds(in: cachedRows)
+        if rounds != self.rounds {
+            self.rounds = rounds
+            roundIndex = Dictionary(uniqueKeysWithValues: rounds.enumerated().map { ($1.rowId, $0) })
+        }
         return cachedRows
     }
 

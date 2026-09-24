@@ -134,6 +134,12 @@ final class AppModel {
                         demo.sessionStore(for: chatId)
                             .setEntries(BenchRunner.syntheticEntries(turns: 120))
                     }
+                    if let ix = args.firstIndex(of: "-turns"), ix + 1 < args.count,
+                       let turns = Int(args[ix + 1]), let demo {
+                        // A session of any length, e.g. for the turn scrubber.
+                        demo.sessionStore(for: chatId)
+                            .setEntries(BenchRunner.syntheticEntries(turns: turns))
+                    }
                     if args.contains("-huge"), let demo {
                         // Warm-reopen stress at real-conversation scale — the
                         // estimated-height error grows with row count, and the
