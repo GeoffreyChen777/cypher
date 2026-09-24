@@ -515,6 +515,10 @@ pub enum RowKind {
         comments: Arc<Vec<MessageComment>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// Sent as a Steer into a live turn: labelled above a quieter,
+        /// outlined bubble (the iOS `UserBubble` treatment). Set in
+        /// [`TranscriptView::rows_for`] from the command ledger.
+        steer: bool,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1058,6 +1062,17 @@ fn selectable_text(
         .into_any_element()
 }
 
+/// Flag an entry's user row as a steer. The version bit keeps the row diff
+/// honest when the ledger confirms a steer after the row first rendered.
+fn mark_steer_rows(rows: &mut [Row]) {
+    for row in rows {
+        if let RowKind::User { steer, .. } = &mut row.kind {
+            *steer = true;
+            row.version ^= 1 << 63;
+        }
+    }
+}
+
 fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
     let text: String = entry
         .parts
@@ -1126,6 +1141,7 @@ pub fn rows_for_entry(
                 attachments: Arc::new(parsed.attachments),
                 comments: Arc::new(entry.comments.clone()),
                 pending,
+                steer: false,
             },
             entry_id,
             role: entry.role,
@@ -3146,14 +3162,19 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let (selected, entries, echoes) = {
+        let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
             let echoes: Vec<(SessionMessageEntry, bool)> = s
                 .pending_echoes()
                 .iter()
                 .map(|echo| (echo.clone(), s.echo_pending(&echo.id)))
                 .collect();
-            (s.selected_chat.clone(), s.transcript.clone(), echoes)
+            (
+                s.selected_chat.clone(),
+                s.transcript.clone(),
+                echoes,
+                s.steer_message_ids(),
+            )
         };
         // A replay can briefly contain both an unresolved live part (which
         // drives the composer wizard) and a resolved mirror of the same
@@ -3208,7 +3229,7 @@ impl Transcript {
             if entry.role == MessageRole::User {
                 after_slash_command = user_entry_is_slash_command(entry);
             }
-            let mut rows = self.rows_for(entry, false);
+            let mut rows = self.rows_for(entry, false, steers.contains(&entry.id));
             if after_slash_command && entry.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
@@ -3220,7 +3241,7 @@ impl Transcript {
             if echo.role == MessageRole::User {
                 after_slash_command = user_entry_is_slash_command(echo);
             }
-            let mut rows = self.rows_for(echo, *pending);
+            let mut rows = self.rows_for(echo, *pending, steers.contains(&echo.id));
             if after_slash_command && echo.role != MessageRole::User {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
@@ -3342,7 +3363,15 @@ impl Transcript {
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
+    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool, steer: bool) -> Vec<Row> {
+        let mut rows = self.cached_rows_for(entry, pending);
+        if steer {
+            mark_steer_rows(&mut rows);
+        }
+        rows
+    }
+
+    fn cached_rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         let fingerprint = entry_fingerprint(entry, pending);
         if !streaming
@@ -3966,15 +3995,45 @@ impl Transcript {
                 attachments,
                 comments,
                 pending,
+                steer,
             } => {
                 let attachments = attachments.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
+                let steer = *steer;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
                 let mut column = div().w_full().flex().flex_col();
+                if steer {
+                    // iOS UserBubble: a muted "↳ Steer" caption over the
+                    // bubble, inset to line up with the bubble's text.
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_end()
+                            .pr(px(12.0))
+                            .pb(px(4.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text_muted)
+                                    .when(pending, |el| el.opacity(0.65))
+                                    .child(
+                                        crate::icons::icon(crate::icons::STEER)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child("Steer"),
+                            ),
+                    );
+                }
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
                 }
@@ -4027,7 +4086,14 @@ impl Transcript {
                                     .min_w_0()
                                     .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
                                     .when(wide, |el| el.max_w(gpui::relative(0.8)))
-                                    .bg(crate::chat_style::bubble(&theme))
+                                    .when(!steer, |el| el.bg(crate::chat_style::bubble(&theme)))
+                                    // A steer reads as a side note to the
+                                    // live turn: fainter fill, hairline edge.
+                                    .when(steer, |el| {
+                                        el.bg(crate::chat_style::bubble(&theme).opacity(0.55))
+                                            .border_1()
+                                            .border_color(theme.border)
+                                    })
                                     .rounded(px(Theme::BUBBLE_RADIUS))
                                     .px(px(16.0))
                                     .py(px(10.0))
@@ -6716,6 +6782,22 @@ mod tests {
         };
         assert!(renders_as_command_chip(text, mentions, attachments));
         assert_eq!(row_match_count(&rows[0], "model"), 0);
+    }
+
+    #[test]
+    fn steer_marks_user_rows_and_changes_their_version() {
+        let mut entry = assistant("s1", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("t0", "actually, use tabs")];
+        let plain = rows_for_entry(&entry, false, &mut parse);
+        let mut steered = plain.clone();
+        mark_steer_rows(&mut steered);
+        assert!(matches!(plain[0].kind, RowKind::User { steer: false, .. }));
+        assert!(matches!(steered[0].kind, RowKind::User { steer: true, .. }));
+        // The ledger can confirm a steer after the row rendered: the diff
+        // must see a changed row.
+        assert_ne!(plain[0].version, steered[0].version);
     }
 
     #[test]

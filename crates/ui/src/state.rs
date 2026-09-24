@@ -724,6 +724,9 @@ pub struct AppState {
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
+    /// Message ids this device sent as a Steer. Labels the optimistic echo
+    /// before the ledger frame carrying its Steer command arrives.
+    local_steers: HashSet<String>,
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
@@ -905,6 +908,7 @@ impl AppState {
             transcript: Vec::new(),
             commands: Vec::new(),
             echoes: HashMap::new(),
+            local_steers: HashSet::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
             local_device_id: None,
@@ -1184,6 +1188,29 @@ impl AppState {
         if !echoes.iter().any(|e| e.id == entry.id) {
             echoes.push(entry);
         }
+    }
+
+    /// Mark a message id as sent via Steer (see [`Self::steer_message_ids`]).
+    pub fn mark_steer(&mut self, message_id: &str) {
+        self.local_steers.insert(message_id.to_string());
+    }
+
+    /// User messages of the selected chat that were steers: the explicit
+    /// message ids on the ledger's Steer commands (the iOS join), plus this
+    /// device's own not-yet-synced steers. Old messages without a matching
+    /// id stay plain prompts.
+    pub fn steer_message_ids(&self) -> HashSet<String> {
+        self.commands
+            .iter()
+            .filter_map(|c| match &c.payload {
+                SessionCommandPayload::Steer {
+                    message_id: Some(id),
+                    ..
+                } if !id.is_empty() => Some(id.clone()),
+                _ => None,
+            })
+            .chain(self.local_steers.iter().cloned())
+            .collect()
     }
 
     /// Drop an echo (send failed — the prompt returns to the draft).
@@ -4529,5 +4556,26 @@ mod tests {
         ]);
         assert!(s.echo_pending("m1"));
         assert!(s.failed_commands().is_empty());
+    }
+
+    #[test]
+    fn steer_ids_join_ledger_steers_and_local_echoes() {
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        let mut steer = run_command("c2", "ignored", 2, SessionCommandStatus::Applied);
+        steer.payload = SessionCommandPayload::Steer {
+            prompt: "nudge".into(),
+            message_id: Some("m2".into()),
+            agent_prompt: None,
+        };
+        s.apply_commands(vec![
+            run_command("c1", "m1", 1, SessionCommandStatus::Applied),
+            steer,
+        ]);
+        s.mark_steer("m3");
+        let ids = s.steer_message_ids();
+        assert!(!ids.contains("m1"), "a Run is a plain prompt");
+        assert!(ids.contains("m2"), "the ledger's Steer message id");
+        assert!(ids.contains("m3"), "this device's unsynced steer echo");
     }
 }

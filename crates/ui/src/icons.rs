@@ -74,6 +74,7 @@ icon_assets![
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
     (TAG, "tag"),
+    // Solar `pin-linear` (the tilted pushpin), like the rest of the set.
     (PIN, "pin"),
     (SIDEBAR_MINIMALISTIC, "sidebar-minimalistic"),
     // Mirrored variant (zeron window-controls.tsx `-scale-x-100`): the LEFT
@@ -91,6 +92,9 @@ icon_assets![
     // Hand-drawn return/enter arrow in the Solar Linear style (like the
     // terminal/plus/close ports) — the set has no return glyph.
     (RETURN, "return"),
+    // Hand-drawn turn-down-right arrow in the Solar Linear style — the
+    // desktop port of iOS's `arrow.turn.down.right` steer label.
+    (STEER, "steer"),
     (ALT_ARROW_DOWN, "alt-arrow-down"),
     // Hand-drawn expand/maximize arrows in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no expand glyph.

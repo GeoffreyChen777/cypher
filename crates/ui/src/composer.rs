@@ -7034,9 +7034,15 @@ impl Composer {
             completed_at: None,
             comments: echo_comments.clone(),
         };
+        // Label the echo "Steer" now; the ledger's Steer command confirms it
+        // once synced (Side Chat has no steer verb).
+        let marks_steer = steer && !is_new && matches!(self.transport, ComposerTransport::Main);
         self.state.update(cx, |s, cx| {
             if is_new {
                 s.select_chat(Some(chat_id.clone()), cx);
+            }
+            if marks_steer {
+                s.mark_steer(&message_id);
             }
             s.push_echo(&chat_id, echo);
             // Working overlay until the host executes the queued command —
