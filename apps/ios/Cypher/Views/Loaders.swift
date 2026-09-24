@@ -192,60 +192,6 @@ struct TranscriptSkeleton: View {
     }
 }
 
-// MARK: - Status dot
-
-extension ChatIndicator {
-    /// shell/spaces.rs status_dot_color — non-done states are muted (running
-    /// is routine); only Done keeps its pop.
-    var dotColor: Color {
-        switch self {
-        case .working: return Theme.statusWorking.opacity(0.55)     // pink-400
-        case .awaitingInput: return Theme.accent.opacity(0.6)       // indigo
-        case .errored: return Theme.danger.opacity(0.65)
-        case .completed: return Theme.statusCompleted.opacity(0.9)  // emerald-400
-        case .idle: return whiteAlpha(0.14)
-        }
-    }
-
-    /// shell.rs status word; nil (Idle) renders the time-ago instead.
-    var label: String? {
-        switch self {
-        case .working: return "Working"
-        case .awaitingInput: return "Input"
-        case .errored: return "Failed"
-        case .completed: return "Done"
-        case .idle: return nil
-        }
-    }
-}
-
-/// The session row's top-right status glyph (shell.rs `render_chat_row`
-/// corner slot): a 6pt dot with the status word beside it in the same color;
-/// Done trades the dot for a check. Idle rows render time-ago instead — the
-/// caller handles that branch, since only it knows the timestamp.
-struct StatusCorner: View {
-    let indicator: ChatIndicator
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if indicator == .completed {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(indicator.dotColor)
-            } else {
-                Circle()
-                    .fill(indicator.dotColor)
-                    .frame(width: 6, height: 6)
-            }
-            if let label = indicator.label {
-                Text(label)
-                    .font(Theme.sans(10, weight: .medium))
-                    .foregroundStyle(indicator.dotColor)
-            }
-        }
-    }
-}
-
 /// Harness brand mark (pickers.rs harness_brand_icon) — the desktop's actual
 /// SVG marks, rendered via BrandMarkShape. Claude keeps its brand orange even
 /// on the mono surface; others stay neutral (icons.rs convention).

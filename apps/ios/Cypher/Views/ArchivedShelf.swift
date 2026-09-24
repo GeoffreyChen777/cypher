@@ -1,9 +1,9 @@
 // Archived shelf — the desktop sidebar's settled shelf for archived sessions
-// (shell/spaces.rs `render_archived_section`), sitting under the active list:
-// a hairline header that folds ("Archived" open / "Archived (N)" collapsed,
-// open by default, session-transient), slim rows, and Show-more paging
-// (10, then +25). The desktop's hover-swapped Unarchive pill becomes
-// swipe-to-unarchive here, mirroring the active rows' swipe-to-archive.
+// (shell/spaces.rs `render_archived_section`), sitting under the active list
+// as its own inset-grouped section: a header that folds (open by default,
+// session-transient), single-line rows, and Show-more paging (10, then +25).
+// The desktop's hover-swapped Unarchive pill becomes swipe-to-unarchive here,
+// mirroring the active rows' swipe-to-archive.
 
 import SwiftUI
 
@@ -15,7 +15,6 @@ struct ArchivedSection: View {
     @Environment(AppModel.self) private var model
     /// Scope, matching the list above it: nil = All.
     var spaceId: String?
-    @Binding var path: [Route]
     var orphanedOnly = false
 
     // spaces.rs INITIAL/PAGE. Both session-transient, like the desktop's.
@@ -24,15 +23,12 @@ struct ArchivedSection: View {
     private static let initialCount = 10
     private static let pageSize = 25
 
-    private static let rowInsets = EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
-
     var body: some View {
         let archived = model.archivedChats(in: spaceId).filter { chat in
             !orphanedOnly || !model.spaces.contains(where: { $0.id == chat.spaceId })
         }
         if !archived.isEmpty {
             Section {
-                header(count: archived.count)
                 if open {
                     // Distinct identity namespace (desktop's "archived-{id}"
                     // vs "c:{id}" FLIP keys): the SAME id in both ForEach made
@@ -47,6 +43,8 @@ struct ArchivedSection: View {
                         showMore(remaining: archived.count - shown)
                     }
                 }
+            } header: {
+                header(count: archived.count)
             }
         }
     }
@@ -58,67 +56,52 @@ struct ArchivedSection: View {
                 shown = Self.initialCount
             }
         } label: {
-            HStack(spacing: 8) {
-                Text(open ? "Archived" : "Archived (\(count))")
-                    .font(Theme.sans(12, weight: .medium))
-                    .foregroundStyle(Theme.textMuted.opacity(0.5))
-                    .fixedSize()
-                Rectangle()
-                    .fill(Theme.border.opacity(0.6))
-                    .frame(height: 1)
-                Image(systemName: open ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted.opacity(0.5))
+            ListSectionHeader(title: "Archived") {
+                HStack(spacing: 6) {
+                    Text("\(count)")
+                        .font(Theme.sans(13, relativeTo: .subheadline))
+                        .foregroundStyle(Theme.textFaint)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.textFaint)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(open ? "Collapse archived" : "Expand archived, \(count) sessions")
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
     }
 
-    /// Slim row: dimmed harness mark, muted title, time-ago (spaces.rs
-    /// archived row — h 36, mark 14, title 13, time 11).
+    /// Single line: dimmed harness mark, muted title, time-ago.
     private func row(_ chat: Chat) -> some View {
-        Button {
-            path.append(.chat(chat.id))
-        } label: {
+        NavigationLink(value: Route.chat(chat.id)) {
             HStack(spacing: 10) {
-                if let harness = chat.config?.harness {
+                if let harness = chat.config?.harness, harness != "pi" {
                     HarnessBadge(harness: harness, size: 14, dimmed: true)
                 }
                 Text(chat.displayTitle)
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.text.opacity(0.55))
+                    .font(Theme.sans(15, relativeTo: .body))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
-                    .font(Theme.sans(11))
-                    .foregroundStyle(Theme.textMuted.opacity(0.55))
+                    .font(Theme.sans(13, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textFaint)
                     .fixedSize()
             }
-            .padding(.horizontal, 10)
-            .frame(height: 36)
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .padding(.vertical, 2)
         }
-        .buttonStyle(PressWashButtonStyle())
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
+        .groupedRowStyle()
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button {
                 withAnimation(Motion.resort) {
                     model.unarchive(chatId: chat.id)
                 }
             } label: {
-                Label("Unarchive", systemImage: "arrow.up.bin")
+                Label("Unarchive", systemImage: "tray.and.arrow.up")
             }
-            .tint(Theme.surfaceRaised)
+            .tint(.gray)
         }
     }
 
@@ -126,22 +109,10 @@ struct ArchivedSection: View {
         Button {
             shown = max(shown, Self.initialCount) + Self.pageSize
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.textMuted.opacity(0.55))
-                Text("Show \(min(remaining, Self.pageSize)) more")
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.textMuted.opacity(0.55))
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 36)
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            Text("Show \(min(remaining, Self.pageSize)) More")
+                .font(Theme.sans(15, weight: .medium, relativeTo: .body))
+                .foregroundStyle(Theme.text)
         }
-        .buttonStyle(PressWashButtonStyle())
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
-        .listRowInsets(Self.rowInsets)
+        .groupedRowStyle()
     }
 }

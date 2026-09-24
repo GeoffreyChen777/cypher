@@ -17,6 +17,8 @@ enum Theme {
     /// Raised surface: popovers, dialogs, cards.
     static let surfaceRaised = adaptive(light: neutral(0.940), dark: neutral(0.235))
     static let sheetPanel = adaptive(light: .white, dark: grey(0x14))
+    /// Inset-grouped list cells: one step off the shell surface.
+    static let groupedRow = adaptive(light: .white, dark: grey(0x1a))
     /// Hover/pressed wash for interactive rows (ink at low alpha).
     static let elementHover = whiteAlpha(0.06)
     /// Active/selected wash.
@@ -81,7 +83,9 @@ extension Theme {
     static let fontSansName = "Geist"
     static let fontMonoName = "GeistMono-Regular"
 
-    static func sans(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+    /// `relativeTo` scales with Dynamic Type from `size` at the default setting.
+    static func sans(_ size: CGFloat, weight: Font.Weight = .regular,
+                     relativeTo style: Font.TextStyle? = nil) -> Font {
         // Static weight cuts register as separate families — select by
         // PostScript name so weights actually resolve.
         let name: String
@@ -94,6 +98,7 @@ extension Theme {
         } else {
             name = "Geist-Regular"
         }
+        if let style { return .custom(name, size: size, relativeTo: style) }
         return .custom(name, size: size)
     }
 

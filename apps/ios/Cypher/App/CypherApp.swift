@@ -10,6 +10,19 @@ struct CypherApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        // Navigation titles in the app's type. Only the text attributes: a
+        // UINavigationBarAppearance override would replace the system's
+        // Liquid Glass bar treatment.
+        let bar = UINavigationBar.appearance()
+        if let large = UIFont(name: "Geist-SemiBold", size: 32) {
+            bar.largeTitleTextAttributes = [.font: UIFontMetrics(forTextStyle: .largeTitle).scaledFont(for: large)]
+        }
+        if let inline = UIFont(name: "Geist-SemiBold", size: 17) {
+            bar.titleTextAttributes = [.font: UIFontMetrics(forTextStyle: .headline).scaledFont(for: inline)]
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

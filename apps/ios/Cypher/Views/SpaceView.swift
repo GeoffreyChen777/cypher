@@ -1,6 +1,6 @@
 // Space detail — the phone's answer to the desktop's horizontal session tabs:
-// the space's sessions as a vertical list (creation order, like tab order),
-// swipe-to-archive (= tab close), and "+" to start a session in this space.
+// the space's sessions as an inset-grouped list (recency order), swipe-to-
+// archive (= tab close), and a bottom-bar compose button for a new session.
 
 import SwiftUI
 
@@ -16,66 +16,48 @@ struct SpaceView: View {
     var body: some View {
         List {
             let chats = model.chats(in: spaceId)
-            if chats.isEmpty {
-                emptyState
-            }
-            ForEach(chats) { chat in
-                Button {
-                    path.append(.chat(chat.id))
-                } label: {
-                    ChatRow(chat: chat, showLocation: false)
+            // No header: the project title already names this list, and the
+            // first card then sits directly on the title's edge.
+            Section {
+                if chats.isEmpty {
+                    emptyState
                 }
-                .buttonStyle(PressWashButtonStyle())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button {
-                        withAnimation(Motion.resort) {
-                            model.archive(chatId: chat.id)
-                        }
-                    } label: {
-                        Label("Archive", systemImage: "archivebox")
+                ForEach(chats) { chat in
+                    NavigationLink(value: Route.chat(chat.id)) {
+                        ChatRow(chat: chat, showLocation: false)
                     }
-                    .tint(Theme.surfaceRaised)
+                    .groupedRowStyle()
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button {
+                            // withAnimation, not a value-keyed .animation: the
+                            // row leaves THIS section and lands in the archived
+                            // shelf — one coordinated List diff.
+                            withAnimation(Motion.resort) {
+                                model.archive(chatId: chat.id)
+                            }
+                        } label: {
+                            Label("Archive", systemImage: "archivebox")
+                        }
+                        .tint(.gray)
+                    }
                 }
             }
-            ArchivedSection(spaceId: spaceId, path: $path)
+            ArchivedSection(spaceId: spaceId)
         }
-        .listStyle(.plain)
-        .environment(\.defaultMinListRowHeight, 10)
+        .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .scrollEdgeEffectStyle(.soft, for: .top)
         .background(Theme.surface.ignoresSafeArea())
-        .navigationTitle(space?.displayName ?? "Project")  // feeds the back menu
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
+        .navigationTitle(space?.displayName ?? "Project")
+        .navigationSubtitle(subtitle)
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(space?.displayName ?? "Project")
-                        .font(Theme.sans(13, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    if let space {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder")
-                                .font(.system(size: 9))
-                            Text("\(space.path) · \(model.deviceName(space.deviceId))")
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                        }
-                        .font(Theme.sans(10.5))
-                        .foregroundStyle(Theme.textMuted.opacity(0.6))
-                    }
-                }
-            }
-            .sharedBackgroundVisibility(.hidden)
-            ToolbarItem(placement: .topBarTrailing) {
+            // Compose lives bottom-trailing, in thumb reach (Mail, Notes).
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
                 Button {
                     path.append(.newSession(spaceId: spaceId))
                 } label: {
-                    Image(systemName: "plus")
+                    Image(systemName: "square.and.pencil")
                 }
                 .accessibilityLabel("New session")
                 .disabled(space == nil)
@@ -89,33 +71,35 @@ struct SpaceView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(Theme.textFaint)
-            Text("No sessions in this project")
-                .font(Theme.sans(13))
-                .foregroundStyle(Theme.textFaint)
-            Button {
-                path.append(.newSession(spaceId: spaceId))
-            } label: {
-                Text("Start a session")
-                    .font(Theme.sans(13, weight: .medium))
-                    .foregroundStyle(Theme.text)
-                    .padding(.horizontal, 16)
-                    .frame(height: 36)
-            }
-            .buttonStyle(.glass)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 48)
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
+    /// "MacBook Pro · ~/cypher": owning device, then the folder on it.
+    private var subtitle: String {
+        guard let space else { return "" }
+        return "\(model.deviceName(space.deviceId)) · \(Self.abbreviatingHome(space.path))"
     }
 
-    private func shortPath(_ path: String) -> String {
-        (path as NSString).lastPathComponent
+    /// The path lives on the remote device, so NSString's tilde abbreviation
+    /// (this phone's home) doesn't apply; fold the usual home roots instead.
+    static func abbreviatingHome(_ path: String) -> String {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        if parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home" {
+            return (["~"] + parts.dropFirst(3)).joined(separator: "/")
+        }
+        return path
+    }
+
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label("No Sessions", systemImage: "bubble.left.and.bubble.right")
+        } description: {
+            Text("Start a session to run Pi on \(space.map { model.deviceName($0.deviceId) } ?? "this project's device").")
+        } actions: {
+            Button("New Session") {
+                path.append(.newSession(spaceId: spaceId))
+            }
+            .buttonStyle(.glass)
+            .disabled(space == nil)
+        }
+        .listRowBackground(Color.clear)
     }
 }
 

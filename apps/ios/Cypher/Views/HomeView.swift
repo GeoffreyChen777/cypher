@@ -1,7 +1,7 @@
-// Home — the mobile shell. The desktop sidebar collapses into one screen: a
-// space dropdown in the nav bar (default "All") scopes the attention-sorted
-// session list below it. Tabs-as-sessions don't fit a phone; close=archive
-// becomes swipe-to-archive.
+// Home — the mobile shell: the desktop sidebar's project list as a native
+// inset-grouped list, filtered by owning-device tabs across the top. A
+// project opens into its sessions (SpaceView); close=archive becomes
+// swipe-to-archive.
 
 import SwiftUI
 
@@ -29,6 +29,7 @@ enum SessionNavigation {
     }
 }
 
+
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [Route] = []
@@ -44,8 +45,9 @@ struct HomeView: View {
     /// is still in flight — SwiftUI reports a UIKit-driven pop only once it
     /// has finished.
     @State private var navigation = NavigationProbe()
-    // "" = All. Sticky across launches; falls back to All if the space is gone.
-    @AppStorage("homeProjectFilter") private var spaceFilter: String = ""
+    // "" = All. Sticky across launches; falls back to All if the device's
+    // projects are gone.
+    @AppStorage("homeDeviceFilter") private var deviceFilter: String = ""
 
     /// Registry rows a pending notification may be waiting on: the chat and
     /// its project id, so a late-hydrating row re-triggers the attempt.
@@ -53,32 +55,54 @@ struct HomeView: View {
         model.allChats.map { "\($0.id):\($0.spaceId ?? "")" }.joined()
     }
 
-    private var selectedSpace: Space? {
-        model.spaces.first { $0.id == spaceFilter }
-    }
-
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                if let selectedSpace {
-                    sessionsSection
-                    ArchivedSection(spaceId: selectedSpace.id, path: $path)
-                } else {
-                    projectsSection
-                    ArchivedSection(spaceId: nil, path: $path, orphanedOnly: true)
+                let groups = deviceGroups
+                let selected = groups.first { $0.id == deviceFilter }
+                // One tab: one card. All: a card per device, named by a plain
+                // header (the tabs already carry presence), so rows never
+                // repeat their device.
+                ForEach(selected.map { [$0] } ?? groups) { group in
+                    Section {
+                        ForEach(group.spaces) { space in
+                            NavigationLink(value: Route.space(space.id)) {
+                                ProjectRow(space: space)
+                            }
+                            .groupedRowStyle()
+                        }
+                    } header: {
+                        if selected == nil && groups.count > 1 {
+                            ListSectionHeader(title: model.deviceName(group.id))
+                        }
+                    }
+                }
+                if selected == nil {
+                    otherSessionsSection
+                    ArchivedSection(spaceId: nil, orphanedOnly: true)
                 }
             }
-            .listStyle(.plain)
-            .background(NavigationProbeView(probe: navigation))
-            .environment(\.defaultMinListRowHeight, 10)
-            .contentMargins(.top, 2, for: .scrollContent)
+            .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: .top)
             .background(Theme.surface.ignoresSafeArea())
-            .navigationTitle("Cypher")  // feeds the back menu; not displayed
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar(removing: .title)
+            // Outside the List: a list cell masks its content to the section's
+            // corner radius, which clipped the first tab. The bar also keeps
+            // the filter reachable while the list scrolls under it.
+            .safeAreaBar(edge: .top) {
+                if !deviceGroups.isEmpty {
+                    DeviceTabs(deviceIds: deviceGroups.map(\.id), selection: $deviceFilter)
+                        .padding(.vertical, 8)
+                }
+            }
+            .overlay {
+                if model.spaces.isEmpty && orphanedChats.isEmpty {
+                    emptyState
+                }
+            }
+            .background(NavigationProbeView(probe: navigation))
+            .navigationTitle("Projects")
+            .navigationSubtitle(subtitle)
+            .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: Route.self) { route in
                 switch route {
                 case .space(let id): SpaceView(spaceId: id, path: $path)
@@ -87,45 +111,18 @@ struct HomeView: View {
                 }
             }
             .toolbar {
-                // One leading item: a second topBarLeading entry gets folded
-                // into a "…" overflow next to the dropdown. The item's SHARED
-                // glass is hidden and the selector wears its own capsule, so
-                // the connect spinner sits bare on the bar beside it instead
-                // of inside the button's glass.
-                ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 10) {
-                        spaceDropdown
-                            // The hidden shared glass still reserves its
-                            // content inset, landing the capsule's edge at
-                            // ~30pt while the list rows' rail starts at 20 —
-                            // pull it back onto the content's left line.
-                            .padding(.leading, -10)
-                        // In the bar, not the list: as a list row it appeared
-                        // and vanished with the connection and shoved the
-                        // content down.
-                        if !model.connected {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                                .accessibilityLabel("Connecting")
-                        }
-                    }
-                }
-                .sharedBackgroundVisibility(.hidden)
                 ToolbarItem(placement: .topBarTrailing) {
-                    newButton
+                    accountMenu
                 }
+                // Account and Add are unrelated: separate glass groups.
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if model.demo != nil {
-                            Text("Demo mode")
-                        }
-                        AppearancePicker()
-                        Button("Notifications") { showNotifications = true }
-                        Button("Sign out", role: .destructive) { model.signOut() }
+                    Button {
+                        showNewSpace = true
                     } label: {
-                        Image(systemName: "person.circle")
+                        Image(systemName: "plus")
                     }
+                    .accessibilityLabel("New project")
                 }
             }
             .sheet(isPresented: $showNewSpace) {
@@ -183,6 +180,7 @@ struct HomeView: View {
         }
     }
 
+
     // MARK: Notification navigation
 
     /// Resolve the pending notification into a route, once the chat row is
@@ -234,317 +232,269 @@ struct HomeView: View {
     /// Longer than a NavigationStack push/pop animation (~0.35s).
     private static let transitionGrace: TimeInterval = 0.6
 
-    // MARK: Space dropdown
 
-    /// The nav-bar dropdown that scopes the session list — a NATIVE glass
-    /// menu. Rows are Buttons, not a Picker: Picker menu rows drop two-Text
-    /// subtitles, while Button rows map to UIAction subtitles, so each space
-    /// shows its owning device ("@ mac") on the small second line without the
-    /// three-line title wraps. Selection carries a checkmark in the icon slot.
-    private var spaceDropdown: some View {
+    // MARK: Chrome
+
+    private var accountMenu: some View {
         Menu {
-            spaceMenuButton(id: "", title: "Projects", subtitle: nil)
-            ForEach(model.spaces) { space in
-                spaceMenuButton(id: space.id, title: space.displayName,
-                                subtitle: deviceTag(space))
+            if model.demo != nil {
+                Text("Demo mode")
             }
-            Divider()
-            Button {
-                showNewSpace = true
-            } label: {
-                Label("New project…", systemImage: "folder.badge.plus")
-            }
+            AppearancePicker()
+            Button("Notifications") { showNotifications = true }
+            Button("Sign out", role: .destructive) { model.signOut() }
         } label: {
-            HStack(spacing: 5) {
-                Text(selectedSpace?.displayName ?? "Projects")
-                    .font(Theme.sans(14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Theme.textFaint)
-            }
-            // Keep long space names from swallowing the whole bar; the owning
-            // device lives on the menu rows ("@ mac"), not up here.
-            .frame(maxWidth: 220, alignment: .leading)
-            // Its own glass capsule (the item's shared glass is hidden so the
-            // connect spinner doesn't ride inside the button).
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            Image(systemName: "person.crop.circle")
         }
-        .accessibilityLabel("Select project")
+        .accessibilityLabel("Account")
     }
 
-    private func deviceTag(_ space: Space) -> String {
-        let name = model.deviceName(space.deviceId)
-        return model.deviceOnline(space.deviceId) ? "@ \(name)" : "@ \(name) · offline"
+    /// Always one line, so the large title never jumps: connection state
+    /// first, then live activity, then the plain project count.
+    private var subtitle: String {
+        guard model.connected else { return "Connecting…" }
+        let indicators = model.overviewChats.map { model.indicator(for: $0) }
+        let activity = ChatIndicator.activitySummary(indicators)
+        if !activity.isEmpty { return activity.joined(separator: " · ") }
+        let count = model.spaces.count
+        return count == 1 ? "1 project" : "\(count) projects"
     }
 
-    private func spaceMenuButton(id: String, title: String, subtitle: String?) -> some View {
-        let selected = id.isEmpty ? selectedSpace == nil : spaceFilter == id
-        return Button {
-            spaceFilter = id
-        } label: {
-            if selected {
-                Label {
-                    Text(title)
-                    if let subtitle { Text(subtitle) }
-                } icon: {
-                    Image(systemName: "checkmark")
-                }
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label("No Projects", systemImage: "folder.badge.plus")
+        } description: {
+            Text("Connect Cypher on a Mac or Linux device, then add a project folder. This phone is a remote control — no Runtime is needed here.")
+        } actions: {
+            Button("Add Project") { showNewSpace = true }
+                .buttonStyle(.glass)
+        }
+    }
+
+    // MARK: Sections
+
+    private struct DeviceGroup: Identifiable {
+        let id: String
+        var spaces: [Space]
+    }
+
+    /// Projects under their owning device, in registry order.
+    private var deviceGroups: [DeviceGroup] {
+        var groups: [DeviceGroup] = []
+        for space in model.spaces {
+            if let ix = groups.firstIndex(where: { $0.id == space.deviceId }) {
+                groups[ix].spaces.append(space)
             } else {
-                Text(title)
-                if let subtitle { Text(subtitle) }
+                groups.append(DeviceGroup(id: space.deviceId, spaces: [space]))
             }
+        }
+        return groups
+    }
+
+    /// Preserve access to history whose project row is gone; never invent a
+    /// project/device association for an orphaned chat.
+    private var orphanedChats: [Chat] {
+        model.overviewChats.filter { chat in
+            !model.spaces.contains(where: { $0.id == chat.spaceId })
         }
     }
 
-    /// "+" starts a session in the scoped space; under All it asks which
-    /// space first. With no spaces yet it falls through to space creation.
-    @ViewBuilder private var newButton: some View {
-        if let space = selectedSpace {
-            Button {
-                path.append(.newSession(spaceId: space.id))
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel("New session")
-        } else {
-            Button {
-                showNewSpace = true
-            } label: {
-                Image(systemName: "plus")
-            }
-            .accessibilityLabel("New project")
-        }
-    }
-
-    private var projectsSection: some View {
-        Section {
-            if model.spaces.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Your projects, across devices")
-                        .font(Theme.sans(16, weight: .medium))
-                    Text("Connect Cypher on a Mac or Linux device, then add a project folder with +. This phone is a remote control — no Runtime is needed here.")
-                        .font(Theme.sans(13))
-                        .foregroundStyle(Theme.textMuted)
-                }
-                .padding(.vertical, 20)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-            }
-            ForEach(model.spaces) { space in
-                Button { path.append(.space(space.id)) } label: {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            Text(model.deviceName(space.deviceId))
-                                .font(Theme.sans(12))
-                                .foregroundStyle(Theme.textMuted)
-                                .lineLimit(1)
-                            Circle()
-                                .fill(model.deviceOnline(space.deviceId)
-                                      ? Theme.statusCompleted.opacity(0.9)
-                                      : Theme.textFaint.opacity(0.4))
-                                .frame(width: 6, height: 6)
-                                .accessibilityLabel(model.deviceOnline(space.deviceId)
-                                                    ? "Device online" : "Device offline")
-                            Spacer(minLength: 8)
-                            Text("\(model.chats(in: space.id).count)")
-                                .font(Theme.mono(12))
-                                .foregroundStyle(Theme.textFaint)
-                                .fixedSize()
-                                .accessibilityLabel("\(model.chats(in: space.id).count) sessions")
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.textFaint)
-                                .frame(width: 12, height: 14)
-                                .accessibilityHidden(true)
-                        }
-                        HStack {
-                            Text(space.displayName)
-                                .font(Theme.sans(15, weight: .medium))
-                                .foregroundStyle(Theme.text)
-                                .lineLimit(1)
-                            Spacer()
-                            ProjectStatusIndicator(indicator: model.spaceIndicator(space.id))
-                        }
+    @ViewBuilder private var otherSessionsSection: some View {
+        let orphaned = orphanedChats
+        if !orphaned.isEmpty {
+            Section {
+                ForEach(orphaned) { chat in
+                    NavigationLink(value: Route.chat(chat.id)) {
+                        ChatRow(chat: chat, showLocation: true)
                     }
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 64)
-                    .contentShape(Rectangle())
+                    .groupedRowStyle()
                 }
-                .buttonStyle(PressWashButtonStyle())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+            } header: {
+                ListSectionHeader(title: "Other Sessions")
             }
-            // Preserve access to history whose project row is gone; never
-            // invent a project/device association for an orphaned chat.
-            let orphaned = model.overviewChats.filter { chat in
-                !model.spaces.contains(where: { $0.id == chat.spaceId })
-            }
-            if !orphaned.isEmpty {
-                Section("Other sessions") {
-                    ForEach(orphaned) { chat in
-                        Button { path.append(.chat(chat.id)) } label: {
-                            ChatRow(chat: chat, showLocation: true)
-                        }
-                        .listRowBackground(Color.clear)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Sessions
-
-    private var sessionsSection: some View {
-        Section {
-            let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
-            if chats.isEmpty {
-                Text(model.spaces.isEmpty
-                    ? "No projects yet — add a folder from a connected device"
-                    : "No sessions yet")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.textFaint)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
-            ForEach(chats) { chat in
-                Button {
-                    path.append(.chat(chat.id))
-                } label: {
-                    ChatRow(chat: chat, showLocation: selectedSpace == nil)
-                }
-                .buttonStyle(PressWashButtonStyle())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button {
-                        // withAnimation, not a value-keyed .animation: the row
-                        // leaves THIS section and lands in the archived shelf
-                        // — one coordinated List diff, or the hand-off jumps.
-                        withAnimation(Motion.resort) {
-                            model.archive(chatId: chat.id)
-                        }
-                    } label: {
-                        Label("Archive", systemImage: "archivebox")
-                    }
-                    .tint(Theme.surfaceRaised)
-                }
-            }
-            .motionAnimation(Motion.resort, value: chats.map(\.id))
         }
     }
 }
 
 // MARK: - Rows
 
-/// Shares the chevron's trailing rail; an empty slot preserves idle geometry.
-private struct ProjectStatusIndicator: View {
-    let indicator: ChatIndicator?
-
-    var body: some View {
-        Group {
-            switch indicator {
-            case .working:
-                MiniSpinner()
-            case .completed:
-                Image(systemName: "checkmark")
-                    .foregroundStyle(ChatIndicator.completed.dotColor)
-            case .awaitingInput:
-                Image(systemName: "questionmark.circle")
-                    .foregroundStyle(ChatIndicator.awaitingInput.dotColor)
-            case .errored:
-                Image(systemName: "exclamationmark.circle")
-                    .foregroundStyle(ChatIndicator.errored.dotColor)
-            case .idle, nil:
-                Color.clear
-            }
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .frame(width: 12, height: 14)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityHidden(indicator == nil || indicator == .idle)
-    }
-
-    private var accessibilityLabel: String {
-        switch indicator {
-        case .working: return "Sessions running"
-        case .completed: return "Unread completed sessions"
-        case .awaitingInput: return "Sessions awaiting input"
-        case .errored: return "Unread session errors"
-        case .idle, nil: return ""
-        }
+extension View {
+    /// Cell paint shared by every inset-grouped list in the app.
+    func groupedRowStyle() -> some View {
+        listRowBackground(Theme.groupedRow)
+            .listRowSeparatorTint(Theme.border)
     }
 }
 
-/// Two-line session row: project-scoped rows show checkout context above
-/// the title. Cross-project history retains its project/device context.
-struct ChatRow: View {
-    @Environment(AppModel.self) private var model
-    let chat: Chat
-    var showLocation: Bool
-
-    private var subline: Color { Theme.textMuted.opacity(0.5) }
+/// Sentence-case section header in the app's type, not the system's caps.
+/// Keeps the system position (aligned with row text), per the list style.
+struct ListSectionHeader<Accessory: View>: View {
+    let title: String
+    @ViewBuilder var accessory: Accessory
 
     var body: some View {
-        let indicator = model.indicator(for: chat)
-        VStack(alignment: .leading, spacing: 5) {
-            // Line 1: context and status (time-ago when idle).
-            HStack(spacing: 8) {
-                if showLocation {
-                    Text(location)
-                        .font(Theme.sans(11))
-                        .foregroundStyle(subline)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    HStack(spacing: 4) {
-                        LineIconView(isWorktree ? .folderWithFiles : .gitBranch,
-                                     size: 11, color: subline)
-                        Text(checkoutLabel)
-                            .font(Theme.sans(11))
-                            .foregroundStyle(subline)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if indicator == .idle {
-                    Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
-                        .font(Theme.sans(10, weight: .medium))
-                        .foregroundStyle(subline)
-                        .fixedSize()
-                } else {
-                    StatusCorner(indicator: indicator)
-                }
-            }
+        HStack(spacing: 8) {
+            Text(title)
+                .font(Theme.sans(14, weight: .semibold, relativeTo: .subheadline))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            accessory
+        }
+        .textCase(nil)
+    }
+}
 
-            // Line 2: title with its live-run spinner.
-            HStack(spacing: 6) {
-                if let harness = chat.config?.harness {
-                    HarnessBadge(harness: harness, size: 11, neutral: subline)
-                }
-                Text(chat.displayTitle)
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if indicator == .working {
-                    MiniSpinner()
+extension ListSectionHeader where Accessory == EmptyView {
+    init(title: String) {
+        self.init(title: title) { EmptyView() }
+    }
+}
+
+/// "All" plus one rounded-rectangle tab per project-owning device, with its
+/// presence dot. Content-layer filters, so solid fills rather than glass
+/// (glass belongs to the navigation layer). Scrolls sideways past ~4 devices.
+private struct DeviceTabs: View {
+    @Environment(AppModel.self) private var model
+    let deviceIds: [String]
+    @Binding var selection: String
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                tab(id: "", title: "All", online: nil)
+                ForEach(deviceIds, id: \.self) { id in
+                    tab(id: id, title: model.deviceName(id), online: model.deviceOnline(id))
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 10)
-        .frame(minHeight: 56)
-        .contentShape(RoundedRectangle(cornerRadius: 8))
+        // Tabs start on the cards' edge (the inset-grouped section margin)
+        // but scroll out to the screen edge.
+        .contentMargins(.horizontal, 16, for: .scrollContent)
+    }
+
+    private func tab(id: String, title: String, online: Bool?) -> some View {
+        // A filter naming a vanished device reads as All.
+        let current = deviceIds.contains(selection) ? selection : ""
+        let selected = id == current
+        return Button {
+            guard !selected else { return }
+            UISelectionFeedbackGenerator().selectionChanged()
+            withAnimation(Motion.fadeQuick) { selection = id }
+        } label: {
+            HStack(spacing: 6) {
+                if let online {
+                    Circle()
+                        .fill(online ? Theme.statusCompleted : Theme.textFaint.opacity(0.5))
+                        .frame(width: 6, height: 6)
+                }
+                Text(title)
+                    .font(Theme.sans(14, weight: .medium, relativeTo: .subheadline))
+                    .foregroundStyle(selected ? Theme.bg : Theme.text)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 36)
+            .background(selected ? Theme.text : Theme.groupedRow,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(online.map { "\(title), \($0 ? "online" : "offline")" } ?? title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Folder glyph, name, and one summary line carrying the project's activity.
+private struct ProjectRow: View {
+    @Environment(AppModel.self) private var model
+    let space: Space
+
+    var body: some View {
+        let chats = model.chats(in: space.id)
+        let indicators = chats.map { model.indicator(for: $0) }
+        HStack(spacing: 12) {
+            LineIconView(space.gitDetected ? .folderWithFiles : .folder, size: 18,
+                         color: Theme.textMuted)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(space.displayName)
+                    .font(Theme.sans(16, weight: .medium, relativeTo: .body))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Text(summary(count: chats.count, indicators: indicators))
+                    .font(Theme.sans(13, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func summary(count: Int, indicators: [ChatIndicator]) -> String {
+        let total = count == 0 ? "No sessions" : count == 1 ? "1 session" : "\(count) sessions"
+        return (ChatIndicator.activitySummary(indicators) + [total]).joined(separator: " · ")
+    }
+}
+
+extension ChatIndicator {
+    /// "1 running · 2 need input · 1 failed · 1 done" parts, attention
+    /// first. Done/failed count unread runs only (the indicator's meaning).
+    static func activitySummary(_ indicators: [ChatIndicator]) -> [String] {
+        let running = indicators.filter { $0 == .working }.count
+        let input = indicators.filter { $0 == .awaitingInput }.count
+        let failed = indicators.filter { $0 == .errored }.count
+        let done = indicators.filter { $0 == .completed }.count
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running) running") }
+        if input > 0 { parts.append(input == 1 ? "1 needs input" : "\(input) need input") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        if done > 0 { parts.append("\(done) done") }
+        return parts
+    }
+}
+
+/// Mail-style session row: title and time, then checkout (or, outside a
+/// project, "project @ device") and live status.
+struct ChatRow: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
+    let chat: Chat
+    var showLocation: Bool
+
+    var body: some View {
+        let indicator = model.indicator(for: chat)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(chat.displayTitle)
+                    .font(Theme.sans(16, weight: .medium, relativeTo: .body))
+                    .foregroundStyle(Theme.text)
+                    // Accessibility sizes leave room for ~2 words per line.
+                    .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
+                    .font(Theme.sans(13, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textFaint)
+                    .fixedSize()
+            }
+            HStack(spacing: 6) {
+                // Pi is the only new-session harness; mark the exceptions.
+                if let harness = chat.config?.harness, harness != "pi" {
+                    HarnessBadge(harness: harness, size: 12, neutral: Theme.textMuted)
+                }
+                if !showLocation {
+                    LineIconView(isWorktree ? .folderWithFiles : .gitBranch,
+                                 size: 12, color: Theme.textMuted)
+                }
+                Text(showLocation ? location : checkoutLabel)
+                    .font(Theme.sans(13, relativeTo: .subheadline))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+                    .truncationMode(showLocation ? .tail : .middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                SessionStatusBadge(indicator: indicator)
+            }
+        }
     }
 
     private var isWorktree: Bool {
@@ -565,12 +515,59 @@ struct ChatRow: View {
     /// "space @ device" (the session header's format). The space name (not
     /// the cwd basename) is what the desktop row shows — they differ once a
     /// space has been renamed, or when the session runs in a worktree off to
-    /// the side. No offline marker: the dropdown carries device liveness.
+    /// the side.
     private var location: String {
         let space = model.space(for: chat)?.displayName
             ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
             ?? "?"
         return "\(space) @ \(model.deviceName(chat.deviceId))"
+    }
+}
+
+/// Live status on the row's second line; nothing when idle (the time on the
+/// first line already covers it).
+struct SessionStatusBadge: View {
+    let indicator: ChatIndicator
+
+    var body: some View {
+        if let label {
+            HStack(spacing: 5) {
+                switch indicator {
+                case .working:
+                    MiniSpinner(cellSize: 2.6)
+                case .completed:
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                default:
+                    Circle().frame(width: 6, height: 6)
+                }
+                Text(label)
+                    .font(Theme.sans(12, weight: .medium, relativeTo: .caption))
+            }
+            .foregroundStyle(color)
+            .fixedSize()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+        }
+    }
+
+    private var label: String? {
+        switch indicator {
+        case .working: return "Working"
+        case .awaitingInput: return "Needs input"
+        case .errored: return "Failed"
+        case .completed: return "Done"
+        case .idle: return nil
+        }
+    }
+
+    private var color: Color {
+        switch indicator {
+        case .working: return Theme.statusWorking
+        case .awaitingInput: return Theme.accent
+        case .errored: return Theme.danger
+        case .completed, .idle: return Theme.statusCompleted
+        }
     }
 }
 
