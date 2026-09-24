@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         completed_at: None,
+        comments: Vec::new(),
     })?;
     std::fs::write(
         &control,

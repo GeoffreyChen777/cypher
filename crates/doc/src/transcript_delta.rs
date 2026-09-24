@@ -282,6 +282,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 

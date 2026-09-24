@@ -465,6 +465,16 @@ impl DraftComment {
             &self.comment,
         )
     }
+
+    /// This comment as the sent entry records it — the same quote the engine
+    /// reads back out of the effective prompt, so the echo and the doc frame
+    /// render alike.
+    fn message_comment(&self) -> cypher_doc::MessageComment {
+        cypher_doc::MessageComment {
+            quote: self.prompt_comment().displayed_quote().to_owned(),
+            comment: self.comment.clone(),
+        }
+    }
 }
 
 /// Whether a send must be blocked because comments are pending on a slash
@@ -496,7 +506,7 @@ pub fn merge_restored_comments(
 }
 
 /// One-line quote preview for the comments inspector/editor.
-fn comment_quote_preview(quote: &str) -> String {
+pub(crate) fn comment_quote_preview(quote: &str) -> String {
     let single = quote.replace('\n', " ");
     if single.chars().count() > 120 {
         let mut out: String = single.chars().take(120).collect();
@@ -6849,7 +6859,16 @@ impl Composer {
         }
 
         // Optimistic echo (client-minted id doubles as the persisted message id,
-        // so the doc frame dedups it away).
+        // so the doc frame dedups it away). It shows the comments this send
+        // takes, as the host's entry will.
+        let echo_comments: Vec<cypher_doc::MessageComment> = if take_draft {
+            self.comments
+                .iter()
+                .map(DraftComment::message_comment)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let echo = SessionMessageEntry {
             id: message_id.clone(),
             role: cypher_doc::MessageRole::User,
@@ -6863,6 +6882,7 @@ impl Composer {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: echo_comments.clone(),
         };
         self.state.update(cx, |s, cx| {
             if is_new {
@@ -7127,6 +7147,7 @@ impl Composer {
                         status: None,
                         continuation_of: None,
                         completed_at: None,
+                        comments: echo_comments.clone(),
                     };
                     let echo_chat_id = chat_id.clone();
                     this.update(cx, |composer, cx| {
@@ -7364,6 +7385,7 @@ impl Composer {
                                 status: None,
                                 continuation_of: None,
                                 completed_at: None,
+                                comments: echo_comments.clone(),
                             };
                             let echo_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
@@ -10163,6 +10185,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         let stripped = strip_attachment_trailer(&user);
         let MessagePart::Text { text, .. } = &stripped.parts[0] else {
@@ -10186,6 +10209,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         assert_eq!(strip_attachment_trailer(&assistant), assistant);
     }
@@ -10721,6 +10745,7 @@ mod tests {
             status,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -10759,6 +10784,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 completed_at: None,
+                comments: Vec::new(),
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -10793,6 +10819,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),
@@ -10816,6 +10843,7 @@ mod tests {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         let t = vec![
             entry(Some(MessageStatus::Complete), vec![input_part.clone()]),

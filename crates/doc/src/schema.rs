@@ -4,7 +4,7 @@
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
-//!   completedAt? }
+//!   completedAt?, comments?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -58,6 +58,35 @@ pub struct SessionMessageEntry {
     /// transcript can label it after a reload or on another device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
+    /// The comments that rode a user prompt (the Comment feature) — the
+    /// agent received them inside its effective prompt; the transcript shows
+    /// them beside the visible one. Additive: absent on old rows, old
+    /// writers, and every prompt sent without comments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<MessageComment>,
+}
+
+/// One comment sent with a user prompt: the quote as the user selected it
+/// and what they wrote about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageComment {
+    pub quote: String,
+    pub comment: String,
+}
+
+impl MessageComment {
+    /// The comments a wrapped effective prompt carries
+    /// ([`cypher_proto::agent_prompt::parse_comments`]).
+    pub fn from_agent_prompt(prompt: &str) -> Vec<Self> {
+        cypher_proto::agent_prompt::parse_comments(prompt)
+            .into_iter()
+            .map(|comment| Self {
+                quote: comment.displayed_quote().to_owned(),
+                comment: comment.comment,
+            })
+            .collect()
+    }
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -758,6 +787,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(completed_at) = entry.completed_at {
         map.insert("completedAt", completed_at)?;
     }
+    if !entry.comments.is_empty() {
+        map.insert(
+            "comments",
+            loro_value_from_json(&serde_json::to_value(&entry.comments)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -837,6 +872,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         continuation_of: Option<String>,
         #[serde(default)]
         completed_at: Option<i64>,
+        #[serde(default)]
+        comments: Vec<MessageComment>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -848,6 +885,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             status: raw.status,
             continuation_of: raw.continuation_of,
             completed_at: raw.completed_at,
+            comments: raw.comments,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -913,6 +951,10 @@ fn salvage_entry(
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
         completed_at: obj.get("completedAt").and_then(|x| x.as_i64()),
+        comments: obj
+            .get("comments")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1049,6 +1091,7 @@ impl<'a> SegmentWriter<'a> {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 completed_at: None,
+                comments: Vec::new(),
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1301,6 +1344,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 
@@ -1320,6 +1364,23 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn round_trips_message_comments() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut commented = user_entry("m1", "");
+        commented.comments = vec![MessageComment {
+            quote: "a \"quoted\"\nline".into(),
+            comment: "why?".into(),
+        }];
+        doc.push_message(&commented).unwrap();
+        doc.push_message(&user_entry("m2", "plain")).unwrap();
+        let other = LoroDoc::new();
+        other.import(&doc.export_snapshot().unwrap()).unwrap();
+        let entries = SessionDoc::from_doc(other).read_entries().unwrap();
+        assert_eq!(entries[0].comments, commented.comments);
+        assert!(entries[1].comments.is_empty());
     }
 
     #[test]
@@ -1367,6 +1428,7 @@ mod tests {
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -1751,6 +1813,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();

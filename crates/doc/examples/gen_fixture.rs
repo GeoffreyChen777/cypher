@@ -28,6 +28,7 @@ fn main() {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         completed_at: None,
+        comments: Vec::new(),
     })
     .expect("push user message");
 

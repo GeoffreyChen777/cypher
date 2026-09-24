@@ -1659,6 +1659,7 @@ impl PiForkBackend for RacingBackend {
                 status: Some(cypher_doc::MessageStatus::Complete),
                 continuation_of: None,
                 completed_at: None,
+                comments: Vec::new(),
             })
             .expect("append raced prompt");
         let path = self.session_root.join("fork-raced.jsonl");

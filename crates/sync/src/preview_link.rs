@@ -533,6 +533,7 @@ pub fn overlay(
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         });
     }
 }

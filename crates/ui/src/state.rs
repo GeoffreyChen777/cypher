@@ -3212,6 +3212,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 
@@ -4128,6 +4129,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.

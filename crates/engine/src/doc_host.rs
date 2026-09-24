@@ -26,8 +26,8 @@ use tokio_util::task::TaskTracker;
 
 use cypher_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
-    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
-    SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
+    MessageComment, MessagePart, MessageRole, MessageStatus, SessionCommandEntry,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
     join_continuation_entries,
 };
 use cypher_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
@@ -397,6 +397,18 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        self.write_user_prompt(message_id, text, &[], created_at)
+    }
+
+    /// [`Self::write_user_message`] carrying the comments that rode the
+    /// prompt (the Comment feature), so the transcript can show them.
+    pub fn write_user_prompt(
+        &self,
+        message_id: &str,
+        text: &str,
+        comments: &[MessageComment],
+        created_at: i64,
+    ) -> Result<(), DocError> {
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
@@ -413,6 +425,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: comments.to_vec(),
         })
     }
 
@@ -2760,12 +2773,6 @@ impl DocHost {
                 message_id,
                 agent_prompt,
             } => {
-                // A steer lands in the chat's running harness; strip the
-                // translation-only alignment input for any agent but Pi.
-                let steer_prompt = crate::sessions::agent_prompt_for(
-                    self.harness_for(chat_id),
-                    agent_prompt.clone(),
-                );
                 // The chat row carries the composer's current model pick: a
                 // parked run launched with other settings ends here, so the
                 // steer falls through to a fresh turn on the new model.
@@ -2774,7 +2781,7 @@ impl DocHost {
                     sessions.retire_stale_run(chat_id, wanted).await?;
                 }
                 match sessions
-                    .steer_augmented(chat_id, prompt, steer_prompt, message_id.clone())
+                    .steer_augmented(chat_id, prompt, agent_prompt.clone(), message_id.clone())
                     .await?
                 {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),

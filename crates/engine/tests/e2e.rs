@@ -659,6 +659,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();

@@ -1026,6 +1026,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 
@@ -1043,6 +1044,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 

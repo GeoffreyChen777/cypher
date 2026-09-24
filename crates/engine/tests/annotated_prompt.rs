@@ -12,7 +12,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
-use cypher_doc::{MessagePart, MessageRole};
+use cypher_doc::{MessageComment, MessagePart, MessageRole};
 use cypher_engine::{EngineCore, HarnessRegistry, SteerOutcome};
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
@@ -389,6 +389,130 @@ async fn accepted_steer_delivers_agent_prompt_but_keeps_visible_entry() {
         user_texts(&rig.core),
         vec![visible_run.to_string(), visible_steer.to_string()],
         "both doc user entries stay visible"
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+/// A commented prompt with one quote taken from a displayed translation.
+fn commented_prompt(request: &str) -> String {
+    use cypher_proto::agent_prompt::{AgentQuote, PromptComment, QuoteAlign, comments_block, wrap};
+    let align = AgentQuote::Align(QuoteAlign {
+        passage: "The original passage.".into(),
+        before: "译文".into(),
+        selected: "选中".into(),
+        after: "。".into(),
+    });
+    wrap(
+        &[comments_block(&[
+            PromptComment::new("选中", Some(&align), "why?"),
+            PromptComment::new("plain", None, "ok"),
+        ])],
+        request,
+    )
+}
+
+fn user_comments(core: &EngineCore) -> Vec<Vec<MessageComment>> {
+    entries(core)
+        .into_iter()
+        .filter(|e| e.role == MessageRole::User)
+        .map(|e| e.comments)
+        .collect()
+}
+
+fn expected_comments() -> Vec<MessageComment> {
+    vec![
+        MessageComment {
+            quote: "选中".into(),
+            comment: "why?".into(),
+        },
+        MessageComment {
+            quote: "plain".into(),
+            comment: "ok".into(),
+        },
+    ]
+}
+
+/// The comments that rode a Run land on its user entry, quoted as the user
+/// selected them — even though a non-Pi harness receives the prompt with the
+/// translation alignment stripped.
+#[tokio::test]
+async fn run_records_its_comments_on_the_user_entry() {
+    let rig = assemble();
+    let augmented = commented_prompt("look");
+    rig.core
+        .sessions
+        .dispatch_augmented(
+            CHAT,
+            HarnessId::Mock,
+            run_request("look"),
+            Some(augmented.clone()),
+            None,
+        )
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(done()).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+
+    let received = rig.prompts.lock().unwrap().clone();
+    assert_eq!(
+        received,
+        vec![cypher_proto::agent_prompt::strip_alignment(&augmented)]
+    );
+    assert_eq!(user_comments(&rig.core), vec![expected_comments()]);
+    rig.core.sessions.shutdown().await;
+}
+
+/// A routed steer records its comments the same way, and strips the
+/// alignment for the running non-Pi harness itself.
+#[tokio::test]
+async fn accepted_steer_records_its_comments_and_strips_alignment() {
+    let rig = assemble();
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("watch"), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(done()).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+
+    let augmented = commented_prompt("follow-up");
+    let outcome = rig
+        .core
+        .sessions
+        .steer_augmented(
+            CHAT,
+            "follow-up",
+            Some(augmented.clone()),
+            Some("msg-2".to_string()),
+        )
+        .await
+        .expect("steer");
+    assert_eq!(outcome, SteerOutcome::Accepted);
+    wait_for(
+        || rig.prompts.lock().unwrap().len() >= 2,
+        "harness records the mailbox steer",
+    )
+    .await;
+
+    let received = rig.prompts.lock().unwrap().clone();
+    assert_eq!(
+        received[1],
+        cypher_proto::agent_prompt::strip_alignment(&augmented)
+    );
+    assert!(!received[1].contains(cypher_proto::agent_prompt::ALIGN_KEY));
+    assert_eq!(
+        user_comments(&rig.core),
+        vec![Vec::new(), expected_comments()]
     );
     rig.core.sessions.shutdown().await;
 }

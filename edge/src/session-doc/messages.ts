@@ -130,6 +130,10 @@ export interface SessionMessageEntry {
    * of a settled turn (the transcript's "Worked for …" label); absent while
    * streaming and on entries written before the field existed. */
   readonly completedAt?: number;
+  /** The comments that rode a user prompt (the Comment feature): each quote
+   * as the user selected it and what they wrote about it. Absent on prompts
+   * sent without comments and on entries written before the field existed. */
+  readonly comments?: ReadonlyArray<{ readonly quote: string; readonly comment: string }>;
 }
 
 const encoder = new TextEncoder();

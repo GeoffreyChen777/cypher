@@ -38,7 +38,7 @@ use gpui::{
     Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
-use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use cypher_proto::view::Indicator;
 use cypher_proto::{Chat, HarnessId, ToolCall};
 
@@ -511,6 +511,8 @@ pub enum RowKind {
         /// image thumbnails load from the owning device via
         /// ReadAttachmentChunk; other files render as tiles.
         attachments: Arc<Vec<crate::attachments::UserAttachment>>,
+        /// The comments that rode this prompt, shown above the bubble.
+        comments: Arc<Vec<MessageComment>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -958,6 +960,55 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     fnv1a(&acc)
 }
 
+/// The comments a prompt carried, right-aligned above its bubble: each quote
+/// (one muted line) over what the user wrote about it.
+fn user_comments(
+    comments: &[MessageComment],
+    wide: bool,
+    pending: bool,
+    theme: &Theme,
+) -> gpui::Div {
+    let mut list = div()
+        .min_w_0()
+        .when(!wide, |el| el.max_w(px(MAX_CONTENT_WIDTH * 0.8)))
+        .when(wide, |el| el.max_w(gpui::relative(0.8)))
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap(px(6.0))
+        .when(pending, |el| el.opacity(0.65));
+    for comment in comments {
+        list = list.child(
+            div()
+                .min_w_0()
+                .max_w_full()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .pl(px(10.0))
+                .border_l_2()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(crate::composer::comment_quote_preview(
+                            &comment.quote,
+                        ))),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(comment.comment.clone())),
+                ),
+        );
+    }
+    div().w_full().flex().justify_end().pb(px(6.0)).child(list)
+}
+
 fn user_entry_is_slash_command(entry: &SessionMessageEntry) -> bool {
     let text: String = entry
         .parts
@@ -1005,14 +1056,26 @@ pub fn rows_for_entry(
             Some((display, spans)) => (display, spans),
             None => (parsed.text, Vec::new()),
         };
+        // Comments are fixed at send, but the echo and the doc frame must
+        // still agree on them for the row cache. Uncommented prompts keep the
+        // plain raw-length key.
+        let comments_key = (!entry.comments.is_empty()).then(|| {
+            let mut acc = Vec::new();
+            for comment in &entry.comments {
+                acc.extend_from_slice(&fnv1a(comment.quote.as_bytes()).to_le_bytes());
+                acc.extend_from_slice(&fnv1a(comment.comment.as_bytes()).to_le_bytes());
+            }
+            fnv1a(&acc)
+        });
         return vec![Row {
             id: entry.id.clone().into(),
-            version: (raw.len() as u64) << 1 | pending as u64,
+            version: ((raw.len() as u64) ^ comments_key.unwrap_or(0)) << 1 | pending as u64,
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
+                comments: Arc::new(entry.comments.clone()),
                 pending,
             },
             entry_id,
@@ -3787,6 +3850,7 @@ impl Transcript {
                 text,
                 mentions,
                 attachments,
+                comments,
                 pending,
             } => {
                 let attachments = attachments.clone();
@@ -3799,6 +3863,9 @@ impl Transcript {
                 let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
+                }
+                if !comments.is_empty() {
+                    column = column.child(user_comments(comments, wide, pending, &theme));
                 }
                 if !text.is_empty() {
                     if renders_as_command_chip(&text, &mentions, &attachments) {
@@ -5925,6 +5992,7 @@ mod tests {
             status: Some(status),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         }
     }
 
@@ -6465,6 +6533,29 @@ mod tests {
     /// row carries the projected display text plus spans, while ordinary
     /// prompts keep the empty-spans fast path. The row version derives from
     /// the RAW text either way, so projection never perturbs the diff key.
+    /// A prompt's comments ride its user row — a comment-only send included
+    /// — and key its version, while an uncommented prompt keeps the plain one.
+    #[test]
+    fn user_rows_carry_their_comments() {
+        let mut entry = assistant("u4", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("t0", "")];
+        let plain = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(plain[0].version, 0);
+        entry.comments = vec![MessageComment {
+            quote: "the quote".into(),
+            comment: "why?".into(),
+        }];
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::User { text, comments, .. } = &rows[0].kind else {
+            panic!("expected a user row");
+        };
+        assert!(text.is_empty());
+        assert_eq!(comments.as_slice(), entry.comments.as_slice());
+        assert_ne!(rows[0].version, plain[0].version);
+    }
+
     #[test]
     fn user_rows_project_file_mentions_into_chips() {
         let raw = "look at [composer.rs](cypher-file:crates/ui/src/composer.rs) please";
@@ -6907,6 +6998,7 @@ mod tests {
             status: None,
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -7281,6 +7373,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 completed_at: None,
+                comments: Vec::new(),
             };
             let rows = rows_for_entry(&entry, false, &mut parse);
             assert!(!rows.is_empty(), "{id} renders a row");
@@ -7300,6 +7393,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             completed_at: None,
+            comments: Vec::new(),
         };
         let rows = rows_for_entry(&tool_entry, false, &mut parse);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));

@@ -88,12 +88,16 @@ impl AgentQuote {
 }
 
 /// One pending comment as the agent reads it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptComment {
     pub quoted_text: String,
     pub comment: String,
-    #[serde(rename = "cypherAlign", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cypherAlign",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub align: Option<QuoteAlign>,
 }
 
@@ -107,6 +111,14 @@ impl PromptComment {
             align: origin.and_then(AgentQuote::align).cloned(),
         }
     }
+
+    /// The quote as the user selected it: the displayed translation while
+    /// the alignment input still rides along, else the quoted text.
+    pub fn displayed_quote(&self) -> &str {
+        self.align
+            .as_ref()
+            .map_or(self.quoted_text.as_str(), |align| align.selected.as_str())
+    }
 }
 
 /// The comments block: [`COMMENTS_LEAD`] and `{"comments":[…]}`.
@@ -117,6 +129,24 @@ pub fn comments_block(comments: &[PromptComment]) -> String {
     }
     let json = serde_json::to_string(&Annotations { comments }).unwrap_or_else(|_| "{}".into());
     format!("{COMMENTS_LEAD} {json}")
+}
+
+/// The comments a wrapped prompt carries — the inverse of
+/// [`comments_block`], so the transcript can show what rode a send. Empty for
+/// a prompt without a comments block or outside the envelope layout.
+pub fn parse_comments(prompt: &str) -> Vec<PromptComment> {
+    #[derive(Deserialize)]
+    struct Annotations {
+        comments: Vec<PromptComment>,
+    }
+    let Some((head, _)) = prompt.split_once(REQUEST_MARKER) else {
+        return Vec::new();
+    };
+    head.split("\n\n")
+        .filter_map(|line| line.strip_prefix(COMMENTS_LEAD)?.strip_prefix(' '))
+        .filter_map(|json| serde_json::from_str::<Annotations>(json).ok())
+        .flat_map(|annotations| annotations.comments)
+        .collect()
 }
 
 /// A Side Chat's first-send context.
@@ -246,6 +276,28 @@ mod tests {
         assert_eq!(comment.align, None);
         // Untranslated: exactly as selected.
         assert_eq!(PromptComment::new("same", None, "ok").quoted_text, "same");
+    }
+
+    #[test]
+    fn parse_comments_inverts_the_comments_block() {
+        let comments = vec![
+            PromptComment::new("很长", Some(&AgentQuote::Align(align())), "why\nnow?"),
+            PromptComment::new("plain", None, "ok"),
+        ];
+        let sessions = format!("{SESSIONS_LEAD} {{\"sessions\":[]}}");
+        let prompt = wrap(&[sessions.clone(), comments_block(&comments)], "go");
+        let parsed = parse_comments(&prompt);
+        assert_eq!(parsed, comments);
+        assert_eq!(parsed[0].displayed_quote(), "很长");
+        assert_eq!(parsed[1].displayed_quote(), "plain");
+        // Stripped for a non-Pi agent: the original passage stands in.
+        let stripped = parse_comments(&strip_alignment(&prompt));
+        assert_eq!(stripped[0].displayed_quote(), "Second paragraph, long.");
+        // No comments block, or no envelope at all.
+        assert!(parse_comments(&wrap(&[sessions], "go")).is_empty());
+        assert!(parse_comments("plain request").is_empty());
+        // A request that merely mentions the lead is not a block.
+        assert!(parse_comments(&wrap(&[], &format!("{COMMENTS_LEAD} {{}}"))).is_empty());
     }
 
     #[test]

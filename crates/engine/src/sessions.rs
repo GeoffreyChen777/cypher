@@ -26,8 +26,8 @@ use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use cypher_doc::{
-    DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    fold_event_into_parts, sanitize_tool_call,
+    DocError, MessageComment, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS,
+    SegmentWriter, SessionDoc, fold_event_into_parts, sanitize_tool_call,
 };
 use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
@@ -620,6 +620,8 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // Read before stripping: the transcript shows the quote the user saw.
+        let comments = MessageComment::from_agent_prompt(agent_prompt.as_deref().unwrap_or(""));
         let agent_prompt = agent_prompt_for(harness_id, agent_prompt);
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
@@ -679,7 +681,7 @@ impl SessionsEngine {
             };
             if sent {
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &visible_prompt, now_ms())?;
+                handle.write_user_prompt(&user_id, &visible_prompt, &comments, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
                     // Working BEFORE the lastMessageAt bump: both ride the
                     // workspace doc from this one peer, so causal order makes it
@@ -715,7 +717,7 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
-        handle.write_user_message(&user_id, &visible_prompt, now_ms())?;
+        handle.write_user_prompt(&user_id, &visible_prompt, &comments, now_ms())?;
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -825,7 +827,8 @@ impl SessionsEngine {
 
     /// [`Self::steer`] with an EFFECTIVE harness prompt override (the Comment
     /// feature): the doc entry keeps `prompt` while the harness mailbox
-    /// receives `agent_prompt` when present.
+    /// receives `agent_prompt` when present — alignment stripped for any
+    /// running harness but Pi ([`agent_prompt_for`]).
     pub async fn steer_augmented(
         &self,
         chat_id: &str,
@@ -841,11 +844,13 @@ impl SessionsEngine {
                     h.run_id.clone(),
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
+                    h.launch.harness,
                 )
             });
-        let Some((run_id, steer_tx, ledger)) = target else {
+        let Some((run_id, steer_tx, ledger, harness)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        let comments = MessageComment::from_agent_prompt(agent_prompt.as_deref().unwrap_or(""));
         let user_id = message_id.clone().unwrap_or_else(new_id);
         // Accepted: the ledger entry and the mailbox send are atomic under
         // the ledger lock — the entry goes in BEFORE try_send, so the run
@@ -858,9 +863,11 @@ impl SessionsEngine {
         // invariant as the dispatch route (an observer must never hold [new
         // message, settled status]: the phantom "completed" flash,
         // 2026-07-31).
-        let effective = agent_prompt.clone().unwrap_or_else(|| prompt.to_string());
+        let effective =
+            agent_prompt_for(harness, agent_prompt.clone()).unwrap_or_else(|| prompt.to_string());
         let sent = {
             let mut ledger = lock(&ledger);
+            // Unstripped: an orphan re-dispatch strips for its own harness.
             ledger.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 agent_prompt: agent_prompt.clone(),
@@ -882,7 +889,7 @@ impl SessionsEngine {
             return Ok(SteerOutcome::NotSteerable);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, now_ms())?;
+        handle.write_user_prompt(&user_id, prompt, &comments, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
