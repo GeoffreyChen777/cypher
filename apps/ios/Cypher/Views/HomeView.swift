@@ -60,6 +60,21 @@ struct HomeView: View {
             List {
                 let groups = deviceGroups
                 let selected = groups.first { $0.id == deviceFilter }
+                // In the list, under the large title: a top safeAreaBar
+                // shifted the scroll inset while the title collapsed (the
+                // title flickered and slid under the tabs) and ran the scroll
+                // indicator across the tabs. A header rather than a row: a
+                // cell masks its content to the section's corner radius,
+                // which clipped the first tab.
+                if !groups.isEmpty {
+                    Section {} header: {
+                        DeviceTabs(deviceIds: groups.map(\.id), selection: $deviceFilter)
+                            .listRowInsets(EdgeInsets())
+                            // Out past the section margin to the screen edge.
+                            .padding(.horizontal, -DeviceTabs.margin)
+                            .textCase(nil)
+                    }
+                }
                 // One tab: one card. All: a card per device, named by a plain
                 // header (the tabs already carry presence), so rows never
                 // repeat their device.
@@ -85,15 +100,6 @@ struct HomeView: View {
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Theme.surface.ignoresSafeArea())
-            // Outside the List: a list cell masks its content to the section's
-            // corner radius, which clipped the first tab. The bar also keeps
-            // the filter reachable while the list scrolls under it.
-            .safeAreaBar(edge: .top) {
-                if !deviceGroups.isEmpty {
-                    DeviceTabs(deviceIds: deviceGroups.map(\.id), selection: $deviceFilter)
-                        .padding(.vertical, 8)
-                }
-            }
             .overlay {
                 if model.spaces.isEmpty && orphanedChats.isEmpty {
                     emptyState
@@ -302,10 +308,11 @@ struct HomeView: View {
     @ViewBuilder private var otherSessionsSection: some View {
         let orphaned = orphanedChats
         if !orphaned.isEmpty {
+            let statusSlot = ChatRow.needsStatusSlot(orphaned, in: model)
             Section {
                 ForEach(orphaned) { chat in
                     NavigationLink(value: Route.chat(chat.id)) {
-                        ChatRow(chat: chat, showLocation: true)
+                        ChatRow(chat: chat, showLocation: true, statusSlot: statusSlot)
                     }
                     .groupedRowStyle()
                 }
@@ -370,8 +377,11 @@ private struct DeviceTabs: View {
         }
         // Tabs start on the cards' edge (the inset-grouped section margin)
         // but scroll out to the screen edge.
-        .contentMargins(.horizontal, 16, for: .scrollContent)
+        .contentMargins(.horizontal, Self.margin, for: .scrollContent)
     }
+
+    /// The inset-grouped section margin.
+    static let margin: CGFloat = 16
 
     private func tab(id: String, title: String, online: Bool?) -> some View {
         // A filter naming a vanished device reads as All.
@@ -454,46 +464,59 @@ extension ChatIndicator {
     }
 }
 
-/// Mail-style session row: title and time, then checkout (or, outside a
-/// project, "project @ device") and live status.
+/// Session row with one reading edge: live status in a leading gutter
+/// (Mail's unread-dot slot), the title, then one muted line — checkout (or,
+/// outside a project, "project @ device") and time. The trailing edge is
+/// left to the disclosure chevron.
 struct ChatRow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// Lifts the mark's center from the title baseline to mid x-height.
+    @ScaledMetric(relativeTo: .body) private var markLift: CGFloat = 5.5
     let chat: Chat
     var showLocation: Bool
+    /// Reserve the status slot. The list decides, so its titles share one
+    /// edge: set when any of its rows has a status (see `needsStatusSlot`).
+    var statusSlot: Bool
+
+    /// A list of all-idle sessions drops the slot rather than indent every
+    /// title past an empty gutter.
+    static func needsStatusSlot(_ chats: [Chat], in model: AppModel) -> Bool {
+        chats.contains { model.indicator(for: $0) != .idle }
+    }
 
     var body: some View {
-        let indicator = model.indicator(for: chat)
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            if statusSlot {
+                // Idle keeps the slot, so every title starts on the same edge.
+                SessionStatusMark(indicator: model.indicator(for: chat))
+                    .frame(width: 10)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + markLift }
+            }
+            VStack(alignment: .leading, spacing: 3) {
                 Text(chat.displayTitle)
                     .font(Theme.sans(16, weight: .medium, relativeTo: .body))
                     .foregroundStyle(Theme.text)
                     // Accessibility sizes leave room for ~2 words per line.
                     .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
-                    .font(Theme.sans(13, relativeTo: .subheadline))
-                    .foregroundStyle(Theme.textFaint)
-                    .fixedSize()
-            }
-            HStack(spacing: 6) {
-                // Pi is the only new-session harness; mark the exceptions.
-                if let harness = chat.config?.harness, harness != "pi" {
-                    HarnessBadge(harness: harness, size: 12, neutral: Theme.textMuted)
+                HStack(spacing: 6) {
+                    // Pi is the only new-session harness; mark the exceptions.
+                    if let harness = chat.config?.harness, harness != "pi" {
+                        HarnessBadge(harness: harness, size: 12, neutral: Theme.textMuted)
+                    }
+                    // The time never truncates; the checkout gives way first.
+                    HStack(spacing: 0) {
+                        Text(showLocation ? location : checkoutLabel)
+                            .lineLimit(1)
+                            .truncationMode(showLocation ? .tail : .middle)
+                        Text(" · \(relativeTime(chat.lastMessageAt ?? chat.createdAt))")
+                            .fixedSize()
+                    }
                 }
-                if !showLocation {
-                    LineIconView(isWorktree ? .folderWithFiles : .gitBranch,
-                                 size: 12, color: Theme.textMuted)
-                }
-                Text(showLocation ? location : checkoutLabel)
-                    .font(Theme.sans(13, relativeTo: .subheadline))
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(showLocation ? .tail : .middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                SessionStatusBadge(indicator: indicator)
+                .font(Theme.sans(13, relativeTo: .subheadline))
+                .foregroundStyle(Theme.textMuted)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -506,8 +529,9 @@ struct ChatRow: View {
         let branch = chat.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         let branchLabel = branch.flatMap { $0.isEmpty ? nil : $0 }
         if isWorktree, let cwd = chat.cwd {
+            if let branchLabel { return "\(branchLabel) (worktree)" }
             let name = ((cwd as NSString).standardizingPath as NSString).lastPathComponent
-            return [branchLabel, "Worktree · \(name)"].compactMap { $0 }.joined(separator: " / ")
+            return "Worktree \(name)"
         }
         return branchLabel ?? "Current checkout"
     }
@@ -524,31 +548,30 @@ struct ChatRow: View {
     }
 }
 
-/// Live status on the row's second line; nothing when idle (the time on the
-/// first line already covers it).
-struct SessionStatusBadge: View {
+/// Live status as a bare glyph for the row's leading slot (the label is
+/// spoken, not shown); blank when idle.
+struct SessionStatusMark: View {
     let indicator: ChatIndicator
 
     var body: some View {
-        if let label {
-            HStack(spacing: 5) {
-                switch indicator {
-                case .working:
-                    MiniSpinner(cellSize: 2.6)
-                case .completed:
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 10, weight: .bold))
-                default:
-                    Circle().frame(width: 6, height: 6)
-                }
-                Text(label)
-                    .font(Theme.sans(12, weight: .medium, relativeTo: .caption))
+        Group {
+            switch indicator {
+            case .working:
+                MiniSpinner(cellSize: 2.6)
+            case .completed:
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+            case .awaitingInput, .errored:
+                Circle().frame(width: 8, height: 8)
+            case .idle:
+                Color.clear.frame(width: 8, height: 8)
             }
-            .foregroundStyle(color)
-            .fixedSize()
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(label)
         }
+        .foregroundStyle(color)
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label ?? "")
+        .accessibilityHidden(label == nil)
     }
 
     private var label: String? {

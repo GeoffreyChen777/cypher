@@ -16,6 +16,7 @@ struct SpaceView: View {
     var body: some View {
         List {
             let chats = model.chats(in: spaceId)
+            let statusSlot = ChatRow.needsStatusSlot(chats, in: model)
             // No header: the project title already names this list, and the
             // first card then sits directly on the title's edge.
             Section {
@@ -24,7 +25,7 @@ struct SpaceView: View {
                 }
                 ForEach(chats) { chat in
                     NavigationLink(value: Route.chat(chat.id)) {
-                        ChatRow(chat: chat, showLocation: false)
+                        ChatRow(chat: chat, showLocation: false, statusSlot: statusSlot)
                     }
                     .groupedRowStyle()
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
