@@ -973,7 +973,7 @@ impl Shell {
     }
 
     /// One project card: an opaque floating surface (`theme.surface`, 12px
-    /// radius, subtle shadow, clipped) whose single-line header owns the
+    /// radius, subtle shadow + hairline ring, clipped) whose single-line header owns the
     /// prominent project label, a hover-revealed target machine and a
     /// presence dot. Real space headers host the rename/remove context menu
     /// on right-click; synthetic cards have no menu. Below the header, chats
@@ -1079,7 +1079,7 @@ impl Shell {
         div()
             .rounded(px(12.0))
             .bg(theme.surface)
-            .shadow_sm()
+            .shadow(theme.sidebar_card_shadows())
             .overflow_hidden()
             .flex()
             .flex_col()

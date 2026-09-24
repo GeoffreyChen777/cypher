@@ -659,6 +659,36 @@ impl Theme {
         }
     }
 
+    /// Sidebar project-card elevation: the Tailwind `shadow-sm` pair plus a
+    /// 1px INSET hairline ring. The card fill sits only a few levels off the
+    /// fixed translucent sidebar frost (and presets or a card override can
+    /// land on it exactly), so the ring gives the card an edge independent of
+    /// fill contrast; a dark drop shadow alone vanishes on dark glass.
+    pub fn sidebar_card_shadows(&self) -> Vec<gpui::BoxShadow> {
+        let ring = match self.appearance {
+            Appearance::Dark => self.hairline(0.08),
+            Appearance::Light => hsla(0.0, 0.0, 0.0, 0.07),
+        };
+        let drop = |blur: f32, spread: f32| gpui::BoxShadow {
+            color: hsla(0.0, 0.0, 0.0, 0.1),
+            offset: gpui::point(gpui::px(0.0), gpui::px(1.0)),
+            blur_radius: gpui::px(blur),
+            spread_radius: gpui::px(spread),
+            inset: false,
+        };
+        vec![
+            drop(3.0, 0.0),
+            drop(2.0, -1.0),
+            gpui::BoxShadow {
+                color: ring,
+                offset: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                blur_radius: gpui::px(0.0),
+                spread_radius: gpui::px(1.0),
+                inset: true,
+            },
+        ]
+    }
+
     /// The standard modal backdrop — see [`scrim`].
     pub fn scrim(&self) -> Hsla {
         scrim_for(self.appearance, SCRIM_ALPHA_DARK)

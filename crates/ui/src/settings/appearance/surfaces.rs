@@ -412,6 +412,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
                         .p(px(10.0))
                         .rounded(px(12.0))
                         .bg(t.surface)
+                        .shadow(t.sidebar_card_shadows())
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
