@@ -752,6 +752,11 @@ pub(crate) struct RawSession {
     /// rows and old writers → empty.
     #[serde(default)]
     subagents: Option<Vec<SubagentRun>>,
+    /// Context-window gauge (`{used, size}`); absent on old rows and old
+    /// writers. Parsed leniently: a malformed value reads as no reading
+    /// instead of dropping the whole status row.
+    #[serde(default)]
+    context_usage: Option<serde_json::Value>,
 }
 
 impl From<RawSession> for Session {
@@ -763,8 +768,9 @@ impl From<RawSession> for Session {
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
             subagents: raw.subagents.unwrap_or_default(),
-            // Host-local gauge: never stored in the registry.
-            context_usage: None,
+            context_usage: raw
+                .context_usage
+                .and_then(|value| serde_json::from_value(value).ok()),
         }
     }
 }

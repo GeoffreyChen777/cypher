@@ -1360,13 +1360,34 @@ impl Inner {
         self.publish_session(chat_id, &session);
     }
 
+    /// The gauge this device last wrote to the chat's durable session row.
+    /// Seeds a row the live map doesn't have yet (the first transition after
+    /// an engine restart), so that transition's registry write doesn't drop
+    /// the ring locally before the next reading lands.
+    fn durable_context_usage(&self, chat_id: &str) -> Option<ContextUsage> {
+        let ws = self.workspace()?;
+        let rows = ws.watch_session_rows();
+        let rows = rows.borrow();
+        rows.iter()
+            .find(|s| s.chat_id == chat_id && s.device_id == self.device_id)
+            .and_then(|s| s.context_usage)
+    }
+
     /// Context-window gauge (ACP `usage_update`, pi session stats): update
     /// the chat's session row's `context_usage` ONLY. Unlike subagent status
     /// it is not a liveness signal, so `updated_at` stays put — a gauge
     /// landing after a turn settled must not make a parked row read fresh.
     /// An unchanged reading publishes nothing (Claude streams one per
     /// message delta).
+    ///
+    /// Every reading reaches this engine's own watchers at once. The synced
+    /// registry row (other devices' rings) is written sparingly: while the
+    /// turn is Working the reading rides the row's next write — the 20s
+    /// freshness touch or the settle transition — and only a reading that
+    /// lands on a settled row (Pi's post-settle and post-compaction reads)
+    /// costs a write of its own.
     fn set_context_usage(&self, chat_id: &str, usage: ContextUsage) {
+        let seed = self.durable_context_usage(chat_id);
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -1378,7 +1399,7 @@ impl Inner {
                     started_at: None,
                     updated_at: Utc::now(),
                     subagents: Vec::new(),
-                    context_usage: None,
+                    context_usage: seed,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1386,9 +1407,11 @@ impl Inner {
             entry.context_usage = Some(usage);
             entry.clone()
         };
-        // Local only: the registry never stores the gauge, so a mirror would
-        // be a durable no-op write per reading.
-        self.publish_local(chat_id, &session);
+        if session.status == SessionStatus::Working {
+            self.publish_local(chat_id, &session);
+        } else {
+            self.publish_session(chat_id, &session);
+        }
     }
 
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
@@ -1399,6 +1422,7 @@ impl Inner {
     /// never reads stale.
     fn set_subagents(&self, chat_id: &str, runs: Vec<SubagentRun>) {
         let now = Utc::now();
+        let seed = self.durable_context_usage(chat_id);
         // Statuses guard released before publish (publish re-locks it).
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1411,7 +1435,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     subagents: Vec::new(),
-                    context_usage: None,
+                    context_usage: seed,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1422,6 +1446,7 @@ impl Inner {
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         let now = Utc::now();
+        let seed = self.durable_context_usage(chat_id);
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -1433,7 +1458,7 @@ impl Inner {
                     started_at: None,
                     updated_at: now,
                     subagents: Vec::new(),
-                    context_usage: None,
+                    context_usage: seed,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always

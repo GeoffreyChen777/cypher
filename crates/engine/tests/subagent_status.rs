@@ -334,12 +334,12 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
 }
 
 /// The context gauge (`AgentEvent::ContextUsage`) is the same kind of live
-/// projection: after a parked turn it lands on the LOCAL session row (the
-/// UI's `WatchSessions` source) without re-arming the session, restamping
-/// its freshness, or folding a transcript entry — and it never reaches the
-/// synced workspace registry.
+/// projection: after a parked turn it lands on the session row without
+/// re-arming the session, restamping its freshness, or folding a transcript
+/// entry — and, the row being settled, it is written to the synced registry
+/// so other devices' rings see it.
 #[tokio::test]
-async fn context_usage_mirrors_locally_without_polluting_run_state() {
+async fn context_usage_on_a_parked_row_syncs_without_polluting_run_state() {
     let rig = assemble("measure the context");
     rig.core
         .sessions
@@ -418,8 +418,87 @@ async fn context_usage_mirrors_locally_without_polluting_run_state() {
     let rows = rig.core.workspace.read_sessions().unwrap();
     let row = rows.iter().find(|s| s.chat_id == CHAT).expect("row");
     assert_eq!(
-        row.context_usage, None,
-        "the registry never stores the gauge"
+        row.context_usage, expected,
+        "a settled reading reaches the registry"
+    );
+    assert_eq!(row.status, SessionStatus::Idle);
+    assert_eq!(
+        Some(row.updated_at.timestamp_millis()),
+        before_updated.map(|at| at.timestamp_millis()),
+        "the synced row keeps its freshness too"
+    );
+
+    rig.core.sessions.shutdown().await;
+}
+
+/// Mid-turn readings stay off the registry (Claude reports one per message
+/// delta, Pi one per assistant message); the settle transition's own write
+/// carries the latest one to other devices.
+#[tokio::test]
+async fn context_usage_mid_turn_rides_the_settle_write() {
+    let rig = assemble("measure mid turn");
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("measure mid turn"), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Working),
+        "turn running",
+    )
+    .await;
+    let reading = |used| ContextUsage {
+        used,
+        size: 200_000,
+    };
+    for used in [40_000, 41_000] {
+        rig.feed
+            .send(AgentEvent::ContextUsage {
+                used,
+                size: 200_000,
+            })
+            .unwrap();
+    }
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(CHAT)
+                .and_then(|s| s.context_usage)
+                == Some(reading(41_000))
+        },
+        "latest reading on the local row",
+    )
+    .await;
+    let registry_usage = || {
+        rig.core
+            .workspace
+            .read_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.chat_id == CHAT)
+            .and_then(|s| s.context_usage)
+    };
+    assert_eq!(registry_usage(), None, "mid-turn readings stay local");
+
+    rig.feed
+        .send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("hs-sa".into()),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+    assert_eq!(
+        registry_usage(),
+        Some(reading(41_000)),
+        "the settle write carries the latest reading"
     );
 
     rig.core.sessions.shutdown().await;

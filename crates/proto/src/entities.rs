@@ -296,9 +296,10 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagents: Vec<SubagentRun>,
     /// Latest context-window occupancy the agent reported (the composer's
-    /// context ring). Host-local run state: it rides `WatchSessions` from
-    /// this engine only and is never written to the workspace registry, so
-    /// another device's row always reads `None`.
+    /// context ring). The host's own `WatchSessions` sees every reading; the
+    /// workspace registry row gets it on the row's next write while a turn
+    /// runs, and at once on a settled row, so other devices' rings trail a
+    /// running turn slightly. `None` until the host has measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
 }

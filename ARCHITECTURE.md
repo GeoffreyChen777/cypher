@@ -14,7 +14,9 @@ A ground-up native rewrite of the original [zeron](../zeron) web app — a multi
   Everything device-side is Rust.
 - Feature parity with zeron **except token-usage display** (poor fit for CRDTs; excluded).
   The one usage surface is the composer's context ring: a context-window gauge the host
-  engine keeps on its local session projection (never written to a synced doc).
+  engine keeps on the chat's session-status row. It syncs through the registry like
+  `subagents`, but sparingly: mid-turn readings ride the row's existing writes, and only
+  a reading on a settled row writes on its own.
 - Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
   **mugen + pretext** (`docs/research/mugen-pretext.md`).
 - One binary, **headed or headless**. Smooth transitions/animations matching the original

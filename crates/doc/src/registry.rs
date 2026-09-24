@@ -1198,10 +1198,12 @@ impl RegistryDoc {
     /// its own runs' rows). Staleness is checked client-side via `updatedAt`.
     /// The live `subagents` projection rides the same row: non-empty → the
     /// JSON array field, empty → a Null delete (a settled snapshot clears the
-    /// column).
+    /// column). The context gauge rides it too, but is only ever replaced: a
+    /// row with no reading (a fresh process that hasn't measured yet) leaves
+    /// the stored one in place rather than blanking other devices' rings.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
         let subagents = serde_json::to_value(&session.subagents)?;
-        let set = fields([
+        let mut set = fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
@@ -1216,6 +1218,9 @@ impl RegistryDoc {
                 },
             ),
         ]);
+        if let Some(usage) = session.context_usage {
+            set.insert("contextUsage".into(), serde_json::to_value(usage)?);
+        }
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
     }

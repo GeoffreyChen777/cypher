@@ -2583,12 +2583,12 @@ impl Pickers {
 
     // ---- render ----
 
-    // Chip builder: every argument is one visual slot of the chip.
-    #[allow(clippy::too_many_arguments)]
     /// The context ring left of the model chip: the selected session's
     /// latest context-window reading, clickable to compact when the harness
     /// has `/compact` and no turn is running. `None` — no ring at all — until
-    /// the host engine has a reading (new chats, remote hosts, side chats).
+    /// the host engine has a reading (new chats, hosts on an older version).
+    /// A remote host's reading can trail a running turn by up to the session
+    /// row's 20s freshness write; it catches up when the turn settles.
     fn context_ring_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.locked {
             return None;
@@ -2649,6 +2649,8 @@ impl Pickers {
         )
     }
 
+    // Chip builder: every argument is one visual slot of the chip.
+    #[allow(clippy::too_many_arguments)]
     fn trigger_chip(
         &self,
         kind: PickerKind,

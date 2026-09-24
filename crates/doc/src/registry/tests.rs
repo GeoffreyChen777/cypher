@@ -468,6 +468,51 @@ fn session_subagents_sync_across_peers() {
     assert!(b.read_sessions().unwrap()[0].subagents.is_empty());
 }
 
+/// The context gauge rides the host's session row to its peers. A write
+/// without a reading (a restarted host that hasn't measured yet) keeps the
+/// stored gauge instead of blanking every other device's ring.
+#[test]
+fn session_context_usage_syncs_and_survives_a_readingless_write() {
+    let usage = cypher_proto::ContextUsage {
+        used: 124_000,
+        size: 200_000,
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut measured = session("chat-1", "dev-a", SessionStatus::Idle);
+    measured.context_usage = Some(usage);
+    a.upsert_session(&measured).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].context_usage, Some(usage));
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    let row = &b.read_sessions().unwrap()[0];
+    assert_eq!(row.status, SessionStatus::Working);
+    assert_eq!(row.context_usage, Some(usage));
+}
+
+/// A malformed gauge (another writer's shape) reads as no reading; the
+/// status row itself must survive.
+#[test]
+fn malformed_context_usage_keeps_the_session_row() {
+    let raw: crate::workspace::RawSession = serde_json::from_value(json!({
+        "chatId": "chat-1",
+        "deviceId": "dev-a",
+        "status": "idle",
+        "updatedAt": 3_500,
+        "contextUsage": {"used": "lots"},
+    }))
+    .unwrap();
+    let row = Session::from(raw);
+    assert_eq!(row.status, SessionStatus::Idle);
+    assert_eq!(row.context_usage, None);
+}
+
 #[test]
 fn rows_round_trip_and_upsert_refreshes() {
     let mut doc = RegistryDoc::new("dev-a");

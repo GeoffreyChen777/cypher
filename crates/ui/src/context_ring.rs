@@ -1,6 +1,7 @@
 //! Composer context ring: the agent's context-window occupancy drawn as a
-//! small progress ring beside the model chip. The reading is the engine's
-//! local session projection (`Session::context_usage`); a click compacts the
+//! small progress ring beside the model chip. The reading is the session row's
+//! `Session::context_usage` — live from this engine for its own chats, synced
+//! through the registry for chats hosted elsewhere; a click compacts the
 //! session when its harness has `/compact`.
 
 use gpui::{
