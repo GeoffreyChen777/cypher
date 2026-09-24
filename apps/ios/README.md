@@ -64,6 +64,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   same native gesture/bounce window but may retarget its own spring. Negative
   bottom distance during a bounce is not treated as a broken/blank layout.
   Idle reflows and keyboard-end corrections remain enabled after settling.
+- **Long transcripts:** a session opens at its latest message and renders
+  the most recent 200 rows; **Show earlier messages** at the top prepends 200
+  more and keeps the row you were reading in place. The reveal reaches the
+  bottom by jumping to the last row's id, never to an estimated offset, so
+  opening doesn't lay out the rows in between (3,000 rows: ~0.3s, down from
+  3–4s of hidden loader on iOS 26–27).
 - **Files / Changes:** separate options in the chat's top-right menu open read-only remote directory
   navigation, UTF-8 file previews and working-tree Git diffs with per-file
   patches. Changes uses a continuous, collapsible list in a locally bundled

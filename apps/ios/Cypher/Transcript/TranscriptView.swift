@@ -47,25 +47,60 @@ struct TranscriptView: View {
     @State private var settled = false
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var hydrationTask: Task<Void, Never>?
+    /// Tags this view's pad reports: the ScrollState outlives view identities,
+    /// and another identity's pad frame must never count as ours.
+    @State private var padOwner = UUID()
+    /// Rows hidden above the rendered window; nil until the first rows fix it.
+    /// Only ever lowered ("Show earlier messages"), so streamed appends never
+    /// drop rows off the top under a reader.
+    @State private var windowFloor: Int?
+    /// Rendered tail on open, and each page "Show earlier" adds. Bounds what
+    /// the lazy stack can realize: jumping to the bottom of an estimated
+    /// transcript made iOS 26 lay out every row on the way (3,000 rows:
+    /// ~1,800 text views, seconds of main thread), which no scroll API avoids.
+    static let windowRows = 200
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // The parse cache lives on the store (one per session, prewarmed
         // off-main), so opening a chat assembles rows from settled parses
         // instead of re-parsing the whole transcript on the main thread.
-        let rows = store.transcriptCache.rows(revision: store.revision,
-                                              entries: store.entries,
-                                              pendingSends: store.pendingSends)
+        let allRows = store.transcriptCache.rows(revision: store.revision,
+                                                 entries: store.entries,
+                                                 pendingSends: store.pendingSends)
+        let floor = windowStart(of: allRows)
+        let rows = floor > 0 ? Array(allRows[floor...]) : allRows
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                if floor > 0 {
+                    // Explicit, not load-on-reach: reaching the top is always
+                    // mid-gesture, and SwiftUI drops a programmatic scroll
+                    // under the finger — the reader's place couldn't be held.
+                    Button {
+                        loadEarlierRows()
+                    } label: {
+                        Text("Show earlier messages")
+                            .font(Theme.sans(13, weight: .medium, relativeTo: .subheadline))
+                            .foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 14)
+                            .frame(height: 32)
+                            .background(whiteAlpha(0.06), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("transcript-show-earlier")
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                }
                 ForEach(rows) { row in
                     rowView(row).id(row.id)
                 }
                 Color.clear.frame(height: 44)  // bottom pad clears the fade + floating status strip
                     // The pad's on-screen frame is the one bottom-position
                     // reading the keyboard can't distort (see correctPin).
-                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { [scroll] new in
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { [scroll, padOwner] new in
                         scroll.padGlobalMaxY = new
+                        scroll.padOwner = padOwner
                         correctPin()
                     }
             }
@@ -89,17 +124,25 @@ struct TranscriptView: View {
         // The settling itself is unavoidable (see settleToBottom) — what is
         // avoidable is WATCHING it: painting mid-settle is what read as the
         // transcript sliding on load.
-        .opacity(settled ? 1 : 0)
+        //
+        // Both fades are SCOPED to their own paint. A value-keyed animation on
+        // this whole view swept the scroll view's re-anchoring into the fade
+        // when rows landed while hidden — a programmatic scroll whose phase
+        // never returns to idle, which blocked the settle and every later
+        // correctPin for the life of the view.
+        .animation(reduceMotion ? nil : Motion.fadeQuick) { $0.opacity(settled ? 1 : 0) }
         // While a big transcript is finding its bottom, show the skeleton — a
         // black void here read as "the session is broken" (and on a slow
         // settle it WAS multiple seconds of void).
         .overlay {
-            if !settled {
-                TranscriptSkeleton()
-                    .background(Theme.bg)
+            ZStack {
+                if !settled {
+                    TranscriptSkeleton()
+                        .background(Theme.bg)
+                }
             }
+            .motionAnimation(Motion.fadeQuick, value: settled)
         }
-        .motionAnimation(Motion.fadeQuick, value: settled)
         .background(Theme.bg)
         .task {
             // SessionView calls this on keyboard didShow/didHide — the one
@@ -107,23 +150,37 @@ struct TranscriptView: View {
             scroll.requestCorrection = { correctPin(force: true) }
             // Warm sessions already have rows at first layout, and `onChange`
             // never fires for an initial value — this is the only hook for them.
+            fixWindow()
             await settleToBottom()
         }
-        .onChange(of: rows.isEmpty) { _, isEmpty in
+        .onChange(of: allRows.isEmpty) { _, isEmpty in
             // Projection is off-main, so a cached transcript usually lands after
             // the pass above ran on an empty list. Only ever hides a transcript
             // that has never been shown — re-hiding a visible one is what made
             // it blink out mid-typing. `hydrated` is the one-shot: it seeds
             // true for stores that have already revealed content, so this
             // fires exactly once, on a fresh store's first non-empty rows.
+            if !isEmpty { fixWindow() }
             guard !isEmpty, !hydrated else { return }
             hydrated = true
             settled = false
+            // The empty list's pad frame is stale for the landed rows — and on
+            // an empty list aligned to the bottom it sits right on the
+            // boundary, faking convergence. Cleared HERE, before the new
+            // layout reports; clearing inside the async settle raced that
+            // report, and a transcript that landed already in place never
+            // moved to report again (a full-budget loader).
+            scroll.padGlobalMaxY = 0
             hydrationTask?.cancel()
             hydrationTask = Task { await settleToBottom() }
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { [scroll] old, new in
             scroll.contentHeight = new
+            if let id = scroll.restoreTopRowId, new > old {
+                // The previous page just landed above the reader.
+                scroll.restoreTopRowId = nil
+                scrollPosition.scrollTo(id: id, anchor: .top)
+            }
             // Estimated row heights keep resolving after the settle, and a
             // SHRINK leaves the held offset past the content — a black
             // viewport until the user's scroll clamps it (t3 re-pins on
@@ -133,11 +190,22 @@ struct TranscriptView: View {
                 correctPin()
             }
         }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { [scroll] _, new in
-            scroll.contentOffsetY = new
+        .onScrollGeometryChange(for: CGFloat.self) { geo in
+            // In ScrollPosition's space, not UIKit's: `contentOffset` counts
+            // the top inset (the nav bar — it reads -116 at the top), while
+            // `scrollTo(y:)` takes the content y shown at the inset-adjusted
+            // top. Mixing them landed every measured nudge one top inset
+            // short: clamped to 0 on short transcripts, parked a nav bar
+            // above the tail on long ones — so the reveal never converged
+            // (the ~3s loader on open) and the pin left the tail under the
+            // composer.
+            geo.contentOffset.y + geo.contentInsets.top
+        } action: { [scroll] _, new in
+            scroll.scrollY = new
             scroll.motion.geometryChanged(now: Date().timeIntervalSinceReferenceDate)
         }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height + $0.contentInsets.bottom } action: { _, _ in
+        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height + $0.contentInsets.bottom } action: { [scroll] _, new in
+            scroll.viewportHeight = new
             // The viewport resized under the content — keyboard up/down, the
             // composer's capsule↔card morph, the question-panel swap. t3's
             // rule for exactly this ("keyboardLiftBehavior=whenAtEnd" +
@@ -219,6 +287,14 @@ struct TranscriptView: View {
             if scroll.showJump != show { scroll.showJump = show }
         }
         .onChange(of: contentSignature(rows)) {
+            // Until the reveal, settleToBottom owns positioning (it follows
+            // growth by measurement). An animated scroll started while the
+            // transcript is hidden never reports its phase back to idle —
+            // `.animating` stuck for the view's life, which blocked the settle
+            // (a ~4s loader when a cold transcript landed late) and every
+            // later correctPin. `hydrated` covers the first rows arriving
+            // before the rows-arrived handler has flipped `settled`.
+            guard settled, hydrated else { return }
             guard scroll.pinned else { return }
             guard !scroll.keyboardTransitioning,
                   !scroll.motion.blocksContentFollowing(now: Date().timeIntervalSinceReferenceDate) else {
@@ -336,25 +412,82 @@ struct TranscriptView: View {
             return
         }
         scroll.motion.didSettle()
-        guard scroll.padGlobalMaxY > 0, scroll.insetTopGlobalY > 0 else {
-            if scroll.pinned { scrollPosition.scrollTo(edge: .bottom) }
+        guard let pad = padFrame, scroll.insetTopGlobalY > 0 else {
+            if scroll.pinned { jumpToBottomRow() }
             return
         }
         // < 0 after native motion settles: overshot past the end due to a
         //      reflow — not the legitimate rubber-band we yield to above.
         // > 0: tail parked short of the boundary — only wrong for a PINNED
         //      feed (an unpinned reader mid-history always measures > 0).
-        let error = scroll.padGlobalMaxY - scroll.insetTopGlobalY
+        let error = pad - scroll.insetTopGlobalY
         guard error < -2 || (scroll.pinned && error > 2) else { return }
-        if abs(error) > 48 {
-            // A keyboard-sized lift reads as motion — glide it. Tiny nudges
-            // (late row measurements) stay instant and invisible.
+        // A keyboard-sized lift reads as motion — glide it. Tiny nudges (late
+        // row measurements) stay instant and invisible. So does anything
+        // while the transcript is hidden for its reveal, or longer than a
+        // viewport: an animated scroll renders every row it passes (a long
+        // transcript's estimate error glided through thousands of rows), and
+        // one started while hidden never reports its phase back to idle.
+        if abs(error) > scroll.viewportHeight {
+            // See jumpToBottomRow: a long correction goes by row, not offset.
+            jumpToBottomRow()
+        } else if settled, abs(error) > 48 {
             scroll.animatingUntil = now + 0.35
             withAnimation(.spring(duration: 0.3)) {
-                scrollPosition.scrollTo(y: scroll.contentOffsetY + error)
+                scrollPosition.scrollTo(y: scroll.scrollY + error)
             }
         } else {
-            scrollPosition.scrollTo(y: scroll.contentOffsetY + error)
+            scrollPosition.scrollTo(y: scroll.scrollY + error)
+        }
+    }
+
+    private func windowStart(of rows: [TranscriptRow]) -> Int {
+        min(windowFloor ?? max(0, rows.count - Self.windowRows), rows.count)
+    }
+
+    /// Pins the window's start at the first rows this view renders.
+    private func fixWindow() {
+        guard windowFloor == nil else { return }
+        let rows = store.transcriptCache.rows(revision: store.revision, entries: store.entries,
+                                              pendingSends: store.pendingSends)
+        guard !rows.isEmpty else { return }
+        windowFloor = max(0, rows.count - Self.windowRows)
+    }
+
+    /// Prepends the previous page, keeping the row that was first (just
+    /// under the button) at the top — by id, once the page has laid out (it's
+    /// realized, so no walk). The bottom scroll anchor does NOT hold a
+    /// reader's place here: it kept the top offset, showing the new page.
+    private func loadEarlierRows() {
+        let rows = store.transcriptCache.rows(revision: store.revision, entries: store.entries,
+                                              pendingSends: store.pendingSends)
+        let floor = windowStart(of: rows)
+        guard floor > 0, floor < rows.count else { return }
+        windowFloor = max(0, floor - Self.windowRows)
+        // Restored once the prepended rows have laid out (content height).
+        scroll.restoreTopRowId = rows[floor].id
+    }
+
+    /// The bottom pad's measured global maxY, if THIS view reported it since
+    /// the last invalidation.
+    private var padFrame: CGFloat? {
+        scroll.padOwner == padOwner && scroll.padGlobalMaxY > 0 ? scroll.padGlobalMaxY : nil
+    }
+
+    /// Places the LAST ROW at the viewport's bottom by id: the lazy stack
+    /// realizes it and its neighbours directly, and the measured nudge then
+    /// adds the pad. `scrollTo(edge:)`/`(y:)` go by the estimated content
+    /// height instead — on a long transcript that lands in the over-estimated
+    /// blank, and correcting from there laid out every row in between (3,000
+    /// rows: ~2,300 text views, seconds on the main thread). The id must be a
+    /// ForEach element's: the pad's own `.id` is unresolvable while unrealized.
+    private func jumpToBottomRow() {
+        let rows = store.transcriptCache.rows(revision: store.revision, entries: store.entries,
+                                              pendingSends: store.pendingSends)
+        if let last = rows.last {
+            scrollPosition.scrollTo(id: last.id, anchor: .bottom)
+        } else {
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 
@@ -368,13 +501,12 @@ struct TranscriptView: View {
     /// sometimes in the blank over-estimate region past the content.
     ///
     /// Convergence is now the same truth correctPin uses: the bottom pad's
-    /// on-screen frame meeting the composer boundary. Edge-jumps chase the
-    /// estimated bottom until the pad realizes and reports; measured nudges
-    /// close the remainder; two consecutive in-tolerance reads reveal.
+    /// on-screen frame meeting the composer boundary. A jump to the last row
+    /// (by id, never by estimated offset) brings the pad into range; measured
+    /// nudges close the remainder; an in-tolerance read reveals.
     /// Bounded (~2s worst case), and it yields the moment the user takes the
     /// scroll view. `settled` flips either way — never left invisible.
     private func settleToBottom() async {
-        scroll.padGlobalMaxY = 0  // stale pad frames must not fake convergence
         for _ in 0..<60 {
             guard !Task.isCancelled, scroll.pinned, !scroll.userScrolling else { break }
             // Don't chase targets through a keyboard transition — the edge
@@ -385,15 +517,22 @@ struct TranscriptView: View {
                 try? await Task.sleep(nanoseconds: 60_000_000)
                 continue
             }
-            if scroll.padGlobalMaxY > 0, scroll.insetTopGlobalY > 0 {
-                let error = scroll.padGlobalMaxY - scroll.insetTopGlobalY
+            if let pad = padFrame, scroll.insetTopGlobalY > 0 {
+                let error = pad - scroll.insetTopGlobalY
                 // Near-pinned is good enough to reveal — correctPin's trailing
                 // nudges close the last few points invisibly, while every
                 // 50ms spent here is the user staring at the loader.
                 if abs(error) < 24 { break }
-                scrollPosition.scrollTo(y: scroll.contentOffsetY + error)
+                if abs(error) > scroll.viewportHeight {
+                    // Off by more than a screen: the estimated heights are
+                    // wrong, and an offset jump would make the lazy stack lay
+                    // out every row in between (thousands on a long session).
+                    jumpToBottomRow()
+                } else {
+                    scrollPosition.scrollTo(y: scroll.scrollY + error)
+                }
             } else {
-                scrollPosition.scrollTo(edge: .bottom)
+                jumpToBottomRow()
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -462,7 +601,11 @@ final class ScrollState {
     var showJump = false
     @ObservationIgnored var distanceFromBottom: CGFloat = 0
     @ObservationIgnored var contentHeight: CGFloat = 0
-    @ObservationIgnored var contentOffsetY: CGFloat = 0
+    /// Scroll position in `ScrollPosition.scrollTo(y:)` coordinates (the
+    /// content offset plus the top inset). Measured nudges add to this.
+    @ObservationIgnored var scrollY: CGFloat = 0
+    /// Container plus bottom inset: the longest correction still glided.
+    @ObservationIgnored var viewportHeight: CGFloat = 0
     @ObservationIgnored var pinned = true
     @ObservationIgnored var motion = TranscriptScrollMotion()
     var userScrolling: Bool { motion.userScrolling }
@@ -472,6 +615,9 @@ final class ScrollState {
     /// (written here) and the composer inset's top edge (written by
     /// SessionView, which owns the inset).
     @ObservationIgnored var padGlobalMaxY: CGFloat = 0
+    @ObservationIgnored var padOwner: UUID?
+    /// Window paging: the row to hold at the top once a prepended page lands.
+    @ObservationIgnored var restoreTopRowId: String?
     @ObservationIgnored var insetTopGlobalY: CGFloat = 0
     /// When the boundary last moved — correctPin trails transitions.
     @ObservationIgnored var insetTopChangedAt: TimeInterval = 0
@@ -601,6 +747,11 @@ struct UserBubble: View {
                     .font(Theme.sans(11, weight: .medium))
                     .foregroundStyle(Theme.textMuted)
                     .padding(.trailing, 12)
+                    // One element reading "Steer": the icon's own name ("Arrow
+                    // Turning Down Then Right") is noise, and split elements
+                    // both carried the identifier.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Steer")
                     .accessibilityIdentifier("steer-label")
             }
             VStack(alignment: .trailing, spacing: 8) {

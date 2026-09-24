@@ -8,7 +8,7 @@ final class ComposerFocusUITests: XCTestCase {
         let transcript = app.scrollViews.matching(identifier: "chat-transcript").firstMatch
         let tail = app.descendants(matching: .any).matching(identifier: "steer-label").firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10))
-        XCTAssertTrue(tail.waitForExistence(timeout: 10))
+        XCTAssertTrue(tail.waitForHittable(timeout: 10), "The transcript must reveal at its tail")
         let start = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
         let end = transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
         for _ in 0..<5 {
@@ -16,7 +16,7 @@ final class ComposerFocusUITests: XCTestCase {
         }
         // This checks the endpoint, not frame-by-frame spring smoothness:
         // XCUITest may itself wait for quiescence between gestures.
-        XCTAssertTrue(tail.isHittable, "Bottom overscroll must not leave a blank/stranded viewport")
+        XCTAssertTrue(tail.waitForHittable(timeout: 3), "Bottom overscroll must not leave a blank/stranded viewport")
         let editor = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'composer-editor-'")).firstMatch
         editor.tap()
@@ -31,8 +31,7 @@ final class ComposerFocusUITests: XCTestCase {
         app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]
         app.launch()
         let label = app.descendants(matching: .any).matching(identifier: "steer-label").firstMatch
-        XCTAssertTrue(label.waitForExistence(timeout: 10))
-        XCTAssertTrue(label.isHittable, "The example steer should be visible at the transcript tail")
+        XCTAssertTrue(label.waitForHittable(timeout: 10), "The example steer should be visible at the transcript tail")
     }
 
     func testRealTapExpandsEmptyComposerAndShortDraftCollapsesOnBlur() {

@@ -184,13 +184,18 @@ struct SessionView: View {
             // was "the session is blank when I open it" on a phone that had
             // never cached the doc.
             .overlay {
-                if store.entries.isEmpty, store.pendingSends.isEmpty,
-                   chat.lastMessageAt != nil {
-                    TranscriptSkeleton()
-                        .background(Theme.bg)
+                // The fade is scoped to the overlay: on the transcript it also
+                // animated the scroll view's jump to the arriving rows (see
+                // TranscriptView's reveal).
+                ZStack {
+                    if store.entries.isEmpty, store.pendingSends.isEmpty,
+                       chat.lastMessageAt != nil {
+                        TranscriptSkeleton()
+                            .background(Theme.bg)
+                    }
                 }
+                .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
             }
-            .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
             // The keyboard's own transition bounds the transcript's no-correct
             // window; didShow/didHide land the single measured glide.
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
