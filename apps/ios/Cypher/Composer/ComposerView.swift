@@ -46,6 +46,11 @@ final class ComposerDraft {
     }
 }
 
+struct ChipOverflow: Equatable {
+    var leading = false
+    var trailing = false
+}
+
 /// Shared glass shell + input + action row. `chips` render in the expanded
 /// toolbar row between the attach and send circles.
 struct ComposerShell<Chips: View>: View {
@@ -81,6 +86,9 @@ struct ComposerShell<Chips: View>: View {
 
     @State private var focus = ComposerFocus()
     @State private var editorID = "composer-editor-\(UUID().uuidString)"
+    /// Which ends of the chip row have content scrolled past them — each
+    /// fades out only while there's more to reveal on that side.
+    @State private var chipOverflow = ChipOverflow()
 
     private var editing: Bool { focus.isFocused }
 
@@ -164,6 +172,16 @@ struct ComposerShell<Chips: View>: View {
                         .accessibilityIdentifier("composer-model-controls")
                     }
                     .scrollClipDisabled(false)
+                    .onScrollGeometryChange(for: ChipOverflow.self) { geo in
+                        let x = geo.contentOffset.x + geo.contentInsets.leading
+                        let maxX = geo.contentSize.width - geo.containerSize.width
+                        return ChipOverflow(leading: x > 1, trailing: x < maxX - 1)
+                    } action: { _, new in
+                        withAnimation(.easeOut(duration: 0.18)) { chipOverflow = new }
+                    }
+                    // Soft edges instead of a hard clip where chips slide
+                    // under the attach / send circles.
+                    .mask(chipEdgeMask)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     actionButton
                 }
@@ -191,6 +209,19 @@ struct ComposerShell<Chips: View>: View {
         .contentShape(surfaceShape)
         .gesture(TapGesture().onEnded { focus.isFocused = true },
                  including: editing ? .subviews : .all)
+    }
+
+    private var chipEdgeMask: some View {
+        let fade: CGFloat = 22
+        return HStack(spacing: 0) {
+            LinearGradient(colors: [.black.opacity(chipOverflow.leading ? 0 : 1), .black],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: fade)
+            Rectangle().fill(.black)
+            LinearGradient(colors: [.black, .black.opacity(chipOverflow.trailing ? 0 : 1)],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: fade)
+        }
     }
 
     private var input: some View {
