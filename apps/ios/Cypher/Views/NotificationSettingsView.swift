@@ -16,6 +16,15 @@ struct NotificationSettingsView: View {
             Form {
                 Section {
                     LabeledContent("iOS permission", value: controller.permission)
+                    if controller.permission == "Allowed" {
+                        LabeledContent("App icon badge", value: controller.badgesAllowed
+                                       ? (controller.badgeCount == 0 ? "No unread sessions" : "\(controller.badgeCount) unread")
+                                       : "Off in iOS Settings")
+                        if !controller.badgesAllowed {
+                            Text("Alerts are allowed but Badges are off, so the unread count can't appear on the app icon. Turn on Badges under Settings › Notifications › Cypher.")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.textMuted)
+                        }
+                    }
                     if controller.permission == "Disabled in iOS Settings" {
                         Button("Open iOS Settings") {
                             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }

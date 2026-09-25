@@ -264,6 +264,51 @@ fn post_impl(title: &str, body: &str) {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn post_impl(_title: &str, _body: &str) {}
 
+/// The app icon's unread badge — the red count at the Dock icon's top-right
+/// corner. `0` clears it. Call from the main thread (AppKit); the caller
+/// dedupes, so this writes unconditionally. macOS only: Linux docks have no
+/// portable badge API and Windows taskbar overlays need a registered app id
+/// (the same installer concern as toasts).
+pub fn set_badge(count: usize) {
+    set_badge_impl(badge_label(count).as_deref());
+}
+
+/// The Dock label for `count`; `None` clears the badge. Past 99 the exact
+/// number stops being useful and only widens the badge over the icon.
+fn badge_label(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1..=99 => Some(count.to_string()),
+        _ => Some("99+".into()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_badge_impl(label: Option<&str>) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    // Digits and "+" only (`badge_label`), so no interior NUL can occur.
+    let label = label.and_then(|l| std::ffi::CString::new(l).ok());
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let tile: *mut Object = msg_send![app, dockTile];
+        if tile.is_null() {
+            return;
+        }
+        let ns_label: *mut Object = match &label {
+            Some(label) => msg_send![class!(NSString), stringWithUTF8String: label.as_ptr()],
+            None => std::ptr::null_mut(),
+        };
+        let _: () = msg_send![tile, setBadgeLabel: ns_label];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_badge_impl(_label: Option<&str>) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +322,13 @@ mod tests {
         );
         // Raw newlines would end the AppleScript statement mid-literal.
         assert_eq!(applescript_escape("two\nlines\r\n"), "two lines  ");
+    }
+
+    #[test]
+    fn badge_labels() {
+        assert_eq!(badge_label(0), None);
+        assert_eq!(badge_label(1).as_deref(), Some("1"));
+        assert_eq!(badge_label(99).as_deref(), Some("99"));
+        assert_eq!(badge_label(100).as_deref(), Some("99+"));
     }
 }

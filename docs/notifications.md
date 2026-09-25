@@ -88,6 +88,13 @@ is no Smart/Always/Off policy.
   client. iOS asks for `.badge` along with alert/sound permission. Existing users
   can use **Notifications → Update notification permissions**, or enable
   **Badges** in iOS Settings. Demo mode does not generate real push badges.
+  iOS does not re-prompt for `.badge` once alerts were granted, so the
+  Notifications page reads the real Badges switch and shows
+  "App icon badge: Off in iOS Settings" instead of failing silently.
+- The macOS desktop draws its own Dock badge locally (Settings →
+  Notifications → Dock badge, on by default): the number of sidebar sessions
+  waiting on input, errored, or finished and unseen on any device. It follows
+  the synced seen marker, not this server-side unread table.
 
 Activity reports carry only the selected session and a monotonic client
 sequence. No keys, coordinates or content are collected. Online headless

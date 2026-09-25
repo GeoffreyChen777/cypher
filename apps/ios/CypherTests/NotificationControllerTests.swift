@@ -15,6 +15,7 @@ private final class NotificationFixture {
     var badgeCount = 0
     var badgeRevision = 0
     var appliedBadges: [Int] = []
+    var badgesOn = true
     var leases: [String: String] = [:]
     init() {
         controller.readRegistration = { [weak self] in self?.storage }
@@ -24,6 +25,7 @@ private final class NotificationFixture {
         controller.registerWithOS = { [weak self] in self?.controller.receivedToken(Data(repeating: 7, count: 32)) }
         controller.clearDelivered = {}
         controller.setBadge = { [weak self] count in self?.appliedBadges.append(count) }
+        controller.badgeAuthorization = { [weak self] in self?.badgesOn ?? true }
         controller.perform = { [weak self] request in
             guard let self, let url = request.url else { throw RelayError.notConnected }
             let scope = String(repeating: request.value(forHTTPHeaderField: "Authorization")?.contains("alice") == true ? "a" : "b", count: 64)
@@ -262,6 +264,18 @@ final class NotificationControllerTests: XCTestCase {
         f.controller.receiveBadge(NotificationBadge(scope: String(repeating: "b", count: 64), badgeCount: 8, badgeRevision: 50))
         try await wait { f.appliedBadges.last == 0 }
         XCTAssertEqual(f.controller.badgeCount, 0)
+    }
+
+    func testBadgesSwitchedOffInIOSSettingsAreSurfaced() async throws {
+        let f = NotificationFixture()
+        f.permission = .authorized
+        f.badgesOn = false
+        f.bind()
+        try await wait { f.controller.permission == "Allowed" }
+        XCTAssertFalse(f.controller.badgesAllowed, "Alerts allowed with Badges off must not look healthy")
+        f.badgesOn = true
+        await f.controller.refresh()
+        XCTAssertTrue(f.controller.badgesAllowed, "Turning Badges back on is picked up on refresh")
     }
 
     func testLateSystemBadgeWriteCannotWinAfterLogout() async throws {

@@ -13,6 +13,10 @@ final class NotificationController {
     private(set) var registered = false
     private(set) var badgeCount = 0
     private var badgeRevision = -1
+    /// iOS's own Badges switch for Cypher. Permission granted before the app
+    /// asked for `.badge` (or the switch turned off in Settings) leaves alerts
+    /// working while `setBadgeCount` silently draws nothing — so surface it.
+    private(set) var badgesAllowed = true
     var error: String?
     var banner: PushPayload?
     var pendingNavigation: PushPayload?
@@ -43,6 +47,9 @@ final class NotificationController {
     }
     @ObservationIgnored var authorization: () async -> UNAuthorizationStatus = {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+    @ObservationIgnored var badgeAuthorization: () async -> Bool = {
+        await UNUserNotificationCenter.current().notificationSettings().badgeSetting != .disabled
     }
     @ObservationIgnored var requestPermission: () async throws -> Bool = {
         try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
@@ -192,8 +199,10 @@ final class NotificationController {
             reportActivity()
             error = available ? nil : "Push notifications aren't configured on this server yet."
             let status = await authorization()
+            let badges = await badgeAuthorization()
             guard ticket == generation, revision == settingsRevision else { return }
             updatePermission(status)
+            badgesAllowed = badges
             if status == .denied, saved.binding != nil {
                 saved.retire()
                 registered = false
@@ -227,6 +236,9 @@ final class NotificationController {
             let granted = try await requestPermission()
             guard ticket == generation else { return }
             permission = granted ? "Allowed" : "Disabled in iOS Settings"
+            let badges = await badgeAuthorization()
+            guard ticket == generation else { return }
+            badgesAllowed = badges
             if granted { registerWithOS(); await registerToken() }
         } catch { if ticket == generation { self.error = "Couldn't request notification permission." } }
     }

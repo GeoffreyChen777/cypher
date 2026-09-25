@@ -1516,6 +1516,24 @@ impl AppState {
         rows
     }
 
+    /// The Dock badge: sessions whose sidebar corner asks for you — waiting
+    /// on an answer, errored, or finished and not yet seen on any device.
+    /// Working and idle rows don't count, so opening a session (the synced
+    /// seen marker) is what takes it off the badge, on every device alike.
+    pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
+        self.overview_chats(now)
+            .iter()
+            .filter(|(status, _)| {
+                matches!(
+                    status,
+                    ChatIndicator::AwaitingInput
+                        | ChatIndicator::Errored
+                        | ChatIndicator::Completed
+                )
+            })
+            .count()
+    }
+
     /// The project-grouped sidebar: one card per live `Space` (empty spaces
     /// included, so project management stays reachable), plus synthetic
     /// cards for project-less chats ("No project", per device) and chats
@@ -3467,6 +3485,42 @@ mod tests {
         // No messages at all: nothing to see — Idle.
         let fresh = chat("f", 0, None);
         assert_eq!(display_status(&fresh, None, now), ChatIndicator::Idle);
+    }
+
+    #[test]
+    fn attention_count_tracks_the_sidebar_corners() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        let mut seen = chat("seen", 0, Some(1));
+        seen.last_seen_at = seen.last_message_at;
+        let mut archived = chat("archived", 0, Some(2));
+        archived.archived = true;
+        let mut orphan = chat("orphan", 0, Some(3));
+        orphan.space_id = Some("gone".into());
+        s.apply_chats(vec![
+            chat("done", 0, Some(4)),
+            chat("asking", 0, Some(5)),
+            chat("failed", 0, Some(6)),
+            chat("running", 0, Some(7)),
+            chat("empty", 0, None),
+            seen,
+            archived,
+            orphan,
+        ]);
+        s.apply_sessions(vec![
+            session("asking", SessionStatus::AwaitingInput, 5, now),
+            session("failed", SessionStatus::Errored, 5, now),
+            session("running", SessionStatus::Working, 5, now),
+        ]);
+        // done (unseen), asking, failed — not working, empty, seen, archived
+        // or a chat whose project is gone (the overview hides it too).
+        assert_eq!(s.attention_count(now), 3);
+        s.begin_pending_send("done", "m1", now);
+        assert_eq!(
+            s.attention_count(now),
+            2,
+            "a send in flight reads as working"
+        );
     }
 
     #[test]

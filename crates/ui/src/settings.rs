@@ -95,6 +95,9 @@ pub struct UiSettings {
     /// Suppress the banner while a Cypher window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
+    /// Unread count on the Dock icon: sessions waiting on input, errored or
+    /// finished-unseen (`AppState::attention_count`).
+    pub dock_badge_enabled: bool,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
@@ -183,6 +186,7 @@ impl Default for UiSettings {
             sound_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
+            dock_badge_enabled: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
@@ -514,6 +518,7 @@ mod tests {
             sound_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
+            dock_badge_enabled: false,
             right_pane_width: 700.0,
             right_pane_open: true,
             terminal_height: 320.0,
@@ -574,6 +579,10 @@ mod tests {
         assert!(
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
+        );
+        assert!(
+            loaded.dock_badge_enabled,
+            "pre-badge files default the Dock badge on"
         );
         assert!(
             !loaded.setup_completed,

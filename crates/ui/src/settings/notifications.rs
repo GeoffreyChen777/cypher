@@ -1,10 +1,11 @@
 //! Settings → Notifications: the session ping toggles — the completion/
 //! question chime and the desktop banner ride the same status transitions
-//! (`shell::on_state_changed`); this page flips their two `UiSettings` flags.
+//! (`shell::on_state_changed`), and the Dock badge counts the sessions still
+//! waiting on you; this page flips their `UiSettings` flags.
 //!
 //! The ShortcutsPage arrangement: the page holds a working copy, every flip
 //! emits [`NotificationsEvent::Changed`], and the shell persists it. Nothing
-//! here talks RPC — both flags are device-local UI settings.
+//! here talks RPC — every flag is a device-local UI setting.
 
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
@@ -14,11 +15,12 @@ use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
 pub enum NotificationsEvent {
-    /// A toggle flipped — persist all three flags.
+    /// A toggle flipped — persist all four flags.
     Changed {
         sound: bool,
         desktop: bool,
         background_only: bool,
+        dock_badge: bool,
     },
 }
 
@@ -26,16 +28,24 @@ pub struct NotificationsPage {
     sound: bool,
     desktop: bool,
     background_only: bool,
+    dock_badge: bool,
 }
 
 impl EventEmitter<NotificationsEvent> for NotificationsPage {}
 
 impl NotificationsPage {
-    pub fn new(sound: bool, desktop: bool, background_only: bool, _cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        sound: bool,
+        desktop: bool,
+        background_only: bool,
+        dock_badge: bool,
+        _cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             sound,
             desktop,
             background_only,
+            dock_badge,
         }
     }
 
@@ -44,6 +54,7 @@ impl NotificationsPage {
             sound: self.sound,
             desktop: self.desktop,
             background_only: self.background_only,
+            dock_badge: self.dock_badge,
         });
     }
 }
@@ -54,6 +65,7 @@ impl Render for NotificationsPage {
         let sound = self.sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
+        let dock_badge = self.dock_badge;
         let card = widgets::section_card(&theme)
             .child(
                 widgets::card_row(&theme, true)
@@ -158,7 +170,45 @@ impl Render for NotificationsPage {
                                 ))
                             }),
                     ),
-            );
+            )
+            // Only macOS draws the badge (`notify::set_badge`); elsewhere the
+            // row would be a switch with no effect.
+            .when(cfg!(target_os = "macos"), |card| {
+                card.child(
+                    widgets::card_row(&theme, false)
+                        .child(widgets::row_tile(&theme, icons::WIDGET))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(widgets::row_title(&theme, "Dock badge"))
+                                .child(widgets::meta_line(
+                                    &theme,
+                                    vec![
+                                        div()
+                                            .child(SharedString::from(
+                                                "Count sessions waiting on you on the Dock \
+                                                 icon — finished, failed or asking. Opening \
+                                                 a session clears it.",
+                                            ))
+                                            .into_any_element(),
+                                    ],
+                                )),
+                        )
+                        .child(
+                            widgets::toggle_switch(&theme, dock_badge)
+                                .id("notifications-dock-badge-toggle")
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.dock_badge = !this.dock_badge;
+                                    this.emit(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            });
 
         div()
             .id("notifications-page")

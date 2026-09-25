@@ -1151,6 +1151,9 @@ pub struct Shell {
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, cypher_proto::SessionStatus>,
+    /// The count last written to the Dock badge (`None` = never written), so
+    /// frequent state notifies only touch AppKit when the number changes.
+    dock_badge: Option<usize>,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -1648,6 +1651,7 @@ impl Shell {
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
+            dock_badge: None,
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             fork_request_ids: std::collections::HashMap::new(),
@@ -1709,6 +1713,22 @@ impl Shell {
     }
 
     // ---- splash ----
+
+    /// Mirror [`AppState::attention_count`] onto the Dock icon (zero when the
+    /// setting is off). Written only on change — this runs on every state
+    /// notify.
+    fn sync_dock_badge(&mut self, cx: &mut Context<Self>) {
+        let count = if self.settings.dock_badge_enabled {
+            self.state.read(cx).attention_count(Utc::now())
+        } else {
+            0
+        };
+        if self.dock_badge != Some(count) {
+            self.dock_badge = Some(count);
+            tracing::debug!(count, "dock badge");
+            crate::notify::set_badge(count);
+        }
+    }
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         // A remotely applied update swapped this app's bundle; the relauncher
@@ -1852,6 +1872,7 @@ impl Shell {
                 }
             }
         }
+        self.sync_dock_badge(cx);
         // Boot: restore the last selected space once the first spaces frame
         // lands (a still-existing row wins over the auto-selected first one;
         // the boot-auto-selected chat's own space wins over both — selecting a
@@ -3451,6 +3472,7 @@ impl Shell {
                             self.settings.sound_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.dock_badge_enabled,
                             cx,
                         )
                     });
@@ -3462,10 +3484,13 @@ impl Shell {
                                 sound,
                                 desktop,
                                 background_only,
+                                dock_badge,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.dock_badge_enabled = dock_badge;
+                            this.sync_dock_badge(cx);
                             this.schedule_save(cx);
                             cx.notify();
                         },
