@@ -30,6 +30,18 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (19), 2026-09-26
+
+- Covers the iOS commits since build 18: `6af3ef7` (faded edges on the
+  composer chip row), `1966d85` (notification settings surface Badges turned
+  off), `da22453` (the shown session is marked seen as activity lands, so
+  badges clear on every device) and `b22e0ca` (ASCII wordmark boot splash).
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  `CODE_SIGNING_ALLOWED=NO`; `release.py ios-context` accepts the tag.
+- Upload is left to `.github/workflows/ios.yml` via the
+  `cypher-ios-v0.2.0-b19` tag. Export compliance, tester groups, public links
+  and review submission remain separate explicit actions.
+
 ## Release: 0.2.0 (18), 2026-09-25
 
 - Build 17 never reached TestFlight: CI's Xcode 26.3 gave up type-checking
