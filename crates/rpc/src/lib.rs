@@ -160,6 +160,19 @@ pub mod methods {
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// Fuzzy relative-path search rooted in a known chat or space checkout.
     pub const SEARCH_FILES: &str = "SearchFiles";
+    /// `#` issue completion for a chat or space checkout, answered with the
+    /// host device's GitHub credential; {chatId | spaceId, path?, query}.
+    pub const SEARCH_GITHUB_ISSUES: &str = "SearchGithubIssues";
+    /// Bounded send-time snapshot of one issue; {repo, number}.
+    pub const GET_GITHUB_ISSUE: &str = "GetGithubIssue";
+    // GitHub sign-in (relay-forwardable — every device holds its own login).
+    pub const GITHUB_ACCOUNT_STATUS: &str = "GithubAccountStatus";
+    /// Device-flow sign-in with the Cypher GitHub App; the target engine
+    /// polls GitHub and stores the token itself.
+    pub const START_GITHUB_LOGIN: &str = "StartGithubLogin";
+    pub const POLL_GITHUB_LOGIN: &str = "PollGithubLogin";
+    pub const CANCEL_GITHUB_LOGIN: &str = "CancelGithubLogin";
+    pub const SIGN_OUT_GITHUB: &str = "SignOutGithub";
     /// Read-only browser; {chatId, cwd, path}. cwd must still be the chat's
     /// assigned checkout, and path is relative with no symlink traversal.
     pub const LIST_WORKSPACE_FILES: &str = "ListWorkspaceFiles";

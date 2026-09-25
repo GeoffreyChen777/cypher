@@ -37,6 +37,8 @@ const CAPTURED_ENV: &[&str] = &[
     "CYPHER_ORG_ID",
     "CYPHER_WORKOS_CLIENT_ID",
     "CYPHER_WORKOS_API_BASE",
+    "CYPHER_GITHUB_CLIENT_ID",
+    "CYPHER_GITHUB_APP_SLUG",
     "CYPHER_CALLBACK_PORT",
     "CYPHER_HARNESS",
     "CYPHER_DEVICE_NAME",
@@ -190,6 +192,8 @@ pub(crate) fn setup_unit_matches(config: &cypher_engine::EngineConfig) -> anyhow
     ];
     for key in [
         "CYPHER_WORKOS_API_BASE",
+        "CYPHER_GITHUB_CLIENT_ID",
+        "CYPHER_GITHUB_APP_SLUG",
         "CYPHER_CALLBACK_PORT",
         "CYPHER_PI_RUNTIME_DIR",
         "CYPHER_PI_RUNTIME_BASE_URL",

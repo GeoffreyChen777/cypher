@@ -514,6 +514,7 @@ pub struct EngineRpc {
     provider_logins: std::sync::Arc<crate::pi_providers::Logins>,
     local_import: Option<crate::local_import::LocalImporter>,
     title_settings: Option<crate::title_settings::TitleSettingsStore>,
+    github: Option<crate::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -572,6 +573,7 @@ impl EngineRpc {
             provider_logins: Default::default(),
             local_import: None,
             title_settings: None,
+            github: None,
             engine_info,
             start_subagent_lock: Mutex::new(()),
         }
@@ -584,6 +586,18 @@ impl EngineRpc {
     ) -> Self {
         self.title_settings = Some(settings);
         self
+    }
+
+    /// This device's GitHub sign-in and API access.
+    pub fn with_github(mut self, github: crate::github::Github) -> Self {
+        self.github = Some(github);
+        self
+    }
+
+    fn github(&self) -> Result<&crate::github::Github, RpcError> {
+        self.github
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("GitHub isn't available on this engine".into()))
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1378,6 +1392,14 @@ fn forwardable(method: &str) -> bool {
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
             | methods::SEARCH_FILES
+            | methods::SEARCH_GITHUB_ISSUES
+            | methods::GET_GITHUB_ISSUE
+            // GitHub logins are per-device, like agent CLI logins.
+            | methods::GITHUB_ACCOUNT_STATUS
+            | methods::START_GITHUB_LOGIN
+            | methods::POLL_GITHUB_LOGIN
+            | methods::CANCEL_GITHUB_LOGIN
+            | methods::SIGN_OUT_GITHUB
             | methods::LIST_WORKSPACE_FILES
             | methods::READ_WORKSPACE_FILE
             | methods::WRITE_WORKSPACE_FILE
@@ -2874,6 +2896,66 @@ impl RpcService for EngineRpc {
                 .map_err(|_| RpcError::Failed("file search timed out".into()))??;
                 RpcReply::value(&matches)
             }
+            methods::SEARCH_GITHUB_ISSUES => {
+                let p: FileSearchParams = parse_params(params)?;
+                if p.query.chars().count() > crate::github::MAX_QUERY_CHARS {
+                    return Err(RpcError::BadParams(
+                        "SearchGithubIssues query must not exceed 256 characters".into(),
+                    ));
+                }
+                let github = self.github()?;
+                let root = self.file_search_root(&p).await?;
+                let search = github
+                    .search_issues(&root, &p.query)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&search)
+            }
+            methods::GET_GITHUB_ISSUE => {
+                #[derive(Deserialize)]
+                struct P {
+                    repo: String,
+                    number: u64,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::github::valid_repo(&p.repo) || p.number == 0 {
+                    return Err(RpcError::BadParams("invalid GitHub issue reference".into()));
+                }
+                let snapshot = self
+                    .github()?
+                    .issue_snapshot(&p.repo, p.number)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
+            }
+            methods::GITHUB_ACCOUNT_STATUS => RpcReply::value(&self.github()?.status().await),
+            methods::START_GITHUB_LOGIN => {
+                let start = self
+                    .github()?
+                    .start_login()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&start)
+            }
+            methods::POLL_GITHUB_LOGIN | methods::CANCEL_GITHUB_LOGIN => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    login_id: String,
+                }
+                let p: P = parse_params(params)?;
+                let github = self.github()?;
+                if method == methods::CANCEL_GITHUB_LOGIN {
+                    github.cancel_login(&p.login_id);
+                    RpcReply::value(&serde_json::json!({ "ok": true }))
+                } else {
+                    RpcReply::value(&github.poll_login(&p.login_id))
+                }
+            }
+            methods::SIGN_OUT_GITHUB => {
+                self.github()?.sign_out().await;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
             methods::CREATE_WORKTREE => {
                 let p: CreateWorktreeParams = parse_params(params)?;
                 let worktree = self
@@ -3251,6 +3333,11 @@ mod tests {
         assert!(forwardable(methods::WATCH_DOC_COMMANDS));
         assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
         assert!(forwardable(methods::SEARCH_FILES));
+        assert!(forwardable(methods::SEARCH_GITHUB_ISSUES));
+        assert!(forwardable(methods::GET_GITHUB_ISSUE));
+        assert!(forwardable(methods::START_GITHUB_LOGIN));
+        assert!(forwardable(methods::POLL_GITHUB_LOGIN));
+        assert!(forwardable(methods::SIGN_OUT_GITHUB));
         assert!(forwardable(methods::LIST_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));

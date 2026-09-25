@@ -11,6 +11,7 @@
 //! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`) are
 //!   ports of zeron's `icons.tsx`. gpui tints SVGs with the text color, so the
 //!   Claude mark's brand orange is applied at the call site ([`CLAUDE_BRAND`]).
+//! - `github-mark` is the `mark-github` glyph from GitHub's Octicons (MIT).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
 
@@ -137,6 +138,8 @@ icon_assets![
     (QUESTION_CIRCLE, "question-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    (ISSUE, "issue"),
+    (GITHUB_MARK, "github-mark"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),

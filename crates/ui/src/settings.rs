@@ -17,6 +17,7 @@ pub mod commands;
 pub mod composer;
 pub mod device_target;
 pub mod devices;
+pub mod github;
 pub mod harnesses;
 pub mod mcp;
 pub mod notifications;

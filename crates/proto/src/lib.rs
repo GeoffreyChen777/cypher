@@ -10,6 +10,7 @@ pub mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
 pub mod entities;
+pub mod github;
 pub mod motion;
 pub mod scratch;
 pub mod session_fork;
@@ -19,6 +20,7 @@ pub mod workspace;
 
 pub use agent::*;
 pub use entities::*;
+pub use github::*;
 pub use session_fork::*;
 pub use side_chat::*;
 pub use workspace::*;

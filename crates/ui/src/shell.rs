@@ -214,6 +214,8 @@ pub enum SettingsSection {
     Mcp,
     /// The `agents/*.md` profiles a chat can spawn as children.
     Subagents,
+    /// The device's GitHub sign-in (`#` issue references).
+    Github,
     Appearance,
     Notifications,
     Shortcuts,
@@ -221,12 +223,13 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const DEVICE_SETTINGS: [Self; 5] = [
+    pub const DEVICE_SETTINGS: [Self; 6] = [
         Self::Harnesses,
         Self::Providers,
         Self::Subagents,
         Self::Commands,
         Self::Mcp,
+        Self::Github,
     ];
     pub const CLIENT_SETTINGS: [Self; 3] = [Self::Appearance, Self::Notifications, Self::Shortcuts];
     // Registry and archived conversations span the workspace, not the selected
@@ -238,13 +241,14 @@ impl SettingsSection {
         ("Workspace", &Self::WORKSPACE_SETTINGS),
     ];
 
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 11] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Providers,
         SettingsSection::Subagents,
         SettingsSection::Commands,
         SettingsSection::Mcp,
+        SettingsSection::Github,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
@@ -263,6 +267,7 @@ impl SettingsSection {
             SettingsSection::Commands => "Commands",
             SettingsSection::Mcp => "MCP",
             SettingsSection::Subagents => "Subagents",
+            SettingsSection::Github => "GitHub",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
@@ -1110,6 +1115,7 @@ pub struct Shell {
     commands_sub: Option<Subscription>,
     mcp_page: Option<Entity<McpPage>>,
     subagents_page: Option<Entity<SubagentsPage>>,
+    github_page: Option<Entity<crate::settings::github::GithubPage>>,
     setup_page: Option<Entity<SetupPage>>,
     setup_sub: Option<Subscription>,
     /// Continue/Skip dismissed the overlay for this process.
@@ -1403,6 +1409,17 @@ impl Shell {
                             .update(cx, |composer, cx| composer.report_error(error, cx)),
                     }
                 }
+                ComposerEvent::OpenGithubSettings { target_device } => {
+                    let result = this.settings_target.update(cx, |target, cx| {
+                        target.select(Some(target_device.clone()), cx)
+                    });
+                    match result {
+                        Ok(()) => this.open_settings(SettingsSection::Github, cx),
+                        Err(error) => this
+                            .composer
+                            .update(cx, |composer, cx| composer.report_error(error, cx)),
+                    }
+                }
                 ComposerEvent::OpenProviders {
                     intent,
                     target_device,
@@ -1541,6 +1558,7 @@ impl Shell {
             Some("settings/commands") => Route::Settings(SettingsSection::Commands),
             Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
             Some("settings/subagents") => Route::Settings(SettingsSection::Subagents),
+            Some("settings/github") => Route::Settings(SettingsSection::Github),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
@@ -1629,6 +1647,7 @@ impl Shell {
             commands_sub: None,
             mcp_page: None,
             subagents_page: None,
+            github_page: None,
             setup_page: None,
             setup_sub: None,
             setup_dismissed: false,
@@ -3293,6 +3312,11 @@ impl Shell {
         if section == SettingsSection::Subagents {
             self.subagents_page = None;
         }
+        // Re-read the sign-in on every visit: a `gh auth login` in a terminal
+        // or an expired token should show without restarting.
+        if section == SettingsSection::Github {
+            self.github_page = None;
+        }
         self.dismiss_comment_popup(cx);
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
@@ -3452,6 +3476,19 @@ impl Shell {
                     self.subagents_page = Some(cx.new(|cx| SubagentsPage::new(state, target, cx)));
                 }
                 match &self.subagents_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Github => {
+                if self.github_page.is_none() {
+                    let state = self.state.clone();
+                    let target = self.settings_target.clone();
+                    self.github_page = Some(
+                        cx.new(|cx| crate::settings::github::GithubPage::new(state, target, cx)),
+                    );
+                }
+                match &self.github_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -4632,6 +4669,7 @@ impl Shell {
             SettingsSection::Commands => icons::COMMAND,
             SettingsSection::Mcp => icons::GLOBAL,
             SettingsSection::Subagents => icons::CHECKLIST,
+            SettingsSection::Github => icons::GITHUB_MARK,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
@@ -10094,6 +10132,7 @@ mod tests {
                 SettingsSection::Subagents,
                 SettingsSection::Commands,
                 SettingsSection::Mcp,
+                SettingsSection::Github,
             ]
         );
         assert_eq!(

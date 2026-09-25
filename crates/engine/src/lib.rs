@@ -20,6 +20,7 @@ pub mod auth;
 pub mod chat2_host;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod github;
 pub mod instance_lock;
 pub mod local_import;
 pub mod mcp;
@@ -179,6 +180,8 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub title_settings: title_settings::TitleSettingsStore,
+    /// This device's GitHub sign-in (device-scoped, like agent accounts).
+    pub github: github::Github,
     mcp_logins: Arc<mcp::login::Logins>,
     provider_logins: Arc<pi_providers::Logins>,
     /// Temporary Side Chats (round 21): engine-hosted chats opened from a
@@ -352,6 +355,7 @@ impl EngineCore {
         });
         let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
         let title_settings = title_settings::TitleSettingsStore::new(data_dir);
+        let github = github::Github::new(github::GithubConfig::detect(), data_dir);
         sessions.set_titles(
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
                 .with_settings(title_settings.clone()),
@@ -375,6 +379,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             title_settings,
+            github,
             mcp_logins: Arc::new(Default::default()),
             provider_logins: Arc::new(Default::default()),
             side_chats,
@@ -560,7 +565,8 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_mcp_logins(self.mcp_logins.clone())
         .with_provider_logins(self.provider_logins.clone())
-        .with_title_settings(self.title_settings.clone());
+        .with_title_settings(self.title_settings.clone())
+        .with_github(self.github.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
