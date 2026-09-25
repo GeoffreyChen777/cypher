@@ -20,6 +20,9 @@ final class AppModel {
     }
 
     var phase: Phase = .signedOut
+    /// `restore()` has run: until then `phase` is only the initial value, not
+    /// a decision (the boot splash waits on it).
+    private(set) var restored = false
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
     let notifications = NotificationController()
@@ -58,6 +61,7 @@ final class AppModel {
     var launchFocusComposer = false
 
     func restore() {
+        defer { restored = true }
         if demo != nil { return }
         DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments

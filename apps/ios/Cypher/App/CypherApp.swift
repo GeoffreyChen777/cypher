@@ -56,6 +56,7 @@ struct CypherApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @State private var showSplash = BootSplash.enabled()
 
     var body: some View {
         Group {
@@ -68,6 +69,20 @@ struct RootView: View {
                 HomeView()
             }
         }
+        .overlay {
+            if showSplash {
+                BootSplashView(ready: splashReady) { showSplash = false }
+            }
+        }
         .task { model.restore() }
+    }
+
+    /// Read only while the splash is up, so RootView stops observing the
+    /// workspace rows once it's gone.
+    private var splashReady: Bool {
+        BootSplash.contentReady(restored: model.restored, phase: model.phase,
+                                demo: model.demo != nil,
+                                connected: model.workspace?.connected == true,
+                                hasRows: !model.spaces.isEmpty || !model.allChats.isEmpty)
     }
 }

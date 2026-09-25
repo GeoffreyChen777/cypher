@@ -11,6 +11,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
 - **Appearance:** Home → account menu → Appearance offers System (default),
   Light and Dark. The choice is saved on this phone only. Surfaces, sheets,
   composer, Markdown and native selectable text adapt without changing layout.
+- **Boot splash:** a cold launch opens on the desktop's ASCII wordmark, which
+  decrypts from scrambled glyphs into ink, then lifts away once sign-in is
+  resolved and the workspace has its on-device cache or a live room (3s cap).
+  "LOADING" appears only if it's still waiting after the decode. Foregrounding
+  never shows it; Reduce Motion gets a static mark and a plain fade. Rigs
+  (`-demo`, `-e2e`, `-bench`, XCTest) skip it; `-splash` forces it.
 - **Project-first:** Home lists projects with their owning device;
   open a project to create or resume its sessions, or access its archive.
   `Space`/`spaceId` remain the shared wire-schema names — no schema migration.
