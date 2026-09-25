@@ -1162,6 +1162,27 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Host-side activity bump WITHOUT a new preview: the run now needs the
+    /// user (a question, an error) though no message text was written. Moving
+    /// `lastMessageAt` past the synced seen marker makes the chat unseen on
+    /// every device, so opening it anywhere reads it everywhere.
+    pub fn touch_chat_activity(
+        &mut self,
+        chat_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("lastMessageAt", json!(at.timestamp_millis()))]),
+        );
+        Ok(true)
+    }
+
     /// Host-side sidebar freshness: preview + timestamp of the latest message.
     pub fn set_chat_last_message(
         &mut self,

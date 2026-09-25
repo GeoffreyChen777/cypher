@@ -45,6 +45,15 @@ function fixture(state: DurableObjectState) {
     snapshot: () => request("settings", "GET"),
     settings: (body: unknown) => request("settings", "PUT", body),
     onSend: (hook: (message: PushMessage) => Promise<void>) => { sendHook = hook; },
+    /** Another device (the desktop) opened the chat: its synced seen marker
+     * lands as a chat-row write through the registry, like any push. */
+    seen: (chatId: string, at: number, lastMessageAt?: number) => {
+      const before = rows.get(`chats/${chatId}`)!;
+      const after = { ...before, fields: { ...before.fields, lastSeenAt: at,
+        ...(lastMessageAt === undefined ? {} : { lastMessageAt }) } };
+      rows.set(`chats/${chatId}`, after);
+      service.observe([{ before, after }], "desktop");
+    },
     view: (chatId: string | null, sequence: number, foreground = true) => request("activity", "POST",
       { clientId: "phone", platform: "ios", chatId, sequence, foreground, interactionAgeMs: 0 }),
     enqueue: async (chatId: string, status = "idle", duration = 60_000) => {
@@ -86,6 +95,46 @@ describe("durable unread-conversation badges", () => {
         expect((await f.snapshot()).badgeCount).toBe(0);
         await f.view(null, 4);
         clock.mockReturnValue(start + 120_000);
+        await f.enqueue("one");
+        expect((await f.snapshot()).badgeCount).toBe(1);
+      } finally { clock.mockRestore(); }
+    });
+  });
+
+  it("clears every phone's badge when the session is opened on another device", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("badges-seen-elsewhere"));
+    await runInDurableObject(stub, async (_, state) => {
+      const f = fixture(state), start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      try {
+        await f.enqueue("one");
+        await f.enqueue("two", "awaitingInput");
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        // A marker older than the event (opened mid-run) reads nothing.
+        f.seen("one", start - 10_000);
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        // Opened on the desktop after it finished, still inside the alert
+        // delay: the unread count drops and the phone alert is withdrawn.
+        clock.mockReturnValue(start + 3_000);
+        f.seen("one", start + 3_000);
+        expect((await f.snapshot()).badgeCount).toBe(1);
+        clock.mockReturnValue(start + 12_000);
+        await f.flush();
+        const alerts = f.calls.filter(m => m.kind !== "badge");
+        expect(alerts.map(m => "chatId" in m ? m.chatId : undefined)).toEqual(["two"]);
+        expect(f.calls.filter(m => m.kind === "badge").map(m => m.badgeCount)).toEqual([1, 1]);
+        // After delivery too: the phones get a badge-only update to zero.
+        f.seen("two", start + 12_000);
+        await f.flush();
+        expect(f.calls.slice(-2).map(m => [m.kind, m.badgeCount])).toEqual([["badge", 0], ["badge", 0]]);
+        // An event arriving after the marker already covers it (the desktop
+        // was watching as it finished) never counts or alerts.
+        clock.mockReturnValue(start + 120_000);
+        f.seen("one", start + 120_500);
+        await f.enqueue("one");
+        expect((await f.snapshot()).badgeCount).toBe(0);
+        // A later run is new again.
+        clock.mockReturnValue(start + 240_000);
         await f.enqueue("one");
         expect((await f.snapshot()).badgeCount).toBe(1);
       } finally { clock.mockRestore(); }

@@ -1517,19 +1517,22 @@ impl AppState {
     }
 
     /// The Dock badge: sessions whose sidebar corner asks for you — waiting
-    /// on an answer, errored, or finished and not yet seen on any device.
-    /// Working and idle rows don't count, so opening a session (the synced
-    /// seen marker) is what takes it off the badge, on every device alike.
+    /// on an answer, errored, or finished — with activity newer than the
+    /// synced seen marker. Opening a session on ANY device moves that marker,
+    /// so a read on the phone takes it off this badge too (and the Worker
+    /// clears the phones' badges off the same marker). The host bumps
+    /// `lastMessageAt` when a run starts asking or fails, so a question
+    /// counts until it's been looked at, not until it's answered.
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
         self.overview_chats(now)
             .iter()
-            .filter(|(status, _)| {
+            .filter(|(status, chat)| {
                 matches!(
                     status,
                     ChatIndicator::AwaitingInput
                         | ChatIndicator::Errored
                         | ChatIndicator::Completed
-                )
+                ) && chat.unseen()
             })
             .count()
     }
@@ -3496,6 +3499,8 @@ mod tests {
         let mut archived = chat("archived", 0, Some(2));
         archived.archived = true;
         let mut orphan = chat("orphan", 0, Some(3));
+        let mut asked_seen = chat("asked-seen", 0, Some(8));
+        asked_seen.last_seen_at = asked_seen.last_message_at;
         orphan.space_id = Some("gone".into());
         s.apply_chats(vec![
             chat("done", 0, Some(4)),
@@ -3506,14 +3511,17 @@ mod tests {
             seen,
             archived,
             orphan,
+            asked_seen,
         ]);
         s.apply_sessions(vec![
             session("asking", SessionStatus::AwaitingInput, 5, now),
             session("failed", SessionStatus::Errored, 5, now),
             session("running", SessionStatus::Working, 5, now),
+            session("asked-seen", SessionStatus::AwaitingInput, 5, now),
         ]);
-        // done (unseen), asking, failed — not working, empty, seen, archived
-        // or a chat whose project is gone (the overview hides it too).
+        // done (unseen), asking, failed — not working, empty, seen, archived,
+        // a question already looked at (on any device), or a chat whose
+        // project is gone (the overview hides it too).
         assert_eq!(s.attention_count(now), 3);
         s.begin_pending_send("done", "m1", now);
         assert_eq!(

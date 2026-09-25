@@ -1,6 +1,9 @@
 /** Notification data intentionally excludes prompts, titles and model output. */
 export const NOTICE_DELAY_MS = 10_000;
 export const ACTIVITY_LEASE_MS = 45_000;
+/** Clock tolerance between the device that stamped a chat's synced seen
+ * marker and the host that stamped the event (both are device clocks). */
+export const SEEN_SLACK_MS = 2_000;
 export const INTERACTION_MS = 120_000;
 export const SHORT_RUN_MS = 30_000;
 export const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -39,6 +42,9 @@ export interface Notice {
   attempt: number;
   sessionStatus?: string;
   source?: "event";
+  /** Host timestamp of the transition; the synced seen marker is compared
+   * against it. Absent on events queued before this field existed. */
+  eventAt?: number;
 }
 export function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid object");

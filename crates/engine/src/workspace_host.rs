@@ -945,6 +945,17 @@ impl WorkspaceHost {
         }
     }
 
+    /// Activity bump without a preview (`RegistryDoc::touch_chat_activity`).
+    pub fn touch_chat_activity(&self, chat_id: &str) {
+        let result = self.claim_chat(chat_id, None).and_then(|_| {
+            self.mutate(|doc| doc.touch_chat_activity(chat_id, Utc::now()))
+                .map_err(EngineError::from)
+        });
+        if let Err(err) = result {
+            tracing::warn!(chat = %chat_id, error = %err, "registry activity touch failed");
+        }
+    }
+
     /// Resume continuity: stamp the chat row with the harness-native session id
     /// of its latest run and the cwd it was created under. An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:

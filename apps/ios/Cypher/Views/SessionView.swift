@@ -34,6 +34,12 @@ struct SessionView: View {
 
 
     private var chat: Chat? { model.chat(id: chatId) }
+    @Environment(\.scenePhase) private var scenePhase
+    /// On screen, frontmost and holding activity newer than the synced seen
+    /// marker — a run finishing (or asking) while you watch it.
+    private var watchingUnseen: Bool {
+        chat?.unseen == true && scenePhase == .active && path.last == .chat(chatId)
+    }
 
     private var chatSpace: Space? {
         guard let spaceId = chat?.spaceId else { return nil }
@@ -46,6 +52,12 @@ struct SessionView: View {
     var body: some View {
         withSheets
             .onChange(of: chatId) { _, _ in workspaceDestination = nil }
+            // Reading it here reads it everywhere: the marker syncs, the desktop
+            // Dock drops it and the Worker clears the other phones' badges. The
+            // desktop marks its focused session live the same way.
+            .onChange(of: watchingUnseen) { _, watching in
+                if watching { model.markSeen(chatId: chatId) }
+            }
             .onChange(of: chat?.cwd) { _, _ in workspaceDestination = nil }
             .onChange(of: chat?.deviceId) { _, _ in workspaceDestination = nil }
             .onChange(of: path) { _, routes in

@@ -1388,6 +1388,9 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // Blocks on the question; an interrupt fails the resolver
                     // (empty answers) and cancels the token — like a real CLI
                     // being torn down, the stream then ends WITHOUT a Done.
+                    // (Asked a beat after the prompt, so the question's own
+                    // lastMessageAt bump is distinguishable from the send's.)
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                     let _ = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
                         id: "q1".into(),
                         header: "Pick".into(),
@@ -1426,6 +1429,28 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                 == Some(SessionStatus::AwaitingInput)
         },
         "awaiting input",
+    )
+    .await;
+    // The question is new activity: `lastMessageAt` moves past the moment it
+    // was asked, so the chat reads unseen (Dock/phone badges) until someone
+    // opens it on any device.
+    // (Rows store epoch ms.)
+    let asked_at = core
+        .sessions
+        .session_status(CHAT)
+        .unwrap()
+        .updated_at
+        .timestamp_millis();
+    wait_for(
+        || {
+            core.workspace
+                .chat(CHAT)
+                .ok()
+                .flatten()
+                .and_then(|c| c.last_message_at)
+                .is_some_and(|at| at.timestamp_millis() >= asked_at)
+        },
+        "question bumps lastMessageAt",
     )
     .await;
     wait_for(

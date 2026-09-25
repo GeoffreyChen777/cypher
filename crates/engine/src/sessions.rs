@@ -1454,8 +1454,16 @@ impl Inner {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         let now = Utc::now();
         let seed = self.durable_context_usage(chat_id);
-        let session = {
+        let (session, entered_attention) = {
             let mut statuses = lock(&self.statuses);
+            // A run that starts waiting on the user or fails is new activity
+            // even when no message text lands (a question, a crash): the
+            // badge on every device keys off `lastMessageAt` vs the synced
+            // seen marker. A first-ever row is a restore, never a transition.
+            let entered_attention = matches!(
+                status,
+                SessionStatus::AwaitingInput | SessionStatus::Errored
+            ) && statuses.get(chat_id).is_some_and(|s| s.status != status);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
@@ -1488,10 +1496,18 @@ impl Inner {
                     entry.started_at = None;
                 }
             }
-            entry.clone()
+            (entry.clone(), entered_attention)
         };
         // Statuses guard released before publish (publish re-locks it).
         self.publish_session(chat_id, &session);
+        // AFTER the status (the send path's causal order): an observer never
+        // holds [new activity, old Working] as a phantom completion.
+        if entered_attention
+            && !self.is_ephemeral(chat_id)
+            && let Some(ws) = self.workspace()
+        {
+            ws.touch_chat_activity(chat_id);
+        }
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.

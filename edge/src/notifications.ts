@@ -5,13 +5,13 @@ import type { BadgeSnapshot } from "./apns";
 import {
   defaultNotificationSettings, identifier, object, parseActivity, parseSettings,
   readNotificationJSON, notificationJSON as json, notificationDecision, iosViewingChat,
-  NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
+  NOTICE_DELAY_MS, SHORT_RUN_MS, ACTIVITY_LEASE_MS, SEEN_SLACK_MS, type Activity, type Notice, type NoticeKind, type NotificationSettings
 } from "./notifications-model";
 
 interface Recipient { id: string; lease: string; installationId: string; epoch: number }
 interface SessionTarget { clientId: string; platform: "desktop" | "ios"; at: number }
 interface BadgeJob extends BadgeSnapshot { id: string; due: number; expires: number; attempt: number }
-type UnreadEvent = Pick<Notice, "id" | "chatId" | "projectId" | "kind" | "child">;
+type UnreadEvent = Pick<Notice, "id" | "chatId" | "projectId" | "kind" | "child" | "eventAt">;
 
 function asyncChildren(fields: Row["fields"] | undefined) {
   const runs = (Array.isArray(fields?.subagents) ? fields.subagents : []).slice(0, 32)
@@ -105,7 +105,7 @@ export class Notifications {
   private markUnread(notice: Notice): void {
     if (notificationDecision(notice, this.settings(), [], Date.now()) === "drop") return;
     const unread: UnreadEvent = { id: notice.id, chatId: notice.chatId, projectId: notice.projectId,
-      kind: notice.kind, child: notice.child };
+      kind: notice.kind, child: notice.child, eventAt: notice.eventAt };
     this.ctx.storage.sql.exec("INSERT INTO notify_unread(chat_id,value) VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET value=excluded.value",
       notice.chatId, JSON.stringify(unread));
     this.badgeChanged(Date.now() + NOTICE_DELAY_MS);
@@ -118,6 +118,36 @@ export class Notifications {
     this.ctx.storage.sql.exec("DELETE FROM notify_unread WHERE chat_id=?", chatId);
     this.badgeChanged();
     return notice.id;
+  }
+  /** Has the chat been opened on ANY device since the host stamped
+   * `eventAt`? Every client writes the synced `lastSeenAt` marker when it
+   * shows a session (desktop and iOS alike), so this is "read elsewhere". */
+  private seenSince(chatId: string, eventAt: number | undefined): boolean {
+    const seen = this.row("chats", chatId)?.fields.lastSeenAt;
+    return typeof seen === "number" && typeof eventAt === "number" && seen >= eventAt - SEEN_SLACK_MS;
+  }
+  /** A chat's seen marker advanced: the session was opened on some device.
+   * Everything it had pending up to that moment is read — the unread badge
+   * contribution and any alert still waiting out its delay — so every
+   * phone's badge follows a read on the desktop (and vice versa via the
+   * marker itself). Events newer than the marker stay. */
+  private observeSeen(before: Row | undefined, after: Row): void {
+    const seen = after.fields.lastSeenAt, previous = before?.fields.lastSeenAt;
+    if (after.deleted || typeof seen !== "number" || (typeof previous === "number" && seen <= previous)) return;
+    const chatId = after.id;
+    for (const { notice } of this.events()) {
+      if (notice.chatId === chatId && seen >= (notice.eventAt ?? notice.at) - SEEN_SLACK_MS) this.remove(notice.id);
+    }
+    const row = [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id=?", chatId)][0];
+    if (!row) return;
+    const unread = JSON.parse(row.value as string) as UnreadEvent;
+    // Unread rows from before `eventAt` existed: fall back to the marker
+    // covering the chat's latest message, the sidebar's own seen rule.
+    const lastMessageAt = after.fields.lastMessageAt;
+    const read = typeof unread.eventAt === "number"
+      ? seen >= unread.eventAt - SEEN_SLACK_MS
+      : typeof lastMessageAt !== "number" || seen >= lastMessageAt;
+    if (read) this.clearUnread(chatId, unread.id);
   }
   private pruneUnread(): void {
     const prefs = this.settings();
@@ -214,14 +244,17 @@ export class Notifications {
           id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
           child: !!chat.fields.child, run, at: Date.now(),
           expires: Date.now() + (kind === "input" ? 8 * 3_600_000 : 600_000),
-          recipients, attempt: 0, sessionStatus: status, source: "event"
+          recipients, attempt: 0, sessionStatus: status, source: "event", eventAt: body.updatedAt
         };
         if (this.get<string>(`enqueued:${chatId}`) === `${run}/${kind}`) return json({ ok: true, duplicate: true });
         this.set(`enqueued:${chatId}`, `${run}/${kind}`);
         for (const pending of this.events()) if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
         // An event arriving while the session is already visible is read too.
         // Remember the dedupe marker even if the viewer leaves before flush.
-        if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], Date.now())) {
+        // Already opened on another device after the host stamped the event
+        // (the desktop marks a session it is showing seen immediately).
+        if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], Date.now()) ||
+            this.seenSince(chatId, body.updatedAt)) {
           this.clearUnread(chatId);
           this.schedule();
           return json({ ok: true, read: true });
@@ -283,6 +316,8 @@ export class Notifications {
     for (const { before, after } of changes) {
       // The execution engine does publish its session row to the registry,
       // including iOS-started runs. Only that host's mutations are eligible.
+      // Any device may move the seen marker; it reads, never notifies.
+      if (after.kind === "chats") { this.observeSeen(before, after); continue; }
       if (after.kind !== "sessions" || after.deleted || after.fields.deviceId !== sourceDevice) continue;
       const chatId = after.fields.chatId;
       if (typeof chatId !== "string") continue;
@@ -328,14 +363,16 @@ export class Notifications {
       const notice: Notice = {
         id: crypto.randomUUID(), chatId, projectId: chat.fields.spaceId, kind,
         child: !!chat.fields.child, run, at: now, expires: now + (kind === "input" ? 8 * 3_600_000 : 600_000),
-        recipients, attempt: 0, sessionStatus: String(status)
+        recipients, attempt: 0, sessionStatus: String(status), eventAt
       };
       // Replace superseded state for this chat, rather than accumulating
       // completion/input/error alerts during flapping.
       for (const pending of this.events()) {
         if (pending.notice.chatId === chatId) this.remove(pending.notice.id);
       }
-      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now)) { this.clearUnread(chatId); continue; }
+      if (iosViewingChat(chatId, this.get<Activity[]>("activity") ?? [], now) || this.seenSince(chatId, eventAt)) {
+        this.clearUnread(chatId); continue;
+      }
       if (this.events().length >= 256) {
         const oldest = this.events()[0]; if (oldest) this.remove(oldest.notice.id);
       }

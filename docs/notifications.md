@@ -65,14 +65,24 @@ is no Smart/Always/Off policy.
   Repeated events in one session count as one. Short completions and disabled,
   muted or excluded child events do not add an unread session.
 - Unread state is durable and separate from the delivery outbox: sending the
-  alert or exhausting its short retry window does not mark it read. Entering
-  that session clears it, even if its alert has already been sent. Home does
-  not clear all badges. Archiving/deleting a chat/project, or muting/disabling
+  alert or exhausting its short retry window does not mark it read. Opening
+  that session on **any** device clears it, even if its alert has already been
+  sent. Home does not clear all badges. Archiving/deleting a chat/project, or muting/disabling
   the corresponding event category, removes its unread contribution.
 - The authenticated settings/activity responses include an absolute count and
   monotonic revision. iOS refreshes on foreground, applies read receipts, ignores
   older/foreign-account snapshots and clears the local badge on logout/account
-  replacement. This does not use the registry's general message-unseen dots.
+  replacement.
+- **Read anywhere, cleared everywhere.** Every client stamps the chat row's
+  synced `lastSeenAt` marker when it shows a session (desktop and iOS mark the
+  frontmost session live as new activity lands). When that marker reaches the
+  event's host timestamp (`eventAt`, 2s clock slack), the Worker drops the
+  chat's unread row, withdraws an alert still inside its delay and sends the
+  badge-only update, so every phone follows a desktop read. An event whose
+  session was already opened after it happened is never counted. The host
+  bumps `lastMessageAt` when a run starts asking or fails, so questions and
+  errors are new activity too; a read counts once it's looked at, not once
+  it's answered.
 - Alerts carry `aps.badge`. A separate coalesced, retryable **badge-only** APNs
   payload sends absolute counts (including zero) to all valid iOS registrations
   in the account. It has no alert text or sound; important **alerts** still follow
@@ -93,8 +103,11 @@ is no Smart/Always/Off policy.
   "App icon badge: Off in iOS Settings" instead of failing silently.
 - The macOS desktop draws its own Dock badge locally (Settings →
   Notifications → Dock badge, on by default): the number of sidebar sessions
-  waiting on input, errored, or finished and unseen on any device. It follows
-  the synced seen marker, not this server-side unread table.
+  waiting on input, errored, or finished with activity newer than the synced
+  seen marker — so opening a session on the phone drops it from the Dock too.
+  The count is derived locally (the sidebar's rule), so it can differ from the
+  phones' count where the phone policy filters events out (short runs, muted
+  projects, disabled categories).
 
 Activity reports carry only the selected session and a monotonic client
 sequence. No keys, coordinates or content are collected. Online headless
