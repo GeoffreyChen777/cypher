@@ -76,6 +76,14 @@ node "$SPEC/patches/pi-claude-bridge-opus-5-5.mjs" \
 node "$SPEC/patches/pi-agent-squad-cypher-host.mjs" \
   "$STAGE/npm/node_modules/pi-agent-squad"
 
+# pi-agent-squad replaced the whole system prompt to add its orchestrator
+# prompt (or the delegation guard), and pi-claude-bridge forwards none of a
+# replaced prompt, so /orchestrate did nothing on Claude. Append through Pi's
+# prompt options instead (see the patch header). Missing anchors fail the build
+# on purpose.
+node "$SPEC/patches/pi-agent-squad-prompt-options.mjs" \
+  "$STAGE/npm/node_modules/pi-agent-squad"
+
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
 keep="${ESBUILD#@esbuild/}"
@@ -178,6 +186,9 @@ PI_PACKAGE_DIR="$STAGE/pi" CYPHER_PROVIDER_HELPER="$STAGE/provider-service.mjs" 
 PI_PACKAGE_DIR="$STAGE/pi" \
   "$STAGE/bin/node" --test "$ROOT/crates/harness/src/pi/engine-client.test.mjs"
 "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs"
+# Loads the real squad and bridge in both orders: what reaches Claude Code.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
