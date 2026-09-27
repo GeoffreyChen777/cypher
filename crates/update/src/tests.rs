@@ -458,3 +458,121 @@ fn binary_probe_has_a_deadline_and_reaps_the_child() {
     assert!(!headless_binary_ready(dir.path()));
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
 }
+
+#[test]
+fn staged_update_pruning_keeps_newer_bundles_and_unrelated_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let updates = dir.path().join("updates");
+    for name in ["0.3.9", "0.3.10", "0.3.11", "notes"] {
+        std::fs::create_dir_all(updates.join(name).join("Cypher.app")).unwrap();
+    }
+    // Startup on 0.3.10: its own bundle and older ones are done with.
+    prune_staged_updates(dir.path(), |staged| !version_newer(staged, "0.3.10"));
+    let mut left: Vec<_> = std::fs::read_dir(&updates)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["0.3.11", "notes"]);
+}
+
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn managed_pruning_keeps_current_newer_and_unrelated_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    // Not named `app`: service units on the test machine cannot pin these.
+    let root = dir.path().join("installs");
+    for name in ["0.3.1", "0.3.2", "0.3.3", "0.3.4", "notes"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    std::os::unix::fs::symlink(root.join("0.3.2"), root.join("current")).unwrap();
+    let crashed = root.join(".stage-crashed");
+    let installing = root.join(".install-running");
+    std::fs::create_dir_all(&crashed).unwrap();
+    std::fs::create_dir_all(&installing).unwrap();
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+    std::fs::File::open(&crashed)
+        .unwrap()
+        .set_modified(two_days_ago)
+        .unwrap();
+
+    // Startup on 0.3.3 while `current` still names 0.3.2 (not yet restarted).
+    prune_managed_versions(&root, |installed| !version_newer(installed, "0.3.3"));
+    assert_eq!(
+        dir_names(&root),
+        [".install-running", "0.3.2", "0.3.4", "current", "notes"],
+        "0.3.3 is gone only because nothing runs it in this test"
+    );
+    assert!(root.join("current").is_symlink());
+}
+
+#[test]
+fn explicitly_kept_versions_survive_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("installs");
+    for name in ["0.3.1", "0.3.2"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    let keep = std::collections::BTreeSet::from(["0.3.1".to_string()]);
+    prune_versions_except(&root, &keep, |_| true);
+    assert_eq!(dir_names(&root), ["0.3.1"]);
+}
+
+#[test]
+fn service_units_pin_the_versions_they_run_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    for name in ["0.3.1", "0.3.2", "0.3.3"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    let units = dir.path().join("units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("cypher.service"),
+        "[Service]\nExecStart=:\"%h/.cypher/app/0.3.1/cypher\" headless\n",
+    )
+    .unwrap();
+    std::fs::write(
+        units.join("cypher-work.service"),
+        "[Service]\nExecStart=:\"%h/.cypher/app/current/cypher\" headless\n",
+    )
+    .unwrap();
+    assert_eq!(
+        service_pinned_versions(&root, &[units, dir.path().join("missing")]),
+        std::collections::BTreeSet::from(["0.3.1".to_string()])
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn versions_another_process_runs_from_are_never_pruned() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("installs");
+    for name in ["0.3.1", "0.3.2"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+    }
+    // An old desktop app still running a superseded version.
+    let binary = root.join("0.3.1").join("cypher");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let mut child = std::process::Command::new(&binary)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    // `/proc/<pid>/exe` names the new image once exec has completed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !running_versions(&root).contains("0.3.1") && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    prune_managed_versions(&root, |_| true);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(dir_names(&root), ["0.3.1"]);
+}

@@ -12,10 +12,17 @@
 //! activated through `<data_dir>/pi-runtime/current`. Mutable Pi configuration
 //! lives separately under `<data_dir>/pi-runtime/agent`; its `npm` entry points
 //! at the active runtime's curated package tree.
+//!
+//! Only the active bundle is kept. The engine enables cleanup at boot, which
+//! removes every other version and abandoned install stages; each later
+//! activation removes versions again, sparing any this process has run (a Pi
+//! child resolves `current` to its versioned directory when it starts and
+//! keeps loading files from there).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -159,6 +166,17 @@ struct Inner {
     operation: tokio::sync::Mutex<()>,
     shutdown_tx: watch::Sender<bool>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set by [`PiRuntimeManager::enable_cleanup`]; activations prune only then.
+    cleanup: AtomicBool,
+}
+
+/// Versioned runtime directories this process has run or activated. The
+/// engine runtime is rebuilt on profile switches, so this outlives any one
+/// manager: children of a replaced runtime may still be loading from theirs.
+static USED_VERSIONS: LazyLock<Mutex<BTreeSet<PathBuf>>> = LazyLock::new(Default::default);
+
+fn mark_used(directory: PathBuf) {
+    lock(&USED_VERSIONS).insert(directory);
 }
 
 #[derive(Clone)]
@@ -181,6 +199,9 @@ impl PiRuntimeManager {
         } else {
             None
         };
+        if let Some(active) = active_version_dir(&paths) {
+            mark_used(active);
+        }
         let installed = read_installed(&paths);
         let (runtime_tx, _) = watch::channel(PiRuntimeStatus {
             installed: paths.installed(),
@@ -206,6 +227,7 @@ impl PiRuntimeManager {
                 operation: tokio::sync::Mutex::new(()),
                 shutdown_tx,
                 task: Mutex::new(None),
+                cleanup: AtomicBool::new(false),
             }),
         };
         let worker = manager.clone();
@@ -248,6 +270,22 @@ impl PiRuntimeManager {
 
     pub fn update_status(&self) -> PiUpdateStatus {
         self.inner.updates_tx.borrow().clone()
+    }
+
+    /// Delete old runtime versions and abandoned install stages now, and again
+    /// after every activation. Only the engine calls this: it holds the
+    /// data-dir instance lock, so no other process has Pi children running
+    /// from this tree. CLI helpers that briefly spawn a manager leave it off.
+    pub fn enable_cleanup(&self) {
+        self.inner.cleanup.store(true, Ordering::SeqCst);
+        let manager = self.clone();
+        tokio::spawn(async move {
+            // Serialized with installs: a freshly unpacked version is not
+            // `current` until activation, and must not be swept before then.
+            let _operation = manager.inner.operation.lock().await;
+            let paths = manager.inner.paths.clone();
+            let _ = crate::off_runtime(move || prune_runtime_dir(&paths)).await;
+        });
     }
 
     pub async fn shutdown(&self) {
@@ -448,9 +486,19 @@ impl PiRuntimeManager {
         }
 
         let paths = self.inner.paths.clone();
+        let cleanup = self.inner.cleanup.load(Ordering::SeqCst);
         crate::off_runtime(move || {
             initialize_agent(&paths, &destination)?;
+            // The outgoing bundle may still back live children, even when a
+            // CLI activated it behind this engine's back.
+            if let Some(previous) = active_version_dir(&paths) {
+                mark_used(previous);
+            }
             activate(&paths, &destination)?;
+            mark_used(destination.clone());
+            if cleanup {
+                prune_runtime_dir(&paths);
+            }
             if let Err(err) = prune_stale_managed_packages(&paths, &destination) {
                 tracing::warn!(error = %err, "could not prune retired Pi runtime packages");
             }
@@ -951,6 +999,83 @@ where
     })
 }
 
+/// The versioned directory `current` points at, when this manager owns the
+/// `versions/` layout (`CYPHER_PI_RUNTIME_DIR` means someone else does).
+fn active_version_dir(paths: &PiRuntimePaths) -> Option<PathBuf> {
+    if paths.current != paths.root.join("current") {
+        return None;
+    }
+    let target = std::fs::read_link(&paths.current).ok()?;
+    let name = target.file_name()?;
+    let versions = target.parent()?;
+    (versions.file_name()? == "versions").then(|| paths.root.join("versions").join(name))
+}
+
+/// Remove every runtime version except the active one and those this process
+/// has used, plus `.stage-<version>-<pid>` directories whose installer died.
+/// Without a readable `current` nothing is known to be safe, so nothing goes.
+fn prune_runtime_dir(paths: &PiRuntimePaths) {
+    let Some(active) = active_version_dir(paths) else {
+        return;
+    };
+    let used = lock(&USED_VERSIONS).clone();
+    if let Ok(entries) = std::fs::read_dir(paths.root.join("versions")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == active || used.contains(&path) {
+                continue;
+            }
+            remove_runtime_path(&path, "old Pi runtime");
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&paths.root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(".stage-"))
+                .and_then(|rest| rest.rsplit_once('-'))
+                .and_then(|(_, pid)| pid.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if !process_alive(pid) {
+                remove_runtime_path(&entry.path(), "abandoned Pi runtime install");
+            }
+        }
+    }
+}
+
+fn remove_runtime_path(path: &Path, what: &str) {
+    let removed = if path.is_dir() && !path.is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => tracing::info!(path = %path.display(), "removed {what}"),
+        Err(err) => tracing::warn!(path = %path.display(), error = %err, "could not remove {what}"),
+    }
+}
+
+fn process_alive(pid: i32) -> bool {
+    // Zero and negative pids address process groups, never one installer.
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // Signal 0 only probes; EPERM means the process exists as another user.
+        // SAFETY: `kill` with signal 0 has no side effects.
+        let probed = unsafe { libc::kill(pid, 0) };
+        probed == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn activate(paths: &PiRuntimePaths, destination: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -1018,6 +1143,46 @@ mod tests {
         assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(tx);
         task.await.unwrap();
+    }
+
+    #[test]
+    fn cleanup_keeps_only_the_active_and_used_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = PiRuntimePaths::for_data_dir(temp.path());
+        let versions = paths.root.join("versions");
+        for version in ["1", "2", "3", "4"] {
+            std::fs::create_dir_all(versions.join(version).join("bin")).unwrap();
+        }
+        let left = || {
+            let mut names: Vec<_> = std::fs::read_dir(&versions)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        // Before anything is active, nothing is known to be unused.
+        prune_runtime_dir(&paths);
+        assert_eq!(left(), ["1", "2", "3", "4"]);
+
+        activate(&paths, &versions.join("4")).unwrap();
+        mark_used(versions.join("2"));
+        let abandoned = paths.root.join(".stage-5-2147483647");
+        let installing = paths.root.join(format!(".stage-5-{}", std::process::id()));
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::create_dir_all(&installing).unwrap();
+        prune_runtime_dir(&paths);
+        assert_eq!(
+            left(),
+            ["2", "4"],
+            "only the active bundle and one a child may run from"
+        );
+        assert!(!abandoned.exists(), "a dead installer's stage is swept");
+        assert!(
+            installing.exists(),
+            "a live installer's stage is left alone"
+        );
+        assert!(paths.current.join("bin").is_dir());
     }
 
     #[test]

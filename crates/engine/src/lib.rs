@@ -1032,10 +1032,12 @@ impl Engine {
             core.set_updater_wake(wake);
         }
         core.set_updater(updater);
-        core.set_pi_runtime(pi_runtime::PiRuntimeManager::spawn(
-            config.edge_url.clone(),
-            &pi_runtime_data_dir,
-        ));
+        let pi_runtime =
+            pi_runtime::PiRuntimeManager::spawn(config.edge_url.clone(), &pi_runtime_data_dir);
+        // Assembly holds the data-dir instance lock, so no other engine has Pi
+        // children running from this runtime tree: keep only the live bundle.
+        pi_runtime.enable_cleanup();
+        core.set_pi_runtime(pi_runtime);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat

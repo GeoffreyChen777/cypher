@@ -499,7 +499,7 @@ pub async fn stage_headless(
     download_release_file(edge_url, manifest, &file, &tarball).await?;
     // Archive validation and extraction shell out to `tar`: blocking pool.
     // `staging` outlives the await, so the temp dir is still there.
-    off_runtime(move || {
+    let dest = off_runtime(move || {
         validate_headless_archive(&tarball, file.trim_end_matches(".tar.gz"))?;
         let unpacked = stage.join("unpacked");
         std::fs::create_dir_all(&unpacked)?;
@@ -531,7 +531,15 @@ pub async fn stage_headless(
         }
         Ok(dest)
     })
-    .await
+    .await?;
+    // A newer release supersedes any older one still waiting to be applied.
+    let (app_root, version) = (app_root.to_path_buf(), version.clone());
+    off_runtime(move || {
+        prune_managed_versions(&app_root, |staged| version_newer(&version, staged));
+        Ok(())
+    })
+    .await?;
+    Ok(dest)
 }
 
 fn headless_binary_ready(dir: &Path) -> bool {
@@ -630,6 +638,161 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
         let _ = (app_root, version);
         bail!("managed installs are unix-only");
     }
+}
+
+/// How long an installer's temporary directory (`.stage-*` from
+/// [`stage_headless`], `.install-*` from install.sh, `.current-*` from
+/// [`apply_headless`]) may sit before it counts as abandoned by a crash.
+const ABANDONED_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Delete the version directories of a managed install that `stale` selects,
+/// plus abandoned installer temp dirs. Never touched, whatever `stale` says:
+/// `current`'s target, the running binary's version, versions any live
+/// process runs from, and versions a service unit still names directly (units
+/// written before the switch to `app/current` pin one).
+fn prune_managed_versions(app_root: &Path, stale: impl Fn(&str) -> bool) {
+    let mut keep = service_pinned_versions(app_root, &service_unit_dirs());
+    keep.extend(running_versions(app_root));
+    if let Some(version) = std::fs::read_link(app_root.join("current"))
+        .ok()
+        .and_then(|target| Some(target.file_name()?.to_str()?.to_owned()))
+    {
+        keep.insert(version);
+    }
+    prune_versions_except(app_root, &keep, stale);
+}
+
+fn prune_versions_except(
+    app_root: &Path,
+    keep: &std::collections::BTreeSet<String>,
+    stale: impl Fn(&str) -> bool,
+) {
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // `file_type` does not follow links: `current` and stray links stay.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if [".stage-", ".install-", ".current-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            let abandoned = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > ABANDONED_TEMP_AGE);
+            if abandoned {
+                remove_install_dir(&path, "abandoned install temp dir");
+            }
+            continue;
+        }
+        if validate_version(&name).is_ok() && !keep.contains(&name) && stale(&name) {
+            remove_install_dir(&path, "old app version");
+        }
+    }
+}
+
+fn remove_install_dir(path: &Path, what: &str) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => tracing::info!(path = %path.display(), "removed {what}"),
+        Err(err) => tracing::warn!(path = %path.display(), error = %err, "could not remove {what}"),
+    }
+}
+
+/// Where `cypher daemon install` writes service definitions.
+fn service_unit_dirs() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".config/systemd/user"),
+        home.join("Library/LaunchAgents"),
+    ]
+}
+
+/// Versions a service unit runs by path (`…/app/<ver>/cypher`) instead of
+/// through `current`. Deleting one would leave that service unable to start.
+fn service_pinned_versions(
+    app_root: &Path,
+    unit_dirs: &[PathBuf],
+) -> std::collections::BTreeSet<String> {
+    let mut pinned = std::collections::BTreeSet::new();
+    let Some(root_name) = app_root.file_name().and_then(|name| name.to_str()) else {
+        return pinned;
+    };
+    let Ok(entries) = std::fs::read_dir(app_root) else {
+        return pinned;
+    };
+    let versions: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| validate_version(name).is_ok())
+        .collect();
+    let units: Vec<String> = unit_dirs
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect();
+    for version in versions {
+        let needle = format!("/{root_name}/{version}/cypher");
+        if units.iter().any(|unit| unit.contains(&needle)) {
+            pinned.insert(version);
+        }
+    }
+    pinned
+}
+
+/// Versions this process and any other live process execute from. Linux
+/// exposes every process's binary as `/proc/<pid>/exe`, which covers a desktop
+/// app still running an old version after the service restarted onto a new
+/// one. Elsewhere only this process is known.
+fn running_versions(app_root: &Path) -> std::collections::BTreeSet<String> {
+    let roots: Vec<PathBuf> = [
+        Some(app_root.to_path_buf()),
+        std::fs::canonicalize(app_root).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let version_of = |exe: &Path| {
+        roots.iter().find_map(|root| {
+            let relative = exe.strip_prefix(root).ok()?;
+            let first = relative.components().next()?;
+            Some(first.as_os_str().to_str()?.to_owned())
+        })
+    };
+    let mut running = std::collections::BTreeSet::new();
+    if let Some(version) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| version_of(&exe))
+    {
+        running.insert(version);
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(processes) = std::fs::read_dir("/proc") {
+        for process in processes.flatten() {
+            let Ok(exe) = std::fs::read_link(process.path().join("exe")) else {
+                continue;
+            };
+            // A replaced binary reads `<path> (deleted)`; it still runs.
+            let exe = exe.to_string_lossy();
+            let exe = Path::new(exe.strip_suffix(" (deleted)").unwrap_or(&exe));
+            if let Some(version) = version_of(exe) {
+                running.insert(version);
+            }
+        }
+    }
+    running
 }
 
 /// The managed layout every Linux install converges on: `~/.cypher/app`.
@@ -863,7 +1026,7 @@ pub async fn stage_mac_app(
     let tarball = dir.join(&file);
     download_release_file(edge_url, manifest, &file, &tarball).await?;
     // Extracting the whole app bundle takes seconds: blocking pool, not a worker.
-    off_runtime(move || {
+    let staged = off_runtime(move || {
         run(
             "tar",
             &[
@@ -880,7 +1043,44 @@ pub async fn stage_mac_app(
         }
         Ok(staged)
     })
-    .await
+    .await?;
+    // A newer bundle supersedes any older one still waiting to be applied.
+    let (data_dir, version) = (data_dir.to_path_buf(), version.clone());
+    off_runtime(move || {
+        prune_staged_updates(&data_dir, |staged| version_newer(&version, staged));
+        Ok(())
+    })
+    .await?;
+    Ok(staged)
+}
+
+/// Delete the staged app bundles under `{data_dir}/updates` that `stale`
+/// selects by version. Entries not named like a release are left alone.
+fn prune_staged_updates(data_dir: &Path, stale: impl Fn(&str) -> bool) {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("updates")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(version) = name.to_str() else {
+            continue;
+        };
+        if validate_version(version).is_err() || !stale(version) {
+            continue;
+        }
+        let path = entry.path();
+        let removed = if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => tracing::info!(%version, "removed staged app update"),
+            Err(err) => {
+                tracing::warn!(%version, error = %err, "could not remove staged app update")
+            }
+        }
+    }
 }
 
 /// Swap the installed bundle for the staged one: `ditto` the staged copy next to
@@ -1043,7 +1243,24 @@ impl Updater {
             last_activation: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         };
         let for_loop = updater.clone();
-        let task = tokio::spawn(async move { for_loop.check_loop(shutdown, checks).await });
+        let task = tokio::spawn(async move {
+            // Bundles for this version or older were applied or overtaken: the
+            // running app never reads them again.
+            let data_dir = for_loop.data_dir.clone();
+            let _ = off_runtime(move || {
+                prune_staged_updates(&data_dir, |staged| {
+                    !version_newer(staged, current_version())
+                });
+                if let InstallKind::Managed { app_root } = detect_install() {
+                    prune_managed_versions(&app_root, |installed| {
+                        !version_newer(installed, current_version())
+                    });
+                }
+                Ok(())
+            })
+            .await;
+            for_loop.check_loop(shutdown, checks).await
+        });
         *updater.check_task.lock().unwrap() = Some(task);
         updater
     }
