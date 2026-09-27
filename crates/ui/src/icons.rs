@@ -139,6 +139,9 @@ icon_assets![
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
     (ISSUE, "issue"),
+    // Hand-drawn pull request glyph, drawn as a family with GIT_BRANCH (same
+    // circles and stroke) — the set has no pull request icon.
+    (PULL_REQUEST, "pull-request"),
     (GITHUB_MARK, "github-mark"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.

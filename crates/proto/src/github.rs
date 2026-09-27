@@ -1,4 +1,5 @@
-//! GitHub: per-device sign-in and the composer's `#` issue references.
+//! GitHub: per-device sign-in and the composer's `#` issue and pull request
+//! references.
 //!
 //! The project's HOST device answers every GitHub call with its own
 //! credential — the Cypher GitHub App login made in Settings → GitHub, or,
@@ -27,13 +28,26 @@ pub enum GithubUnavailable {
 pub struct GithubIssueSummary {
     pub number: u64,
     pub title: String,
-    /// `open` / `closed`.
+    /// `open` / `closed`, or `merged` for a pull request.
     pub state: String,
     #[serde(default)]
     pub labels: Vec<String>,
     /// Assigned to the signed-in user (only known for an empty query).
     #[serde(default)]
     pub assigned_to_me: bool,
+    /// A draft pull request.
+    #[serde(default)]
+    pub draft: bool,
+}
+
+/// Whether a GitHub issue number names an issue or a pull request (they
+/// share one number space).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GithubIssueKind {
+    #[default]
+    Issue,
+    PullRequest,
 }
 
 /// `SearchGithubIssues` reply.
@@ -42,9 +56,12 @@ pub struct GithubIssueSummary {
 pub enum GithubIssueSearch {
     #[serde(rename_all = "camelCase")]
     Ok {
-        /// `owner/name` of the repository the issues belong to.
+        /// `owner/name` of the repository the rows belong to.
         repo: String,
         issues: Vec<GithubIssueSummary>,
+        /// Absent from older engines, which list issues only.
+        #[serde(default)]
+        pull_requests: Vec<GithubIssueSummary>,
     },
     #[serde(rename_all = "camelCase")]
     Unavailable {
@@ -66,13 +83,16 @@ pub struct GithubIssueComment {
     pub body: String,
 }
 
-/// `GetGithubIssue` reply: a bounded snapshot of one issue, taken at send
-/// time and embedded in the agent prompt as untrusted reference context.
+/// `GetGithubIssue` reply: a bounded snapshot of one issue or pull request,
+/// taken at send time and embedded in the agent prompt as untrusted reference
+/// context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubIssueSnapshot {
     pub repo: String,
     pub number: u64,
+    #[serde(default)]
+    pub kind: GithubIssueKind,
     pub title: String,
     pub state: String,
     pub url: String,

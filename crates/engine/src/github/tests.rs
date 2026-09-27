@@ -145,6 +145,19 @@ fn issue_json(number: u64, repo: &str, pr: bool) -> serde_json::Value {
     issue
 }
 
+fn merged_pr(number: u64) -> serde_json::Value {
+    let mut pr = issue_json(number, "o/r", true);
+    pr["state"] = json!("closed");
+    pr["pull_request"]["merged_at"] = json!("2026-01-01T00:00:00Z");
+    pr
+}
+
+fn draft_pr(number: u64) -> serde_json::Value {
+    let mut pr = issue_json(number, "o/r", true);
+    pr["draft"] = json!(true);
+    pr
+}
+
 fn git_checkout(remote: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
@@ -236,7 +249,8 @@ async fn device_flow_signs_in_and_issue_search_uses_the_new_token() {
         ("GET", "/repos/o/r/issues") => (
             200,
             json!([
-                issue_json(5, "o/r", true),
+                merged_pr(5),
+                draft_pr(6),
                 issue_json(2, "o/r", false),
                 issue_json(7, "o/r", false),
                 issue_json(3, "o/r", false),
@@ -280,19 +294,29 @@ async fn device_flow_signs_in_and_issue_search_uses_the_new_token() {
         .search_issues(checkout.path(), "")
         .await
         .expect("search");
-    let GithubIssueSearch::Ok { repo, issues } = search else {
+    let GithubIssueSearch::Ok {
+        repo,
+        issues,
+        pull_requests,
+    } = search
+    else {
         panic!("{search:?}")
     };
     assert_eq!(repo, "o/r");
-    let numbers: Vec<u64> = issues.iter().map(|issue| issue.number).collect();
+    let numbers =
+        |rows: &[GithubIssueSummary]| rows.iter().map(|row| row.number).collect::<Vec<_>>();
     assert_eq!(
-        numbers,
+        numbers(&issues),
         [7, 2, 3],
-        "assigned first, PRs and other repos dropped"
+        "assigned first, other repos dropped"
     );
     assert!(issues[0].assigned_to_me && !issues[1].assigned_to_me);
+    assert_eq!(numbers(&pull_requests), [8, 5, 6], "PRs in their own list");
+    assert!(pull_requests[0].assigned_to_me);
+    assert_eq!(pull_requests[1].state, "merged");
+    assert!(pull_requests[2].draft && !pull_requests[1].draft);
     let searches = mock.requests("/search/issues");
-    assert!(searches[0].query["q"].contains("repo:o/r is:issue is:open assignee:@me"));
+    assert!(searches[0].query["q"].contains("repo:o/r is:open assignee:@me"));
     assert!(
         mock.requests
             .lock()
@@ -430,6 +454,52 @@ async fn repositories_without_access_or_credentials_explain_themselves() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn a_numeric_query_finds_a_pull_request_and_snapshots_it() {
+    let mock = MockGithub::start(|req| match req.path.as_str() {
+        "/repos/o/r" => (200, json!({})),
+        "/repos/o/r/issues/12" => {
+            let mut pr = issue_json(12, "o/r", true);
+            pr["html_url"] = json!("https://github.com/o/r/pull/12");
+            (200, pr)
+        }
+        "/search/issues" => (
+            200,
+            json!({"items": [issue_json(120, "o/r", false), issue_json(121, "o/r", true)]}),
+        ),
+        _ => (404, json!({})),
+    })
+    .await;
+    let data = tempfile::tempdir().unwrap();
+    write_account(data.path(), &account("ghu_1", None, None));
+    let github = Github::new(mock.config(Some("Iv1.test")), data.path());
+    let checkout = git_checkout("https://github.com/o/r.git");
+    let GithubIssueSearch::Ok {
+        issues,
+        pull_requests,
+        ..
+    } = github.search_issues(checkout.path(), "#12").await.unwrap()
+    else {
+        panic!("search failed")
+    };
+    let numbers =
+        |rows: &[GithubIssueSummary]| rows.iter().map(|row| row.number).collect::<Vec<_>>();
+    assert_eq!(numbers(&issues), [120]);
+    assert_eq!(
+        numbers(&pull_requests),
+        [12, 121],
+        "exact PR leads its list"
+    );
+    assert!(!mock.requests("/search/issues")[0].query["q"].contains("is:issue"));
+
+    let snapshot = github.issue_snapshot("o/r", 12).await.expect("snapshot");
+    assert_eq!(snapshot.kind, GithubIssueKind::PullRequest);
+    assert_eq!(
+        serde_json::to_value(&snapshot).unwrap()["kind"],
+        "pullRequest"
+    );
 }
 
 #[tokio::test]
@@ -606,9 +676,9 @@ fn rest(number: u64) -> RestIssue {
 
 #[test]
 fn merge_puts_assigned_then_exact_first_and_dedupes() {
-    let rows = merge_issues(
+    let (rows, pulls) = merge_by_kind(
         vec![rest(3)],
-        vec![rest(7)],
+        Some(rest(7)),
         vec![rest(9), rest(3), rest(7), rest(1)],
     );
     let numbers: Vec<u64> = rows.iter().map(|row| row.number).collect();
@@ -616,6 +686,24 @@ fn merge_puts_assigned_then_exact_first_and_dedupes() {
     assert!(rows[0].assigned_to_me);
     assert!(!rows[1].assigned_to_me);
     assert_eq!(rows[0].labels, ["bug"]);
+    assert!(pulls.is_empty());
+}
+
+#[test]
+fn merge_caps_each_kind_apart_without_cutting_leading_rows() {
+    let pr = |number| serde_json::from_value::<RestIssue>(issue_json(number, "o/r", true)).unwrap();
+    let assigned: Vec<RestIssue> = (1..=ASSIGNED_LIMIT as u64 + 2).map(rest).collect();
+    let rest_rows = (100..130)
+        .map(|n| if n % 2 == 0 { rest(n) } else { pr(n) })
+        .collect();
+    let (issues, pulls) = merge_by_kind(assigned, Some(pr(99)), rest_rows);
+    assert_eq!(
+        issues.iter().filter(|row| row.assigned_to_me).count(),
+        ASSIGNED_LIMIT
+    );
+    assert_eq!(issues.len(), SEARCH_LIMIT);
+    assert_eq!(pulls[0].number, 99);
+    assert_eq!(pulls.len(), SEARCH_LIMIT);
 }
 
 #[test]
@@ -653,9 +741,14 @@ fn search_reply_serializes_with_a_status_tag() {
     let ok = serde_json::to_value(GithubIssueSearch::Ok {
         repo: "o/r".into(),
         issues: Vec::new(),
+        pull_requests: Vec::new(),
     })
     .unwrap();
     assert_eq!(ok["status"], "ok");
+    // An older engine's reply (issues only) still decodes.
+    let old: GithubIssueSearch =
+        serde_json::from_value(json!({"status": "ok", "repo": "o/r", "issues": []})).unwrap();
+    assert!(matches!(old, GithubIssueSearch::Ok { pull_requests, .. } if pull_requests.is_empty()));
     let unavailable = serde_json::to_value(GithubIssueSearch::Unavailable {
         reason: GithubUnavailable::NoAccess,
         repo: Some("o/r".into()),
@@ -686,10 +779,21 @@ async fn github_live_search_and_snapshot_with_local_credentials() {
         .search_issues(checkout.path(), "")
         .await
         .expect("search");
-    let GithubIssueSearch::Ok { repo, issues } = search else {
+    let GithubIssueSearch::Ok {
+        repo,
+        issues,
+        pull_requests,
+    } = search
+    else {
         panic!("{search:?}")
     };
-    eprintln!("{} rows, first: {:?}", issues.len(), issues.first());
+    eprintln!(
+        "{} issues, {} PRs, first: {:?} / {:?}",
+        issues.len(),
+        pull_requests.len(),
+        issues.first(),
+        pull_requests.first()
+    );
     let first = issues.first().expect("an open issue");
     let exact = github
         .search_issues(checkout.path(), &first.number.to_string())

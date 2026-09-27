@@ -1,5 +1,6 @@
 //! GitHub for this device: the Cypher GitHub App sign-in (Settings → GitHub)
-//! and the REST calls behind the composer's `#` issue references.
+//! and the REST calls behind the composer's `#` issue and pull request
+//! references.
 //!
 //! Every device holds its own GitHub credential, like it holds its own git
 //! checkouts: a token never syncs and never crosses the relay. Sign-in uses
@@ -20,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use cypher_proto::{
     GithubAccountStatus, GithubCredentialSource, GithubFallback, GithubIssueComment,
-    GithubIssueSearch, GithubIssueSnapshot, GithubIssueSummary, GithubLoginPoll, GithubLoginStart,
-    GithubLoginState, GithubUnavailable,
+    GithubIssueKind, GithubIssueSearch, GithubIssueSnapshot, GithubIssueSummary, GithubLoginPoll,
+    GithubLoginStart, GithubLoginState, GithubUnavailable,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,10 +37,12 @@ const REPO_ACCESS_TTL: Duration = Duration::from_secs(10 * 60);
 const LOCAL_CREDENTIALS_TTL: Duration = Duration::from_secs(60);
 /// Refresh a Cypher token this long before it expires.
 const REFRESH_MARGIN_SECS: i64 = 5 * 60;
-/// Rows per popup query (the composer shows them in one scroll list).
-const SEARCH_LIMIT: usize = 20;
-/// Assigned-to-me rows that lead an empty query.
-const ASSIGNED_LIMIT: usize = 10;
+/// Rows per popup section and query (issues and pull requests each get this
+/// many, in one scroll list).
+const SEARCH_LIMIT: usize = 10;
+/// Assigned-to-me rows that lead an empty query's issues, and its pull
+/// requests.
+const ASSIGNED_LIMIT: usize = 5;
 pub const MAX_QUERY_CHARS: usize = 256;
 /// Snapshot budgets (chars): the issue body, one comment, and all comments.
 const BODY_MAX_CHARS: usize = 12 * 1024;
@@ -251,20 +254,48 @@ struct RestIssue {
     /// The comment COUNT (the comments themselves are a separate request).
     #[serde(default)]
     comments: u64,
+    /// Present only on pull requests.
     #[serde(default)]
-    pull_request: Option<serde_json::Value>,
+    pull_request: Option<RestPullRef>,
+    #[serde(default)]
+    draft: bool,
     #[serde(default)]
     repository_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RestPullRef {
+    #[serde(default)]
+    merged_at: Option<String>,
+}
+
 impl RestIssue {
+    fn kind(&self) -> GithubIssueKind {
+        if self.pull_request.is_some() {
+            GithubIssueKind::PullRequest
+        } else {
+            GithubIssueKind::Issue
+        }
+    }
+
+    /// GitHub reports a merged pull request as `closed`.
+    fn display_state(&self) -> String {
+        match &self.pull_request {
+            Some(RestPullRef {
+                merged_at: Some(_), ..
+            }) => "merged".into(),
+            _ => self.state.clone(),
+        }
+    }
+
     fn summary(self, assigned_to_me: bool) -> GithubIssueSummary {
         GithubIssueSummary {
             number: self.number,
+            state: self.display_state(),
             title: self.title,
-            state: self.state,
             labels: self.labels.into_iter().map(|label| label.name).collect(),
             assigned_to_me,
+            draft: self.draft,
         }
     }
 
@@ -633,9 +664,10 @@ impl Github {
 
     // ── issues ──────────────────────────────────────────────────────────
 
-    /// Popup rows for `query` in the checkout at `root`: an empty query lists
-    /// the user's assigned open issues first, then recently updated ones; a
-    /// numeric query (`482`) puts that exact issue first, whatever its state.
+    /// Popup rows for `query` in the checkout at `root`, issues and pull
+    /// requests apart: an empty query lists the user's assigned open ones
+    /// first, then recently updated ones; a numeric query (`482`) puts that
+    /// exact issue or pull request first, whatever its state.
     pub async fn search_issues(
         &self,
         root: &Path,
@@ -649,7 +681,11 @@ impl Github {
             });
         };
         match self.search_rows(&repo, root, query.trim()).await {
-            Ok(issues) => Ok(GithubIssueSearch::Ok { repo, issues }),
+            Ok((issues, pull_requests)) => Ok(GithubIssueSearch::Ok {
+                repo,
+                issues,
+                pull_requests,
+            }),
             Err(GhError::Unavailable(reason)) => Ok(GithubIssueSearch::Unavailable {
                 reason,
                 install_url: (reason == GithubUnavailable::NoAccess)
@@ -661,6 +697,8 @@ impl Github {
         }
     }
 
+    /// Issues and pull requests alike (one search request per keystroke, not
+    /// two: the search API allows 30 a minute).
     async fn search(
         &self,
         repo: &str,
@@ -670,7 +708,7 @@ impl Github {
         limit: usize,
     ) -> Result<Vec<RestIssue>, GhError> {
         let mut query = vec![
-            ("q", format!("repo:{repo} is:issue {qualifiers}")),
+            ("q", format!("repo:{repo} {qualifiers}")),
             ("per_page", limit.to_string()),
         ];
         if sort_updated {
@@ -684,48 +722,39 @@ impl Github {
         Ok(page
             .items
             .into_iter()
-            .filter(|issue| issue.pull_request.is_none() && issue.in_repo(repo))
+            .filter(|issue| issue.in_repo(repo))
             .collect())
     }
 
+    /// `(issues, pull requests)`.
     async fn search_rows(
         &self,
         repo: &str,
         root: &Path,
         query: &str,
-    ) -> Result<Vec<GithubIssueSummary>, GhError> {
+    ) -> Result<(Vec<GithubIssueSummary>, Vec<GithubIssueSummary>), GhError> {
         // Resolve the credential once up front, so the concurrent requests
         // below share one access probe instead of racing their own.
         self.repo_credential(repo, Some(root)).await?;
         if query.is_empty() {
-            let recent = async {
-                let issues: Vec<RestIssue> = self
-                    .repo_get(
-                        repo,
-                        Some(root),
-                        &format!("/repos/{repo}/issues"),
-                        &[
-                            ("state", "open".into()),
-                            ("sort", "updated".into()),
-                            ("direction", "desc".into()),
-                            ("per_page", (SEARCH_LIMIT * 2).to_string()),
-                        ],
-                    )
-                    .await
-                    .map_err(GhError::from)?;
-                Ok::<_, GhError>(
-                    issues
-                        .into_iter()
-                        .filter(|issue| issue.pull_request.is_none())
-                        .take(SEARCH_LIMIT)
-                        .collect::<Vec<_>>(),
-                )
-            };
+            // The issues endpoint lists pull requests too.
+            let path = format!("/repos/{repo}/issues");
+            let params = [
+                ("state", "open".to_string()),
+                ("sort", "updated".into()),
+                ("direction", "desc".into()),
+                ("per_page", (SEARCH_LIMIT * 5).to_string()),
+            ];
+            let recent = self.repo_get::<Vec<RestIssue>>(repo, Some(root), &path, &params);
             let (assigned, recent) = tokio::join!(
-                self.search(repo, root, "is:open assignee:@me", true, ASSIGNED_LIMIT),
+                self.search(repo, root, "is:open assignee:@me", true, ASSIGNED_LIMIT * 2),
                 recent
             );
-            return Ok(merge_issues(assigned?, Vec::new(), recent?));
+            return Ok(merge_by_kind(
+                assigned?,
+                None,
+                recent.map_err(GhError::from)?,
+            ));
         }
         let exact = async {
             let Ok(number) = query.trim_start_matches('#').parse::<u64>() else {
@@ -740,23 +769,19 @@ impl Github {
                 )
                 .await
             {
-                Ok(issue) if issue.pull_request.is_none() => Ok(Some(issue)),
-                // A pull request, or a number that isn't an issue, just isn't
-                // a row.
-                Ok(_) | Err(RepoError::Api(ApiError::Status(_))) => Ok(None),
+                Ok(issue) => Ok(Some(issue)),
+                // A number that isn't an issue or pull request just isn't a
+                // row.
+                Err(RepoError::Api(ApiError::Status(_))) => Ok(None),
                 Err(err) => Err(GhError::from(err)),
             }
         };
         let qualifiers = format!("is:open {query}");
         let (exact, found) = tokio::join!(
             exact,
-            self.search(repo, root, &qualifiers, false, SEARCH_LIMIT)
+            self.search(repo, root, &qualifiers, false, SEARCH_LIMIT * 3)
         );
-        Ok(merge_issues(
-            Vec::new(),
-            exact?.into_iter().collect(),
-            found?,
-        ))
+        Ok(merge_by_kind(Vec::new(), exact?, found?))
     }
 
     /// A bounded snapshot of `repo#number` for the agent prompt.
@@ -1273,24 +1298,38 @@ async fn github_repo(root: &Path) -> Option<String> {
 
 // ── shaping ────────────────────────────────────────────────────────────────
 
-/// Assigned rows, then exact-number rows, then the rest — deduped by number.
-fn merge_issues(
+/// `(issues, pull requests)`, each: assigned rows (at most
+/// [`ASSIGNED_LIMIT`]), then the exact-number row, then the rest — deduped by
+/// number. The rest fill up to [`SEARCH_LIMIT`]; assigned and exact rows are
+/// never cut.
+fn merge_by_kind(
     assigned: Vec<RestIssue>,
-    exact: Vec<RestIssue>,
+    exact: Option<RestIssue>,
     rest: Vec<RestIssue>,
-) -> Vec<GithubIssueSummary> {
+) -> (Vec<GithubIssueSummary>, Vec<GithubIssueSummary>) {
     let mut seen = std::collections::HashSet::new();
-    let mut rows = Vec::new();
+    let (mut issues, mut pulls) = (Vec::new(), Vec::new());
+    let mut assigned_counts = [0usize; 2];
     let tagged = assigned
         .into_iter()
-        .map(|issue| (issue, true))
-        .chain(exact.into_iter().chain(rest).map(|issue| (issue, false)));
-    for (issue, assigned) in tagged {
-        if seen.insert(issue.number) {
+        .map(|issue| (issue, true, true))
+        .chain(exact.into_iter().map(|issue| (issue, false, true)))
+        .chain(rest.into_iter().map(|issue| (issue, false, false)));
+    for (issue, assigned, leads) in tagged {
+        let pull = issue.kind() == GithubIssueKind::PullRequest;
+        let rows = if pull { &mut pulls } else { &mut issues };
+        if assigned {
+            let count = &mut assigned_counts[usize::from(pull)];
+            if *count >= ASSIGNED_LIMIT {
+                continue;
+            }
+            *count += 1;
+        }
+        if (leads || rows.len() < SEARCH_LIMIT) && seen.insert(issue.number) {
             rows.push(issue.summary(assigned));
         }
     }
-    rows
+    (issues, pulls)
 }
 
 fn bounded(text: &str, max_chars: usize) -> String {
@@ -1331,8 +1370,9 @@ fn snapshot_from(
     GithubIssueSnapshot {
         repo: repo.to_string(),
         number: issue.number,
+        kind: issue.kind(),
+        state: issue.display_state(),
         title: issue.title,
-        state: issue.state,
         url: issue.html_url,
         author: login(issue.user),
         labels: issue.labels.into_iter().map(|label| label.name).collect(),

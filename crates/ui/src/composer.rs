@@ -589,7 +589,8 @@ fn session_reference_block(sessions: &[SessionReference]) -> String {
     }
 }
 
-/// Replace only strict `cypher-session:` and `cypher-issue:` mentions in the
+/// Replace only strict `cypher-session:`, `cypher-issue:` and `cypher-pr:`
+/// mentions in the
 /// EFFECTIVE harness prompt with a plain marker. The durable visible prompt
 /// stays untouched.
 ///
@@ -616,9 +617,10 @@ fn project_reference_mentions_for_agent(visible: &str) -> String {
     for link in links {
         projected.push_str(&visible[cursor..link.range.start]);
         match &link.kind {
-            MentionKind::Issue { repo, number } => {
+            MentionKind::Issue { repo, number, pull } => {
                 projected.push_str(&format!(
-                    "GitHub issue {repo}#{number} (snapshot included above)"
+                    "GitHub {} {repo}#{number} (snapshot included above)",
+                    github_kind_noun(*pull)
                 ));
             }
             _ => {
@@ -1423,7 +1425,10 @@ const SESSION_MENTION_SCHEME: &str = "cypher-session:";
 /// The label (`#482 Title`) is the display snapshot at insert time; the
 /// target alone identifies the issue.
 const ISSUE_MENTION_SCHEME: &str = "cypher-issue:";
-/// Distinct issues one send may reference.
+/// The same for `#` pull request references (GitHub numbers issues and pull
+/// requests in one space, so only the chip's wording differs).
+const PR_MENTION_SCHEME: &str = "cypher-pr:";
+/// Distinct issues and pull requests one send may reference.
 const MAX_ISSUE_REFS: usize = 3;
 /// Total character budget across ALL referenced-issue snapshots (each is
 /// already bounded engine-side; this bounds the sum).
@@ -1468,9 +1473,19 @@ struct EditSnapshot {
 /// sessions carry the stable chat id (identity survives title changes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MentionKind {
-    File { path: String, is_dir: bool },
-    Session { chat_id: String },
-    Issue { repo: String, number: u64 },
+    File {
+        path: String,
+        is_dir: bool,
+    },
+    Session {
+        chat_id: String,
+    },
+    Issue {
+        repo: String,
+        number: u64,
+        /// A pull request (`cypher-pr:`).
+        pull: bool,
+    },
 }
 
 /// A strict, local-only Markdown representation of a mention (file or
@@ -1588,12 +1603,21 @@ fn issue_chip_label(number: u64, title: &str) -> String {
     }
 }
 
-/// The canonical raw form of a `#issue` chip.
-fn local_issue_link(repo: &str, number: u64, title: &str) -> String {
+/// "issue" / "pull request", for chip tooltips and prompt text.
+fn github_kind_noun(pull: bool) -> &'static str {
+    if pull { "pull request" } else { "issue" }
+}
+
+/// The canonical raw form of a `#issue` or `#pull request` chip.
+fn local_issue_link(repo: &str, number: u64, title: &str, pull: bool) -> String {
     format!(
         "[{}]({}{}/{})",
         escape_mention_label(&issue_chip_label(number, title)),
-        ISSUE_MENTION_SCHEME,
+        if pull {
+            PR_MENTION_SCHEME
+        } else {
+            ISSUE_MENTION_SCHEME
+        },
         percent_encode_path(repo),
         number
     )
@@ -1666,7 +1690,11 @@ fn mention_links(text: &str) -> Vec<MentionLink> {
                 (safe && percent_encode_path(&chat_id) == encoded)
                     .then_some(MentionKind::Session { chat_id })
             })
-        } else if let Some(target) = target.strip_prefix(ISSUE_MENTION_SCHEME) {
+        } else if let Some((target, pull)) = target
+            .strip_prefix(ISSUE_MENTION_SCHEME)
+            .map(|target| (target, false))
+            .or_else(|| target.strip_prefix(PR_MENTION_SCHEME).map(|t| (t, true)))
+        {
             target.rsplit_once('/').and_then(|(repo, number)| {
                 let parsed = number.parse::<u64>().ok().filter(|n| *n > 0)?;
                 // Canonical only: no leading zeros, and the chip must read
@@ -1678,6 +1706,7 @@ fn mention_links(text: &str) -> Vec<MentionLink> {
                 .then(|| MentionKind::Issue {
                     repo: repo.to_string(),
                     number: parsed,
+                    pull,
                 })
             })
         } else {
@@ -1734,11 +1763,12 @@ fn session_ref_chat_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// One `#` issue reference in a draft: the issue and its chip label.
+/// One `#` issue or pull request reference in a draft, and its chip label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueRef {
     repo: String,
     number: u64,
+    pull: bool,
     label: String,
 }
 
@@ -1747,12 +1777,13 @@ fn issue_refs(text: &str) -> Vec<IssueRef> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for link in mention_links(text) {
-        if let MentionKind::Issue { repo, number } = link.kind
+        if let MentionKind::Issue { repo, number, pull } = link.kind
             && seen.insert((repo.clone(), number))
         {
             out.push(IssueRef {
                 repo,
                 number,
+                pull,
                 label: link.label,
             });
         }
@@ -1868,6 +1899,7 @@ enum MentionTooltipTarget {
         range: Range<usize>,
         /// `owner/name#482`.
         reference: SharedString,
+        pull: bool,
     },
 }
 
@@ -2173,6 +2205,7 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
     if !raw.contains(FILE_MENTION_SCHEME)
         && !raw.contains(SESSION_MENTION_SCHEME)
         && !raw.contains(ISSUE_MENTION_SCHEME)
+        && !raw.contains(PR_MENTION_SCHEME)
     {
         return None;
     }
@@ -2647,18 +2680,19 @@ impl ComposerInput {
         self.insert_raw(range, local_session_link(title, chat_id), cx);
     }
 
-    /// Replace a completed `#query` token with a GitHub issue chip as one
-    /// non-coalescing undo step.
+    /// Replace a completed `#query` token with a GitHub issue or pull request
+    /// chip as one non-coalescing undo step.
     pub fn replace_issue_mention(
         &mut self,
         range: Range<usize>,
         repo: &str,
         number: u64,
         title: &str,
+        pull: bool,
         cx: &mut Context<Self>,
     ) {
         self.invalidate_mention_tooltip();
-        self.insert_raw(range, local_issue_link(repo, number, title), cx);
+        self.insert_raw(range, local_issue_link(repo, number, title, pull), cx);
     }
 
     /// The shared insertion path: splice `link` into the token range with a
@@ -3981,9 +4015,9 @@ impl Render for MentionPathTooltip {
         let label: SharedString = match &self.target {
             MentionTooltipTarget::File { path, .. } => path.clone(),
             MentionTooltipTarget::Session { title, .. } => format!("Session: {title}").into(),
-            MentionTooltipTarget::Issue { reference, .. } => {
-                format!("GitHub issue {reference}").into()
-            }
+            MentionTooltipTarget::Issue {
+                reference, pull, ..
+            } => format!("GitHub {} {reference}", github_kind_noun(*pull)).into(),
         };
         motion::fade_quick(
             ("file-mention-path-tooltip", self.activation),
@@ -4098,9 +4132,10 @@ impl gpui::Element for ComposerTextElement {
                     range: mention.range.clone(),
                     title: mention.label.clone().into(),
                 },
-                MentionKind::Issue { repo, number } => MentionTooltipTarget::Issue {
+                MentionKind::Issue { repo, number, pull } => MentionTooltipTarget::Issue {
                     range: mention.range.clone(),
                     reference: format!("{repo}#{number}").into(),
+                    pull: *pull,
                 },
             };
             for local_bounds in input.bounds_for_display_range(display.clone()) {
@@ -4640,15 +4675,17 @@ struct SlashState {
     dismissed: Option<(Range<usize>, String)>,
 }
 
-/// `#` issue completion: rows come from `SearchGithubIssues` on the project's
-/// host device (debounced like file search; stale rows stay visible while a
-/// refinement is in flight).
+/// `#` issue and pull request completion: rows come from `SearchGithubIssues`
+/// on the project's host device (debounced like file search; stale rows stay
+/// visible while a refinement is in flight).
 #[derive(Debug, Clone, Default)]
 struct IssueState {
     token: Option<MentionToken>,
     /// `owner/name` the rows belong to.
     repo: Option<String>,
     issues: Vec<cypher_proto::GithubIssueSummary>,
+    pull_requests: Vec<cypher_proto::GithubIssueSummary>,
+    /// Index into the issue rows followed by the pull request rows.
     active: Option<usize>,
     request: u64,
     loading: bool,
@@ -4658,6 +4695,32 @@ struct IssueState {
     /// The fix the notice offers, as a clickable row under it.
     action: Option<IssueAction>,
     dismissed: Option<(Range<usize>, String)>,
+}
+
+impl IssueState {
+    fn row_count(&self) -> usize {
+        self.issues.len() + self.pull_requests.len()
+    }
+
+    /// Row `ix` of the popup, and whether it is a pull request.
+    fn row(&self, ix: usize) -> Option<(&cypher_proto::GithubIssueSummary, bool)> {
+        match ix.checked_sub(self.issues.len()) {
+            None => self.issues.get(ix).map(|row| (row, false)),
+            Some(pull) => self.pull_requests.get(pull).map(|row| (row, true)),
+        }
+    }
+
+    /// Row `ix`'s child index in the scroll list, where each non-empty
+    /// section leads with a header row.
+    fn scroll_index(&self, ix: usize) -> usize {
+        ix + 1 + usize::from(ix >= self.issues.len() && !self.issues.is_empty())
+    }
+
+    fn clear_rows(&mut self) {
+        self.issues.clear();
+        self.pull_requests.clear();
+        self.active = None;
+    }
 }
 
 /// What the `#` popup's notice row does when clicked.
@@ -6542,9 +6605,8 @@ impl Composer {
         self.issue.request = self.issue.request.wrapping_add(1);
         self.issue.token = Some(token.clone());
         if !refining {
-            self.issue.issues.clear();
+            self.issue.clear_rows();
             self.issue.repo = None;
-            self.issue.active = None;
             self.issue_scroll.set_offset(Point::default());
         }
         self.issue.notice = None;
@@ -6580,12 +6642,17 @@ impl Composer {
                 }
                 composer.issue.loading = false;
                 match result.map(serde_json::from_value::<cypher_proto::GithubIssueSearch>) {
-                    Ok(Ok(cypher_proto::GithubIssueSearch::Ok { repo, issues })) => {
+                    Ok(Ok(cypher_proto::GithubIssueSearch::Ok {
+                        repo,
+                        issues,
+                        pull_requests,
+                    })) => {
                         composer.issue.repo = Some(repo);
                         composer.issue.issues = issues;
+                        composer.issue.pull_requests = pull_requests;
                         composer.issue.active = reconcile_mention_active(
                             composer.issue.active,
-                            composer.issue.issues.len(),
+                            composer.issue.row_count(),
                         );
                     }
                     Ok(Ok(cypher_proto::GithubIssueSearch::Unavailable {
@@ -6597,8 +6664,7 @@ impl Composer {
                         if reason == GithubUnavailable::NoGithubRemote {
                             composer.no_github_spaces.insert(space);
                         }
-                        composer.issue.issues.clear();
-                        composer.issue.active = None;
+                        composer.issue.clear_rows();
                         composer.issue.notice = Some(
                             issue_unavailable_message(reason, repo.as_deref(), &device).into(),
                         );
@@ -6621,8 +6687,7 @@ impl Composer {
                     }
                     Err(err) => {
                         tracing::warn!(%err, "issue search failed");
-                        composer.issue.issues.clear();
-                        composer.issue.active = None;
+                        composer.issue.clear_rows();
                         composer.issue.notice = Some(issue_error_message(&err));
                     }
                 }
@@ -6648,10 +6713,10 @@ impl Composer {
 
     fn move_issue(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.issue.active =
-            crate::popover::menu_step(self.issue.active, self.issue.issues.len(), delta);
+            crate::popover::menu_step(self.issue.active, self.issue.row_count(), delta);
         if let Some(active) = self.issue.active {
-            // Row 0 of the scroll container is the repository header.
-            self.issue_scroll.scroll_to_item(active + 1);
+            self.issue_scroll
+                .scroll_to_item(self.issue.scroll_index(active));
         }
         self.sync_mention_controls(cx);
         cx.notify();
@@ -6673,12 +6738,12 @@ impl Composer {
         let Some(token) = self.issue.token.clone() else {
             return;
         };
-        let (Some(repo), Some(issue)) = (
+        let (Some(repo), Some((issue, pull))) = (
             self.issue.repo.clone(),
             self.issue
                 .active
-                .and_then(|active| self.issue.issues.get(active))
-                .cloned(),
+                .and_then(|active| self.issue.row(active))
+                .map(|(row, pull)| (row.clone(), pull)),
         ) else {
             return;
         };
@@ -6688,12 +6753,14 @@ impl Composer {
                 .iter()
                 .any(|r| r.repo == repo && r.number == issue.number)
         {
-            self.failure = Some("Up to 3 issue references per message — remove one first.".into());
+            self.failure = Some(
+                "Up to 3 issue or pull request references per message — remove one first.".into(),
+            );
             cx.notify();
             return;
         }
         self.input.update(cx, |input, cx| {
-            input.replace_issue_mention(token.range, &repo, issue.number, &issue.title, cx)
+            input.replace_issue_mention(token.range, &repo, issue.number, &issue.title, pull, cx)
         });
         self.reset_issue(None, cx);
         cx.notify();
@@ -6715,7 +6782,6 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let token = self.issue.token.as_ref()?;
-        let issues = &self.issue.issues;
         let mut card = crate::popover::popover_card(theme)
             .w(px(420.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_issue(cx)));
@@ -6727,7 +6793,7 @@ impl Composer {
                 .text_color(color)
                 .child(text)
         };
-        if issues.is_empty() {
+        if self.issue.row_count() == 0 {
             card = if self.issue.loading {
                 card.child(crate::popover::skeleton_rows(
                     "issue-mention-loading",
@@ -6766,17 +6832,26 @@ impl Composer {
             } else {
                 card.child(note(
                     if token.query.is_empty() {
-                        "No open issues".into()
+                        "No open issues or pull requests".into()
                     } else {
-                        "No matching open issues".into()
+                        "No matching open issues or pull requests".into()
                     },
                     theme.text_muted,
                 ))
             };
         } else {
-            let header = match &self.issue.repo {
-                Some(repo) => format!("Issues · {repo}"),
-                None => "Issues".to_string(),
+            let header = |title: &str, first: bool| {
+                let text = match (&self.issue.repo, first) {
+                    (Some(repo), true) => format!("{title} · {repo}"),
+                    _ => title.to_string(),
+                };
+                div()
+                    .px(px(10.0))
+                    .pt(px(if first { 6.0 } else { 10.0 }))
+                    .pb(px(2.0))
+                    .text_size(px(10.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(text))
             };
             let mut list = div()
                 .id("issue-menu-scroll")
@@ -6784,77 +6859,27 @@ impl Composer {
                 .flex()
                 .flex_col()
                 .overflow_y_scroll()
-                .track_scroll(&self.issue_scroll)
-                .child(
-                    div()
-                        .px(px(10.0))
-                        .pt(px(6.0))
-                        .pb(px(2.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(header)),
-                );
-            for (ix, issue) in issues.iter().enumerate() {
-                let selected = self.issue.active == Some(ix);
-                let trailing = if issue.assigned_to_me {
-                    Some("Assigned to you".to_string())
-                } else if !issue.state.eq_ignore_ascii_case("open") {
-                    Some(issue.state.to_lowercase())
-                } else {
-                    issue.labels.first().cloned()
-                };
-                list = list.child(
-                    crate::popover::menu_row(theme, selected, format!("issue-mention-result-{ix}"))
-                        .id(("issue-mention-result", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.issue.active = Some(ix);
-                            this.accept_issue(cx);
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .min_w_0()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    crate::icons::icon(crate::icons::ISSUE)
-                                        .size(px(14.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .mono(theme)
-                                        .text_size(px(11.5))
-                                        .text_color(theme.text_faint)
-                                        .child(SharedString::from(format!("#{}", issue.number))),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(12.5))
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(issue.title.clone())),
-                                )
-                                .when_some(trailing, |el, trailing| {
-                                    el.child(
-                                        div()
-                                            .flex_none()
-                                            .max_w(px(140.0))
-                                            .overflow_hidden()
-                                            .truncate()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_faint)
-                                            .child(SharedString::from(trailing)),
-                                    )
-                                }),
-                        ),
-                );
+                .track_scroll(&self.issue_scroll);
+            let sections = [
+                ("Issues", crate::icons::ISSUE, &self.issue.issues, 0),
+                (
+                    "Pull requests",
+                    crate::icons::PULL_REQUEST,
+                    &self.issue.pull_requests,
+                    self.issue.issues.len(),
+                ),
+            ];
+            let mut first = true;
+            for (title, icon, rows, offset) in sections {
+                if rows.is_empty() {
+                    continue;
+                }
+                list = list.child(header(title, first));
+                first = false;
+                for (row_ix, issue) in rows.iter().enumerate() {
+                    let ix = offset + row_ix;
+                    list = list.child(self.render_issue_row(theme, ix, icon, issue, cx));
+                }
             }
             card = card.child(list);
         }
@@ -6868,6 +6893,76 @@ impl Composer {
             card.into_any_element(),
             None,
         ))
+    }
+
+    fn render_issue_row(
+        &self,
+        theme: &Theme,
+        ix: usize,
+        icon: &'static str,
+        issue: &cypher_proto::GithubIssueSummary,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.issue.active == Some(ix);
+        let trailing = if issue.assigned_to_me {
+            Some("Assigned to you".to_string())
+        } else if !issue.state.eq_ignore_ascii_case("open") {
+            Some(issue.state.to_lowercase())
+        } else if issue.draft {
+            Some("draft".to_string())
+        } else {
+            issue.labels.first().cloned()
+        };
+        crate::popover::menu_row(theme, selected, format!("issue-mention-result-{ix}"))
+            .id(("issue-mention-result", ix))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.issue.active = Some(ix);
+                this.accept_issue(cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        crate::icons::icon(icon)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .mono(theme)
+                            .text_size(px(11.5))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(format!("#{}", issue.number))),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(issue.title.clone())),
+                    )
+                    .when_some(trailing, |el, trailing| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(140.0))
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(trailing)),
+                        )
+                    }),
+            )
     }
 
     fn render_input_with_completion(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -7594,15 +7689,17 @@ impl Composer {
             }
             if block_slash_with_issue_refs(&text) {
                 self.failure = Some(
-                    "Issue references can't be sent with a slash command — remove the /command or the references first."
+                    "Issue and pull request references can't be sent with a slash command — remove the /command or the references first."
                         .into(),
                 );
                 cx.notify();
                 return;
             }
             if issue_refs(&text).len() > MAX_ISSUE_REFS {
-                self.failure =
-                    Some("Up to 3 issue references per message — remove one first.".into());
+                self.failure = Some(
+                    "Up to 3 issue or pull request references per message — remove one first."
+                        .into(),
+                );
                 cx.notify();
                 return;
             }
@@ -7865,7 +7962,12 @@ impl Composer {
                 let mut issue_snapshots: Vec<cypher_proto::GithubIssueSnapshot> =
                     Vec::with_capacity(issue_ref_list.len());
                 for issue in &issue_ref_list {
-                    let reference = format!("{}#{}", issue.repo, issue.number);
+                    let reference = format!(
+                        "{} {}#{}",
+                        github_kind_noun(issue.pull),
+                        issue.repo,
+                        issue.number
+                    );
                     let mut params = serde_json::json!({
                         "repo": issue.repo,
                         "number": issue.number,
@@ -7885,17 +7987,21 @@ impl Composer {
                     let value = match futures::future::select(call, deadline).await {
                         futures::future::Either::Left((Ok(value), _)) => value,
                         futures::future::Either::Left((Err(err), _)) => {
-                            return Err(format!("Couldn't load GitHub issue {reference}: {err}"));
+                            return Err(format!("Couldn't load GitHub {reference}: {err}"));
                         }
                         futures::future::Either::Right(_) => {
-                            return Err(format!("Loading GitHub issue {reference} timed out."));
+                            return Err(format!("Loading GitHub {reference} timed out."));
                         }
                     };
-                    issue_snapshots.push(
+                    let mut snapshot: cypher_proto::GithubIssueSnapshot =
                         serde_json::from_value(value).map_err(|_| {
                             format!("The device returned an unreadable snapshot of {reference}.")
-                        })?,
-                    );
+                        })?;
+                    // Older engines don't say which kind the number is.
+                    if issue.pull {
+                        snapshot.kind = cypher_proto::GithubIssueKind::PullRequest;
+                    }
+                    issue_snapshots.push(snapshot);
                 }
                 // Resolve the working directory: existing chats keep theirs;
                 // new chats run per the checkout plan (t3code env-mode): the
@@ -10617,7 +10723,12 @@ mod tests {
 
     #[test]
     fn issue_links_round_trip_and_project_without_the_at_prefix() {
-        let raw = local_issue_link("GeoffreyChen777/cypher", 482, "Login [loops] after refresh");
+        let raw = local_issue_link(
+            "GeoffreyChen777/cypher",
+            482,
+            "Login [loops] after refresh",
+            false,
+        );
         assert_eq!(
             raw,
             "[#482 Login \\[loops\\] after refresh](cypher-issue:GeoffreyChen777/cypher/482)"
@@ -10628,7 +10739,8 @@ mod tests {
             links[0].kind,
             MentionKind::Issue {
                 repo: "GeoffreyChen777/cypher".into(),
-                number: 482
+                number: 482,
+                pull: false,
             }
         );
         assert_eq!(links[0].label, "#482 Login [loops] after refresh");
@@ -10641,6 +10753,67 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert!(display.contains("#482"));
         assert_eq!(spans[0].session, None);
+    }
+
+    #[test]
+    fn pull_request_links_keep_their_kind_through_the_draft() {
+        let raw = local_issue_link("o/r", 12, "Add dark mode", true);
+        assert_eq!(raw, "[#12 Add dark mode](cypher-pr:o/r/12)");
+        assert_eq!(
+            mention_links(&raw)[0].kind,
+            MentionKind::Issue {
+                repo: "o/r".into(),
+                number: 12,
+                pull: true,
+            }
+        );
+        assert!(sent_mention_display(&raw).is_some());
+        let refs = issue_refs(&format!(
+            "{raw} and {}",
+            local_issue_link("o/r", 3, "Bug", false)
+        ));
+        assert_eq!(
+            refs.iter().map(|r| (r.number, r.pull)).collect::<Vec<_>>(),
+            [(12, true), (3, false)]
+        );
+        assert_eq!(
+            project_reference_mentions_for_agent(&format!("review {raw}")),
+            "review GitHub pull request o/r#12 (snapshot included above)"
+        );
+        // The label must still name the number the target points at.
+        assert!(mention_links("[#13 t](cypher-pr:o/r/12)").is_empty());
+    }
+
+    #[test]
+    fn issue_popup_rows_run_issues_then_pull_requests() {
+        let row = |number| cypher_proto::GithubIssueSummary {
+            number,
+            title: String::new(),
+            state: "open".into(),
+            labels: Vec::new(),
+            assigned_to_me: false,
+            draft: false,
+        };
+        let mut state = IssueState {
+            issues: vec![row(1), row(2)],
+            pull_requests: vec![row(3)],
+            ..IssueState::default()
+        };
+        assert_eq!(state.row_count(), 3);
+        assert_eq!(
+            state.row(1).map(|(r, pull)| (r.number, pull)),
+            Some((2, false))
+        );
+        assert_eq!(
+            state.row(2).map(|(r, pull)| (r.number, pull)),
+            Some((3, true))
+        );
+        assert!(state.row(3).is_none());
+        // Each section's header is a scroll child too.
+        assert_eq!(state.scroll_index(0), 1);
+        assert_eq!(state.scroll_index(2), 4);
+        state.issues.clear();
+        assert_eq!(state.scroll_index(0), 1, "no issue header to skip");
     }
 
     #[test]
@@ -10665,8 +10838,8 @@ mod tests {
 
     #[test]
     fn issue_refs_dedupe_and_name_the_worktree() {
-        let a = local_issue_link("o/r", 7, "Fix the thing");
-        let b = local_issue_link("o/r", 9, "Other");
+        let a = local_issue_link("o/r", 7, "Fix the thing", false);
+        let b = local_issue_link("o/r", 9, "Other", true);
         let refs = issue_refs(&format!("{a} and {b} and {a}"));
         assert_eq!(refs.iter().map(|r| r.number).collect::<Vec<_>>(), [7, 9]);
         assert_eq!(issue_worktree_hint(&refs[0]), "7 Fix the thing");
@@ -10730,6 +10903,7 @@ mod tests {
         cypher_proto::GithubIssueSnapshot {
             repo: "o/r".into(),
             number,
+            kind: cypher_proto::GithubIssueKind::Issue,
             title: format!("Issue {number}"),
             state: "OPEN".into(),
             url: format!("https://github.com/o/r/issues/{number}"),
@@ -10743,7 +10917,7 @@ mod tests {
 
     #[test]
     fn serialize_reference_prompt_frames_issues_as_untrusted_background() {
-        let chip = local_issue_link("o/r", 3, "Crash on start");
+        let chip = local_issue_link("o/r", 3, "Crash on start", false);
         let visible = format!("please fix {chip}");
         let prompt = serialize_reference_prompt(
             &[],
