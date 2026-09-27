@@ -1515,16 +1515,32 @@ pub fn runs_for_syntax_line_with_plain(
         underline: None,
         strikethrough: None,
     };
+    // The runs must cover `line` exactly on char boundaries — gpui's text
+    // layout `split_at`s by run length and panics otherwise. Spans can be
+    // stale (the editor paints the previous parse until the re-highlight
+    // lands), so clamp them to the line and snap them to boundaries.
+    let floor = |mut ix: usize| {
+        ix = ix.min(line.len());
+        while !line.is_char_boundary(ix) {
+            ix -= 1;
+        }
+        ix
+    };
     let mut runs = Vec::new();
     let mut at = 0usize;
     for span in spans {
-        if span.range.start > at {
-            runs.push(plain(span.range.start - at));
+        let start = floor(span.range.start).max(at);
+        let end = floor(span.range.end);
+        if end <= start {
+            continue;
         }
-        let mut run = plain(span.range.len());
+        if start > at {
+            runs.push(plain(start - at));
+        }
+        let mut run = plain(end - start);
         run.color = token_color(span.kind, theme);
         runs.push(run);
-        at = span.range.end;
+        at = end;
     }
     if at < line.len() {
         runs.push(plain(line.len() - at));
@@ -1537,6 +1553,34 @@ pub fn runs_for_syntax_line_with_plain(
 mod tests {
     use super::*;
     use crate::markdown::parser::InlineStyle;
+
+    #[test]
+    fn stale_spans_still_cover_the_line_on_char_boundaries() {
+        // The editor paints the previous parse until the re-highlight lands:
+        // after a deletion its spans overrun the line, after typing CJK they
+        // end mid-character. Either used to panic inside gpui's layout.
+        let theme = Theme::dark();
+        let mono = theme.mono();
+        let span = |range: Range<usize>| HighlightSpan {
+            range,
+            kind: HighlightKind::Keyword,
+        };
+        for (line, spans) in [
+            ("fn", vec![span(0..2), span(3..9)]),
+            ("f", vec![span(0..2)]),
+            ("你x", vec![span(0..1), span(1..4)]),
+            ("aéb", vec![span(2..3), span(1..2)]),
+            ("", vec![span(0..5)]),
+        ] {
+            let runs = runs_for_syntax_line(line, &spans, &mono, &theme);
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), line.len());
+            let mut at = 0;
+            for run in &runs {
+                at += run.len;
+                assert!(line.is_char_boundary(at), "{line:?}: {at}");
+            }
+        }
+    }
 
     #[test]
     fn fenced_code_runs_cover_literal_newlines_tabs_and_unicode() {
