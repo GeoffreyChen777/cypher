@@ -141,6 +141,61 @@ describe("durable unread-conversation badges", () => {
     });
   });
 
+  it("retires unread rows whose seen marker moved before the Worker could observe it", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("badges-stale-seen"));
+    await runInDurableObject(stub, async (_, state) => {
+      const f = fixture(state), start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      try {
+        await f.enqueue("one");
+        await f.enqueue("two");
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        // Read on the desktop by a registry that never told Notifications
+        // (the pre-seen-marker Worker): no later write will retire the row.
+        const chat = f.rows.get("chats/one")!;
+        chat.fields = { ...chat.fields, lastSeenAt: start + 5_000 };
+        // A legacy row without eventAt falls back to the latest message.
+        const legacy = [...state.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id='two'")][0];
+        const { eventAt: _, ...old } = JSON.parse(legacy.value as string);
+        state.storage.sql.exec("UPDATE notify_unread SET value=? WHERE chat_id='two'", JSON.stringify(old));
+        const two = f.rows.get("chats/two")!;
+        two.fields = { ...two.fields, lastSeenAt: start - 1_000, lastMessageAt: start };
+        expect((await f.snapshot()).badgeCount).toBe(1);
+        two.fields = { ...two.fields, lastSeenAt: start };
+        expect((await f.snapshot()).badgeCount).toBe(0);
+      } finally { clock.mockRestore(); }
+    });
+  });
+
+  it("reads a subagent's unread event through its parent session", async () => {
+    const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("badges-child"));
+    await runInDurableObject(stub, async (_, state) => {
+      const f = fixture(state), start = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+      const child = (id: string) => f.rows.set(`chats/${id}`, { kind: "chats", id, seq: 1, deleted: false, clocks: {},
+        fields: { spaceId: "project", deviceId: "host", child: { parentChatId: "one", parentRunId: "run", agent: "planner" } } });
+      try {
+        child("kid");
+        child("kid2");
+        await f.enqueue("kid", "awaitingInput");
+        await f.enqueue("kid2", "awaitingInput");
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        // A parent marker older than the event reads nothing.
+        f.seen("one", start - 10_000);
+        expect((await f.snapshot()).badgeCount).toBe(2);
+        clock.mockReturnValue(start + 3_000);
+        f.seen("one", start + 3_000);
+        expect((await f.snapshot()).badgeCount).toBe(0);
+        // Already covered by the parent's marker when the Worker looks again.
+        clock.mockReturnValue(start + 120_000);
+        await f.enqueue("kid", "awaitingInput");
+        expect((await f.snapshot()).badgeCount).toBe(1);
+        f.rows.get("chats/one")!.fields.lastSeenAt = start + 121_000;
+        expect((await f.snapshot()).badgeCount).toBe(0);
+      } finally { clock.mockRestore(); }
+    });
+  });
+
   it("excludes short/disabled/muted/archived events and prunes unread badges on preference changes", async () => {
     const stub = env.TEST_LOG.get(env.TEST_LOG.idFromName("badges-filter"));
     await runInDurableObject(stub, async (_, state) => {

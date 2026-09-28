@@ -82,7 +82,10 @@ is no Smart/Always/Off policy.
   session was already opened after it happened is never counted. The host
   bumps `lastMessageAt` when a run starts asking or fails, so questions and
   errors are new activity too; a read counts once it's looked at, not once
-  it's answered.
+  it's answered. A subagent chat never appears on Home, so its unread row is
+  also read by the parent's marker. Each settings refresh re-applies the rule,
+  retiring rows whose marker moved before the Worker could observe it (reads
+  from before seen markers reached the Worker).
 - Alerts carry `aps.badge`. A separate coalesced, retryable **badge-only** APNs
   payload sends absolute counts (including zero) to all valid iOS registrations
   in the account. It has no alert text or sound; important **alerts** still follow

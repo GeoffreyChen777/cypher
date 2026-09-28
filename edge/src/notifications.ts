@@ -138,26 +138,51 @@ export class Notifications {
     for (const { notice } of this.events()) {
       if (notice.chatId === chatId && seen >= (notice.eventAt ?? notice.at) - SEEN_SLACK_MS) this.remove(notice.id);
     }
-    const row = [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id=?", chatId)][0];
-    if (!row) return;
-    const unread = JSON.parse(row.value as string) as UnreadEvent;
-    // Unread rows from before `eventAt` existed: fall back to the marker
-    // covering the chat's latest message, the sidebar's own seen rule.
-    const lastMessageAt = after.fields.lastMessageAt;
-    const read = typeof unread.eventAt === "number"
-      ? seen >= unread.eventAt - SEEN_SLACK_MS
-      : typeof lastMessageAt !== "number" || seen >= lastMessageAt;
-    if (read) this.clearUnread(chatId, unread.id);
+    for (const unread of this.unread()) {
+      if (unread.chatId === chatId || this.parentOf(unread) === chatId) this.clearIfRead(unread);
+    }
+  }
+  private unread(): UnreadEvent[] {
+    return [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread")]
+      .map(row => JSON.parse(row.value as string) as UnreadEvent);
+  }
+  private parentOf(unread: UnreadEvent): string | undefined {
+    if (!unread.child) return;
+    const child = this.row("chats", unread.chatId)?.fields.child;
+    const parent = child && typeof child === "object" && !Array.isArray(child) ? child.parentChatId : undefined;
+    return typeof parent === "string" ? parent : undefined;
+  }
+  /** Did any device's seen marker cover this unread event? The chat's own
+   * marker, or — for a subagent chat, which Home never lists — its parent's:
+   * the parent session is where that result is read. */
+  private clearIfRead(unread: UnreadEvent): void {
+    const parent = this.parentOf(unread);
+    const markers = [this.row("chats", unread.chatId), parent ? this.row("chats", parent) : undefined];
+    const lastMessageAt = markers[0]?.fields.lastMessageAt;
+    const read = markers.some(chat => {
+      const seen = chat?.fields.lastSeenAt;
+      if (!chat || chat.deleted || typeof seen !== "number") return false;
+      // Unread rows from before `eventAt` existed: fall back to the marker
+      // covering the chat's latest message, the sidebar's own seen rule.
+      return typeof unread.eventAt === "number"
+        ? seen >= unread.eventAt - SEEN_SLACK_MS
+        : typeof lastMessageAt !== "number" || seen >= lastMessageAt;
+    });
+    if (read) this.clearUnread(unread.chatId, unread.id);
   }
   private pruneUnread(): void {
     const prefs = this.settings();
-    for (const row of [...this.ctx.storage.sql.exec("SELECT value FROM notify_unread")]) {
-      const notice = JSON.parse(row.value as string) as UnreadEvent;
+    for (const notice of this.unread()) {
       const chat = this.row("chats", notice.chatId), project = this.row("spaces", notice.projectId);
       if (!chat || chat.deleted || chat.fields.archived || !project || project.deleted ||
           !prefs[notice.kind] || prefs.mutedProjects.includes(notice.projectId) ||
           (notice.child && notice.kind !== "input" && !prefs.subagents)) {
         this.clearUnread(notice.chatId);
+      } else {
+        // Rows written before seen markers reached the Worker (and child rows
+        // before a parent's read counted) would otherwise stay unread forever:
+        // the marker already moved, so no later write will retire them.
+        this.clearIfRead(notice);
       }
     }
   }
