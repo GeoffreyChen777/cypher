@@ -497,17 +497,21 @@ impl Shell {
                     .text_color(theme.text)
                     .child(SharedString::from("Cypher")),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(view_button)
-                    .child(quick_chat)
-                    .child(add_project),
-            )
+            // A project window lists one fixed project: no view menu, quick
+            // chats or new projects (those belong to the main window).
+            .when(!self.is_project_window(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(view_button)
+                        .child(quick_chat)
+                        .child(add_project),
+                )
+            })
             .into_any_element()
     }
 
@@ -2781,7 +2785,7 @@ impl Shell {
 
     // ---- space context menu / rename / delete overlays ----
 
-    fn close_space_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_space_menu(&mut self, cx: &mut Context<Self>) {
         if self.space_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
             cx.notify();
@@ -2875,13 +2879,17 @@ impl Shell {
             let rename_id = space_id.clone();
             let delete_id = space_id.clone();
             let pin_id = space_id.clone();
+            let window_id = space_id.clone();
+            let project_window = self.is_project_window();
             let pinned = self
                 .state
                 .read(cx)
                 .space_row(&space_id)
                 .is_some_and(|s| s.pinned);
+            // Wide enough for the longest label ("Return to Main Window")
+            // on one line.
             let menu = popover::popover_card(&theme)
-                .w(px(170.0))
+                .w(px(210.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_space_menu(cx);
                 }))
@@ -2904,6 +2912,31 @@ impl Shell {
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename…")),
+                )
+                // The main window pops the project out; its own window
+                // hands it back (same as closing the window).
+                .child(
+                    popover::menu_row(&theme, false, format!("space-menu-window-{space_id}"))
+                        .id("space-menu-window")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if project_window {
+                                this.close_this_window(cx);
+                            } else {
+                                this.open_project_window(window_id.clone(), cx);
+                            }
+                        }))
+                        .child(
+                            icon(icons::WINDOW_FRAME)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().whitespace_nowrap().child(SharedString::from(
+                            if project_window {
+                                "Return to Main Window"
+                            } else {
+                                "Open in New Window"
+                            },
+                        ))),
                 )
                 .child(popover::menu_separator())
                 .child(

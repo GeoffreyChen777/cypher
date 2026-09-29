@@ -2865,6 +2865,25 @@ impl Pickers {
                 .into();
             (device_label, project_label, offline)
         };
+        // A project window's canvas always targets its project (and that
+        // project's host): the target reads, it doesn't pick.
+        if self.state.read(cx).window_project().is_some() {
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    Self::footer_label(crate::icons::MONITOR, device_label, &theme)
+                        .when(offline, |el| el.text_color(theme.warning.opacity(0.8))),
+                )
+                .child(Self::footer_label(
+                    crate::icons::FOLDER,
+                    project_label,
+                    &theme,
+                ))
+                .into_any_element();
+        }
         let device_chip = self
             .footer_chip(
                 PickerKind::Device,

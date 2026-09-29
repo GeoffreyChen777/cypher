@@ -200,7 +200,7 @@ impl Shell {
                     .settings
                     .last_space_id
                     .clone()
-                    .filter(|id| s.space_row(id).is_some())
+                    .filter(|id| s.space_row(id).is_some() && s.project_scope().space_visible(id))
                     .or_else(|| s.first_space_on_picked_device());
                 if let Some(id) = target {
                     s.select_space(Some(id), cx);

@@ -261,57 +261,80 @@ fn open_main_window(
 ) {
     // zeron window geometry: 1320×880, min 900×600 (feature-inventory §1.1).
     let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(900.), px(600.))),
-            // `kind` is deliberately left at its default `WindowKind::Normal`
-            // (gpui platform.rs WindowOptions::default), which on macOS maps
-            // to `NSNormalWindowLevel` (gpui_macos window.rs) — same as zed's
-            // main window. Nothing here raises the window level or touches
-            // presentation options; the "menu bar never appears" symptom came
-            // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
-            // from window kind/level, and `appears_transparent` only affects
-            // the titlebar, not the menu bar.
-            // macOS: frameless-inset chrome like the original Electron app
-            // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-            // feature-inventory §1.1). No title text — the strip is
-            // custom-drawn (zed sets `title: None` the same way). On
-            // Linux/Windows `appears_transparent` hides the system titlebar
-            // for our custom-drawn chrome; harmless where unsupported.
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // Centered on the titlebar's content line (40px bar, content
-                // shifted 4px down, lights ~12px tall → center 22).
-                traffic_light_position: Some(gpui::point(px(14.), px(14.))),
-            }),
-            // Our own titlebar strip drags the window (WindowControlArea::
-            // Drag + start_window_move) — mark the content view app-owned
-            // so AppKit neither dead-zones the strip nor delays clicks.
-            app_owns_titlebar_drag: true,
-            // Frosted shell (macOS): blur the desktop behind the window; the
-            // shell paints its frost surface translucent so the sidebar reads
-            // as glass (shell.rs root). Elsewhere blur support is compositor
-            // roulette — stay opaque.
-            // One source of truth with the re-apply loop in `appearance::apply`
-            // — if these two ever disagree, vibrancy dies on the first theme
-            // change and never comes back.
-            window_background: theme::Theme::of(cx).window_background_appearance(),
-            app_id: Some("cypher".into()),
-            ..Default::default()
-        },
-        move |window, cx| {
-            // React to the user flipping macOS between light and dark. Detached:
-            // the subscription lives as long as the window does, and the window
-            // owns nothing that would drop it early.
-            appearance::observe_window(window, cx).detach();
-            cx.new(|cx| shell::Shell::new(state, boot, data_dir, cx))
-        },
-    )
+    cx.open_window(shell_window_options(bounds, cx), move |window, cx| {
+        // React to the user flipping macOS between light and dark. Detached:
+        // the subscription lives as long as the window does, and the window
+        // owns nothing that would drop it early.
+        appearance::observe_window(window, cx).detach();
+        cx.new(|cx| shell::Shell::new(state, boot, data_dir, cx))
+    })
     .expect("failed to open window");
     // Belt and braces: assert the blur once the window actually exists. The
     // `WindowOptions` value is applied during creation, before the view is
     // attached; re-pushing it here means a window is never left opaque.
     appearance::reapply_window_background(cx);
+}
+
+/// Open a project window: the same chrome as the main window around a
+/// [`shell::Shell`] scoped to one project (`state` comes from
+/// [`state::AppState::new_project_window`]). Slightly smaller than the main
+/// window so the two read as a stack rather than a replacement.
+pub(crate) fn open_project_window(
+    state: gpui::Entity<state::AppState>,
+    boot: EngineBootConfig,
+    data_dir: PathBuf,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<shell::Shell>> {
+    let bounds = Bounds::centered(None, size(px(1200.), px(820.)), cx);
+    let window = cx
+        .open_window(shell_window_options(bounds, cx), move |window, cx| {
+            appearance::observe_window(window, cx).detach();
+            cx.new(|cx| shell::Shell::new_project_window(state, boot, data_dir, cx))
+        })
+        .inspect_err(|err| tracing::error!(error = %err, "failed to open project window"))
+        .ok()?;
+    appearance::reapply_window_background(cx);
+    Some(window)
+}
+
+fn shell_window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(900.), px(600.))),
+        // `kind` is deliberately left at its default `WindowKind::Normal`
+        // (gpui platform.rs WindowOptions::default), which on macOS maps
+        // to `NSNormalWindowLevel` (gpui_macos window.rs) — same as zed's
+        // main window. Nothing here raises the window level or touches
+        // presentation options; the "menu bar never appears" symptom came
+        // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
+        // from window kind/level, and `appears_transparent` only affects
+        // the titlebar, not the menu bar.
+        // macOS: frameless-inset chrome like the original Electron app
+        // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
+        // feature-inventory §1.1). No title text — the strip is
+        // custom-drawn (zed sets `title: None` the same way). On
+        // Linux/Windows `appears_transparent` hides the system titlebar
+        // for our custom-drawn chrome; harmless where unsupported.
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            // Centered on the titlebar's content line (40px bar, content
+            // shifted 4px down, lights ~12px tall → center 22).
+            traffic_light_position: Some(gpui::point(px(14.), px(14.))),
+        }),
+        // Our own titlebar strip drags the window (WindowControlArea::
+        // Drag + start_window_move) — mark the content view app-owned
+        // so AppKit neither dead-zones the strip nor delays clicks.
+        app_owns_titlebar_drag: true,
+        // Frosted shell (macOS): blur the desktop behind the window; the
+        // shell paints its frost surface translucent so the sidebar reads
+        // as glass (shell.rs root). Elsewhere blur support is compositor
+        // roulette — stay opaque.
+        // One source of truth with the re-apply loop in `appearance::apply`
+        // — if these two ever disagree, vibrancy dies on the first theme
+        // change and never comes back.
+        window_background: theme::Theme::of(cx).window_background_appearance(),
+        app_id: Some("cypher".into()),
+        ..Default::default()
+    }
 }

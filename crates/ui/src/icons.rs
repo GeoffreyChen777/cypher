@@ -82,6 +82,9 @@ icon_assets![
     // sidebar toggle shows the panel line on the left; gpui divs have no
     // scale transform at the pinned rev, so the flip is baked into the asset.
     (SIDEBAR_MINIMALISTIC_LEFT, "sidebar-minimalistic-left"),
+    // "Open in New Window" — drawn in the Solar linear style (the same frame
+    // as `sidebar-minimalistic`, with a title bar and two window dots).
+    (WINDOW_FRAME, "window-frame"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
     (KEYBOARD, "keyboard"),
     (ARROW_LEFT, "arrow-left"),

@@ -746,6 +746,37 @@ pub struct AppState {
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
     commands_task: Option<Task<()>>,
+    /// Which projects this state's window lists (see [`ProjectScope`]).
+    scope: ProjectScope,
+}
+
+/// Which projects a window lists. The main window lists every project except
+/// the ones open in their own window; a project window lists only its
+/// project (no project-less sessions). Scoping is a view concern: the lists
+/// ([`AppState::visible_chats`], [`AppState::spaces_sorted`], the sidebar
+/// groups) narrow, the synced rows underneath stay complete.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectScope {
+    /// The project a project window is dedicated to.
+    pub only: Option<String>,
+    /// Main window: projects currently open in their own windows.
+    pub hidden: HashSet<String>,
+}
+
+impl ProjectScope {
+    pub fn space_visible(&self, space_id: &str) -> bool {
+        match self.only.as_deref() {
+            Some(only) => only == space_id,
+            None => !self.hidden.contains(space_id),
+        }
+    }
+
+    pub fn chat_visible(&self, chat: &Chat) -> bool {
+        match chat.space_id.as_deref() {
+            Some(space_id) => self.space_visible(space_id),
+            None => self.only.is_none(),
+        }
+    }
 }
 
 impl Default for AppState {
@@ -922,7 +953,112 @@ impl AppState {
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            scope: ProjectScope::default(),
         }
+    }
+
+    /// The state behind a project window: a secondary [`AppState`] sharing
+    /// `main`'s [`EngineHandle`], scoped to `space_id`, with its own
+    /// selection and transcript watches. Seeded from `main`'s synced lists so
+    /// the window's first frame is already populated; its own watches take
+    /// over from there. Lands on `main`'s selected chat when that belongs to
+    /// the project (the chat moves windows with it), else on the project's
+    /// most recent session. `None` while `main` has no engine attached.
+    pub fn new_project_window(
+        main: &Entity<AppState>,
+        space_id: &str,
+        cx: &mut App,
+    ) -> Option<Entity<AppState>> {
+        let m = main.read(cx);
+        let engine = m.engine.clone()?;
+        let space = m.space_row(space_id)?.clone();
+        let in_project = |chat_id: &String| {
+            m.chats
+                .iter()
+                .any(|c| &c.id == chat_id && c.space_id.as_deref() == Some(space_id))
+        };
+        let landing = m.selected_chat.clone().filter(|id| in_project(id));
+        let mut seed = AppState::new();
+        seed.scope.only = Some(space_id.to_string());
+        seed.auth = m.auth.clone();
+        seed.devices = m.devices.clone();
+        seed.spaces = m.spaces.clone();
+        seed.chats = m.chats.clone();
+        seed.sessions = m.sessions.clone();
+        seed.chats_synced = m.chats_synced;
+        seed.spaces_synced = m.spaces_synced;
+        seed.update = m.update.clone();
+        seed.pi_update = m.pi_update.clone();
+        seed.data_dir = m.data_dir.clone();
+        // In-flight sends ride along so the moved sessions keep their
+        // optimistic echoes and Working dots until the host acks.
+        seed.echoes = m
+            .echoes
+            .iter()
+            .filter(|(id, _)| in_project(id))
+            .map(|(id, echoes)| (id.clone(), echoes.clone()))
+            .collect();
+        seed.pending_sends = m
+            .pending_sends
+            .iter()
+            .filter(|(id, _)| in_project(id))
+            .map(|(id, send)| (id.clone(), send.clone()))
+            .collect();
+        seed.local_steers = m.local_steers.clone();
+        seed.selected_space = Some(space.id.clone());
+        seed.selected_device = Some(space.device_id.clone());
+        let state = cx.new(|_| seed);
+        state.update(cx, |s, cx| {
+            s.attach_engine(engine, false, cx);
+            let landing = landing.or_else(|| {
+                s.overview_chats(Utc::now())
+                    .first()
+                    .map(|(_, c)| c.id.clone())
+            });
+            if landing.is_some() {
+                s.select_chat(landing, cx);
+            }
+        });
+        Some(state)
+    }
+
+    pub fn project_scope(&self) -> &ProjectScope {
+        &self.scope
+    }
+
+    /// The project a project window is dedicated to (`None` in the main
+    /// window).
+    pub fn window_project(&self) -> Option<&str> {
+        self.scope.only.as_deref()
+    }
+
+    /// Main window: hide the projects that are open in their own windows.
+    /// A selection that just left the scope moves on — the chat to the most
+    /// recent listed session (else the canvas), the canvas project to the
+    /// first listed one.
+    pub fn set_hidden_projects(&mut self, hidden: HashSet<String>, cx: &mut Context<Self>) {
+        if self.scope.hidden == hidden {
+            return;
+        }
+        self.scope.hidden = hidden;
+        if self
+            .selected_chat_row()
+            .is_some_and(|chat| !self.scope.chat_visible(chat))
+        {
+            let next = self
+                .overview_chats(Utc::now())
+                .first()
+                .map(|(_, c)| c.id.clone());
+            self.select_chat(next, cx);
+        }
+        if self
+            .selected_space
+            .as_deref()
+            .is_some_and(|id| !self.scope.space_visible(id))
+        {
+            self.selected_space = self.first_space_on_picked_device();
+        }
+        cx.notify();
     }
 
     // ---- reducers (pure) ----
@@ -1373,8 +1509,12 @@ impl AppState {
     /// Subagents inspector. [`Self::selected_chat_row`] and transcript
     /// subscriptions still work for a selected child (navigation selects it
     /// directly).
+    ///
+    /// Scoped to this window's projects ([`ProjectScope`]).
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|c| !c.archived && !c.is_child())
+        self.chats
+            .iter()
+            .filter(|c| !c.archived && !c.is_child() && self.scope.chat_visible(c))
     }
 
     pub fn selected_space_row(&self) -> Option<&Space> {
@@ -1445,8 +1585,13 @@ impl AppState {
     /// Spaces in display order — case-insensitive alphabetical, the order
     /// the space selectors (the canvas project picker, composer) list rows in.
     /// Ties break on id so the order is stable across renders.
+    /// Scoped to this window's projects ([`ProjectScope`]).
     pub fn spaces_sorted(&self) -> Vec<&Space> {
-        let mut spaces: Vec<&Space> = self.spaces.iter().collect();
+        let mut spaces: Vec<&Space> = self
+            .spaces
+            .iter()
+            .filter(|s| self.scope.space_visible(&s.id))
+            .collect();
         spaces.sort_by_key(|s| (s.display_name().to_lowercase(), s.id.clone()));
         spaces
     }
@@ -1523,12 +1668,21 @@ impl AppState {
     /// clears the phones' badges off the same marker). The host bumps
     /// `lastMessageAt` when a run starts asking or fails, so a question
     /// counts until it's been looked at, not until it's answered.
+    ///
+    /// App-wide: the Dock icon is shared by every window, so this counts
+    /// the sessions of projects open in their own windows too (the
+    /// [`ProjectScope`] is ignored).
     pub fn attention_count(&self, now: DateTime<Utc>) -> usize {
-        self.overview_chats(now)
+        self.chats
             .iter()
-            .filter(|(status, chat)| {
+            .filter(|c| !c.archived && !c.is_child())
+            .filter(|c| match c.space_id.as_deref() {
+                None => true,
+                Some(id) => self.space_row(id).is_some(),
+            })
+            .filter(|chat| {
                 matches!(
-                    status,
+                    self.display_status_for(chat, now),
                     ChatIndicator::AwaitingInput
                         | ChatIndicator::Errored
                         | ChatIndicator::Completed
@@ -1704,7 +1858,7 @@ impl AppState {
         let mut empty: Vec<&Space> = self
             .spaces
             .iter()
-            .filter(|s| !live.contains(s.id.as_str()))
+            .filter(|s| !live.contains(s.id.as_str()) && self.scope.space_visible(&s.id))
             .collect();
         empty.sort_by(|a, b| {
             a.display_name()
@@ -1829,7 +1983,7 @@ impl AppState {
             // closure's value directly (no Result) — AsyncApp implements
             // AppContext like App does.
             state.update(cx, |s, cx| match outcome {
-                Ok(handle) => s.attach_engine(handle, cx),
+                Ok(handle) => s.attach_engine(handle, true, cx),
                 Err(message) => {
                     tracing::error!(%message, "engine bootstrap failed");
                     s.connection = ConnectionStatus::Failed(message);
@@ -1843,13 +1997,16 @@ impl AppState {
     /// Wire the connected engine: mark Ready and start the standing watches.
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
-    fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+    /// `owner`: this state bootstrapped the handle, so it also watches the
+    /// deferred engine assembly (and shuts the handle down on failure). A
+    /// project window's state only borrows the main window's handle.
+    fn attach_engine(&mut self, handle: EngineHandle, owner: bool, cx: &mut Context<Self>) {
         let engine_info = handle.engine_info();
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
         let mut watch_tasks = Vec::with_capacity(8);
-        if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
+        if owner && let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
         }
         watch_tasks.extend([
@@ -3625,6 +3782,67 @@ mod tests {
         // No selection at all is not "live" either.
         state.selected_space = None;
         assert_eq!(state.selected_space_if_live(), None);
+    }
+
+    /// Two projects plus a project-less chat, each with an unseen finished
+    /// session — the fixture for the project-window scoping tests.
+    fn scoped_fixture() -> AppState {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![space("a", "dev", "/a", 1), space("b", "dev", "/b", 2)]);
+        let mut in_a = chat("in-a", 0, Some(3));
+        in_a.space_id = Some("a".into());
+        let mut in_b = chat("in-b", 0, Some(2));
+        in_b.space_id = Some("b".into());
+        state.apply_chats(vec![in_a, in_b, chat("loose", 0, Some(1))]);
+        state
+    }
+
+    fn listed(state: &AppState) -> (Vec<&str>, Vec<&str>, Vec<String>) {
+        let chats = state.visible_chats().map(|c| c.id.as_str()).collect();
+        let spaces = state
+            .spaces_sorted()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        let groups = state
+            .sidebar_groups(Utc::now())
+            .into_iter()
+            .map(|g| g.key)
+            .collect();
+        (chats, spaces, groups)
+    }
+
+    #[test]
+    fn main_window_scope_hides_projects_open_elsewhere() {
+        let mut state = scoped_fixture();
+        state.scope.hidden = HashSet::from(["b".to_string()]);
+        let (chats, spaces, groups) = listed(&state);
+        assert_eq!(chats, ["in-a", "loose"]);
+        assert_eq!(spaces, ["a"]);
+        assert_eq!(groups, ["s:a", "np:dev"]);
+        // Even when quiet: a hidden project's empty card stays hidden.
+        state.apply_chats(Vec::new());
+        assert_eq!(listed(&state).2, ["s:a"]);
+    }
+
+    #[test]
+    fn project_window_scope_lists_only_its_project() {
+        let mut state = scoped_fixture();
+        state.scope.only = Some("b".into());
+        let (chats, spaces, groups) = listed(&state);
+        assert_eq!(chats, ["in-b"], "no other project, no project-less chats");
+        assert_eq!(spaces, ["b"]);
+        assert_eq!(groups, ["s:b"]);
+        assert_eq!(state.first_space_on_picked_device().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn dock_badge_counts_every_window() {
+        let now = Utc::now();
+        let mut state = scoped_fixture();
+        assert_eq!(state.attention_count(now), 3);
+        state.scope.hidden = HashSet::from(["a".to_string(), "b".to_string()]);
+        assert_eq!(state.attention_count(now), 3, "the Dock icon is app-wide");
     }
 
     #[test]

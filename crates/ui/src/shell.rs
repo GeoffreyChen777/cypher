@@ -62,6 +62,7 @@ use crate::transcript::{self, Transcript};
 
 mod spaces;
 mod tabs;
+mod windows;
 
 use spaces::{AddSpaceFlow, OrphanWorktree, RenameSpaceDialog};
 
@@ -1281,6 +1282,9 @@ pub struct Shell {
     comment_popup: Entity<crate::comments::CommentPopup>,
     /// CommentPopup → composer comment forwarding (subscribed ONCE).
     _comment_popup_events: Subscription,
+    /// The project a project window is dedicated to; `None` in the main
+    /// window (see `shell/windows.rs`).
+    project_window: Option<String>,
 }
 
 /// Pure presentation of the update strip: given the engine's last
@@ -1375,12 +1379,30 @@ fn update_strip_view(
 }
 
 impl Shell {
+    /// The main window's shell.
     pub fn new(
         state: Entity<AppState>,
         boot: EngineBootConfig,
         data_dir: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut shell = Self::build(state, boot, data_dir, None, cx);
+        shell.register_main_window(cx);
+        shell
+    }
+
+    /// Shared by the main window and project windows
+    /// ([`Shell::new_project_window`]). A project window leaves the app-wide
+    /// globals (keymap, hidden slash commands) and the dev capture knobs to
+    /// the main window.
+    fn build(
+        state: Entity<AppState>,
+        boot: EngineBootConfig,
+        data_dir: PathBuf,
+        project_window: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let main_window = project_window.is_none();
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.on_state_changed(&state, cx);
             cx.notify();
@@ -1390,7 +1412,9 @@ impl Shell {
         let comment_popup = cx.new(crate::comments::CommentPopup::new);
         let transcript =
             cx.new(|cx| Transcript::new(state.clone(), comment_popup.clone().downgrade(), cx));
-        crate::settings::commands::publish_hidden(None, cx);
+        if main_window {
+            crate::settings::commands::publish_hidden(None, cx);
+        }
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
         // Every send glides the prompt to the viewport top and reserves the
@@ -1542,13 +1566,18 @@ impl Shell {
         });
         let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
         let settings = UiSettings::load(&data_dir);
-        crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
-        // Bind the customizable shortcuts from the persisted keymap.
-        apply_keymap(cx, &settings.keymap);
+        if main_window {
+            crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
+            // Bind the customizable shortcuts from the persisted keymap.
+            apply_keymap(cx, &settings.keymap);
+        }
         // Dev/testing knob: `CYPHER_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
-        let route = match cypher_env::var("OPEN_ROUTE").as_deref() {
+        let route = match cypher_env::var("OPEN_ROUTE")
+            .filter(|_| main_window)
+            .as_deref()
+        {
             Some("settings") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/devices") => Route::Settings(SettingsSection::Devices),
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
@@ -1575,8 +1604,8 @@ impl Shell {
         // the combined harness/model menu once the shell is Ready;
         // `CYPHER_FORCE_GATE=signin|org|failed|setup` renders that gate
         // regardless of real auth state (display-only — for styling passes).
-        let debug_dialog = cypher_env::var("OPEN_DIALOG");
-        let force_gate = cypher_env::var("FORCE_GATE");
+        let debug_dialog = cypher_env::var("OPEN_DIALOG").filter(|_| main_window);
+        let force_gate = cypher_env::var("FORCE_GATE").filter(|_| main_window);
         let debug_setup = force_gate.as_deref() == Some("setup");
         let debug_gate = match force_gate.as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
@@ -1728,6 +1757,7 @@ impl Shell {
             _transcript_events: transcript_events,
             comment_popup,
             _comment_popup_events: comment_popup_events,
+            project_window,
         }
     }
 
@@ -1737,6 +1767,10 @@ impl Shell {
     /// setting is off). Written only on change — this runs on every state
     /// notify.
     fn sync_dock_badge(&mut self, cx: &mut Context<Self>) {
+        // One Dock icon: the main window owns it (the count is app-wide).
+        if self.is_project_window() {
+            return;
+        }
         let count = if self.settings.dock_badge_enabled {
             self.state.read(cx).attention_count(Utc::now())
         } else {
@@ -1750,10 +1784,15 @@ impl Shell {
     }
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.sync_window_scope(cx);
+        // App-wide flows (relaunch, runtime switches, capture knobs) are the
+        // main window's; a project window only renders its project.
+        let main_window = !self.is_project_window();
         // A remotely applied update swapped this app's bundle; the relauncher
         // is waiting for this process to exit. Quit through the normal path so
         // the embedded engine flushes before the new bundle opens.
-        if !self.relaunch_quit_sent
+        if main_window
+            && !self.relaunch_quit_sent
             && state
                 .read(cx)
                 .update
@@ -1771,7 +1810,7 @@ impl Shell {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
         };
-        if next_sync_flow != self.sync_flow {
+        if main_window && next_sync_flow != self.sync_flow {
             self.sync_flow = next_sync_flow;
             if matches!(
                 self.sync_flow,
@@ -1782,8 +1821,10 @@ impl Shell {
         }
         // The in-place local→synced switch: once the replacement runtime is
         // attached and Ready, kick the import (or finish) from here.
-        self.drive_sync_switch(cx);
-        let signed_out_synced = {
+        if main_window {
+            self.drive_sync_switch(cx);
+        }
+        let signed_out_synced = main_window && {
             let state = state.read(cx);
             state.workspace_scope == Some(WorkspaceScope::Synced)
                 && matches!(state.auth, Some(AuthState::SignedOut))
@@ -1838,11 +1879,23 @@ impl Shell {
         // keeps tracking silently so the ghost edge never fires later. The
         // question chime is NOT gated: an instant AwaitingInput ack should
         // still ring.
+        //
+        // WINDOW-SCOPED: each window rings for the sessions it lists, so a
+        // project open in its own window rings once, from there. Rows outside
+        // the scope still track their baseline silently — a project that
+        // returns to the main window never replays an edge it already rang.
         {
             let now = Utc::now();
-            type Ping = (String, cypher_proto::SessionStatus, bool, Option<String>);
+            type Ping = (
+                String,
+                cypher_proto::SessionStatus,
+                bool,
+                Option<String>,
+                bool,
+            );
             let sessions: Vec<Ping> = {
                 let state = state.read(cx);
+                let scope = state.project_scope();
                 state
                     .sessions
                     .iter()
@@ -1855,32 +1908,31 @@ impl Shell {
                             Indicator::None => cypher_proto::SessionStatus::Idle,
                         };
                         let send_pending = state.send_pending(&s.chat_id, now);
-                        let title = state
-                            .chats
-                            .iter()
-                            .find(|c| c.id == s.chat_id)
-                            .and_then(|c| c.title.clone());
-                        (s.chat_id.clone(), status, send_pending, title)
+                        let chat = state.chats.iter().find(|c| c.id == s.chat_id);
+                        let title = chat.and_then(|c| c.title.clone());
+                        // Rows without a chat yet belong to the main window.
+                        let in_scope = chat.map_or(scope.only.is_none(), |c| scope.chat_visible(c));
+                        (s.chat_id.clone(), status, send_pending, title, in_scope)
                     })
                     .collect()
             };
+            let (sound_enabled, notifications_enabled, background_only) = self.chime_settings(cx);
             // Background-only banners: `active_window()` is app-level (any
             // Cypher window being key), so a ping for a *background chat* in a
             // focused app still stays a chime — you're already looking at
             // Cypher; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
-            for (chat_id, status, send_pending, title) in sessions {
+            for (chat_id, status, send_pending, title, in_scope) in sessions {
                 let prev = self.sound_prev.insert(chat_id, status);
-                if let Some(prev) = prev
+                if in_scope
+                    && let Some(prev) = prev
                     && let Some(sound) = crate::sound::sound_for_transition(prev, status)
                     && !(send_pending && sound == crate::sound::Sound::Done)
                 {
-                    if self.settings.sound_enabled {
+                    if sound_enabled {
                         crate::sound::play(sound);
                     }
-                    if self.settings.notifications_enabled
-                        && !(self.settings.notifications_background_only && app_focused)
-                    {
+                    if notifications_enabled && !(background_only && app_focused) {
                         let title = title.unwrap_or_else(|| "New session".into());
                         let body = match sound {
                             crate::sound::Sound::Done => "Run finished",
@@ -1918,7 +1970,7 @@ impl Shell {
         // resolves to a LIVE Space. A dangling id (space deleted elsewhere)
         // must never overwrite the remembered one, or the next boot would
         // restore a dead project.
-        {
+        if main_window {
             let state = state.read(cx);
             let live = state.selected_space_if_live();
             if live.is_some() && live != self.settings.last_space_id {
@@ -3156,6 +3208,12 @@ impl Shell {
     /// latest snapshot on the background executor. Re-scheduling drops (cancels)
     /// the previous timer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        // Only the main window writes `ui-settings.json`: a project window's
+        // copy is a boot-time snapshot, and saving it whole would clobber
+        // whatever the main window changed since. Its pane sizes stay local.
+        if self.is_project_window() {
+            return;
+        }
         let dir = self.data_dir.clone();
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -3275,6 +3333,14 @@ impl Shell {
     }
 
     fn open_providers(&mut self, intent: ProviderIntent, cx: &mut Context<Self>) {
+        if self.is_project_window() {
+            let target = self.settings_target.read(cx).id().map(str::to_string);
+            self.forward_to_main(cx, move |main, cx| {
+                main.aim_settings_target(target, cx);
+                main.open_providers(intent, cx);
+            });
+            return;
+        }
         self.open_settings(SettingsSection::Providers, cx);
         let state = self.state.clone();
         let target = self.settings_target.clone();
@@ -3282,6 +3348,16 @@ impl Shell {
     }
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        // Settings are app-wide: a project window opens them in the main
+        // window, carrying over the device its composer aimed them at.
+        if self.is_project_window() {
+            let target = self.settings_target.read(cx).id().map(str::to_string);
+            self.forward_to_main(cx, move |main, cx| {
+                main.aim_settings_target(target, cx);
+                main.open_settings(section, cx);
+            });
+            return;
+        }
         if let Some(page) = &self.providers_page {
             page.update(cx, |page, cx| page.dismiss(cx));
         }
@@ -3323,6 +3399,19 @@ impl Shell {
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    /// Point the settings device selector at `device` (a forwarded request
+    /// from a project window). `None` keeps the current pick.
+    fn aim_settings_target(&mut self, device: Option<String>, cx: &mut Context<Self>) {
+        if device.is_some() {
+            let result = self
+                .settings_target
+                .update(cx, |target, cx| target.select(device, cx));
+            if let Err(error) = result {
+                tracing::debug!(%error, "settings target unchanged");
+            }
+        }
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -3663,7 +3752,13 @@ impl Shell {
     /// The sidebar view menu's current state (persisted in ui-settings).
     pub(super) fn sidebar_view(&self) -> crate::state::SidebarView {
         crate::state::SidebarView {
-            device: self.settings.sidebar_device_filter.clone(),
+            // A project window lists one project: a device filter could only
+            // empty it.
+            device: self
+                .settings
+                .sidebar_device_filter
+                .clone()
+                .filter(|_| !self.is_project_window()),
             sort: self.settings.sidebar_sort,
             reversed: self.settings.sidebar_sort_reversed,
         }
@@ -5167,13 +5262,18 @@ impl Shell {
                 )
                 .fade_overflow_y(&self.sidebar_scroll),
             )
-            // Update strip (above the user menu; below the lists).
-            .when_some(self.render_update_strip(theme, cx), |el, strip| {
-                el.child(strip)
-            })
-            .when_some(self.render_pi_update_strip(theme, cx), |el, strip| {
-                el.child(strip)
-            })
+            // Update strip (above the user menu; below the lists). App-wide
+            // chrome — the main window's alone.
+            .when_some(
+                self.render_update_strip(theme, cx)
+                    .filter(|_| !self.is_project_window()),
+                |el, strip| el.child(strip),
+            )
+            .when_some(
+                self.render_pi_update_strip(theme, cx)
+                    .filter(|_| !self.is_project_window()),
+                |el, strip| el.child(strip),
+            )
             // Inline mutation-failure notice.
             .when_some(self.sidebar_notice.clone(), |el, notice| {
                 el.child(
@@ -5196,7 +5296,9 @@ impl Shell {
                         .child(notice),
                 )
             })
-            .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
+            .when(!self.is_project_window(), |el| {
+                el.child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
+            })
             .into_any_element()
     }
 
@@ -8795,16 +8897,32 @@ impl Render for Shell {
                     this.open_settings(SettingsSection::Harnesses, cx);
                 }),
             )
+            // About / updates / adding projects are app-wide: a project
+            // window hands them to the main window.
             .on_action(cx.listener(|this, _: &crate::app_menus::About, _, cx| {
+                if this.is_project_window() {
+                    this.forward_to_main(cx, |main, cx| main.open_about(cx));
+                    return;
+                }
                 this.open_about(cx);
             }))
             .on_action(
                 cx.listener(|this, _: &crate::app_menus::CheckForUpdates, _, cx| {
+                    if this.is_project_window() {
+                        this.forward_to_main(cx, |main, cx| main.begin_update_check(cx));
+                        return;
+                    }
                     this.begin_update_check(cx);
                 }),
             )
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
-                if this.add_space.is_some() {
+                if this.is_project_window() {
+                    this.forward_to_main(cx, |main, cx| {
+                        if main.add_space.is_none() {
+                            main.open_add_space(cx);
+                        }
+                    });
+                } else if this.add_space.is_some() {
                     this.add_space = None;
                     cx.notify();
                 } else {
