@@ -254,7 +254,8 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}'
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}'
       # The message ends to call a tool; the tool executes after message_end.
-      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"Hello world"}],"stopReason":"toolUse"}}'
+      # It reports its output tokens; m2 below does not (the estimate stands).
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"Hello world"}],"usage":{"output":7},"stopReason":"toolUse"}}'
       emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cargo test -p cypher-harness"}}'
       emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{"content":[{"type":"text","text":"   Compiling cypher-harness v0.1.21\n    Finished `dev` profile"}]},"isError":false}'
       # A toolResult message is not an assistant message: internal only.

@@ -38,6 +38,7 @@
 
 mod client;
 pub mod fork;
+mod throughput;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -2158,6 +2159,8 @@ async fn run_session(session: Session) {
     // once resolved; this stops the harness from even emitting them).
     let mut progress_last: HashMap<String, Instant> = HashMap::new();
     let mut progress_ended: HashSet<String> = HashSet::new();
+    // The working trailer's tok/s, estimated from the streamed deltas.
+    let mut throughput = throughput::ThroughputMeter::default();
     // False until the FIRST agent event of any kind arrives. While it stays
     // false the run is proven inert (no agent activity, e.g. an extension
     // command whose handler only notifies) and the grace timer below ends it.
@@ -2247,6 +2250,7 @@ async fn run_session(session: Session) {
             in_turn = true;
             progress_last.clear();
             progress_ended.clear();
+            throughput.start_turn();
             // The no-activity timer is NOT armed here: the previous turn's
             // sleep may already have elapsed and must not fire during this
             // prompt's preflight. The `idle_prompt.is_none()` guard keeps the
@@ -2443,6 +2447,16 @@ async fn run_session(session: Session) {
                                 // *_start/*_end/toolcall_*: internal state only.
                                 _ => {}
                             }
+                            // Every streamed delta is output — text,
+                            // thinking, and tool-call arguments alike.
+                            let kind = ame.and_then(|a| a.get("type")).and_then(Value::as_str);
+                            let delta = ame.and_then(|a| a.get("delta")).and_then(Value::as_str);
+                            if let (Some(kind @ ("text_delta" | "thinking_delta" | "toolcall_delta")), Some(delta)) = (kind, delta)
+                                && let Some(reading) = throughput.delta(delta, kind == "thinking_delta", Instant::now())
+                                && !send(&event_tx, AgentEvent::Throughput { throughput: Some(reading) }).await
+                            {
+                                break 'main;
+                            }
                         }
                         "message_start" => {
                             // A new assistant message starts a fresh text
@@ -2451,6 +2465,7 @@ async fn run_session(session: Session) {
                             // (toolResult/user messages are internal.)
                             if message_is_assistant(ev.get("message")) {
                                 last_assistant_text.clear();
+                                throughput.start_message();
                                 // The NEXT assistant message after an accepted
                                 // steer is the steer's reply: split the doc entry
                                 // here (before its content streams), exactly like
@@ -2478,6 +2493,14 @@ async fn run_session(session: Session) {
                         "message_end" => {
                             if message_is_assistant(ev.get("message")) {
                                 refresh_context_usage(&client, &event_tx, None);
+                                // The reported count replaces the estimate;
+                                // the rate drops until the next message.
+                                let usage = ev.get("message").and_then(|m| m.get("usage"));
+                                let count = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_u64);
+                                let reading = throughput.end_message(count("output"), count("reasoning"));
+                                if !send(&event_tx, AgentEvent::Throughput { throughput: Some(reading) }).await {
+                                    break 'main;
+                                }
                                 if let Some(message) = ev.get("message") {
                                     if let Some(stop) = message.get("stopReason").and_then(Value::as_str)
                                     {

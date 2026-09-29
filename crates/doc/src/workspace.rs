@@ -771,6 +771,7 @@ impl From<RawSession> for Session {
             context_usage: raw
                 .context_usage
                 .and_then(|value| serde_json::from_value(value).ok()),
+            throughput: None,
         }
     }
 }
@@ -849,6 +850,7 @@ mod tests {
             updated_at: ts(3_500),
             subagents: Vec::new(),
             context_usage: None,
+            throughput: None,
         }
     }
 

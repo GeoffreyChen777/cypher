@@ -500,6 +500,13 @@ pub enum AgentEvent {
     SubagentStatus {
         runs: Vec<SubagentRun>,
     },
+    /// Live output throughput (pi `cypher.throughput.v1`); `None` clears it.
+    /// Run-state only, like `ContextUsage`: mirrored onto the chat's local
+    /// session projection — never journaled, folded, or a status driver.
+    #[serde(rename_all = "camelCase")]
+    Throughput {
+        throughput: Option<crate::Throughput>,
+    },
 }
 
 #[cfg(test)]

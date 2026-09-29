@@ -686,6 +686,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 updated_at: now,
                 subagents: Vec::new(),
                 context_usage: None,
+                throughput: None,
             })
             .unwrap();
         store

@@ -34,7 +34,8 @@ use cypher_harness::{
 };
 use cypher_proto::{
     AgentEvent, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
-    Session, SessionStatus, SubagentRun, SubagentRunStatus, UserInputAnswer, UserInputQuestion,
+    Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1407,6 +1408,7 @@ impl Inner {
                     updated_at: Utc::now(),
                     subagents: Vec::new(),
                     context_usage: seed,
+                    throughput: None,
                 });
             if entry.context_usage == Some(usage) {
                 return;
@@ -1419,6 +1421,27 @@ impl Inner {
         } else {
             self.publish_session(chat_id, &session);
         }
+    }
+
+    /// Live throughput (pi `cypher.throughput.v1`): the working trailer's
+    /// tok/s. Engine-local like the context gauge's in-turn readings, but it
+    /// never reaches the registry at all — a reading every half second of
+    /// streaming is not worth a synced write, and other devices' trailers
+    /// simply go without it. No `updated_at` bump: it is not a liveness
+    /// signal, and a missing row is never created for it.
+    fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.throughput.is_none() && throughput.is_none() {
+                return;
+            }
+            entry.throughput = throughput;
+            entry.clone()
+        };
+        self.publish_local(chat_id, &session);
     }
 
     /// Live subagent projection (pi `cypher.subagents.v1`): update the chat's
@@ -1443,6 +1466,7 @@ impl Inner {
                     updated_at: now,
                     subagents: Vec::new(),
                     context_usage: seed,
+                    throughput: None,
                 });
             entry.subagents = runs;
             entry.updated_at = now;
@@ -1474,6 +1498,7 @@ impl Inner {
                     updated_at: now,
                     subagents: Vec::new(),
                     context_usage: seed,
+                    throughput: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -1487,13 +1512,18 @@ impl Inner {
             );
             entry.status = status;
             entry.updated_at = now;
+            // Throughput belongs to one turn, like `started_at`: a settled
+            // session must not keep the last tok/s, nor a new turn open with
+            // the previous one's token count.
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
+                    entry.throughput = None;
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
+                    entry.throughput = None;
                 }
             }
             (entry.clone(), entered_attention)
@@ -2138,6 +2168,12 @@ async fn drive_run(
         // resume a parked session (Claude re-reports it after compaction).
         if let AgentEvent::ContextUsage { used, size } = event {
             inner.set_context_usage(&chat_id, ContextUsage { used, size });
+            continue;
+        }
+        // Throughput too: a live reading for the working trailer, never
+        // run activity (the extension's final clear lands after agent_end).
+        if let AgentEvent::Throughput { throughput } = event {
+            inner.set_throughput(&chat_id, throughput);
             continue;
         }
         // A prompt's translation belongs to the USER entry it replaced, which

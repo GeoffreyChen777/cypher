@@ -2060,6 +2060,7 @@ mod tests {
                         updated_at: now,
                         subagents: vec![r],
                         context_usage: None,
+                        throughput: None,
                     },
                     cypher_proto::Session {
                         chat_id: "child-1".into(),
@@ -2069,6 +2070,7 @@ mod tests {
                         updated_at: now,
                         subagents: vec![],
                         context_usage: None,
+                        throughput: None,
                     },
                 ]);
                 s.selected_chat = Some("parent".into());

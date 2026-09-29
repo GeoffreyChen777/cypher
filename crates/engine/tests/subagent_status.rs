@@ -18,7 +18,7 @@ use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
     AgentEvent, ContextUsage, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
     SandboxLevel, Session, SessionStatus, SteeringMode, SubagentRun, SubagentRunMode,
-    SubagentRunStatus, ToolCall,
+    SubagentRunStatus, Throughput, ToolCall,
 };
 
 const CHAT: &str = "chat-subagents";
@@ -504,6 +504,77 @@ async fn context_usage_mid_turn_rides_the_settle_write() {
     rig.core.sessions.shutdown().await;
 }
 
+/// Throughput (pi `cypher.throughput.v1`) is the working trailer's tok/s:
+/// live on this engine's own `WatchSessions`, never on the registry, never in
+/// the transcript, and gone once the turn settles.
+#[tokio::test]
+async fn throughput_is_local_and_ends_with_the_turn() {
+    let rig = assemble("stream fast");
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("stream fast"), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started()).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Working),
+        "turn running",
+    )
+    .await;
+    let before_entries = assistant_entries(&rig.core).len();
+    let reading = Throughput {
+        tokens_per_second: Some(52),
+        output_tokens: 3_400,
+        sampled_at: chrono::Utc::now(),
+    };
+    rig.feed
+        .send(AgentEvent::Throughput {
+            throughput: Some(reading),
+        })
+        .unwrap();
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .watch_sessions()
+                .borrow()
+                .iter()
+                .any(|s| s.chat_id == CHAT && s.throughput == Some(reading))
+        },
+        "WatchSessions carries the reading",
+    )
+    .await;
+    assert_eq!(status(&rig.core), Some(SessionStatus::Working));
+    assert_eq!(assistant_entries(&rig.core).len(), before_entries);
+
+    rig.feed
+        .send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("hs-sa".into()),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "park after Done",
+    )
+    .await;
+    assert_eq!(
+        rig.core
+            .sessions
+            .session_status(CHAT)
+            .and_then(|s| s.throughput),
+        None,
+        "a settled turn drops its tok/s"
+    );
+    let rows = rig.core.workspace.read_sessions().unwrap();
+    let row = rows.iter().find(|s| s.chat_id == CHAT).expect("row");
+    assert_eq!(row.throughput, None, "never synced");
+
+    rig.core.sessions.shutdown().await;
+}
+
 /// During a LIVE turn, SubagentStatus still never folds into the transcript:
 /// it updates the projection only, and the run keeps its Working status.
 #[tokio::test]
@@ -771,6 +842,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         updated_at: now,
         subagents: vec![run("r-local")],
         context_usage: None,
+        throughput: None,
     };
     let remote = Session {
         chat_id: "chat-remote".into(),
@@ -780,6 +852,7 @@ async fn boot_recovery_terminalizes_local_but_not_remote_rows() {
         updated_at: now,
         subagents: vec![run("r-remote")],
         context_usage: None,
+        throughput: None,
     };
     rig.core.workspace.record_session(&local);
     rig.core.workspace.record_session(&remote);

@@ -520,6 +520,23 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
         "{output:?}"
     );
 
+    // Throughput: the first delta publishes an estimate at once; each
+    // assistant message_end publishes the turn's count without a rate — m1's
+    // reported 7, then m2's estimate on top ("Done." ≈ 1 token).
+    let readings: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Throughput {
+                throughput: Some(t),
+            } => Some((t.tokens_per_second, t.output_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(readings.first(), Some(&(None, 2)), "{readings:?}");
+    let ends: Vec<_> = readings.iter().filter(|(rate, _)| rate.is_none()).collect();
+    assert_eq!(ends.last(), Some(&&(None, 8)), "{readings:?}");
+    assert!(readings.contains(&(None, 7)), "{readings:?}");
+
     // Two assistant messages → two journal boundaries; the toolResult
     // messages must NOT emit one.
     let completed = events

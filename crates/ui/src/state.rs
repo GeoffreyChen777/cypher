@@ -1098,6 +1098,7 @@ impl AppState {
             updated_at: status.updated_at,
             subagents: Vec::new(),
             context_usage: None,
+            throughput: None,
         };
         if let Some(existing) = self
             .sessions
@@ -3404,6 +3405,7 @@ mod tests {
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
             subagents: Vec::new(),
             context_usage: None,
+            throughput: None,
         }
     }
 

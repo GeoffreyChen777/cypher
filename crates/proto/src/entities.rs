@@ -302,6 +302,32 @@ pub struct Session {
     /// running turn slightly. `None` until the host has measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
+    /// Live output throughput of the running turn (pi `cypher.throughput.v1`
+    /// — the working trailer's tok/s). Host-local run state: only this
+    /// engine's own `WatchSessions` carries it, the registry row never does,
+    /// and a settled or newly started turn drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<Throughput>,
+}
+
+/// One output-throughput reading: an ESTIMATE made from the streamed deltas
+/// (text, thinking, tool-call arguments), calibrated against each finished
+/// message's reported output tokens. Never token accounting — nothing
+/// persists it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Throughput {
+    /// Output tokens per second over the last few seconds of streaming;
+    /// `None` while no message is streaming (a tool runs, the provider has
+    /// not answered yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_second: Option<u32>,
+    /// Output tokens of the turn so far: reported for finished messages,
+    /// estimated for the one still streaming.
+    pub output_tokens: u64,
+    /// When the host received the reading. A stream that stalls mid-message
+    /// publishes nothing, so readers age the rate out against this.
+    pub sampled_at: DateTime<Utc>,
 }
 
 /// Context-window occupancy: `used` tokens of a `size`-token window.

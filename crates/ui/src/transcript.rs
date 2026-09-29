@@ -1745,6 +1745,33 @@ pub fn format_elapsed(secs: i64) -> String {
     }
 }
 
+/// A throughput reading older than this has stopped describing the stream:
+/// the host publishes only while deltas arrive, so a stalled provider leaves
+/// the last rate standing.
+const THROUGHPUT_STALE_MS: i64 = 3_000;
+
+/// The working trailer's throughput tail: `↓ 3.4k tokens · 52 tok/s`. The
+/// rate shows only while fresh (a tool running or a stalled stream keeps just
+/// the count); nothing at all before the turn's first output token.
+pub fn throughput_label(
+    throughput: &cypher_proto::Throughput,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let fresh = now
+        .signed_duration_since(throughput.sampled_at)
+        .num_milliseconds()
+        <= THROUGHPUT_STALE_MS;
+    let rate = throughput.tokens_per_second.filter(|_| fresh);
+    if throughput.output_tokens == 0 && rate.is_none() {
+        return None;
+    }
+    let tokens = crate::context_ring::format_tokens(throughput.output_tokens);
+    Some(match rate {
+        Some(rate) => format!("↓ {tokens} tokens · {rate} tok/s"),
+        None => format!("↓ {tokens} tokens"),
+    })
+}
+
 /// Turns shorter than this carry no work rule: the label is a record of time
 /// spent, and sub-second work reads as noise ("Worked for 0s").
 const WORKED_MIN_SECS: i64 = 1;
@@ -3728,7 +3755,7 @@ impl Transcript {
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs, upload_percent) = {
+        let (sending, elapsed_secs, upload_percent, throughput) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
@@ -3777,7 +3804,16 @@ impl Transcript {
             let elapsed = turn_started
                 .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                 .unwrap_or(0);
-            (sending, elapsed, state.upload_progress_percent(&chat_id))
+            let throughput = state
+                .session_for(&chat_id)
+                .and_then(|s| s.throughput.as_ref())
+                .and_then(|t| throughput_label(t, now));
+            (
+                sending,
+                elapsed,
+                state.upload_progress_percent(&chat_id),
+                throughput,
+            )
         };
         let word = if let Some(percent) = upload_percent {
             format!("Uploading {percent}%")
@@ -3809,10 +3845,15 @@ impl Transcript {
                         .child(SharedString::from(format!("{word}…"))),
                 )
                 .when(upload_percent.is_none() && !sending, |el| {
+                    let elapsed = format_elapsed(elapsed_secs);
+                    let tail = match throughput {
+                        Some(throughput) => format!("{elapsed} · {throughput}"),
+                        None => elapsed,
+                    };
                     el.child(
                         div()
                             .text_color(theme.text_faint)
-                            .child(SharedString::from(format_elapsed(elapsed_secs))),
+                            .child(SharedString::from(tail)),
                     )
                 })
                 .into_any_element(),
@@ -7399,6 +7440,31 @@ mod tests {
         assert_eq!(format_elapsed(59), "59s");
         assert_eq!(format_elapsed(92), "1m 32s");
         assert_eq!(format_elapsed(-5), "0s");
+    }
+
+    #[test]
+    fn throughput_label_drops_a_stale_rate_but_keeps_the_count() {
+        let now = chrono::Utc::now();
+        let reading = |rate, tokens, age_ms| cypher_proto::Throughput {
+            tokens_per_second: rate,
+            output_tokens: tokens,
+            sampled_at: now - chrono::Duration::milliseconds(age_ms),
+        };
+        assert_eq!(
+            throughput_label(&reading(Some(52), 3_400, 400), now).as_deref(),
+            Some("↓ 3.4k tokens · 52 tok/s")
+        );
+        // A stalled stream: the last rate no longer describes anything.
+        assert_eq!(
+            throughput_label(&reading(Some(52), 3_400, 5_000), now).as_deref(),
+            Some("↓ 3.4k tokens")
+        );
+        // Between messages (a tool running) the host sends no rate at all.
+        assert_eq!(
+            throughput_label(&reading(None, 812, 100), now).as_deref(),
+            Some("↓ 812 tokens")
+        );
+        assert_eq!(throughput_label(&reading(None, 0, 100), now), None);
     }
 
     #[test]

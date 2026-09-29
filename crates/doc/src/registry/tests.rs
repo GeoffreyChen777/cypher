@@ -351,6 +351,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         updated_at: ts(3_500),
         subagents: Vec::new(),
         context_usage: None,
+        throughput: None,
     }
 }
 

@@ -2071,6 +2071,7 @@ mod tests {
             updated_at: Utc::now(),
             subagents: Vec::new(),
             context_usage: None,
+            throughput: None,
         }
     }
 

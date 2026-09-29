@@ -4,7 +4,9 @@
 //! Per-turn token accounting is excluded by design; the `Usage` agent event is kept as a
 //! harness-level passthrough (rate-limit meters), never persisted into docs. The one
 //! usage surface is the live context-window gauge ([`ContextUsage`]), which rides the
-//! engine's local session projection and is never written to a synced doc.
+//! engine's local session projection and is never written to a synced doc. The
+//! working trailer's tok/s ([`Throughput`]) is an estimate on the same local-only
+//! path, never persisted anywhere.
 
 pub mod agent;
 pub mod agent_prompt;
