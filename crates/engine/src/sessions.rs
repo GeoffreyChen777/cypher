@@ -1979,13 +1979,14 @@ async fn drive_run(
     // segment finalized Complete, status Idle, child and mailbox warm. A
     // false trip (the agent was quietly waiting on something invisible)
     // costs a status dip: the parked-resume path below re-arms Working the
-    // moment output flows again, and nothing is lost. `CYPHER_TURN_QUIESCE_MS`
-    // overrides the window; 0 disables.
+    // moment output flows again, and nothing is lost. Default 5min: long
+    // silent thinking with no reasoning events must not drop the spinner.
+    // `CYPHER_TURN_QUIESCE_MS` overrides the window; 0 disables.
     let quiesce_after: Option<std::time::Duration> =
         match cypher_env::var("TURN_QUIESCE_MS").and_then(|v| v.parse::<u64>().ok()) {
             Some(0) => None,
             Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            None => Some(std::time::Duration::from_secs(120)),
+            None => Some(std::time::Duration::from_secs(300)),
         };
     let mut last_stream_activity = tokio::time::Instant::now();
     // SELF-CONTINUED turns get a much SHORTER quiesce window. A turn the
@@ -1994,7 +1995,7 @@ async fn drive_run(
     // settle — verified in claude-agent-acp's autonomous-result lane, which
     // consumes the SDK's turn-end without emitting anything; codex shows
     // the same shape. The watchdog is that turn shape's ONLY settle path,
-    // so the default 120s window read as 2min of stuck-Working after every
+    // so the normal window (then 120s) read as 2min of stuck-Working after every
     // background notification (user report 2026-08-13). The in-flight
     // fold gate below still protects running tools; reasoning heartbeats
     // push the window during real thinking. `CYPHER_SELF_TURN_QUIESCE_MS`
