@@ -115,9 +115,10 @@ pub enum ChatEvent {
 /// Lock contract. The client never holds its internal state lock while
 /// calling a method that touches the document (`acknowledge_outbox`,
 /// `advance_cursor`, `apply_row`, `apply_checkpoint`, `load_outbox`,
-/// `contains_frontier`): exporting or importing a Loro doc runs its commit
-/// hooks synchronously on the calling thread, and the engine's local-update
-/// hook re-enters this client through [`ChatClient::enqueue_update`]. The
+/// `contains_frontier`, `coalesce_updates`): exporting or importing a Loro
+/// doc runs its commit hooks synchronously on the calling thread, and the
+/// engine's local-update hook re-enters this client through
+/// [`ChatClient::enqueue_update`]. The
 /// storage-only outbox methods (`enqueue_outbox`, `update_outbox`) MAY be
 /// called under that lock and therefore must never touch the document.
 pub trait ChatDocSink: Send + Sync + 'static {
@@ -129,6 +130,13 @@ pub trait ChatDocSink: Send + Sync + 'static {
     }
     fn update_outbox(&self, _batch_id: &str, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
+    }
+    /// One payload carrying exactly the ops of `older` followed by `newer`,
+    /// or `None` to keep them as separate batches. The default can only merge
+    /// self-contained updates; a sink backed by the live doc should re-export
+    /// the combined range ([`coalesce_from_doc`]) so streaming deltas merge.
+    fn coalesce_updates(&self, older: &[u8], newer: &[u8]) -> Option<Vec<u8>> {
+        merge_loro_updates(&[older.to_vec(), newer.to_vec()])
     }
     /// Persist the current document/cursor BEFORE retiring this exact batch.
     /// A failed commit leaves it pending for retry on either transport.
@@ -351,6 +359,50 @@ fn merge_loro_updates(updates: &[Vec<u8>]) -> Option<Vec<u8>> {
         }
     }
     doc.export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .ok()
+        .filter(|bytes| bytes.len() <= MAX_PUSH_BYTES)
+}
+
+/// Merge two consecutive update blobs by re-exporting their combined op range
+/// from `doc`, which must already contain both. Unlike [`merge_loro_updates`]
+/// this works for dependent deltas — every streaming commit in a chat that
+/// already has content — because the ops' causal history stays in `doc`.
+/// `None` when the ranges are not contiguous per peer (ops between them
+/// belong to another batch) or `doc` lacks any of them.
+pub fn coalesce_from_doc(doc: &loro::LoroDoc, older: &[u8], newer: &[u8]) -> Option<Vec<u8>> {
+    let older = loro::LoroDoc::decode_import_blob_meta(older, false).ok()?;
+    let newer = loro::LoroDoc::decode_import_blob_meta(newer, false).ok()?;
+    let range = |meta: &loro::ImportBlobMetadata, peer: &loro::PeerID| {
+        let end = meta.partial_end_vv.get(peer).copied().unwrap_or(0);
+        let start = meta.partial_start_vv.get(peer).copied().unwrap_or(0);
+        (end > start).then_some((start, end))
+    };
+    let mut peers: Vec<loro::PeerID> = older
+        .partial_end_vv
+        .keys()
+        .chain(newer.partial_end_vv.keys())
+        .copied()
+        .collect();
+    peers.sort_unstable();
+    peers.dedup();
+    let have = doc.oplog_vv();
+    let mut spans = Vec::with_capacity(peers.len());
+    for peer in peers {
+        let (start, end) = match (range(&older, &peer), range(&newer, &peer)) {
+            (Some(a), Some(b)) if a.1 >= b.0 && b.1 >= a.0 => (a.0.min(b.0), a.1.max(b.1)),
+            (Some(_), Some(_)) => return None,
+            (Some(r), None) | (None, Some(r)) => r,
+            (None, None) => continue,
+        };
+        if have.get(&peer).copied().unwrap_or(0) < end {
+            return None;
+        }
+        spans.push(loro::IdSpan::new(peer, start, end));
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    doc.export(loro::ExportMode::updates_in_range(spans))
         .ok()
         .filter(|bytes| bytes.len() <= MAX_PUSH_BYTES)
 }
@@ -709,31 +761,43 @@ impl ChatClient {
             let _ = self.events.send(ChatEvent::PushRejected);
             return;
         }
+        // Coalesce into the queue's unsent tail — also while the head is in
+        // flight, so the next push carries everything produced during one
+        // ACK round trip. Without this, every 120 ms stream commit became its
+        // own row, drained one per round trip, and peers fell further behind
+        // for as long as the model kept streaming. A sent batch is immutable.
+        let tail = lock(&self.shared)
+            .pending
+            .back()
+            .filter(|last| last.persisted && !last.sent)
+            .map(|last| (last.batch_id.clone(), last.bytes.clone()));
+        // Merging may export from the doc, so it runs outside `shared` (see
+        // the `ChatDocSink` lock contract); the actor may send the tail
+        // meanwhile, hence the re-check before replacing its payload.
+        if let Some((batch_id, old)) = tail
+            && let Some(merged) = self.sink.coalesce_updates(&old, &bytes)
+        {
+            let mut shared = lock(&self.shared);
+            if let Some(last) = shared.pending.back_mut()
+                && last.batch_id == batch_id
+                && !last.sent
+                && last.bytes == old
+                && self.sink.update_outbox(&batch_id, &merged).is_ok()
+            {
+                last.bytes = merged;
+                shared
+                    .flush_at
+                    .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
+                drop(shared);
+                let _ = self.nudge.try_send(());
+                return;
+            }
+        }
         {
             // The outbox writes below run under `shared`. That is allowed
             // only because they are storage-only (see the `ChatDocSink`
             // lock contract): nothing here may export or import the doc.
             let mut shared = lock(&self.shared);
-            // Once in-flight, the batch is immutable. Before that point we
-            // may replace its payload with a causal cumulative export.
-            if shared.in_flight.is_none()
-                && let Some(last) = shared.pending.back_mut()
-                && last.persisted
-                && !last.sent
-            {
-                let old = last.bytes.clone();
-                if let Some(merged) = merge_loro_updates(&[old, bytes.clone()])
-                    && self.sink.update_outbox(&last.batch_id, &merged).is_ok()
-                {
-                    last.bytes = merged;
-                    shared.flush_at.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + Duration::from_secs(2)
-                    });
-                    drop(shared);
-                    let _ = self.nudge.try_send(());
-                    return;
-                }
-            }
             let batch_id = uuid::Uuid::new_v4().to_string();
             let persisted = self.sink.enqueue_outbox(&batch_id, &bytes).is_ok();
             if !persisted {

@@ -401,6 +401,122 @@ fn coalescing_never_exports_an_update_with_unresolved_causal_history() {
     assert!(merge_loro_updates(&[second]).is_none());
 }
 
+/// A chat with content streaming one commit at a time: the peer already has
+/// `base`; each delta depends on the one before it.
+fn streaming_doc(commits: &[&str]) -> (loro::LoroDoc, Vec<u8>, Vec<Vec<u8>>) {
+    let doc = loro::LoroDoc::new();
+    doc.set_peer_id(7).unwrap();
+    let text = doc.get_text("text");
+    text.insert(0, "user prompt").unwrap();
+    doc.commit();
+    let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+    let mut deltas = Vec::new();
+    for chunk in commits {
+        let from = doc.oplog_vv();
+        text.insert(text.len_unicode(), chunk).unwrap();
+        doc.commit();
+        deltas.push(doc.export(loro::ExportMode::updates(&from)).unwrap());
+    }
+    (doc, base, deltas)
+}
+
+#[test]
+fn coalesce_from_doc_merges_dependent_streaming_deltas() {
+    let (doc, base, deltas) = streaming_doc(&[" a", " b", " c"]);
+    // The doc-free merge cannot do this — the regression that turned every
+    // stream commit into its own row.
+    assert!(merge_loro_updates(&deltas[..2]).is_none());
+
+    let first_two =
+        coalesce_from_doc(&doc, &deltas[0], &deltas[1]).expect("contiguous deltas merge");
+    let all = coalesce_from_doc(&doc, &first_two, &deltas[2]).expect("merged batch keeps growing");
+    let peer = loro::LoroDoc::from_snapshot(&base).unwrap();
+    peer.import(&all).unwrap();
+    assert_eq!(peer.get_text("text").to_string(), "user prompt a b c");
+
+    // Ops between the two ranges belong to another batch: never skip them.
+    assert!(coalesce_from_doc(&doc, &deltas[0], &deltas[2]).is_none());
+    // A doc missing the ops cannot vouch for them.
+    let stale = loro::LoroDoc::from_snapshot(&base).unwrap();
+    assert!(coalesce_from_doc(&stale, &deltas[0], &deltas[1]).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn commits_during_an_inflight_push_ride_the_next_push_as_one_batch() {
+    let (doc, base, deltas) = streaming_doc(&[" one", " two", " three", " four"]);
+    let sink = Arc::new(RecordingSink {
+        doc: Some(doc),
+        ..RecordingSink::default()
+    });
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let (first_tx, first_rx) = oneshot::channel::<Vec<u8>>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}), &[], vec![], false).await;
+        let first = expect_kind(&mut end, frame_type::PUSH).await;
+        first_tx.send(first.payload.clone()).unwrap();
+        release_rx.await.unwrap();
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":first.header["batchId"],"seq":1,"dup":false}),
+            &[],
+        )
+        .await;
+        let second = expect_kind(&mut end, frame_type::PUSH).await;
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":second.header["batchId"],"seq":2,"dup":false}),
+            &[],
+        )
+        .await;
+        (end, second.payload)
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "d",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+
+    client.enqueue_update(deltas[0].clone());
+    let first = first_rx.await.unwrap();
+    for delta in &deltas[1..] {
+        client.enqueue_update(delta.clone());
+    }
+    assert_eq!(
+        client.stats().pending_pushes,
+        2,
+        "in-flight head + one merged tail"
+    );
+    release_tx.send(()).unwrap();
+    let (mut end, second) = server.await.unwrap();
+
+    let peer = loro::LoroDoc::from_snapshot(&base).unwrap();
+    peer.import(&first).unwrap();
+    peer.import(&second).unwrap();
+    assert_eq!(
+        peer.get_text("text").to_string(),
+        "user prompt one two three four"
+    );
+    for _ in 0..100 {
+        if client.stats().pending_pushes == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(client.stats().pending_pushes, 0);
+    assert!(sink.load_outbox().unwrap().is_empty());
+    assert!(end.rx.try_recv().is_err(), "no third push");
+    client.shutdown().await;
+}
+
 // ── plumbing: linked pipes + scripted connector ─────────────────────────────
 
 struct ServerEnd {
@@ -446,6 +562,9 @@ struct RecordingSink {
     checkpoints: Mutex<Vec<(Vec<u8>, u64)>>,
     cursor_advances: Mutex<Vec<u64>>,
     frontier_contained: std::sync::atomic::AtomicBool,
+    /// Stand-in for the engine's live doc: when set, coalescing re-exports
+    /// from it like `EngineChatSink` does.
+    doc: Option<loro::LoroDoc>,
 }
 
 impl ChatDocSink for RecordingSink {
@@ -466,6 +585,21 @@ impl ChatDocSink for RecordingSink {
             rows.push((id.into(), bytes.into()));
         }
         Ok(())
+    }
+    fn update_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        let mut rows = lock(&self.outbox);
+        let row = rows
+            .iter_mut()
+            .find(|(key, _)| key == id)
+            .ok_or("no such batch")?;
+        row.1 = bytes.into();
+        Ok(())
+    }
+    fn coalesce_updates(&self, older: &[u8], newer: &[u8]) -> Option<Vec<u8>> {
+        match &self.doc {
+            Some(doc) => coalesce_from_doc(doc, older, newer),
+            None => merge_loro_updates(&[older.to_vec(), newer.to_vec()]),
+        }
     }
     fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
         if self.ack_fails.load(Ordering::SeqCst) {

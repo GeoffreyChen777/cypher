@@ -110,6 +110,11 @@ impl ChatDocSink for EngineChatSink {
             .map_err(|e| e.to_string())
     }
 
+    fn coalesce_updates(&self, older: &[u8], newer: &[u8]) -> Option<Vec<u8>> {
+        let doc = self.doc.upgrade()?;
+        cypher_sync::chat_client::coalesce_from_doc(doc.doc(), older, newer)
+    }
+
     fn acknowledge_outbox(&self, batch_id: &str, cursor: u64) -> Result<(), String> {
         let doc = self.doc.upgrade().ok_or("doc evicted")?;
         let snapshot = doc.export_snapshot().map_err(|e| e.to_string())?;
@@ -414,6 +419,42 @@ mod frontier_tests {
             !sink.contains_frontier(&encoded_empty),
             "an encoded-empty frontier is a vacuous claim"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_feed_updates_coalesce_through_the_live_doc() {
+        let (sink, doc, dir) = test_sink("coalesce");
+        let text = doc.doc().get_text("t");
+        text.insert(0, "prompt").expect("insert");
+        doc.doc().commit();
+        let base = doc
+            .doc()
+            .export(loro::ExportMode::Snapshot)
+            .expect("snapshot");
+        // The same blobs the chat2 feed pump hands to `enqueue_update`.
+        let feed = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let sub = doc.doc().subscribe_local_update(Box::new({
+            let feed = feed.clone();
+            move |bytes: &Vec<u8>| {
+                feed.lock().unwrap().push(bytes.clone());
+                true
+            }
+        }));
+        for chunk in [" one", " two", " three"] {
+            text.insert(text.len_unicode(), chunk).expect("insert");
+            doc.doc().commit();
+        }
+        drop(sub);
+        let feed = feed.lock().unwrap().clone();
+        assert_eq!(feed.len(), 3);
+        let merged = feed[1..].iter().fold(feed[0].clone(), |acc, next| {
+            sink.coalesce_updates(&acc, next)
+                .expect("stream commits coalesce")
+        });
+        let peer = loro::LoroDoc::from_snapshot(&base).expect("peer");
+        peer.import(&merged).expect("import");
+        assert_eq!(peer.get_text("t").to_string(), "prompt one two three");
         let _ = std::fs::remove_dir_all(dir);
     }
 
