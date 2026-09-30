@@ -1215,9 +1215,9 @@ impl Shell {
     /// A project card's single-line header: folder icon + prominent project
     /// name (the strongest type in the sidebar) on the left — followed by the
     /// branch when the card's lone checkout is inlined, or the hidden session
-    /// count when the card is collapsed — then the target-machine name and a
-    /// far-right presence dot (emerald online, faint offline). The machine
-    /// name only appears when the sidebar spans several hosts, and then only
+    /// count when the card is collapsed — then the target-machine name and,
+    /// only while the host can't be reached, a far-right slashed-cloud glyph.
+    /// The machine name only appears when the sidebar spans several hosts, and then only
     /// on hover unless the host is offline; a project with no sessions dims
     /// its title. The header toggles the whole card body (all branch/worktree
     /// groups + sessions) on left-press; real-space headers open the
@@ -1264,21 +1264,27 @@ impl Shell {
         let icon_tint =
             crate::space_style::space_color(group.color.as_deref(), theme).unwrap_or(theme.text);
         let pinned = group.pinned;
-        let presence = div()
-            .size(px(6.0))
-            .flex_none()
-            .rounded_full()
-            .when(!offline, |el| {
-                let emerald = theme.success;
-                el.bg(emerald.opacity(0.9)).shadow(vec![gpui::BoxShadow {
-                    color: emerald.opacity(0.45),
-                    offset: gpui::point(px(0.0), px(0.0)),
-                    blur_radius: px(4.0),
-                    spread_radius: px(0.0),
-                    inset: false,
-                }])
-            })
-            .when(offline, |el| el.bg(crate::theme::ink(0.22)));
+        // Online is the normal case and says nothing; only an unreachable
+        // host earns a mark.
+        let unreachable = offline.then(|| {
+            let hint: SharedString = if device.is_empty() {
+                "Device offline".into()
+            } else {
+                format!("{device} is offline").into()
+            };
+            div()
+                .id(SharedString::from(format!(
+                    "space-card-{}-offline",
+                    group.key
+                )))
+                .flex_none()
+                .child(
+                    icon(icons::CLOUD_OFF)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted.opacity(0.7)),
+                )
+                .tooltip(move |_, cx| cx.new(|_| super::FindTooltip(hint.clone())).into())
+        });
         let mut header = div()
             .id(SharedString::from(format!(
                 "space-card-{}-header",
@@ -1381,10 +1387,10 @@ impl Shell {
                         .child(device),
                 )
             })
-            .child(presence);
+            .children(unreachable);
         if let Some(space_id) = menu_space {
             // Real-space headers also get the trailing add plus (after the
-            // presence dot): a canvas explicitly targeted at the project's
+            // offline glyph): a canvas explicitly targeted at the project's
             // ordinary/current checkout — pinned `CurrentCheckout { branch:
             // None }` so no stale worktree draft survives. Synthetic cards
             // get neither the plus nor the menu.

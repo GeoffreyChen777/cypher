@@ -74,6 +74,9 @@ icon_assets![
     (GIT_WORKTREE, "git-worktree"),
     // Compact history-ref glyphs, drawn in the same linear style.
     (CLOUD, "cloud"),
+    // The same cloud, slashed (the stroke is masked open around the slash):
+    // a project's host machine can't be reached.
+    (CLOUD_OFF, "cloud-off"),
     (TAG, "tag"),
     // Solar `pin-linear` (the tilted pushpin), like the rest of the set.
     (PIN, "pin"),
