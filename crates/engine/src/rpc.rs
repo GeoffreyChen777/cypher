@@ -492,6 +492,24 @@ enum MutateParams {
         #[serde(default)]
         at: Option<i64>,
     },
+    /// Development builds only: upsert a fake peer device row (mock data for
+    /// judging multi-device / offline-host UI). `lastSeenAt` is epoch ms;
+    /// omitted = never seen, i.e. offline.
+    #[cfg(feature = "development")]
+    #[serde(rename_all = "camelCase")]
+    SeedDevice {
+        device_id: String,
+        name: String,
+        #[serde(default = "seed_device_platform")]
+        platform: String,
+        #[serde(default)]
+        last_seen_at: Option<i64>,
+    },
+}
+
+#[cfg(feature = "development")]
+fn seed_device_platform() -> String {
+    "linux".to_string()
 }
 
 pub struct EngineRpc {
@@ -1316,6 +1334,21 @@ impl EngineRpc {
                 .delete_device(&device_id)
                 .map_err(failed)
                 .map(drop),
+            #[cfg(feature = "development")]
+            MutateParams::SeedDevice {
+                device_id,
+                name,
+                platform,
+                last_seen_at,
+            } => self
+                .workspace
+                .seed_device(
+                    &device_id,
+                    &name,
+                    &platform,
+                    last_seen_at.and_then(chrono::DateTime::from_timestamp_millis),
+                )
+                .map_err(failed),
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

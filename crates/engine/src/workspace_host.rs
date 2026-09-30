@@ -1442,6 +1442,34 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    /// Development builds only: write a fake peer device row so the UI's
+    /// multi-device and offline-host states can be judged without a second
+    /// machine. No heartbeat ever arrives for it, so it reads as offline once
+    /// `last_seen_at` falls outside the UI's online window. Refuses THIS
+    /// device — its row is owned by `announce_device`.
+    #[cfg(feature = "development")]
+    pub fn seed_device(
+        &self,
+        device_id: &str,
+        name: &str,
+        platform: &str,
+        last_seen_at: Option<DateTime<Utc>>,
+    ) -> Result<(), EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other("cannot seed this device".into()));
+        }
+        Ok(self.mutate(|doc| {
+            doc.upsert_device(&Device {
+                id: device_id.to_string(),
+                name: name.to_string(),
+                platform: platform.to_string(),
+                last_seen_at,
+                created_at: Some(Utc::now()),
+                version: None,
+            })
+        })?)
+    }
+
     /// Unpair another device: tombstone its registry row so it drops out of
     /// sync. Refuses to delete THIS device — sign out is the way to leave.
     pub fn delete_device(&self, device_id: &str) -> Result<DeletedDevice, EngineError> {
@@ -2168,6 +2196,27 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "development")]
+    #[tokio::test]
+    async fn seeded_mock_device_is_a_never_seen_peer_and_cannot_replace_self() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "local-device", false);
+
+        host.seed_device("mock-box", "Studio Linux box", "linux", None)
+            .unwrap();
+        assert!(
+            host.seed_device("local-device", "Impostor", "linux", None)
+                .is_err()
+        );
+
+        let devices = host.read_devices().unwrap();
+        let mock = devices.iter().find(|d| d.id == "mock-box").unwrap();
+        assert_eq!(mock.name, "Studio Linux box");
+        assert_eq!(mock.last_seen_at, None);
+        let local = devices.iter().find(|d| d.id == "local-device").unwrap();
+        assert_eq!(local.name, "Local");
     }
 
     fn add_probe_peer(host: &WorkspaceHost) {
