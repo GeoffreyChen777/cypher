@@ -285,6 +285,15 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     );
 }
 
+/// Copy the latest transcript/diff text selection; false when there is none.
+fn copy_surface_selection(cx: &mut App) -> bool {
+    let Some(text) = crate::markdown::selection::selected_text() else {
+        return false;
+    };
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    true
+}
+
 /// The settings sections (feature-inventory §1.5 routes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -6287,7 +6296,25 @@ impl Render for Shell {
                 if let Some(sid) = this.focused_slot() {
                     this.open_find(sid, cx)
                 }
-            }));
+            }))
+            // Transcript/diff text takes no focus: a drag there leaves focus
+            // on this root, outside every input's Copy binding. Edit → Copy
+            // dispatches the action here; ⌘C arrives as a raw key (a global
+            // binding would pre-empt the terminal's own raw ⌘C copy).
+            .on_action(|_: &crate::composer::Copy, _, cx| {
+                copy_surface_selection(cx);
+            })
+            .on_key_down(|event: &gpui::KeyDownEvent, _, cx| {
+                let ks = &event.keystroke;
+                let m = &ks.modifiers;
+                if ks.key == "c"
+                    && (m.platform || m.control)
+                    && !(m.shift || m.alt || m.function)
+                    && copy_surface_selection(cx)
+                {
+                    cx.stop_propagation();
+                }
+            });
 
         let render_gate = if restart_required {
             GatePhase::Loading
