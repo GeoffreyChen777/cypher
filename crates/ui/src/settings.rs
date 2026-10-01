@@ -8,6 +8,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 pub mod accounts;
@@ -47,6 +49,16 @@ pub const TERMINAL_MIN_HEIGHT: f32 = 160.0;
 pub const TERMINAL_MAX_VH: f32 = 0.55;
 pub const TERMINAL_ABS_MAX_HEIGHT: f32 = 2000.0;
 pub const TERMINAL_DEFAULT_HEIGHT: f32 = 280.0;
+
+/// Sanity range for a persisted dock fraction (share of the session area).
+/// The pixel clamps (chat column, dock and terminal minimums) apply at
+/// render time; this only heals hand-edited files.
+pub const DOCK_FRACTION_MIN: f32 = 0.05;
+pub const DOCK_FRACTION_MAX: f32 = 0.95;
+
+/// At most this many sessions remember their dock sizes; the least recently
+/// changed entries go first.
+pub const SESSION_DOCKS_CAP: usize = 200;
 
 /// Debounce for settings writes after a drag/toggle.
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
@@ -99,11 +111,15 @@ pub struct UiSettings {
     /// Unread count on the Dock icon: sessions waiting on input, errored or
     /// finished-unseen (`AppState::attention_count`).
     pub dock_badge_enabled: bool,
+    /// Legacy global right dock width (px), from before per-session docks:
+    /// no longer written; the size of a session whose dock was never dragged
+    /// (see [`SessionDock`]).
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
     pub right_pane_open: bool,
+    /// Legacy global terminal height (px) — see [`Self::right_pane_width`].
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
@@ -132,6 +148,81 @@ pub struct UiSettings {
     /// Sidebar sort direction flipped from the sort's natural one (newest
     /// first for activity/date, A→Z for name/device).
     pub sidebar_sort_reversed: bool,
+    /// The main window's workspace layout (docs/workspace-layout.md,
+    /// decision 1). Deserialization repairs it; the shell prunes tabs of
+    /// chats that no longer exist once the first chats frame lands.
+    /// These three load leniently ([`lenient`], [`lenient_map`]): an
+    /// unreadable layout (a downgrade's unknown tab kind, a hand edit) is
+    /// dropped on its own instead of resetting every setting.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workspace: Option<crate::workspace::Workspace>,
+    /// Each project window's own layout, keyed by project (space) id.
+    #[serde(
+        default,
+        deserialize_with = "lenient_map",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub project_workspaces: HashMap<String, crate::workspace::Workspace>,
+    /// Per-session dock sizes and open flags, keyed by chat id (decision 7).
+    /// Bounded: see [`Self::remember_session_dock`].
+    #[serde(
+        default,
+        deserialize_with = "lenient_map",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub session_docks: HashMap<String, SessionDock>,
+}
+
+/// One session's docks: sizes as fractions of its session area (so a tile
+/// keeps its proportions when the layout changes), open flags, and when it
+/// last changed. A `None` size has never been dragged and falls back to the
+/// legacy global pixel size ([`UiSettings::right_pane_width`] /
+/// [`UiSettings::terminal_height`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionDock {
+    /// Right dock width / session area width.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<f32>,
+    /// Terminal dock height / session area height.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<f32>,
+    pub right_open: bool,
+    pub terminal_open: bool,
+    /// Unix milliseconds of the last change: picks the most recent entry
+    /// (a new session's default sizes) and the entries the cap evicts.
+    pub used_at: i64,
+}
+
+impl SessionDock {
+    /// The defaults for a session without an entry: the most recently used
+    /// sizes, docks closed (opening is always an explicit act).
+    pub fn seeded_from(latest: Option<&SessionDock>) -> Self {
+        Self {
+            right: latest.and_then(|d| d.right),
+            terminal: latest.and_then(|d| d.terminal),
+            ..Self::default()
+        }
+    }
+
+    /// Heal a loaded entry: fractions outside the sane range are clamped,
+    /// non-finite ones dropped (back to the legacy default).
+    pub fn clamped(mut self) -> Self {
+        self.right = self.right.and_then(clamp_fraction);
+        self.terminal = self.terminal.and_then(clamp_fraction);
+        self
+    }
+}
+
+/// A dock fraction clamped to the sane range; `None` when not finite.
+pub fn clamp_fraction(fraction: f32) -> Option<f32> {
+    fraction
+        .is_finite()
+        .then(|| fraction.clamp(DOCK_FRACTION_MIN, DOCK_FRACTION_MAX))
 }
 
 /// How the sidebar orders its project cards (and the sessions inside them).
@@ -200,6 +291,9 @@ impl Default for UiSettings {
             sidebar_sort: SidebarSort::Activity,
             sidebar_device_filter: None,
             sidebar_sort_reversed: false,
+            workspace: None,
+            project_workspaces: HashMap::new(),
+            session_docks: HashMap::new(),
         }
     }
 }
@@ -217,27 +311,90 @@ pub enum ShortcutId {
     NewSession,
     NextSession,
     PrevSession,
+    // Workspace layout (docs/workspace-layout.md).
+    SplitRight,
+    SplitDown,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    CloseTab,
+    ToggleZoom,
+}
+
+/// Rows of the Settings → Shortcuts table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutGroup {
+    General,
+    Workspace,
+}
+
+impl ShortcutGroup {
+    pub const ALL: [ShortcutGroup; 2] = [ShortcutGroup::General, ShortcutGroup::Workspace];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShortcutGroup::General => "General",
+            ShortcutGroup::Workspace => "Workspace",
+        }
+    }
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 6] = [
+    pub const ALL: [ShortcutId; 14] = [
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
+        ShortcutId::SplitRight,
+        ShortcutId::SplitDown,
+        ShortcutId::FocusLeft,
+        ShortcutId::FocusRight,
+        ShortcutId::FocusUp,
+        ShortcutId::FocusDown,
+        ShortcutId::CloseTab,
+        ShortcutId::ToggleZoom,
     ];
 
-    /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
+    /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim;
+    /// the workspace rows are ours).
     pub fn label(self) -> &'static str {
         match self {
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
-            ShortcutId::ToggleChanges => "Toggle right sidebar",
+            ShortcutId::ToggleChanges => "Toggle right dock",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
             ShortcutId::NextSession => "Next session",
             ShortcutId::PrevSession => "Previous session",
+            ShortcutId::SplitRight => "Split right",
+            ShortcutId::SplitDown => "Split down",
+            ShortcutId::FocusLeft => "Focus tile to the left",
+            ShortcutId::FocusRight => "Focus tile to the right",
+            ShortcutId::FocusUp => "Focus tile above",
+            ShortcutId::FocusDown => "Focus tile below",
+            ShortcutId::CloseTab => "Close tab",
+            ShortcutId::ToggleZoom => "Zoom tile",
+        }
+    }
+
+    pub fn group(self) -> ShortcutGroup {
+        match self {
+            ShortcutId::ToggleSidebar
+            | ShortcutId::ToggleChanges
+            | ShortcutId::ToggleTerminal
+            | ShortcutId::NewSession
+            | ShortcutId::NextSession
+            | ShortcutId::PrevSession => ShortcutGroup::General,
+            ShortcutId::SplitRight
+            | ShortcutId::SplitDown
+            | ShortcutId::FocusLeft
+            | ShortcutId::FocusRight
+            | ShortcutId::FocusUp
+            | ShortcutId::FocusDown
+            | ShortcutId::CloseTab
+            | ShortcutId::ToggleZoom => ShortcutGroup::Workspace,
         }
     }
 
@@ -269,12 +426,22 @@ impl ShortcutId {
             ShortcutId::NextSession => "mod-tab",
             ShortcutId::PrevSession if mac => "ctrl-shift-tab",
             ShortcutId::PrevSession => "mod-shift-tab",
+            ShortcutId::SplitRight => "mod-\\",
+            ShortcutId::SplitDown => "mod-shift-\\",
+            ShortcutId::FocusLeft => "mod-alt-left",
+            ShortcutId::FocusRight => "mod-alt-right",
+            ShortcutId::FocusUp => "mod-alt-up",
+            ShortcutId::FocusDown => "mod-alt-down",
+            // ⌘W stays Close Window.
+            ShortcutId::CloseTab => "mod-shift-w",
+            ShortcutId::ToggleZoom => "mod-shift-enter",
         }
     }
 }
 
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
-/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`].
+/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. Missing fields (a file
+/// from an older build) load their defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
@@ -284,18 +451,38 @@ pub struct KeymapConfig {
     pub new_session: String,
     pub next_session: String,
     pub prev_session: String,
+    pub split_right: String,
+    pub split_down: String,
+    pub focus_left: String,
+    pub focus_right: String,
+    pub focus_up: String,
+    pub focus_down: String,
+    pub close_tab: String,
+    pub toggle_zoom: String,
 }
 
 impl Default for KeymapConfig {
     fn default() -> Self {
-        Self {
-            toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
-            toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
-            toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
-            new_session: ShortcutId::NewSession.default_combo().into(),
-            next_session: ShortcutId::NextSession.default_combo().into(),
-            prev_session: ShortcutId::PrevSession.default_combo().into(),
+        let mut keymap = Self {
+            toggle_sidebar: String::new(),
+            toggle_changes: String::new(),
+            toggle_terminal: String::new(),
+            new_session: String::new(),
+            next_session: String::new(),
+            prev_session: String::new(),
+            split_right: String::new(),
+            split_down: String::new(),
+            focus_left: String::new(),
+            focus_right: String::new(),
+            focus_up: String::new(),
+            focus_down: String::new(),
+            close_tab: String::new(),
+            toggle_zoom: String::new(),
+        };
+        for id in ShortcutId::ALL {
+            keymap.reset(id);
         }
+        keymap
     }
 }
 
@@ -308,18 +495,35 @@ impl KeymapConfig {
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
+            ShortcutId::SplitRight => &self.split_right,
+            ShortcutId::SplitDown => &self.split_down,
+            ShortcutId::FocusLeft => &self.focus_left,
+            ShortcutId::FocusRight => &self.focus_right,
+            ShortcutId::FocusUp => &self.focus_up,
+            ShortcutId::FocusDown => &self.focus_down,
+            ShortcutId::CloseTab => &self.close_tab,
+            ShortcutId::ToggleZoom => &self.toggle_zoom,
         }
     }
 
     pub fn set(&mut self, id: ShortcutId, combo: String) {
-        match id {
-            ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
-            ShortcutId::ToggleChanges => self.toggle_changes = combo,
-            ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
-            ShortcutId::NewSession => self.new_session = combo,
-            ShortcutId::NextSession => self.next_session = combo,
-            ShortcutId::PrevSession => self.prev_session = combo,
-        }
+        let field = match id {
+            ShortcutId::ToggleSidebar => &mut self.toggle_sidebar,
+            ShortcutId::ToggleChanges => &mut self.toggle_changes,
+            ShortcutId::ToggleTerminal => &mut self.toggle_terminal,
+            ShortcutId::NewSession => &mut self.new_session,
+            ShortcutId::NextSession => &mut self.next_session,
+            ShortcutId::PrevSession => &mut self.prev_session,
+            ShortcutId::SplitRight => &mut self.split_right,
+            ShortcutId::SplitDown => &mut self.split_down,
+            ShortcutId::FocusLeft => &mut self.focus_left,
+            ShortcutId::FocusRight => &mut self.focus_right,
+            ShortcutId::FocusUp => &mut self.focus_up,
+            ShortcutId::FocusDown => &mut self.focus_down,
+            ShortcutId::CloseTab => &mut self.close_tab,
+            ShortcutId::ToggleZoom => &mut self.toggle_zoom,
+        };
+        *field = combo;
     }
 
     pub fn reset(&mut self, id: ShortcutId) {
@@ -456,7 +660,45 @@ impl UiSettings {
             TERMINAL_ABS_MAX_HEIGHT,
             TERMINAL_DEFAULT_HEIGHT,
         );
+        for dock in self.session_docks.values_mut() {
+            *dock = dock.clamped();
+        }
+        self.cap_session_docks();
         self
+    }
+
+    /// Record `chat_id`'s docks (stamped `now_ms`), keeping at most
+    /// [`SESSION_DOCKS_CAP`] entries.
+    pub fn remember_session_dock(&mut self, chat_id: &str, mut dock: SessionDock, now_ms: i64) {
+        dock.used_at = now_ms;
+        self.session_docks.insert(chat_id.to_string(), dock);
+        self.cap_session_docks();
+    }
+
+    /// The most recently changed session's docks.
+    pub fn latest_session_dock(&self) -> Option<&SessionDock> {
+        self.session_docks.values().max_by_key(|dock| dock.used_at)
+    }
+
+    /// Drop entries of sessions for which `keep` is false (deleted chats).
+    pub fn prune_session_docks(&mut self, keep: impl Fn(&str) -> bool) {
+        self.session_docks.retain(|chat_id, _| keep(chat_id));
+    }
+
+    fn cap_session_docks(&mut self) {
+        let excess = self.session_docks.len().saturating_sub(SESSION_DOCKS_CAP);
+        if excess == 0 {
+            return;
+        }
+        let mut by_age: Vec<(i64, String)> = self
+            .session_docks
+            .iter()
+            .map(|(id, dock)| (dock.used_at, id.clone()))
+            .collect();
+        by_age.sort();
+        for (_, id) in by_age.into_iter().take(excess) {
+            self.session_docks.remove(&id);
+        }
     }
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
@@ -487,6 +729,56 @@ impl UiSettings {
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join(FILE_NAME)
     }
+}
+
+/// Deserialize a field through [`serde_json::Value`], falling back to its
+/// default (with a warning) when the value doesn't fit the type.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            field = std::any::type_name::<T>(),
+            "ui-settings: dropping an unreadable entry"
+        );
+        T::default()
+    }))
+}
+
+/// [`lenient`] per entry of a string-keyed map: an unreadable entry (or a
+/// non-object map) is dropped, the rest survive.
+fn lenient_map<'de, D, T>(deserializer: D) -> Result<HashMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Object(entries) = value else {
+        tracing::warn!(
+            field = std::any::type_name::<T>(),
+            "ui-settings: dropping an unreadable map"
+        );
+        return Ok(HashMap::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|(key, value)| match serde_json::from_value(value) {
+            Ok(entry) => Some((key, entry)),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    key = %key,
+                    field = std::any::type_name::<T>(),
+                    "ui-settings: dropping an unreadable entry"
+                );
+                None
+            }
+        })
+        .collect())
 }
 
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
@@ -535,9 +827,148 @@ mod tests {
             sidebar_sort: SidebarSort::Device,
             sidebar_device_filter: Some("dev-1".into()),
             sidebar_sort_reversed: true,
+            workspace: Some(sample_workspace()),
+            project_workspaces: HashMap::from([("space-1".to_string(), sample_workspace())]),
+            session_docks: HashMap::from([(
+                "a".to_string(),
+                SessionDock {
+                    right: Some(0.4),
+                    terminal: None,
+                    right_open: true,
+                    terminal_open: false,
+                    used_at: 7,
+                },
+            )]),
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
+        let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        for key in [
+            "\"workspace\"",
+            "\"projectWorkspaces\"",
+            "\"sessionDocks\"",
+            "\"rightOpen\"",
+        ] {
+            assert!(json.contains(key), "{key} missing: {json}");
+        }
+    }
+
+    fn sample_workspace() -> crate::workspace::Workspace {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let mut ws = Workspace::new();
+        let first = ws.open(TabKey::session("a"));
+        ws.open_split(TabKey::session("b"), first, Edge::Right);
+        ws
+    }
+
+    /// Files from before the workspace layout load with no saved layout and
+    /// no per-session docks — and don't write the keys back until used.
+    #[test]
+    fn legacy_files_without_a_workspace_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "openTabs": ["a"], "rightPaneWidth": 700, "terminalHeight": 300}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.workspace, None);
+        assert!(loaded.project_workspaces.is_empty() && loaded.session_docks.is_empty());
+        assert_eq!(loaded.right_pane_width, 700.0, "legacy sizes still seed");
+        assert_eq!(loaded.terminal_height, 300.0);
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(
+            !json.contains("workspace") && !json.contains("sessionDocks"),
+            "{json}"
+        );
+    }
+
+    /// A layout of the wrong shape (a newer build's tab kind after a
+    /// downgrade, a negative index) drops only itself: every other setting
+    /// survives the load.
+    #[test]
+    fn a_type_invalid_workspace_drops_only_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{
+                "keymap": {"toggleSidebar": "mod-shift-s"},
+                "appearance": "light",
+                "workspace": {"root": {"group": 1}, "groups": {"1": {"tabs": [{"futureKind": 3}], "active": -1}}},
+                "projectWorkspaces": {"p": {"root": {"group": 1}, "groups": {"1": {"active": -2}}}, "q": {}},
+                "sessionDocks": {"a": {"right": "wide"}, "b": {"rightOpen": true, "usedAt": 5}}
+            }"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.keymap.toggle_sidebar, "mod-shift-s");
+        assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::Light);
+        assert_eq!(loaded.workspace, None);
+        assert_eq!(
+            loaded.project_workspaces.keys().collect::<Vec<_>>(),
+            vec!["q"]
+        );
+        assert_eq!(loaded.session_docks.keys().collect::<Vec<_>>(), vec!["b"]);
+        assert!(loaded.session_docks["b"].right_open);
+        // A map of the wrong type altogether is dropped the same way.
+        let loaded: UiSettings =
+            serde_json::from_str(r#"{"soundEnabled": false, "sessionDocks": [1, 2]}"#).unwrap();
+        assert!(!loaded.sound_enabled);
+        assert!(loaded.session_docks.is_empty());
+    }
+
+    #[test]
+    fn a_corrupt_saved_workspace_is_repaired_not_fatal() {
+        let loaded: UiSettings = serde_json::from_str(
+            r#"{"soundEnabled": false, "workspace": {"root": {"group": 9}, "groups": {}}}"#,
+        )
+        .unwrap();
+        assert!(!loaded.sound_enabled);
+        let ws = loaded.workspace.expect("repaired, not dropped");
+        assert_eq!(ws.group_count(), 1);
+        assert_eq!(ws.tabs().count(), 0);
+    }
+
+    #[test]
+    fn session_docks_heal_and_stay_bounded() {
+        let mut settings = UiSettings::default();
+        for i in 0..SESSION_DOCKS_CAP + 5 {
+            settings.remember_session_dock(&format!("c{i}"), SessionDock::default(), i as i64);
+        }
+        assert_eq!(settings.session_docks.len(), SESSION_DOCKS_CAP);
+        // The oldest went first; the newest is the default for new sessions.
+        assert!(!settings.session_docks.contains_key("c0"));
+        assert!(!settings.session_docks.contains_key("c4"));
+        assert!(settings.session_docks.contains_key("c5"));
+        let latest = settings.latest_session_dock().unwrap();
+        assert_eq!(latest.used_at, (SESSION_DOCKS_CAP + 4) as i64);
+        settings.prune_session_docks(|id| id == "c10");
+        assert_eq!(settings.session_docks.len(), 1);
+
+        let healed: UiSettings = serde_json::from_str(
+            r#"{"sessionDocks": {"a": {"right": 3.0, "terminal": -1.0, "terminalOpen": true}}}"#,
+        )
+        .unwrap();
+        let a = healed.clamped().session_docks["a"];
+        assert_eq!(a.right, Some(DOCK_FRACTION_MAX));
+        assert_eq!(a.terminal, Some(DOCK_FRACTION_MIN));
+        assert!(a.terminal_open && !a.right_open);
+        assert_eq!(clamp_fraction(f32::NAN), None);
+    }
+
+    #[test]
+    fn a_new_session_starts_from_the_latest_sizes_with_docks_closed() {
+        let latest = SessionDock {
+            right: Some(0.3),
+            terminal: Some(0.25),
+            right_open: true,
+            terminal_open: true,
+            used_at: 5,
+        };
+        let seeded = SessionDock::seeded_from(Some(&latest));
+        assert_eq!((seeded.right, seeded.terminal), (Some(0.3), Some(0.25)));
+        assert!(!seeded.right_open && !seeded.terminal_open);
+        assert_eq!(SessionDock::seeded_from(None), SessionDock::default());
     }
 
     /// The retired sidebar filter keeps its old `spaceFilter` JSON key — an
@@ -808,6 +1239,26 @@ mod tests {
             keymap.get(ShortcutId::NextSession),
             ShortcutId::NextSession.default_combo()
         );
+        // The workspace rows arrived later still: defaults, customizations
+        // intact.
+        assert_eq!(keymap.get(ShortcutId::SplitRight), "mod-\\");
+        assert_eq!(keymap.get(ShortcutId::ToggleZoom), "mod-shift-enter");
+    }
+
+    #[test]
+    fn workspace_shortcuts_are_grouped_and_round_trip() {
+        let workspace: Vec<ShortcutId> = ShortcutId::ALL
+            .into_iter()
+            .filter(|id| id.group() == ShortcutGroup::Workspace)
+            .collect();
+        assert_eq!(workspace.len(), 8);
+        assert_eq!(ShortcutId::NewSession.group(), ShortcutGroup::General);
+        let mut keymap = KeymapConfig::default();
+        keymap.set(ShortcutId::FocusLeft, "mod-shift-left".into());
+        let json = serde_json::to_string(&keymap).unwrap();
+        assert!(json.contains(r#""focusLeft":"mod-shift-left""#), "{json}");
+        let back: KeymapConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, keymap);
     }
 
     #[test]

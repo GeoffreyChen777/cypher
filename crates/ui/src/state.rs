@@ -17,13 +17,15 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use gpui::{App, AppContext, Context, Entity, Task};
+use gpui::{App, AppContext, Context, Entity, Subscription, Task, WeakEntity};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
@@ -716,6 +718,11 @@ pub struct AppState {
     /// pre-sync lists.
     pub chats_synced: bool,
     pub spaces_synced: bool,
+    /// Bumped per applied chats frame. A session context mirrors it and
+    /// heals a vanished selection only when it advances — like
+    /// [`Self::apply_chats`], never on an unrelated notify (a canvas tile
+    /// selects its minted chat before the row's frame lands).
+    chats_generation: u64,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// Durable command ledger of the selected chat (WatchDocCommands): the
@@ -728,8 +735,11 @@ pub struct AppState {
     /// before the ledger frame carrying its Steer command arrives.
     local_steers: HashSet<String>,
     /// Send-in-flight overlay per chat id: a queued doc command the host
-    /// hasn't executed yet (see [`Self::begin_pending_send`]).
-    pending_sends: HashMap<String, PendingSend>,
+    /// hasn't executed yet (see [`Self::begin_pending_send`]). Shared between
+    /// a main state and its session contexts ([`Self::new_session_context`])
+    /// so a send from any tile drives the main sidebar's dot and chime gate;
+    /// a project window keeps its own copy.
+    pending_sends: Rc<RefCell<HashMap<String, PendingSend>>>,
     upload_progress: Option<UploadProgress>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
@@ -748,6 +758,20 @@ pub struct AppState {
     commands_task: Option<Task<()>>,
     /// Which projects this state's window lists (see [`ProjectScope`]).
     scope: ProjectScope,
+    /// Whether `select_chat` subscribes the selected chat's transcript and
+    /// command ledger. Off on a main state whose session tiles own the
+    /// transcripts ("lists-only": the selection only drives the sidebar).
+    transcript_watches: bool,
+    /// Session context: the main state this one mirrors lists from and
+    /// forwards seen / config writes to ([`Self::new_session_context`]).
+    parent: Option<WeakEntity<AppState>>,
+    /// Session context: the observation copying `parent`'s lists on each
+    /// notify. Dropped with the context.
+    mirror: Option<Subscription>,
+    /// Bumped whenever what a transcript view renders may have changed
+    /// (transcript, echoes, command ledger, steers, selection) — views gate
+    /// their row rebuild on it ([`Self::transcript_revision`]).
+    transcript_rev: u64,
 }
 
 /// Which projects a window lists. The main window lists every project except
@@ -940,7 +964,7 @@ impl AppState {
             commands: Vec::new(),
             echoes: HashMap::new(),
             local_steers: HashSet::new(),
-            pending_sends: HashMap::new(),
+            pending_sends: Rc::default(),
             upload_progress: None,
             local_device_id: None,
             update: None,
@@ -953,7 +977,12 @@ impl AppState {
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            chats_generation: 0,
             scope: ProjectScope::default(),
+            transcript_watches: true,
+            parent: None,
+            mirror: None,
+            transcript_rev: 0,
         }
     }
 
@@ -998,12 +1027,15 @@ impl AppState {
             .filter(|(id, _)| in_project(id))
             .map(|(id, echoes)| (id.clone(), echoes.clone()))
             .collect();
-        seed.pending_sends = m
-            .pending_sends
-            .iter()
-            .filter(|(id, _)| in_project(id))
-            .map(|(id, send)| (id.clone(), send.clone()))
-            .collect();
+        // A copy, not the shared map: the window runs its own watches.
+        seed.pending_sends = Rc::new(RefCell::new(
+            m.pending_sends
+                .borrow()
+                .iter()
+                .filter(|(id, _)| in_project(id))
+                .map(|(id, send)| (id.clone(), send.clone()))
+                .collect(),
+        ));
         seed.local_steers = m.local_steers.clone();
         seed.selected_space = Some(space.id.clone());
         seed.selected_device = Some(space.device_id.clone());
@@ -1020,6 +1052,177 @@ impl AppState {
             }
         });
         Some(state)
+    }
+
+    /// A session context: a secondary [`AppState`] pinned to one session so
+    /// several sessions render side by side, each through the unchanged
+    /// `Transcript` / `Composer` / `Changes` / `FilesPanel` /
+    /// `TerminalPanel` (which read `selected_chat`, `transcript`, …).
+    /// `chat_id: None` is a new-session canvas tile: it starts from `main`'s
+    /// project / device picks, and its first send selects the new chat here.
+    ///
+    /// It runs no list watches of its own: it MIRRORS `main` (engine,
+    /// connection, auth, devices, spaces, chats, sessions, …) on every
+    /// notify, and only subscribes its own selected chat's transcript and
+    /// ledger. The send-in-flight overlay is shared with `main`; seen marks
+    /// and optimistic config writes are forwarded to it
+    /// ([`Self::mark_chat_seen`], [`Self::set_chat_config_optimistic`]).
+    pub fn new_session_context(
+        main: &Entity<AppState>,
+        chat_id: Option<String>,
+        cx: &mut App,
+    ) -> Entity<AppState> {
+        let m = main.read(cx);
+        let mut seed = AppState::new();
+        seed.parent = Some(main.downgrade());
+        seed.pending_sends = m.pending_sends.clone();
+        seed.engine = m.engine.clone();
+        seed.mirror_lists(m);
+        seed.selected_space = m.selected_space.clone();
+        seed.selected_device = m.selected_device.clone();
+        seed.no_project = m.no_project;
+        seed.scratch_pending = chat_id.is_none() && m.scratch_pending;
+        seed.auto_selected = true;
+        if let Some(id) = chat_id.as_deref()
+            && let Some(echoes) = m.echoes.get(id)
+        {
+            seed.echoes.insert(id.to_string(), echoes.clone());
+        }
+        seed.local_steers = m.local_steers.clone();
+        let state = cx.new(|cx| {
+            seed.mirror = Some(cx.observe(main, |this: &mut AppState, main, cx| {
+                this.mirror_from_parent(&main, cx);
+            }));
+            seed
+        });
+        if chat_id.is_some() {
+            state.update(cx, |s, cx| s.select_chat(chat_id, cx));
+        }
+        state
+    }
+
+    /// The main state a session context mirrors (`None` elsewhere, or once
+    /// the parent is gone).
+    pub fn parent(&self) -> Option<Entity<AppState>> {
+        self.parent.as_ref()?.upgrade()
+    }
+
+    /// Copy the synced lists from `main` (session contexts), then heal a
+    /// selection that vanished the same way the watches' reducers do.
+    /// Returns whether anything changed (unchanged lists aren't re-cloned).
+    fn mirror_lists(&mut self, main: &AppState) -> bool {
+        let mut changed = false;
+        macro_rules! mirror {
+            ($($field:ident),* $(,)?) => {$(
+                if self.$field != main.$field {
+                    self.$field = main.$field.clone();
+                    changed = true;
+                }
+            )*};
+        }
+        mirror!(
+            connection,
+            workspace_scope,
+            auth,
+            devices,
+            spaces,
+            chats,
+            sessions,
+            local_device_id,
+            data_dir,
+            update,
+            pi_update,
+            chats_synced,
+            spaces_synced,
+            scope,
+        );
+        // Only a chats frame judges the selection (see `chats_generation`);
+        // pre-sync (or mid runtime replacement) lists are empty, not
+        // authoritative.
+        let chats_frame = self.chats_generation != main.chats_generation;
+        self.chats_generation = main.chats_generation;
+        if self.chats_synced && chats_frame && self.drop_vanished_chat() {
+            changed = true;
+        }
+        if self.spaces_synced {
+            let before = (
+                self.selected_space.clone(),
+                self.selected_device.clone(),
+                self.no_project,
+            );
+            self.heal_space_selection();
+            changed |= before
+                != (
+                    self.selected_space.clone(),
+                    self.selected_device.clone(),
+                    self.no_project,
+                );
+        }
+        changed
+    }
+
+    /// The mirror observation: lists, plus the engine — a runtime
+    /// replacement on `main` re-aims (or drops) this context's watches.
+    /// Notifies only when something was mirrored: every main notify reaches
+    /// every tile's context, and a no-op notify re-rendered them all.
+    fn mirror_from_parent(&mut self, main: &Entity<AppState>, cx: &mut Context<Self>) {
+        let (mut changed, engine) = {
+            let main = main.read(cx);
+            (self.mirror_lists(main), main.engine.clone())
+        };
+        let same_engine = match (&self.engine, &engine) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a.inner, &b.inner),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_engine {
+            self.engine = engine;
+            self.transcript.clear();
+            self.commands.clear();
+            self.transcript_task = None;
+            self.commands_task = None;
+            self.bump_transcript();
+            self.spawn_transcript_watches(cx);
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A closed tab's context kept alive only by a parked terminal panel
+    /// (its PTYs outlive the tab): stop mirroring `main` and drop the
+    /// transcript watches — nothing renders from it until the panel is
+    /// re-bound to a new tile's context.
+    pub fn park_session_context(&mut self) {
+        self.mirror = None;
+        self.transcript_task = None;
+        self.commands_task = None;
+        self.transcript.clear();
+        self.commands.clear();
+        self.bump_transcript();
+    }
+
+    /// See [`Self::chats_generation`]: advances once per applied chats
+    /// frame (never on an optimistic insert).
+    pub fn chats_generation(&self) -> u64 {
+        self.chats_generation
+    }
+
+    /// See [`Self::transcript_rev`].
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_rev
+    }
+
+    fn bump_transcript(&mut self) {
+        self.transcript_rev = self.transcript_rev.wrapping_add(1);
+    }
+
+    /// Replace the selected chat's transcript wholesale (a promoted side
+    /// chat's handoff seeds the new tile before its doc watch lands).
+    pub fn set_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
+        self.transcript = entries;
+        self.bump_transcript();
     }
 
     pub fn project_scope(&self) -> &ProjectScope {
@@ -1067,16 +1270,31 @@ impl AppState {
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
+        self.chats_generation = self.chats_generation.wrapping_add(1);
+        self.drop_vanished_chat();
+    }
+
+    /// Selected chat vanished (deleted elsewhere): drop selection +
+    /// transcript. A chat with a send in flight is kept: a canvas's first
+    /// send selects the client-minted id before the row's chats frame lands,
+    /// and an unrelated frame in that gap must not drop it (the tile would
+    /// close mid-send). The overlay is TTL-bounded, so a send that never
+    /// creates the row still lets the selection go. Returns whether it
+    /// dropped.
+    fn drop_vanished_chat(&mut self) -> bool {
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
+            && !self.send_pending(selected, Utc::now())
         {
-            // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.selected_chat = None;
             self.transcript.clear();
             self.commands.clear();
             self.transcript_task = None;
             self.commands_task = None;
+            self.bump_transcript();
+            return true;
         }
+        false
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) {
@@ -1203,6 +1421,10 @@ impl AppState {
         sort_spaces(&mut spaces);
         self.spaces = spaces;
         self.spaces_synced = true;
+        self.heal_space_selection();
+    }
+
+    fn heal_space_selection(&mut self) {
         // Heal a vanished selection (project deleted elsewhere): fall back to
         // the first project; its chats died with it, so a matching chat
         // selection is healed by the accompanying chats frame (`apply_chats`).
@@ -1229,6 +1451,24 @@ impl AppState {
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
+    }
+
+    /// [`Self::apply_chat_config`] from a view: a session context stamps its
+    /// parent too, or the next mirror copy would revert the chips until the
+    /// engine's chats frame lands. Must not run inside the parent's update.
+    pub fn set_chat_config_optimistic(
+        &mut self,
+        chat_id: &str,
+        config: cypher_proto::ChatConfig,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(parent) = self.parent() {
+            parent.update(cx, |parent, cx| {
+                parent.set_chat_config_optimistic(chat_id, config.clone(), cx);
+            });
+        }
+        self.apply_chat_config(chat_id, config);
+        cx.notify();
     }
 
     pub fn apply_devices(&mut self, mut devices: Vec<Device>) {
@@ -1299,6 +1539,7 @@ impl AppState {
             echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
         }
         self.transcript = entries;
+        self.bump_transcript();
         self.ack_pending_send_from_transcript();
     }
 
@@ -1308,6 +1549,8 @@ impl AppState {
         &mut self,
         frame: TranscriptFrame,
     ) -> Result<(), TranscriptDesync> {
+        // Bumped even on a desync: the partially applied copy renders.
+        self.bump_transcript();
         cypher_doc::apply_transcript_frame(&mut self.transcript, frame)?;
         if let Some(chat_id) = self.selected_chat.as_deref()
             && let Some(echoes) = self.echoes.get_mut(chat_id)
@@ -1325,11 +1568,13 @@ impl AppState {
         if !echoes.iter().any(|e| e.id == entry.id) {
             echoes.push(entry);
         }
+        self.bump_transcript();
     }
 
     /// Mark a message id as sent via Steer (see [`Self::steer_message_ids`]).
     pub fn mark_steer(&mut self, message_id: &str) {
         self.local_steers.insert(message_id.to_string());
+        self.bump_transcript();
     }
 
     /// User messages of the selected chat that were steers: the explicit
@@ -1355,6 +1600,7 @@ impl AppState {
         if let Some(echoes) = self.echoes.get_mut(chat_id) {
             echoes.retain(|e| e.id != message_id);
         }
+        self.bump_transcript();
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
@@ -1364,7 +1610,7 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
-        self.pending_sends.insert(
+        self.pending_sends.borrow_mut().insert(
             chat_id.to_string(),
             PendingSend {
                 message_id: message_id.to_string(),
@@ -1377,18 +1623,18 @@ impl AppState {
     /// removes the overlay this message started: a quick resend must not lose
     /// its own overlay to the first send's failure cleanup.
     pub fn end_pending_send(&mut self, chat_id: &str, message_id: &str) {
-        if self
-            .pending_sends
+        let mut pending = self.pending_sends.borrow_mut();
+        if pending
             .get(chat_id)
             .is_some_and(|p| p.message_id == message_id)
         {
-            self.pending_sends.remove(chat_id);
+            pending.remove(chat_id);
         }
     }
 
     /// Is a send still in flight for this chat (unacked, inside the TTL)?
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
+        self.pending_sends.borrow().get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
         })
     }
@@ -1400,6 +1646,7 @@ impl AppState {
     /// half-hour mark.
     pub fn pending_send_started(&self, chat_id: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.pending_sends
+            .borrow()
             .get(chat_id)
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
@@ -1411,11 +1658,15 @@ impl AppState {
     /// up in the transcript (it writes the message before — causally with —
     /// the Working status; sessions.rs dispatch paths).
     fn ack_pending_send_from_transcript(&mut self) {
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
-            && self.transcript.iter().any(|e| e.id == pending.message_id)
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        let mut pending = self.pending_sends.borrow_mut();
+        if pending
+            .get(chat_id)
+            .is_some_and(|p| self.transcript.iter().any(|e| e.id == p.message_id))
         {
-            self.pending_sends.remove(chat_id);
+            pending.remove(chat_id);
         }
     }
 
@@ -1435,12 +1686,15 @@ impl AppState {
     /// row + Retry take over.
     pub fn apply_commands(&mut self, commands: Vec<SessionCommandEntry>) {
         self.commands = commands;
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
-            && command_send_status(&self.commands, &pending.message_id)
-                == Some(CommandSendStatus::Failed)
-        {
-            self.pending_sends.remove(chat_id);
+        self.bump_transcript();
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        let mut pending = self.pending_sends.borrow_mut();
+        if pending.get(chat_id).is_some_and(|p| {
+            command_send_status(&self.commands, &p.message_id) == Some(CommandSendStatus::Failed)
+        }) {
+            pending.remove(chat_id);
         }
     }
 
@@ -1948,7 +2202,8 @@ impl AppState {
         self.transcript.clear();
         self.commands.clear();
         self.echoes.clear();
-        self.pending_sends.clear();
+        self.bump_transcript();
+        self.pending_sends.borrow_mut().clear();
         self.upload_progress = None;
         self.local_device_id = None;
         self.update = None;
@@ -2046,12 +2301,43 @@ impl AppState {
         // data profile they reached before they are allowed to render Ready.
         self.connection = ConnectionStatus::Ready;
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
-        if let Some(chat_id) = self.selected_chat.clone() {
+        self.spawn_transcript_watches(cx);
+        cx.notify();
+    }
+
+    /// Subscribe the selected chat's transcript + ledger (when this state
+    /// owns transcripts and has an engine). Callers drop the old tasks.
+    fn spawn_transcript_watches(&mut self, cx: &mut Context<Self>) {
+        if !self.transcript_watches {
+            return;
+        }
+        if let (Some(chat_id), Some(handle)) = (self.selected_chat.clone(), self.engine.clone()) {
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             self.commands_task = Some(spawn_commands_watch(cx, handle, chat_id));
         }
+    }
+
+    /// Lists-only mode (`false`): the selection keeps driving the sidebar,
+    /// space and seen marks, but this state subscribes no transcript — the
+    /// session tiles' contexts own them. Switching drops or re-subscribes
+    /// the current selection's watches.
+    pub fn set_transcript_watches(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.transcript_watches == on {
+            return;
+        }
+        self.transcript_watches = on;
+        self.transcript.clear();
+        self.commands.clear();
+        self.bump_transcript();
+        self.transcript_task = None;
+        self.commands_task = None;
+        self.spawn_transcript_watches(cx);
         cx.notify();
+    }
+
+    pub fn transcript_watches(&self) -> bool {
+        self.transcript_watches
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
@@ -2070,6 +2356,7 @@ impl AppState {
         self.auto_selected = true;
         self.transcript.clear();
         self.commands.clear();
+        self.bump_transcript();
         self.transcript_task = None;
         self.commands_task = None;
         if let Some(id) = chat_id.as_deref() {
@@ -2090,11 +2377,7 @@ impl AppState {
             }
             self.mark_chat_seen(id, cx);
         }
-        if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
-            self.transcript_task =
-                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
-            self.commands_task = Some(spawn_commands_watch(cx, handle, chat_id));
-        }
+        self.spawn_transcript_watches(cx);
         cx.notify();
     }
 
@@ -2122,9 +2405,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// Synced seen marker: only fires when the chat is currently unseen
-    /// (idempotence — no mutate spam), stamps the local row optimistically so
-    /// the LWW round-trip is invisible, and fire-and-forgets the mutate.
     /// Window-focus liveness sweep: ask the engine to probe every open room
     /// (workspace + chat docs). Fire-and-forget; each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so spamming is harmless.
@@ -2168,15 +2448,30 @@ impl AppState {
         .detach();
     }
 
+    /// Synced seen marker: only fires when the chat is currently unseen
+    /// (idempotence — no mutate spam), stamps the local row optimistically so
+    /// the LWW round-trip is invisible, and fire-and-forgets the mutate.
+    ///
+    /// A session context stamps its own row and forwards to its parent,
+    /// which owns the mutate — one RPC, and the sidebar badge clears at
+    /// once instead of after the next mirror copy. Must not run inside the
+    /// parent's update.
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
-            return;
+        let stamped = match self.chats.iter_mut().find(|c| c.id == chat_id) {
+            Some(chat) if chat.unseen() => {
+                chat.last_seen_at = Some(Utc::now());
+                cx.notify();
+                true
+            }
+            _ => false,
         };
-        if !chat.unseen() {
+        if let Some(parent) = self.parent() {
+            parent.update(cx, |parent, cx| parent.mark_chat_seen(chat_id, cx));
             return;
         }
-        chat.last_seen_at = Some(Utc::now());
-        cx.notify();
+        if !stamped {
+            return;
+        }
         let Some(handle) = self.engine.clone() else {
             return;
         };
@@ -3503,6 +3798,76 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_minted_by_a_send_survives_frames_before_its_row() {
+        // A canvas's first send selects the client-minted id before the
+        // chats frame carrying its row lands (bug: the tab closed mid-send).
+        let mut s = AppState::new();
+        s.apply_chats(vec![chat("a", 0, None)]);
+        s.selected_chat = Some("new".into());
+        s.begin_pending_send("new", "m1", Utc::now());
+        s.apply_chats(vec![chat("a", 0, None)]);
+        assert_eq!(s.selected_chat.as_deref(), Some("new"));
+        // The row arrives: nothing to heal.
+        s.apply_chats(vec![chat("a", 0, None), chat("new", 1, None)]);
+        assert_eq!(s.selected_chat.as_deref(), Some("new"));
+        // Without a send in flight a vanished chat still drops.
+        s.end_pending_send("new", "m1");
+        s.apply_chats(vec![chat("a", 0, None)]);
+        assert_eq!(s.selected_chat, None);
+    }
+
+    #[test]
+    fn a_stale_send_no_longer_holds_a_vanished_selection() {
+        let mut s = AppState::new();
+        s.selected_chat = Some("new".into());
+        let long_ago = Utc::now() - TimeDelta::milliseconds(PENDING_SEND_TTL_MS + 1);
+        s.begin_pending_send("new", "m1", long_ago);
+        s.apply_chats(vec![chat("a", 0, None)]);
+        assert_eq!(s.selected_chat, None);
+    }
+
+    #[test]
+    fn mirroring_unchanged_lists_reports_no_change() {
+        let mut main = AppState::new();
+        main.apply_chats(vec![chat("a", 0, None)]);
+        let mut context = AppState::new();
+        assert!(context.mirror_lists(&main), "first mirror copies");
+        assert!(!context.mirror_lists(&main), "same lists: no notify");
+        main.apply_sessions(vec![]);
+        assert!(!context.mirror_lists(&main));
+        main.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
+        assert!(context.mirror_lists(&main), "a chats frame mirrors");
+        assert_eq!(context.chats.len(), 2);
+    }
+
+    #[test]
+    fn transcript_revision_tracks_what_a_transcript_renders() {
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        let mut last = s.transcript_revision();
+        let mut bumped = |s: &AppState| {
+            let now = s.transcript_revision();
+            let changed = now != last;
+            last = now;
+            changed
+        };
+        s.apply_transcript(vec![user_entry("m1")]);
+        assert!(bumped(&s));
+        s.push_echo("c", user_entry("m2"));
+        assert!(bumped(&s));
+        s.mark_steer("m2");
+        assert!(bumped(&s));
+        s.apply_commands(Vec::new());
+        assert!(bumped(&s));
+        s.remove_echo("c", "m2");
+        assert!(bumped(&s));
+        // List-only changes leave it alone.
+        s.apply_sessions(vec![]);
+        s.apply_chats(vec![chat("c", 0, None)]);
+        assert!(!bumped(&s));
+    }
+
+    #[test]
     fn send_failure_cleanup_only_ends_its_own_overlay() {
         let now = Utc::now();
         let mut s = AppState::new();
@@ -4218,6 +4583,243 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    /// A backend whose RPC server never runs (an undriven current-thread
+    /// runtime): watches can be spawned but never deliver.
+    struct IdleEngine(RpcClient);
+
+    #[async_trait]
+    impl EngineBackend for IdleEngine {
+        fn client(&self) -> &RpcClient {
+            &self.0
+        }
+        fn mode(&self) -> EngineMode {
+            EngineMode::InProcess
+        }
+        async fn shutdown(&self) {}
+    }
+
+    fn idle_engine(rt: &tokio::runtime::Runtime) -> EngineHandle {
+        let _guard = rt.enter();
+        EngineHandle {
+            inner: Arc::new(IdleEngine(memory_client(Arc::new(LegacyIdentityRpc)))),
+            engine_info: EngineInfo {
+                device_id: "dev".into(),
+                workspace_scope: WorkspaceScope::Local,
+            },
+            deferred_state: None,
+        }
+    }
+
+    fn idle_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+    }
+
+    fn chat_ids(state: &AppState) -> Vec<&str> {
+        state.chats.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[gpui::test]
+    fn session_context_mirrors_main_lists(cx: &mut gpui::TestAppContext) {
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, _| {
+            m.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)])
+        });
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, Some("a".into()), cx));
+        ctx.read_with(cx, |c, _| {
+            assert_eq!(c.selected_chat.as_deref(), Some("a"));
+            assert_eq!(chat_ids(c), ["b", "a"]);
+            assert!(c.parent().is_some());
+        });
+
+        main.update(cx, |m, cx| {
+            m.apply_chats(vec![
+                chat("a", 0, None),
+                chat("b", 1, None),
+                chat("c", 2, None),
+            ]);
+            m.sessions = vec![session("c", SessionStatus::Working, 0, Utc::now())];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ctx.read_with(cx, |c, _| {
+            assert_eq!(chat_ids(c), ["c", "b", "a"]);
+            assert_eq!(c.sessions.len(), 1);
+        });
+
+        // Deleted elsewhere: the tile's selection goes the same way
+        // `apply_chats` drops it.
+        main.update(cx, |m, cx| {
+            m.apply_chats(vec![chat("b", 1, None)]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ctx.read_with(cx, |c, _| assert_eq!(c.selected_chat, None));
+    }
+
+    #[gpui::test]
+    fn session_context_keeps_its_own_selection(cx: &mut gpui::TestAppContext) {
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, _| {
+            m.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)])
+        });
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, Some("a".into()), cx));
+        main.update(cx, |m, cx| m.select_chat(Some("b".into()), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            main.read_with(cx, |m, _| m.selected_chat.clone())
+                .as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            ctx.read_with(cx, |c, _| c.selected_chat.clone()).as_deref(),
+            Some("a")
+        );
+    }
+
+    #[gpui::test]
+    fn session_context_shares_the_pending_send_overlay(cx: &mut gpui::TestAppContext) {
+        let now = Utc::now();
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, _| m.apply_chats(vec![chat("a", 0, None)]));
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, Some("a".into()), cx));
+        ctx.update(cx, |c, _| c.begin_pending_send("a", "m1", now));
+        main.read_with(cx, |m, _| {
+            assert!(m.send_pending("a", now));
+            assert_eq!(m.indicator_for("a", now), Indicator::Working);
+        });
+        // The tile's transcript acks it for everyone.
+        ctx.update(cx, |c, _| c.apply_transcript(vec![user_entry("m1")]));
+        main.read_with(cx, |m, _| {
+            assert!(!m.send_pending("a", now));
+            assert_eq!(m.indicator_for("a", now), Indicator::None);
+        });
+    }
+
+    #[gpui::test]
+    fn session_context_forwards_config_and_seen_to_main(cx: &mut gpui::TestAppContext) {
+        let main = cx.new(|_| AppState::new());
+        // Unseen activity on "a".
+        main.update(cx, |m, _| m.apply_chats(vec![chat("a", 0, Some(5))]));
+        assert!(main.read_with(cx, |m, _| m.chats[0].unseen()));
+        // Opening the tile marks it seen on main too (main's sidebar badge).
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, Some("a".into()), cx));
+        cx.run_until_parked();
+        assert!(!main.read_with(cx, |m, _| m.chats[0].unseen()));
+        assert!(!ctx.read_with(cx, |c, _| c.chats[0].unseen()));
+
+        let config = cypher_proto::ChatConfig {
+            harness: HarnessId::ClaudeCode,
+            model: Some("claude-fable-5".into()),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+        };
+        ctx.update(cx, |c, cx| {
+            c.set_chat_config_optimistic("a", config.clone(), cx)
+        });
+        cx.run_until_parked();
+        // Landed on main, so the mirror copy keeps it on the tile.
+        assert_eq!(
+            main.read_with(cx, |m, _| m.chats[0].config.clone()),
+            Some(config.clone())
+        );
+        assert_eq!(
+            ctx.read_with(cx, |c, _| c.chats[0].config.clone()),
+            Some(config)
+        );
+    }
+
+    #[gpui::test]
+    fn lists_only_select_chat_spawns_no_watch(cx: &mut gpui::TestAppContext) {
+        let rt = idle_runtime();
+        let engine = idle_engine(&rt);
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, cx| {
+            m.engine = Some(engine);
+            m.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
+            // Control: a transcript-owning state subscribes on select.
+            m.select_chat(Some("a".into()), cx);
+            assert!(m.transcript_task.is_some() && m.commands_task.is_some());
+
+            m.set_transcript_watches(false, cx);
+            assert!(m.transcript_task.is_none() && m.commands_task.is_none());
+            m.select_chat(Some("b".into()), cx);
+            assert_eq!(m.selected_chat.as_deref(), Some("b"));
+            assert!(m.transcript_task.is_none() && m.commands_task.is_none());
+
+            m.set_transcript_watches(true, cx);
+            assert!(m.transcript_task.is_some() && m.commands_task.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn canvas_context_selects_its_first_chat_without_an_engine(cx: &mut gpui::TestAppContext) {
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, _| {
+            m.apply_spaces(vec![space("s1", "dev", "/p", 0)]);
+            m.selected_device = Some("dev".into());
+        });
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, None, cx));
+        ctx.read_with(cx, |c, _| {
+            assert_eq!(c.selected_chat, None);
+            assert_eq!(c.selected_space.as_deref(), Some("s1"));
+            assert_eq!(c.selected_device.as_deref(), Some("dev"));
+        });
+        // The first send mints a chat and selects it on the tile.
+        let mut minted = chat("new", 3, None);
+        minted.space_id = Some("s1".into());
+        main.update(cx, |m, cx| {
+            m.apply_chats(vec![minted]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        ctx.update(cx, |c, cx| {
+            c.select_chat(Some("new".into()), cx);
+            assert_eq!(c.selected_chat.as_deref(), Some("new"));
+            assert!(c.transcript_task.is_none());
+        });
+        assert_eq!(main.read_with(cx, |m, _| m.selected_chat.clone()), None);
+    }
+
+    #[gpui::test]
+    fn canvas_context_keeps_a_minted_chat_until_a_chats_frame_drops_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let main = cx.new(|_| AppState::new());
+        main.update(cx, |m, _| m.apply_chats(vec![chat("a", 0, None)]));
+        let ctx = cx.update(|cx| AppState::new_session_context(&main, None, cx));
+        // The composer selects the client-minted id before its row syncs.
+        ctx.update(cx, |c, cx| c.select_chat(Some("new".into()), cx));
+        // Unrelated main notifies (a sessions frame) must not drop it.
+        main.update(cx, |m, cx| {
+            m.apply_sessions(Vec::new());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            ctx.read_with(cx, |c, _| c.selected_chat.clone()).as_deref(),
+            Some("new")
+        );
+        // The row lands, then is deleted elsewhere: the frame drops it.
+        main.update(cx, |m, cx| {
+            m.apply_chats(vec![chat("a", 0, None), chat("new", 1, None)]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            ctx.read_with(cx, |c, _| c.selected_chat.clone()).as_deref(),
+            Some("new")
+        );
+        main.update(cx, |m, cx| {
+            m.apply_chats(vec![chat("a", 0, None)]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(ctx.read_with(cx, |c, _| c.selected_chat.clone()), None);
     }
 
     #[test]

@@ -16,6 +16,8 @@ path = "src/main.rs"
 default = ["ui"]
 development = ["cypher-engine/development"]
 ui = ["dep:cypher-ui"]
+# Dev-only UI driver/capture (see crates/ui/src/dev_capture.rs).
+dev-capture = ["ui", "cypher-ui/dev-capture"]
 
 [dependencies]
 cypher-env.workspace = true

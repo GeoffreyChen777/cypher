@@ -137,7 +137,7 @@ impl RenderOptions {
             now: Instant::now(),
             copy: None,
             selection: None,
-            scope: super::selection::SelectionScope::Transcript,
+            scope: super::selection::SelectionScope::Transcript(0),
         }
     }
 }

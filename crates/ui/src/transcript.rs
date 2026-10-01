@@ -116,10 +116,13 @@ pub const AT_BOTTOM_PX: f32 = 2.0;
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
 /// Teleport when farther than this many viewports from the end; glide the rest.
 pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
-/// A freshly-sent prompt rests this far below the transcript viewport's top.
-/// The titlebar overlays the full-height list, so its height is part of the
-/// inset; the extra 10px matches the first row's breathing room.
-pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// The top fade band a tile's transcript scrolls under: the session tile's
+/// header is a normal row above the viewport, and content is fully faded at
+/// the header's bottom edge, opaque this far below it.
+pub(crate) const TOP_CHROME_PX: f32 = 20.0;
+/// A freshly-sent prompt rests this far below the transcript viewport's top:
+/// clear of the top fade band, plus the first row's 10px breathing room.
+pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = TOP_CHROME_PX + 10.0;
 /// Embedded (temporary Side Chat) own-turn top inset: no titlebar chrome
 /// above the panel, so the held prompt rests at a compact top gap.
 const EMBEDDED_TOP_INSET_PX: f32 = 10.0;
@@ -2080,6 +2083,16 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
+    /// The shell-reported viewport size (the tile's chat column); a change
+    /// re-anchors the list ([`Self::set_viewport_size`]). `None` until the
+    /// first report.
+    viewport_size: Option<(f32, f32)>,
+    /// `(state revision, selected chat)` the rows were last built from —
+    /// [`Self::sync`] skips the transcript clone and row rebuild when a
+    /// notify changed neither.
+    /// (The attachment devices ride along: protected attachments re-key when
+    /// the chat's row or the local device id lands.)
+    synced_revision: Option<(u64, Option<String>, Vec<String>)>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -2199,7 +2212,7 @@ impl Transcript {
         Self::with_options(
             state,
             comment_popup,
-            crate::markdown::selection::SelectionScope::Transcript,
+            crate::markdown::selection::next_transcript_scope(),
             true,
             false,
             cx,
@@ -2288,6 +2301,8 @@ impl Transcript {
             scope,
             embedded,
             bottom_clearance: 0.0,
+            viewport_size: None,
+            synced_revision: None,
             rail_hover: None,
             hovered_entry: None,
             copied_code: None,
@@ -2546,6 +2561,34 @@ impl Transcript {
             }
             cx.notify();
         }
+    }
+
+    /// Shell-driven: the tile's chat column size. A layout change or tile
+    /// resize moves the viewport under a list anchored for the old size —
+    /// the pinned tail could sit off screen (blank until the next commit),
+    /// so re-anchor: a pinned list snaps back to its end, a held own-turn
+    /// prompt re-sizes its runway.
+    pub fn set_viewport_size(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
+        let changed = self
+            .viewport_size
+            .is_none_or(|(w, h)| (w - width).abs() > 0.5 || (h - height).abs() > 0.5);
+        if !changed {
+            return;
+        }
+        let first = self.viewport_size.is_none();
+        self.viewport_size = Some((width, height));
+        if first || self.rows.is_empty() {
+            return;
+        }
+        if self.own_turn.is_some() {
+            self.remeasure_last_row();
+            self.own_turn_kick = true;
+        } else if self.pinned {
+            self.list.scroll_to_end();
+            self.spring.reset();
+            self.spring_kick = true;
+        }
+        cx.notify();
     }
 
     pub(crate) fn rail_hover(&self) -> Option<usize> {
@@ -3189,6 +3232,20 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // Cheap gate first: every tile's context notifies on unrelated list
+        // frames too; the rows only depend on what the revision covers.
+        let revision = {
+            let s = self.state.read(cx);
+            (
+                s.transcript_revision(),
+                s.selected_chat.clone(),
+                self.attachment_device_ids(cx),
+            )
+        };
+        if self.synced_revision.as_ref() == Some(&revision) {
+            return;
+        }
+        self.synced_revision = Some(revision);
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
             let echoes: Vec<(SessionMessageEntry, bool)> = s
@@ -3987,15 +4044,14 @@ impl Transcript {
             let style = crate::chat_style::settings(cx);
             (style.wide, style.message_spacing, style.paragraph_spacing)
         };
-        // The viewport spans the full window (under the titlebar): the first
-        // row's gap adds the titlebar's height so a top-scrolled transcript
-        // rests below the chrome it fades under. An embedded panel (temporary
-        // Side Chat) has no titlebar to clear — a compact top gap.
+        // The first row's gap clears the small top fade band so a
+        // top-scrolled transcript rests below it. An embedded panel
+        // (temporary Side Chat) has no band to clear — a compact top gap.
         let top_gap = if ix == 0 {
             if self.embedded {
                 EMBEDDED_TOP_INSET_PX + 6.0
             } else {
-                Theme::TITLEBAR_HEIGHT + message_spacing + 10.0
+                TOP_CHROME_PX + message_spacing + 10.0
             }
         } else {
             top_gap_for_style(
@@ -4778,7 +4834,9 @@ impl Transcript {
     }
 
     /// Close the floating affordance and remove the transcript selection wash.
-    fn dismiss_comment_ui_and_selection(&mut self, cx: &mut Context<Self>) {
+    /// Also shell-driven: a tile's tab closing or going to the background
+    /// takes its transcript's comment pill/editor and selection with it.
+    pub(crate) fn dismiss_comment_ui_and_selection(&mut self, cx: &mut Context<Self>) {
         self.dismiss_comment_ui(cx);
         crate::markdown::selection::clear(self.scope);
     }
@@ -4923,6 +4981,9 @@ impl Transcript {
                         if !this.translation_originals.remove(&key) {
                             this.translation_originals.insert(key.clone());
                         }
+                        // A local fold change: rebuild despite an unchanged
+                        // state revision.
+                        this.synced_revision = None;
                         this.sync(cx);
                         cx.notify();
                     }))

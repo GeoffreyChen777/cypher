@@ -4,14 +4,18 @@
 //! ([`AppState::new_project_window`]) — its own selection, transcript and
 //! panes, the main window's engine. While it is open the main window hides
 //! the project ([`AppState::set_hidden_projects`]); closing it brings the
-//! project back. The arrangement is temporary by design: nothing persists,
-//! closing the main window closes every project window, and an engine
-//! reattach (retry, runtime switch) closes them too — their states hold the
-//! old handle.
+//! project back. The arrangement is temporary by design: which projects have
+//! windows does not persist, closing the main window closes every project
+//! window, and an engine reattach (retry, runtime switch) closes them too —
+//! their states hold the old handle. A project window's workspace layout
+//! does persist (`UiSettings.project_workspaces`, keyed by project), so
+//! reopening the project's window restores it.
 //!
 //! App-wide chrome stays with the main window: Settings, About, the update
 //! strips, the user menu, adding projects and quick chats forward there, and
-//! only the main window writes `ui-settings.json` and the Dock badge.
+//! only the main window writes `ui-settings.json` (project windows merge
+//! their persisted bits into its copy — [`Shell::persist_settings`]) and the
+//! Dock badge.
 
 use gpui::{Global, WeakEntity, WindowHandle};
 
@@ -140,6 +144,12 @@ impl Shell {
             cx.notify();
             return;
         };
+        // The layout this window restores: the live copy here, not the file
+        // its shell loaded (up to a debounce behind).
+        let saved = self.settings.project_workspaces.get(&space_id).cloned();
+        window
+            .update(cx, |shell, _, _| shell.saved_workspace = saved)
+            .ok();
         registry(cx).open.push((space_id, window));
         sync_hidden_projects(cx);
         cx.notify();
@@ -162,6 +172,39 @@ impl Shell {
                     .update(cx, |_, window, _| window.remove_window())
                     .ok();
             });
+        }
+    }
+
+    /// Change persisted settings: applied to this shell's copy and saved —
+    /// from a project window by merging the same change into the main
+    /// window's copy (the only writer), so it can never clobber fields the
+    /// main window changed since this window loaded its snapshot.
+    pub(super) fn persist_settings(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl Fn(&mut UiSettings) + 'static,
+    ) {
+        change(&mut self.settings);
+        if !self.is_project_window() {
+            self.schedule_save(cx);
+            return;
+        }
+        cx.defer(move |cx| {
+            if let Some(main) = main_shell(cx) {
+                main.update(cx, |main, cx| {
+                    change(&mut main.settings);
+                    main.schedule_save(cx);
+                });
+            }
+        });
+    }
+
+    /// The settings a project window reads its persisted layout bits from:
+    /// the main window's live copy (its own is a boot-time snapshot).
+    pub(super) fn live_settings<'a>(&'a self, cx: &'a App) -> &'a UiSettings {
+        match self.project_window.as_ref().and_then(|_| main_shell(cx)) {
+            Some(main) => &main.read(cx).settings,
+            None => &self.settings,
         }
     }
 

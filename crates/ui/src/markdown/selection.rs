@@ -34,8 +34,12 @@ use std::sync::{Mutex, OnceLock};
 /// pane's listeners).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SelectionScope {
-    /// The conversation transcript (markdown rows + user bubbles).
-    Transcript,
+    /// A conversation transcript (markdown rows + user bubbles), one fresh
+    /// id per [`Transcript`](crate::transcript::Transcript) instance
+    /// ([`next_transcript_scope`]): several session tiles show transcripts
+    /// side by side, and a shared scope made them fight over the selection
+    /// and the Comment pill.
+    Transcript(u64),
     /// A Git diff surface, allocated fresh ids for each pane and each of its
     /// split columns ([`next_change_scope`]). Tabs/versions never share a
     /// selection registry and closed panes' scopes are never reused.
@@ -46,6 +50,13 @@ pub enum SelectionScope {
     /// registry. Side-chat scopes render selection + copy but deliberately
     /// offer NO annotation actions (no Comment pill, no nested Side Chat).
     SideChat(u64),
+}
+
+/// Allocate a fresh per-transcript selection scope (one per session tile's
+/// transcript; a dropped transcript's scope is never reused).
+pub fn next_transcript_scope() -> SelectionScope {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    SelectionScope::Transcript(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Allocate a fresh per-panel Side Chat selection scope. Each temporary
@@ -409,7 +420,7 @@ pub(crate) mod tests {
         assert_eq!(resolve_spans(&rows, (0, 0), (3, 5)).len(), 2);
     }
 
-    const S: SelectionScope = SelectionScope::Transcript;
+    const S: SelectionScope = SelectionScope::Transcript(999);
     // A fixed pane id — real panes allocate via `next_change_scope`, but the
     // pure state tests just need two distinct scopes.
     const C: SelectionScope = SelectionScope::Changes(999);
@@ -547,7 +558,7 @@ pub(crate) mod tests {
         let b = next_side_chat_scope();
         assert_ne!(a, b);
         assert!(matches!(a, SelectionScope::SideChat(_)));
-        assert_ne!(a, SelectionScope::Transcript);
+        assert_ne!(a, SelectionScope::Transcript(0));
         assert_ne!(a, SelectionScope::Changes(0));
     }
 

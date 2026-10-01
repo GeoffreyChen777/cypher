@@ -500,6 +500,17 @@ pub fn chat_switch_closes(open_chat: Option<&str>, selected_chat: Option<&str>) 
 // GPUI panel
 // ---------------------------------------------------------------------------
 
+/// What the panel asks its host to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentsEvent {
+    /// Open a Cypher child chat (an inspector row). The shell opens it like
+    /// a sidebar click — its own tab — never by re-selecting this panel's
+    /// session context (that would blank the parent tile).
+    OpenChat(String),
+}
+
+impl gpui::EventEmitter<SubagentsEvent> for SubagentsPanel {}
+
 /// The Subagents chrome: a compact trigger on the status strip's right edge
 /// (glyph + one-line summary, transparent until hover) that opens an UPWARD
 /// inspector popover — right edge aligned with the trigger, 6px above it, in
@@ -597,9 +608,9 @@ impl SubagentsPanel {
     /// `min(520, main column − 32)` — a fixed width capped by the window,
     /// since a floating layer has no ancestor to resolve `w_full` against.
     /// Open a Cypher child chat from the inspector: close the popover (the
-    /// exit animation reaps it) and select the child through the normal
-    /// `AppState::select_chat` path. The Shell's NavHistory observation
-    /// records the switch, so Back returns to this parent session.
+    /// exit animation reaps it) and ask the shell to open the child
+    /// ([`SubagentsEvent::OpenChat`]) — its own tab, focused, recorded in
+    /// the nav history so Back returns to this parent session.
     fn open_child_chat(&mut self, child_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.begin_close() {
             popover::reap_popup(cx, |this: &mut Self| &mut this.popup);
@@ -610,8 +621,7 @@ impl SubagentsPanel {
         if self.focus.is_focused(window) || self.list_focus.is_focused(window) {
             window.blur();
         }
-        let state = self.state.clone();
-        state.update(cx, |state, cx| state.select_chat(Some(child_id), cx));
+        cx.emit(SubagentsEvent::OpenChat(child_id));
         cx.notify();
     }
 
@@ -1032,6 +1042,8 @@ impl Render for SubagentsPanel {
         // anchored layer must stay mounted while the close eases out.
         let open = self.popup.get().is_some_and(|id| id == &chat_id);
         let backing = theme.composer_accessory_bg();
+        // Hover-fade keys are global: one per panel (tiles side by side).
+        let trigger_fade = format!("subagents-trigger-{}", cx.entity_id());
 
         let mut trigger = div()
             .id("subagents-trigger")
@@ -1047,11 +1059,11 @@ impl Render for SubagentsPanel {
             .cursor_pointer()
             // Match Comments: always backed, with a quiet hover lift.
             .bg(motion::hover_blend(
-                "subagents-trigger",
+                &trigger_fade,
                 backing,
                 backing.blend(crate::theme::ink(0.06)),
             ))
-            .on_hover(motion::hover_listener("subagents-trigger"))
+            .on_hover(motion::hover_listener(trigger_fade.clone()))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 match ev.keystroke.key.as_str() {
                     "enter" | " " => {
@@ -2085,6 +2097,15 @@ mod tests {
         let window = cx.open_window(gpui::size(px(1100.0), px(800.0)), |_, cx| {
             SubagentsPanel::new(state.clone(), cx)
         });
+        let panel = window.root(cx).expect("panel");
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let opened = opened.clone();
+            cx.subscribe(&panel, move |_, event: &SubagentsEvent, _| {
+                opened.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let draw = |visual: &mut gpui::VisualTestContext| {
             visual.update(|w, cx| {
@@ -2106,7 +2127,13 @@ mod tests {
         }
         visual.simulate_mouse_up(row.center(), gpui::MouseButton::Left, Default::default());
         draw(&mut visual);
+        // The shell opens the child in its own tab; this panel's context
+        // keeps its session.
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [SubagentsEvent::OpenChat("child-1".into())]
+        );
         let selected = visual.update(|_, cx| state.read(cx).selected_chat.clone());
-        assert_eq!(selected.as_deref(), Some("child-1"));
+        assert_eq!(selected.as_deref(), Some("parent"));
     }
 }

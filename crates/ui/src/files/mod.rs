@@ -706,10 +706,9 @@ impl FilesPanel {
         let markdown = selected.as_deref().is_some_and(is_markdown) && file.is_some();
         let tree_on = self.tree_visible;
         let wide = self.wide();
-        let path_label: SharedString = match &selected {
-            Some(path) => path.clone().into(),
-            None => "Files".into(),
-        };
+        // No "Files" title (user request) — the row names the open file
+        // only.
+        let path_label: SharedString = selected.clone().unwrap_or_default().into();
 
         let mut row = div()
             .size_full()

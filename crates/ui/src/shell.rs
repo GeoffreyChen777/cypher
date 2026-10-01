@@ -1,15 +1,16 @@
-//! The app shell (zeron `__root.tsx`): sidebar column + main panel + optional
-//! right "Changes" pane, plus the boot splash and the connection gate.
+//! The app shell (zeron `__root.tsx`): the sidebar column + the workspace of
+//! session tiles (docs/workspace-layout.md), plus the boot splash and the
+//! connection gate.
 //!
-//! Layout is zeron's: collapsible drag-resizable sidebar (208–400px, default
-//! 256) with a 200ms ease-out width transition; main panel with an h-11 header,
-//! content outlet, and a reserved h-6 status strip so later content never
-//! shifts; right pane scaffold (360–760px, default 520), hidden by default.
+//! Layout: collapsible drag-resizable sidebar (208–400px, default 256) with a
+//! 200ms ease-out width transition; the workspace column tiles sessions
+//! (`shell/workspace_view.rs`), each tile showing one session's chat with its
+//! terminal dock and right dock (`shell/session.rs`, `shell/dock.rs`).
 //! Widths/collapsed state persist to `ui-settings.json` (debounced).
 //!
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
-//! dock. Double-clicking a handle resets that pane to its default width.
+//! dock. Double-clicking a handle resets that pane to its default size.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -48,8 +49,8 @@ use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::subagents::SubagentsPage;
 use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
+    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -60,9 +61,12 @@ use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_heigh
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript};
 
+mod dock;
+mod session;
 mod spaces;
 mod tabs;
 mod windows;
+mod workspace_view;
 
 use spaces::{AddSpaceFlow, OrphanWorktree, RenameSpaceDialog};
 
@@ -75,9 +79,77 @@ actions!(
         FindInChat,
         NewSession,
         NextSession,
-        PrevSession
+        PrevSession,
+        SplitRight,
+        SplitDown,
+        FocusLeft,
+        FocusRight,
+        FocusUp,
+        FocusDown,
+        CloseTab,
+        ToggleZoom,
+        FocusTile1,
+        FocusTile2,
+        FocusTile3,
+        FocusTile4,
+        FocusTile5,
+        FocusTile6,
+        FocusTile7,
+        FocusTile8,
+        FocusTile9,
+        LayoutSingle,
+        LayoutColumns2,
+        LayoutRows2,
+        LayoutColumns3,
+        LayoutRows3,
+        LayoutGrid2x2,
+        LayoutGrid3x3,
+        LayoutTwoStackedPlusOne,
+        LayoutOnePlusTwoStacked
     ]
 );
+
+/// Fixed tile-focus keys: ⌘1…⌘9 (Ctrl elsewhere) focus the Nth tile in
+/// reading order. No other binding or key handler claims a primary+digit.
+const FOCUS_TILE_KEYS: [&str; 9] = [
+    "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
+];
+
+/// The `FocusTile{index + 1}` action.
+fn focus_tile_action(index: usize) -> Box<dyn gpui::Action> {
+    match index {
+        0 => Box::new(FocusTile1),
+        1 => Box::new(FocusTile2),
+        2 => Box::new(FocusTile3),
+        3 => Box::new(FocusTile4),
+        4 => Box::new(FocusTile5),
+        5 => Box::new(FocusTile6),
+        6 => Box::new(FocusTile7),
+        7 => Box::new(FocusTile8),
+        _ => Box::new(FocusTile9),
+    }
+}
+
+/// A layout preset's menu label.
+pub fn layout_label(preset: crate::workspace::Preset) -> &'static str {
+    workspace_view::preset_label(preset)
+}
+
+/// The View-menu action applying `preset`.
+pub fn layout_action(preset: crate::workspace::Preset) -> Box<dyn gpui::Action> {
+    use crate::workspace::Preset;
+    match preset {
+        Preset::Single => Box::new(LayoutSingle),
+        Preset::Columns2 => Box::new(LayoutColumns2),
+        Preset::Rows2 => Box::new(LayoutRows2),
+        Preset::Columns3 => Box::new(LayoutColumns3),
+        Preset::Rows3 => Box::new(LayoutRows3),
+        Preset::Grid2x2 => Box::new(LayoutGrid2x2),
+        Preset::Grid3x3 => Box::new(LayoutGrid3x3),
+        Preset::TwoStackedPlusOne => Box::new(LayoutTwoStackedPlusOne),
+        Preset::OnePlusTwoStacked => Box::new(LayoutOnePlusTwoStacked),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -109,8 +181,6 @@ const PANEL_EDGE_INSET: f32 = 8.0;
 const PANEL_CORNER_RADIUS: f32 = 12.0;
 const RIGHT_TAB_RADIUS: f32 = 6.0;
 const RIGHT_TAB_HEIGHT: f32 = 24.0;
-/// Nested rounded rectangles share a corner center when inset by R - r.
-const RIGHT_TAB_INSET: f32 = PANEL_CORNER_RADIUS - RIGHT_TAB_RADIUS;
 
 /// Where the cluster's first button starts, from the window's left edge.
 pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
@@ -148,43 +218,40 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // these back the native menu key equivalents and must survive keymap
     // re-application.
     crate::app_menus::bind_keys(cx);
+    use crate::settings::ShortcutId;
+    let bind = |id: ShortcutId, action: Box<dyn gpui::Action>| {
+        let combo = valid_or_default(keymap.get(id), id.default_combo());
+        KeyBinding::load(
+            &combo,
+            action,
+            None,
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        )
+    };
+    let customizable: [(ShortcutId, Box<dyn gpui::Action>); 14] = [
+        (ShortcutId::ToggleSidebar, Box::new(ToggleSidebar)),
+        (ShortcutId::ToggleChanges, Box::new(ToggleChanges)),
+        (ShortcutId::ToggleTerminal, Box::new(ToggleTerminal)),
+        (ShortcutId::NewSession, Box::new(NewSession)),
+        (ShortcutId::NextSession, Box::new(NextSession)),
+        (ShortcutId::PrevSession, Box::new(PrevSession)),
+        (ShortcutId::SplitRight, Box::new(SplitRight)),
+        (ShortcutId::SplitDown, Box::new(SplitDown)),
+        (ShortcutId::FocusLeft, Box::new(FocusLeft)),
+        (ShortcutId::FocusRight, Box::new(FocusRight)),
+        (ShortcutId::FocusUp, Box::new(FocusUp)),
+        (ShortcutId::FocusDown, Box::new(FocusDown)),
+        (ShortcutId::CloseTab, Box::new(CloseTab)),
+        (ShortcutId::ToggleZoom, Box::new(ToggleZoom)),
+    ];
+    cx.bind_keys(
+        customizable
+            .into_iter()
+            .filter_map(|(id, action)| bind(id, action).ok()),
+    );
     cx.bind_keys([
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_sidebar, "mod-s"),
-            ToggleSidebar,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_changes, "mod-b"),
-            ToggleChanges,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.toggle_terminal, "mod-j"),
-            ToggleTerminal,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.new_session, "mod-n"),
-            NewSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(
-                &keymap.next_session,
-                crate::settings::ShortcutId::NextSession.default_combo(),
-            ),
-            NextSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(
-                &keymap.prev_session,
-                crate::settings::ShortcutId::PrevSession.default_combo(),
-            ),
-            PrevSession,
-            None,
-        ),
         // Fixed: ⌘K summons the add-space palette (the ⌘K chip in its search
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
@@ -199,6 +266,23 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             None,
         ),
     ]);
+    // Fixed: ⌘1…⌘9 focus the Nth tile in reading order.
+    cx.bind_keys(
+        FOCUS_TILE_KEYS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, combo)| {
+                KeyBinding::load(
+                    &platform_combo(combo),
+                    focus_tile_action(index),
+                    None,
+                    false,
+                    None,
+                    &gpui::DummyKeyboardMapper,
+                )
+                .ok()
+            }),
+    );
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -282,77 +366,6 @@ impl SettingsSection {
 pub enum Route {
     Chat,
     Settings(SettingsSection),
-}
-
-/// One right-pane surface tab (t3code RightPanelSurface): a git-diff page
-/// (each tab its own [`Changes`] viewer — multiple diff panels, user
-/// request), one embedded terminal keyed by its [`TerminalPanel`] tab key,
-/// a file browser/editor over the chat's checkout ([`FilesPanel`]), or a
-/// temporary Side Chat (round 21). `Picker` is the empty state ("Open a
-/// surface").
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum RightSurface {
-    #[default]
-    Picker,
-    Diff(u64),
-    Terminal(u64),
-    Files(u64),
-    SideChat(u64),
-}
-
-/// Round-21 Side Chats cap: at most this many temporary side chat tabs per
-/// chat (they are host-memory engine objects; a runaway count would leak
-/// docs and streams). Further offers are ignored.
-const MAX_SIDE_CHATS_PER_CHAT: usize = 8;
-
-/// Per-chat panel open flags (zeron parity: `sessionPanels` — the terminal and
-/// changes panels open *per session*, in memory only; heights and every other
-/// persisted setting stay global).
-///
-/// Everything defaults CLOSED — the right pane included (user request,
-/// revising the earlier default-open: it popped open on every session you
-/// visited). Opening is an explicit act, remembered per chat for the rest of
-/// the app run; a fresh open with no surface tabs lands on the picker.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ChatPanels {
-    pub terminal_open: bool,
-    /// Right pane visible (the surface host — historically the Changes pane).
-    pub changes_open: bool,
-    /// Which surface tab renders; validated against the live tab list each
-    /// frame (a closed tab falls back gracefully).
-    pub right_active: RightSurface,
-}
-
-/// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
-/// the empty key. Not persisted — a fresh app starts with everything closed.
-#[derive(Debug, Default)]
-pub struct SessionPanels {
-    map: std::collections::HashMap<String, ChatPanels>,
-}
-
-impl SessionPanels {
-    pub fn get(&self, key: &str) -> ChatPanels {
-        self.map.get(key).copied().unwrap_or_default()
-    }
-
-    /// Flip the terminal flag for `key`; returns the new value.
-    pub fn toggle_terminal(&mut self, key: &str) -> bool {
-        let entry = self.map.entry(key.to_string()).or_default();
-        entry.terminal_open = !entry.terminal_open;
-        entry.terminal_open
-    }
-
-    /// Flip the changes flag for `key`; returns the new value.
-    pub fn toggle_changes(&mut self, key: &str) -> bool {
-        let entry = self.map.entry(key.to_string()).or_default();
-        entry.changes_open = !entry.changes_open;
-        entry.changes_open
-    }
-
-    /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
-    pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
-        f(self.map.entry(key.to_string()).or_default());
-    }
 }
 
 /// One route-history entry (zeron parity: the renderer's TanStack memory
@@ -444,45 +457,6 @@ impl NavHistory {
 /// equivalent.
 pub const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
 
-/// The drag-drop spec for the right-pane surface tab strip: move the surface
-/// at `from` to `to` (both must be in bounds and distinct). Pure so the
-/// reorder behaviour — including mixed diff/terminal/side-chat strips — is
-/// testable without a live shell. Returns whether the strip changed.
-/// Round-21 audit: remove a Side Chat surface from ITS PARENT chat's tab
-/// strip — closing/promoting a HIDDEN side tab (the user switched away) must
-/// remove it from the parent's `right_tabs` key, never whichever main chat is
-/// currently selected. Pure so the keyed removal is testable without a shell.
-pub fn remove_side_chat_from_tabs(
-    right_tabs: &mut std::collections::HashMap<String, Vec<RightSurface>>,
-    parent_chat_id: &str,
-    id: u64,
-) -> bool {
-    match right_tabs.get_mut(parent_chat_id) {
-        Some(tabs) => {
-            let before = tabs.len();
-            tabs.retain(|s| *s != RightSurface::SideChat(id));
-            before != tabs.len()
-        }
-        None => false,
-    }
-}
-
-pub fn reorder_right_surfaces(tabs: &mut [RightSurface], from: usize, to: usize) -> bool {
-    if from < tabs.len() && to < tabs.len() && from != to {
-        let surface = tabs[from];
-        if from < to {
-            tabs.copy_within(from + 1..=to, from);
-            tabs[to] = surface;
-        } else {
-            tabs.copy_within(to..from, to + 1);
-            tabs[to] = surface;
-        }
-        true
-    } else {
-        false
-    }
-}
-
 /// FLIP diff for a keyed list: given the previously rendered order and the new
 /// order (key + row height), return each surviving key's paint-only start
 /// offset `old_y - new_y` (only keys whose position actually moved). `gap` is
@@ -539,75 +513,6 @@ const SIDEBAR_GLASS_FADE_BAND: f32 = 32.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
-/// Drag marker for the right-pane resize handle.
-struct RightPaneResize;
-
-/// The dragged surface-tab payload (strip reorder).
-struct RightTabDrag {
-    panel_key: String,
-    from: usize,
-    title: SharedString,
-}
-
-/// Live drag-over state for the surface-tab strip — the terminal drawer's
-/// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
-/// slide-animation restarts as the hovered slot changes.
-struct RightTabDragState {
-    from: usize,
-    over: usize,
-    epoch: usize,
-    prev_over: usize,
-}
-
-/// Ghost chip following the pointer while a surface tab drags.
-struct SurfaceTabGhost {
-    title: SharedString,
-}
-
-impl Render for SurfaceTabGhost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .h(px(RIGHT_TAB_HEIGHT))
-            .w(px(112.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .rounded(px(RIGHT_TAB_RADIUS))
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_color(theme.border_strong)
-            .text_size(px(11.5))
-            .text_color(theme.text)
-            .opacity(0.85)
-            .child(div().truncate().child(self.title.clone()))
-    }
-}
-/// Drag marker for the terminal-panel height handle.
-/// Find-bar button tooltip (the step/close glyphs carry their key equivalent
-/// so the bar teaches ↵ / ⇧↵ / esc without spelling them on the chrome).
-struct FindTooltip(SharedString);
-
-impl Render for FindTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        motion::fade_quick(
-            "find-tooltip",
-            div()
-                .px(px(8.0))
-                .py(px(5.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface_raised)
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(self.0.clone()),
-        )
-    }
-}
-
-struct TerminalResize;
 
 /// Invisible drag ghost — resize drags render nothing at the cursor.
 struct DragGhost;
@@ -1037,67 +942,85 @@ struct OrgGateUi {
 }
 
 pub struct Shell {
+    /// The window's main state: lists (sidebar, spaces, sessions) in
+    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
+    /// session (sidebar highlight, nav history, cycle order, space
+    /// implication). Each tile renders from its own session context.
     state: Entity<AppState>,
-    transcript: Entity<Transcript>,
-    composer: Entity<Composer>,
-    /// In-chat find (⌘F): the query field and the frame that owns its keys.
-    /// Whether the BAR is on screen is the transcript's state
-    /// ([`Transcript::find_open`]) — this pair is just the chrome, so a chat
-    /// switch closing find over there closes the bar here with no second
-    /// flag to keep in step.
-    find_input: Entity<ComposerInput>,
-    find_focus: gpui::FocusHandle,
-    /// Focus lands in the field on the render after ⌘F (the element has to
-    /// exist first — the palette flows do the same).
-    find_focus_pending: bool,
-    _find_events: Subscription,
-    /// Session-level subagents chrome (current chat's live subagent runs): a
-    /// compact trigger on the status strip's right edge with an upward
-    /// inspector popover. Renders Empty without records, so the fixed-height
-    /// status strip (and the measured bottom stack) never shifts.
-    subagents: Entity<SubagentsPanel>,
-    /// External file drag hovering the conversation column — shows the
-    /// "Drop images to attach" veil over the whole chat area; a drop stages
-    /// the files in the composer.
-    file_drag_active: bool,
-    /// Measured height of the bottom chrome stack (status strip + composer +
-    /// terminal dock) the full-height transcript scrolls under — written by a
-    /// paint-time canvas each frame, read the NEXT frame for the fade inset,
-    /// the transcript's bottom clearance, and the jump pill's anchor (the
-    /// same one-frame lag every fade here rides).
-    bottom_stack: std::rc::Rc<std::cell::Cell<f32>>,
-    /// Lazy panes: no entity (and no RPC) until first opened.
-    terminal: Option<Entity<TerminalPanel>>,
-    /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
-    /// entity from the bottom drawer's (own PTYs, own grid geometry; one
-    /// panel can only size one visible grid at a time).
-    right_terminal: Option<Entity<TerminalPanel>>,
-    /// The surface-tab strip's `+` menu (Terminal / Git diff rows).
-    right_plus: popover::Popup<()>,
-    /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
-    /// scope/base pick and diff watch (multiple diff panels, user request).
-    diffs: std::collections::HashMap<u64, Entity<Changes>>,
-    /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
-    diff_subs: std::collections::HashMap<u64, Subscription>,
-    diff_seq: u64,
-    /// Files surfaces by id — each tab its own tree + editor over the
-    /// chat's checkout.
-    files: std::collections::HashMap<u64, Entity<FilesPanel>>,
-    files_seq: u64,
-    /// Temporary Side Chat tabs (round 21): one [`SideChatPanel`] per open
-    /// side chat, keyed by a shell-minted sequence id. Owned here so the
-    /// shell can promote/close/dispose them and re-render their tabs.
-    side_chats: std::collections::HashMap<u64, Entity<crate::side_chats::SideChatPanel>>,
-    side_chat_subs: std::collections::HashMap<u64, Subscription>,
-    side_chat_seq: u64,
-    /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
-    /// closed terminals/diffs — are skipped at read time).
-    right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
-    /// In-flight surface-tab drag (slide animation state).
-    right_tab_drag: Option<RightTabDragState>,
-    /// Surface-tab strip scroll (the strip overflows horizontally, t3
-    /// ScrollArea-style; drag drop-math reads the offset back out).
-    right_tab_scroll: gpui::ScrollHandle,
+    /// The tiled session layout (docs/workspace-layout.md).
+    workspace: crate::workspace::Workspace,
+    /// One slot per open workspace tab (created on open, dropped on close —
+    /// dropping the context kills its watches).
+    slots: std::collections::HashMap<session::SlotId, session::SessionSlot>,
+    next_slot_id: session::SlotId,
+    /// The slots on screen at the last workspace change (see
+    /// [`Self::dismiss_hidden_comment_ui`]).
+    shown_slots: Vec<session::SlotId>,
+    /// The focused tab main's selection last followed (see
+    /// [`Self::sync_follow`]).
+    followed: Option<crate::workspace::TabKey>,
+    /// Land keyboard focus in the focused slot's composer on the next
+    /// render (routing changes the focused tile without a window handle).
+    focus_pending: bool,
+    /// Boot landing ran (the first chats frame restored the saved layout or
+    /// opened a tab). Layout saves wait for it, so a boot-time save never
+    /// overwrites the saved layout with the empty placeholder.
+    boot_landed: bool,
+    /// The persisted layout to restore at boot landing: the main window's
+    /// `UiSettings.workspace`, a project window's
+    /// `UiSettings.project_workspaces[project]`. Taken once.
+    saved_workspace: Option<crate::workspace::Workspace>,
+    /// Unsent drafts + staged attachments of closed session tabs, restored
+    /// when the session's slot is created again (drafts used to survive chat
+    /// switches). In memory only. Also holds a background fork's prefill
+    /// until its tab is first shown.
+    closed_drafts:
+        std::collections::HashMap<String, (String, Vec<crate::attachments::StagedAttachment>)>,
+    /// Terminal panels of closed session tabs, by chat id: their PTYs keep
+    /// running (a long job stays reachable) and the panel re-binds to the
+    /// session's next slot. Closed for good when the chat is deleted.
+    parked_terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
+    /// The main state's chats generation `prune_tabs` last judged: only a
+    /// NEW chats frame may close a tab whose chat is missing from the list.
+    seen_chats_generation: u64,
+    /// Chats this window just created (a fork, a promoted side chat) whose
+    /// row may trail a chats frame or two, by creation time: their tabs
+    /// aren't closed as deleted until a frame lists them (which clears the
+    /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
+    expected_chats: std::collections::HashMap<String, std::time::Instant>,
+    /// Per tile: its tab strip's scroll handle and the (active tab, tab
+    /// count) last scrolled into view — a change scrolls the active tab
+    /// fully into view once.
+    tile_tab_scroll: std::collections::HashMap<
+        crate::workspace::GroupId,
+        (
+            gpui::ScrollHandle,
+            Option<(crate::workspace::TabKey, usize)>,
+        ),
+    >,
+    /// Split containers' measured bounds by tree path (paint-time canvas),
+    /// read by the split handles' drag math.
+    split_bounds: std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<Vec<usize>, gpui::Bounds<Pixels>>>,
+    >,
+    /// The tile whose session rail last appeared, and a counter bumped each
+    /// time focus moves to another tile — keys the rail's entrance
+    /// animation so it replays in the newly focused tile.
+    rail_focus: (Option<crate::workspace::GroupId>, u64),
+    /// Tile bodies' measured bounds by group (paint-time canvas), read by
+    /// the session-tab drag's drop-zone hit test.
+    tile_bounds: std::rc::Rc<
+        std::cell::RefCell<
+            std::collections::HashMap<crate::workspace::GroupId, gpui::Bounds<Pixels>>,
+        >,
+    >,
+    /// A live session-tab drag (tile drop catchers mount while `Some`).
+    tab_drop: Option<workspace_view::TabDropState>,
+    /// The dock surface strip's `+` menu, for the slot that opened it (one
+    /// menu is open at a time).
+    right_plus: popover::Popup<session::SlotId>,
+    /// The titlebar cluster's layout presets popover.
+    layout_menu: popover::Popup<()>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1204,11 +1127,6 @@ pub struct Shell {
     boot: EngineBootConfig,
     data_dir: PathBuf,
     settings: UiSettings,
-    /// Session-scoped panel open flags (terminal / changes per chat; §1.10-1.11
-    /// parity — heights stay in [`UiSettings`]).
-    panels: SessionPanels,
-    /// The panel key of the chat currently shown ("" = new-chat canvas).
-    active_chat: String,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
@@ -1233,15 +1151,6 @@ pub struct Shell {
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
-    right_tween: Option<WidthTween>,
-    /// Changes-panel takeover (the header's expand button): the panel fills
-    /// everything right of the sidebar and the conversation column collapses
-    /// to zero. Session-local view state — never persisted, reset on close.
-    right_pane_expanded: bool,
-    /// Viewport width stamped each frame at render — the expanded panel's
-    /// width target ([`Self::right_target`] has no `Window`).
-    viewport_width: f32,
-    terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
     fullscreen: Option<bool>,
@@ -1250,10 +1159,6 @@ pub struct Shell {
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
-    /// Clears the height tween once it completes (so a closed panel unmounts).
-    terminal_tween_task: Option<Task<()>>,
-    /// Height-drag anchor: (pointer y, height) at mouse-down on the handle.
-    terminal_drag_anchor: Option<(f32, f32)>,
     /// `motion::reduced_motion` snapshot, refreshed at the top of each render
     /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
     /// snap without a `cx`.
@@ -1269,13 +1174,12 @@ pub struct Shell {
     /// with nothing focused they go dead. Initial focus lands on the composer
     /// and focus lost with no successor routes back there.
     focus_sub: Option<Subscription>,
+    /// Keyboard landing spot when the focused tile has no composer (an empty
+    /// group): tracked on the root so window shortcuts keep dispatching.
+    root_focus: gpui::FocusHandle,
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
-    _composer_events: Subscription,
-    /// Transcript → shell events (Session Fork v1): the settled entry's fork
-    /// affordance emits ForkRequested; the shell owns the ForkSession RPC.
-    _transcript_events: Subscription,
     /// Shared floating Comment pill/editor (round 20): rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
@@ -1410,95 +1314,19 @@ impl Shell {
         // The shared comment popup is created FIRST so every surface can
         // hold a weak handle to it.
         let comment_popup = cx.new(crate::comments::CommentPopup::new);
-        let transcript =
-            cx.new(|cx| Transcript::new(state.clone(), comment_popup.clone().downgrade(), cx));
         if main_window {
             crate::settings::commands::publish_hidden(None, cx);
         }
-        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let subagents = cx.new(|cx| SubagentsPanel::new(state.clone(), cx));
-        // Every send glides the prompt to the viewport top and reserves the
-        // reply's space below it (notes-app parity).
-        let composer_events = cx.subscribe(&composer, {
-            let transcript = transcript.clone();
-            move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::OpenAgentSettings { target_device } => {
-                    let result = this.settings_target.update(cx, |target, cx| {
-                        target.select(Some(target_device.clone()), cx)
-                    });
-                    match result {
-                        Ok(()) => this.open_settings(SettingsSection::Harnesses, cx),
-                        Err(error) => this
-                            .composer
-                            .update(cx, |composer, cx| composer.report_error(error, cx)),
-                    }
-                }
-                ComposerEvent::OpenGithubSettings { target_device } => {
-                    let result = this.settings_target.update(cx, |target, cx| {
-                        target.select(Some(target_device.clone()), cx)
-                    });
-                    match result {
-                        Ok(()) => this.open_settings(SettingsSection::Github, cx),
-                        Err(error) => this
-                            .composer
-                            .update(cx, |composer, cx| composer.report_error(error, cx)),
-                    }
-                }
-                ComposerEvent::OpenProviders {
-                    intent,
-                    target_device,
-                } => {
-                    let result = this
-                        .settings_target
-                        .update(cx, |target, cx| target.select(target_device.clone(), cx));
-                    match result {
-                        Ok(()) => this.open_providers(intent.clone(), cx),
-                        Err(error) => this
-                            .composer
-                            .update(cx, |composer, cx| composer.report_error(error, cx)),
-                    }
-                }
-                ComposerEvent::Sent {
-                    chat_id,
-                    message_id,
-                } => {
-                    transcript.update(cx, |t, cx| {
-                        t.on_own_send(chat_id.clone(), message_id.clone(), cx)
-                    });
-                }
-            }
-        });
-        // Session Fork (v1): a settled entry's fork affordance → the shell
-        // owns the ForkSession RPC (target host when remote) and the created
-        // chat's selection/prefill.
-        let transcript_events = cx.subscribe(&transcript, {
-            |this: &mut Shell, _, event: &crate::transcript::TranscriptEvent, cx| match event {
-                crate::transcript::TranscriptEvent::ForkRequested {
-                    chat_id,
-                    anchor_message_id,
-                } => {
-                    // The shell owns the ForkSession RPC (target host when
-                    // remote); `fork_session` arms the loading guard itself.
-                    this.fork_session(chat_id.clone(), anchor_message_id.clone(), cx);
-                }
-                crate::transcript::TranscriptEvent::RewindRequested {
-                    chat_id,
-                    anchor_message_id,
-                } => {
-                    // Session Rewind: the transcript already took the user's
-                    // confirming click; the shell owns the RewindSession RPC.
-                    this.rewind_session(chat_id.clone(), anchor_message_id.clone(), cx);
-                }
-            }
-        });
-        // CommentPopup → composer: a comment saved in any surface's anchored
-        // editor lands in the composer's pending list (the status-strip
-        // indicator). Subscribed ONCE — the event carries the chat id that
-        // was selected when the selection settled (each surface captured it);
-        // the composer's guard still drops a comment whose chat is no longer
-        // selected.
+        // Lists-only: the session tiles' contexts own the transcripts; this
+        // state's selection just follows the focused tile.
+        state.update(cx, |s, cx| s.set_transcript_watches(false, cx));
+        // CommentPopup → the owning tile: a comment saved in any surface's
+        // anchored editor lands in the pending list (the status-strip
+        // indicator) of the tile showing that chat. Subscribed ONCE — the
+        // event carries the chat id that was selected when the selection
+        // settled (each surface captured it); the composer's guard still
+        // drops a comment whose chat is no longer selected.
         let comment_popup_events = cx.subscribe(&comment_popup, {
-            let composer = composer.clone();
             move |this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event {
                 crate::comments::CommentPopupEvent::CommentSaved {
                     chat_id,
@@ -1506,9 +1334,13 @@ impl Shell {
                     origin,
                     comment,
                 } => {
-                    // The chat id was captured when the selection SETTLED —
-                    // forward it; the composer's guard still drops a comment
-                    // whose chat is no longer selected.
+                    let Some(composer) = this
+                        .slot_for_chat(chat_id, cx)
+                        .and_then(|sid| this.slots.get(&sid))
+                        .map(|slot| slot.composer.clone())
+                    else {
+                        return;
+                    };
                     composer.update(cx, |composer, cx| {
                         composer.add_comment(
                             chat_id.clone(),
@@ -1527,9 +1359,13 @@ impl Shell {
                 } => {
                     // Round 21: open a temporary Side Chat from the settled
                     // selection (the shell owns the StartSideChat call and
-                    // the right-pane tab). The selected quote rides along so
-                    // the engine validates + injects it on the first send.
+                    // the dock tab). The selected quote rides along so the
+                    // engine validates + injects it on the first send.
+                    let Some(sid) = this.slot_for_chat(chat_id, cx) else {
+                        return;
+                    };
                     this.open_side_chat(
+                        sid,
                         chat_id.clone(),
                         source.clone(),
                         selected_text.clone(),
@@ -1545,11 +1381,16 @@ impl Shell {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |shell: &mut Shell, cx| {
+                    // Any visible tile's session counts.
                     let live = {
                         let s = shell.state.read(cx);
-                        s.selected_chat
-                            .as_deref()
-                            .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
+                        let now = Utc::now();
+                        shell
+                            .workspace
+                            .visible_tabs()
+                            .into_iter()
+                            .filter_map(|tab| tab.chat_id())
+                            .any(|id| s.indicator_for(id, now) != Indicator::None)
                     };
                     if live
                         || shell
@@ -1566,6 +1407,13 @@ impl Shell {
         });
         let settings_target = cx.new(|cx| DeviceTarget::new(state.clone(), cx));
         let settings = UiSettings::load(&data_dir);
+        // A project window's entry here is the file's; the main window's
+        // live copy replaces it right after the window opens
+        // (`open_project_window`).
+        let saved_workspace = match &project_window {
+            None => settings.workspace.clone(),
+            Some(project) => settings.project_workspaces.get(project).cloned(),
+        };
         if main_window {
             crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
             // Bind the customizable shortcuts from the persisted keymap.
@@ -1615,51 +1463,31 @@ impl Shell {
             )),
             _ => None,
         };
-        // "PaletteSearch" context: ↵ / ⇧↵ / esc stay unbound so they bubble
-        // to the bar's frame (`find_key`) as match navigation instead of
-        // editing text.
-        let find_input =
-            cx.new(|cx| ComposerInput::with_context("Find in chat…", "PaletteSearch", cx));
-        let find_events = cx.subscribe(&find_input, {
-            let transcript = transcript.clone();
-            move |_: &mut Shell, input, event: &ComposerInputEvent, cx| {
-                if matches!(event, ComposerInputEvent::Edited) {
-                    let query = input.read(cx).text().to_owned();
-                    transcript.update(cx, |t, cx| t.set_find_query(&query, cx));
-                }
-            }
-        });
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
         });
         Self {
             state,
-            transcript,
-            composer,
-            find_input,
-            find_focus: cx.focus_handle(),
-            find_focus_pending: false,
-            _find_events: find_events,
-            subagents,
-            file_drag_active: false,
-            // Seed with the compact composer stack's rough height so the
-            // first frame's clearance isn't zero (the measure corrects it).
-            bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
-            terminal: None,
-            right_terminal: None,
+            workspace: crate::workspace::Workspace::new(),
+            slots: std::collections::HashMap::new(),
+            shown_slots: Vec::new(),
+            next_slot_id: 0,
+            followed: None,
+            focus_pending: false,
+            boot_landed: false,
+            saved_workspace,
+            closed_drafts: std::collections::HashMap::new(),
+            parked_terminals: std::collections::HashMap::new(),
+            seen_chats_generation: 0,
+            expected_chats: std::collections::HashMap::new(),
+            tile_tab_scroll: std::collections::HashMap::new(),
+            split_bounds: Default::default(),
+            rail_focus: (None, 0),
+            tile_bounds: Default::default(),
+            tab_drop: None,
             right_plus: popover::Popup::default(),
-            diffs: std::collections::HashMap::new(),
-            diff_subs: std::collections::HashMap::new(),
-            diff_seq: 0,
-            files: std::collections::HashMap::new(),
-            files_seq: 0,
-            side_chats: std::collections::HashMap::new(),
-            side_chat_subs: std::collections::HashMap::new(),
-            side_chat_seq: 0,
-            right_tabs: std::collections::HashMap::new(),
-            right_tab_drag: None,
-            right_tab_scroll: gpui::ScrollHandle::new(),
+            layout_menu: popover::Popup::default(),
             route,
             nav,
             devices_page: None,
@@ -1724,8 +1552,6 @@ impl Shell {
             boot,
             data_dir,
             settings,
-            panels: SessionPanels::default(),
-            active_chat: String::new(),
             sidebar_prev_order: Vec::new(),
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
@@ -1736,25 +1562,18 @@ impl Shell {
             debug_dialog,
             debug_gate,
             sidebar_tween: None,
-            right_tween: None,
-            right_pane_expanded: false,
-            viewport_width: 1280.0,
-            terminal_tween: None,
             fullscreen: None,
             titlebar_tween: None,
             titlebar_should_move: false,
-            terminal_tween_task: None,
-            terminal_drag_anchor: None,
             reduced_motion: false,
             motion_active: std::cell::Cell::new(false),
             splash: SplashPhase::Visible,
             splash_task: None,
             save_task: None,
             focus_sub: None,
+            root_focus: cx.focus_handle(),
             _ticker: ticker,
             _state_observation: observation,
-            _composer_events: composer_events,
-            _transcript_events: transcript_events,
             comment_popup,
             _comment_popup_events: comment_popup_events,
             project_window,
@@ -1962,7 +1781,18 @@ impl Shell {
                     None
                 };
                 if target.is_some() {
-                    state.update(cx, |s, cx| s.select_space(target, cx));
+                    state.update(cx, |s, cx| s.select_space(target.clone(), cx));
+                    // A boot canvas tile opened before the spaces frame
+                    // copied main's then-empty pick: aim it too.
+                    let canvases: Vec<Entity<AppState>> = self
+                        .slots
+                        .values()
+                        .filter(|slot| matches!(slot.tab, crate::workspace::TabKey::NewSession(_)))
+                        .map(|slot| slot.state.clone())
+                        .collect();
+                    for canvas in canvases {
+                        canvas.update(cx, |s, cx| s.select_space(target.clone(), cx));
+                    }
                 }
             }
         }
@@ -1981,49 +1811,9 @@ impl Shell {
         // Boot landing: the most recent session once the first chats frame
         // syncs (manual selection wins).
         self.boot_select_chat(cx);
-        // Chat switch: restore THAT chat's panel state (per-session open flags;
-        // snap, no tween — the panels belong to the destination chat).
-        let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
-        if selected != self.active_chat {
-            // The outgoing chat's ACTIVE diff pane loses the surface on
-            // switch: detach its selection/comment BEFORE the panel key
-            // changes, even when the new chat resolves to the same checkout/
-            // checksum (its pane's `sync` would otherwise early-return and
-            // inherit a stale selection). Scoped to the outgoing ACTIVE diff
-            // only — hidden/background panes keep their state. (The terminal
-            // panels detach themselves through their own state observer.)
-            if let RightSurface::Diff(id) = self.resolved_right_active(cx)
-                && let Some(changes) = self.diffs.get(&id).cloned()
-            {
-                changes.update(cx, |changes, cx| changes.detach(cx));
-            }
-            self.active_chat = selected;
-            // Route history: a chat switch is a navigation. The very first
-            // selection off the untouched boot canvas REPLACES that entry —
-            // zeron's `/` route redirected into the last-used chat, leaving no
-            // dead Back target. Walking history lands here too, but the
-            // destination already equals `current()`, so the push dedups.
-            if matches!(self.route, Route::Chat) {
-                let entry = NavEntry::Chat(self.active_chat.clone());
-                if self.nav.len() == 1 && *self.nav.current() == NavEntry::Chat(String::new()) {
-                    self.nav.replace(entry);
-                } else {
-                    self.nav.push(entry);
-                }
-            }
-            self.right_tween = None;
-            self.terminal_tween = None;
-            let panels = self.panels.get(&self.panel_key(cx));
-            if let Some(panel) = self.terminal.clone() {
-                panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
-            }
-            if panels.changes_open
-                && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-                && let Some(changes) = self.diffs.get(&id).cloned()
-            {
-                changes.update(cx, |changes, cx| changes.ensure_content(cx));
-            }
-        }
+        // Deleted / archived sessions, and sessions whose project moved to
+        // (or out of) this window's scope, leave the workspace.
+        self.prune_tabs(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
                 if self.splash == SplashPhase::Visible {
@@ -2056,1119 +1846,10 @@ impl Shell {
         }
     }
 
-    /// Does the selected space's folder have git? Owner-stamped and synced —
-    /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
-    fn space_git_detected(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_space_git()
-    }
-
-    /// The current chat's changes-pane flag (per-session, in-memory), gated on
-    /// the space having git at all: a stale per-chat open flag must not reopen
-    /// the pane after switching into a non-git space.
-    /// The per-session panel key. The new-chat canvas (no selection) keys per
-    /// SPACE — one shared "" key made a canvas toggle read as global state
-    /// (user report).
-    fn panel_key(&self, cx: &App) -> String {
-        if self.active_chat.is_empty() {
-            let space = self
-                .state
-                .read(cx)
-                .selected_space
-                .clone()
-                .unwrap_or_default();
-            format!("space-canvas:{space}")
-        } else {
-            self.active_chat.clone()
-        }
-    }
-
-    /// Whether the right pane shows. NOT gated on git any more: the pane is
-    /// a surface HOST now (terminals work in any space), so only the Git
-    /// surface rows check `space_git_detected`. Still hidden on the
-    /// new-session canvas, where the titlebar carries no toggle to close it
-    /// again (an earlier user request).
-    fn right_pane_open(&self, cx: &App) -> bool {
-        !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
-    }
-
-    /// The current chat's terminal flag (per-session, in-memory).
-    fn terminal_open(&self, cx: &App) -> bool {
-        self.panels.get(&self.panel_key(cx)).terminal_open
-    }
-
-    fn right_target(&self, cx: &App) -> f32 {
-        if !self.right_pane_open(cx) {
-            0.0
-        } else if self.right_pane_expanded {
-            // Takeover: everything right of the sidebar; the conversation
-            // column (flex_1) collapses to zero behind it. Rides the sidebar's
-            // width tween so a sidebar toggle mid-takeover stays seamless.
-            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-            (self.viewport_width - sidebar_now).max(RIGHT_PANE_MIN)
-        } else {
-            self.settings.right_pane_width
-        }
-    }
-
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let from = self.sidebar_target();
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        // No git gate: the pane hosts terminals too (see `right_pane_open`).
-        let from = self.right_target(cx);
-        let key = self.panel_key(cx);
-        let open = self.panels.toggle_changes(&key);
-        if !open {
-            // Closing always leaves takeover mode — reopening at full bleed
-            // with the conversation gone read as a broken chat.
-            self.right_pane_expanded = false;
-            // The pane is gone: the outgoing surface's floating comment must
-            // not linger — an embedded terminal's pill would float over the
-            // conversation card, and an outgoing diff's selection/comment
-            // must clear (symmetric with terminal).
-            if let Some(panel) = &self.right_terminal {
-                panel.update(cx, |panel, cx| panel.detach_comment_selection(cx));
-            }
-            if let RightSurface::Diff(id) = self.resolved_right_active(cx)
-                && let Some(changes) = self.diffs.get(&id).cloned()
-            {
-                changes.update(cx, |changes, cx| changes.detach(cx));
-            }
-        }
-        self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
-        if open
-            && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-            && let Some(changes) = self.diffs.get(&id).cloned()
-        {
-            // Reopening onto a diff tab revalidates its watch.
-            changes.update(cx, |changes, cx| changes.ensure_content(cx));
-        }
-        cx.notify();
-    }
-
-    fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.right_terminal {
-            return terminal.clone();
-        }
-        let popup = self.comment_popup.clone().downgrade();
-        let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), popup, cx));
-        self.right_terminal = Some(terminal.clone());
-        terminal
-    }
-
-    /// The right pane's surface tabs in the STORED (drag-reorderable) order —
-    /// `(surface, title)`; entries whose backing tab/entity is gone are
-    /// skipped.
-    fn right_surface_rows(&self, cx: &App) -> Vec<(RightSurface, SharedString)> {
-        let key = self.panel_key(cx);
-        let stored: &[RightSurface] = self
-            .right_tabs
-            .get(&key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let terminals: Vec<(u64, SharedString, bool)> = self
-            .right_terminal
-            .as_ref()
-            .map(|t| t.read(cx).tab_summaries(cx))
-            .unwrap_or_default();
-        stored
-            .iter()
-            .filter_map(|surface| match surface {
-                RightSurface::Diff(id) => self
-                    .diffs
-                    .get(id)
-                    // Contextual title (user request): the pane's scope
-                    // label, or the pinned commit's subject.
-                    .map(|changes| (*surface, changes.read(cx).tab_title())),
-                RightSurface::Terminal(tab) => terminals
-                    .iter()
-                    .find(|(k, _, _)| k == tab)
-                    .map(|(_, title, _)| (*surface, title.clone())),
-                RightSurface::Files(id) => self
-                    .files
-                    .get(id)
-                    .map(|panel| (*surface, panel.read(cx).tab_title())),
-                RightSurface::SideChat(id) => self
-                    .side_chats
-                    .get(id)
-                    .map(|panel| (*surface, panel.read(cx).tab_title())),
-                RightSurface::Picker => None,
-            })
-            .collect()
-    }
-
-    /// Drag-reorder a surface tab within this chat's strip.
-    fn reorder_right_tabs(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        let key = self.panel_key(cx);
-        if let Some(tabs) = self.right_tabs.get_mut(&key)
-            && reorder_right_surfaces(tabs, from, to)
-        {
-            cx.notify();
-        }
-    }
-
-    /// Track the hovered drop slot mid-drag (the terminal drawer's
-    /// `update_drag_over`, ported: epoch bumps restart the slide tween).
-    fn update_right_tab_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
-        match &mut self.right_tab_drag {
-            Some(drag) if drag.over != over => {
-                drag.prev_over = drag.over;
-                drag.over = over;
-                drag.epoch += 1;
-                cx.notify();
-            }
-            Some(_) => {}
-            None => {
-                self.right_tab_drag = Some(RightTabDragState {
-                    from,
-                    over,
-                    epoch: 0,
-                    prev_over: from,
-                });
-                cx.notify();
-            }
-        }
-    }
-
-    /// The surface that actually renders: the stored pick when it still
-    /// exists, else the first remaining tab, else the picker. Terminal keys
-    /// go stale when their tab closes/exits — never render a dead surface.
-    fn resolved_right_active(&self, cx: &App) -> RightSurface {
-        let picked = self.panels.get(&self.panel_key(cx)).right_active;
-        let rows = self.right_surface_rows(cx);
-        let exists = match picked {
-            RightSurface::Picker => false,
-            surface => rows.iter().any(|(s, _)| *s == surface),
-        };
-        if exists {
-            picked
-        } else {
-            rows.first()
-                .map(|(s, _)| *s)
-                .unwrap_or(RightSurface::Picker)
-        }
-    }
-
-    fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
-        // The surface being replaced: an outgoing diff's selection/comment
-        // must clear (symmetric with terminal below) — but ONLY the outgoing
-        // ACTIVE one, never a hidden pane's.
-        let outgoing = self.resolved_right_active(cx);
-        if let RightSurface::Diff(id) = outgoing
-            && outgoing != surface
-            && let Some(changes) = self.diffs.get(&id).cloned()
-        {
-            changes.update(cx, |changes, cx| changes.detach(cx));
-        }
-        // Leaving a Terminal surface hides its comment pill — it would float
-        // over the pane that replaces it.
-        if !matches!(surface, RightSurface::Terminal(_))
-            && let Some(panel) = &self.right_terminal
-        {
-            panel.update(cx, |panel, cx| panel.detach_comment_selection(cx));
-        }
-        let key = self.panel_key(cx);
-        self.panels.update(&key, |p| p.right_active = surface);
-        match surface {
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
-            }
-            RightSurface::Diff(id) => {
-                if let Some(changes) = self.diffs.get(&id).cloned() {
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                }
-            }
-            RightSurface::Files(id) => {
-                if let Some(panel) = self.files.get(&id).cloned() {
-                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
-                }
-            }
-            RightSurface::SideChat(_) => {}
-            RightSurface::Picker => {}
-        }
-        cx.notify();
-    }
-
-    /// Files is only meaningful for a session bound to a project checkout
-    /// (the engine resolves paths against the chat's verified cwd).
-    fn files_available(&self, cx: &App) -> bool {
-        !self.active_chat.is_empty() && crate::files::context_for(self.state.read(cx)).is_ok()
-    }
-
-    /// The picker's Files card / the `+` menu's Files row: a fresh file
-    /// browser tab over the selected chat's checkout.
-    fn add_files_surface(&mut self, cx: &mut Context<Self>) {
-        self.files_seq += 1;
-        let id = self.files_seq;
-        let panel = cx.new(|cx| FilesPanel::new(self.state.clone(), cx));
-        self.files.insert(id, panel);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Files(id));
-        self.set_right_active(RightSurface::Files(id), cx);
-    }
-
-    /// The picker's Git card / the `+` menu's Diff row: every click opens a
-    /// FRESH diff tab with its own scope/base selection (multiple diff
-    /// panels, user request).
-    fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
-        let popup = self.comment_popup.clone().downgrade();
-        let changes = cx.new(|cx| Changes::new(self.state.clone(), popup, cx));
-        self.register_diff_surface(changes, cx);
-    }
-
-    /// A History row click: the commit opens as its own pinned diff tab
-    /// (user request).
-    fn add_commit_diff_surface(
-        &mut self,
-        commit: cypher_proto::GitHistoryCommit,
-        cx: &mut Context<Self>,
-    ) {
-        let popup = self.comment_popup.clone().downgrade();
-        let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), popup, commit, cx));
-        self.register_diff_surface(changes, cx);
-    }
-
-    fn register_diff_surface(&mut self, changes: Entity<Changes>, cx: &mut Context<Self>) {
-        self.diff_seq += 1;
-        let id = self.diff_seq;
-        let sub = cx.subscribe(&changes, |this: &mut Self, _, event, cx| match event {
-            ChangesEvent::OpenCommit(commit) => {
-                this.add_commit_diff_surface(commit.clone(), cx);
-            }
-        });
-        self.diffs.insert(id, changes);
-        self.diff_subs.insert(id, sub);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Diff(id));
-        self.set_right_active(RightSurface::Diff(id), cx);
-    }
-
-    // ---- temporary Side Chats (round 21) ----
-
-    /// User-facing notice text for a failed `StartSideChat` RPC.
-    ///
-    /// `unknown method: StartSideChat` means the device hosting the parent
-    /// session still runs a Cypher engine older than the Side Chat feature
-    /// — the message says so and how to fix it. Every other failure gets
-    /// the generic "Could not open Side Chat: …" (the full RPC error,
-    /// e.g. an engine-side `Failed` message).
-    fn side_chat_start_error_text(err: &cypher_rpc::RpcError) -> String {
-        if let cypher_rpc::RpcError::UnknownMethod(method) = err
-            && method == methods::START_SIDE_CHAT
-        {
-            "Side Chat requires a newer Cypher engine on the device hosting \
-             this session. Update that device or use a session hosted on \
-             this device."
-                .to_string()
-        } else {
-            format!("Could not open Side Chat: {err}")
-        }
-    }
-
-    /// Session Fork idempotence: should the `(sourceChatId, anchorMessageId)`
-    /// → requestId mapping survive this RPC outcome? Errors / lost replies
-    /// keep it (the retry must reuse the SAME target id so the engine returns
-    /// the created chat); a definitive reply (Created or typed Unavailable)
-    /// drops it.
-    fn fork_request_id_retained(
-        result: &Result<cypher_proto::SessionForkResponse, cypher_rpc::RpcError>,
-    ) -> bool {
-        result.is_err()
-    }
-
-    /// User-facing notice text for a failed `ForkSession` RPC.
-    /// `unknown method: ForkSession` means the device hosting the source
-    /// chat runs an engine too old for Session Fork — the message says so
-    /// and how to fix it. Every other failure gets the generic "Could not
-    /// fork: …" (the full RPC error).
-    fn fork_session_error_text(err: &cypher_rpc::RpcError) -> String {
-        if let cypher_rpc::RpcError::UnknownMethod(method) = err
-            && method == methods::FORK_SESSION
-        {
-            "Session Fork requires a newer Cypher engine on the device \
-             hosting this session. Update that device or use a session \
-             hosted on this device."
-                .to_string()
-        } else {
-            format!("Could not fork: {err}")
-        }
-    }
-
-    /// `ForkSession` for a settled transcript entry (Session Fork v1): mint
-    /// a NEW durable root Pi chat on the source chat's host device
-    /// (relay-forwarded when the source is remote). The reply's composer
-    /// prefill is seeded immediately; the fork is SELECTED only when the
-    /// user is still on the source chat — a late reply (user switched away)
-    /// still inserts the chat into the sidebar but only notifies, never
-    /// yanks the selection. Engine/Unavailable failures surface as a desktop
-    /// notice AND the in-app sidebar notice strip. The transcript's in-flight
-    /// marker (spinner + double-click guard) is begun here and ended on
-    /// every settle path.
-    ///
-    /// Idempotence: the request id (the client-minted target chat id) is
-    /// cached per `(sourceChatId, anchorMessageId)` and REUSED across RPC
-    /// errors / lost replies — a retry hits the engine with the same id and
-    /// returns the already-created chat instead of minting a twin. The cache
-    /// entry is dropped once the RPC settles definitively (Created or typed
-    /// Unavailable).
-    fn fork_session(&mut self, chat_id: String, anchor_message_id: String, cx: &mut Context<Self>) {
-        self.transcript.update(cx, |t, cx| {
-            t.begin_fork(chat_id.clone(), anchor_message_id.clone());
-            cx.notify();
-        });
-        // Unwind the in-flight marker on every settle path (the RPC result
-        // or an offline pre-flight failure).
-        let settle = {
-            let transcript = self.transcript.clone();
-            let chat_id = chat_id.clone();
-            let anchor_message_id = anchor_message_id.clone();
-            move |cx: &mut Context<Shell>| {
-                transcript.update(cx, |t, cx| {
-                    t.end_fork(chat_id.clone(), anchor_message_id.clone());
-                    cx.notify();
-                });
-            }
-        };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            tracing::warn!(%chat_id, "ForkSession skipped: engine offline");
-            let notice = "Cannot fork: the engine is not connected.";
-            crate::notify::post("Fork", notice);
-            self.sidebar_notice = Some(notice.into());
-            settle(cx);
-            cx.notify();
-            return;
-        };
-        // The request id is the client-minted TARGET chat id — reuse the
-        // cached id for this (source, anchor) so a lost-reply retry returns
-        // the SAME chat (idempotent); mint + remember it on first click.
-        let key = (chat_id.clone(), anchor_message_id.clone());
-        let request_id = self.fork_request_ids.get(&key).cloned().unwrap_or_else(|| {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.fork_request_ids.insert(key, id.clone());
-            id
-        });
-        let mut params = serde_json::Map::new();
-        params.insert("requestId".into(), serde_json::Value::String(request_id));
-        params.insert(
-            "sourceChatId".into(),
-            serde_json::Value::String(chat_id.clone()),
-        );
-        params.insert(
-            "anchorMessageId".into(),
-            serde_json::Value::String(anchor_message_id.clone()),
-        );
-        {
-            let state = self.state.read(cx);
-            if let (Some(chat), Some(local)) = (
-                state.chats.iter().find(|c| c.id == chat_id),
-                state.local_device_id.clone(),
-            ) && chat.device_id != local
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(chat.device_id.clone()),
-                );
-            }
-        }
-        let params = serde_json::Value::Object(params);
-        let weak = cx.weak_entity();
-        let composer = self.composer.clone();
-        let state = self.state.clone();
-        cx.spawn(async move |_this, cx| {
-            let value = engine.client().call(methods::FORK_SESSION, params).await;
-            // Always clear the in-flight marker once the RPC settles.
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |_shell, cx| {
-                    settle(cx);
-                    cx.notify();
-                });
-            }
-            let result: Result<cypher_proto::SessionForkResponse, cypher_rpc::RpcError> = value
-                .and_then(|v| {
-                    serde_json::from_value(v)
-                        .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
-                });
-            // The (source, anchor) → requestId mapping is RETAINED on errors /
-            // lost replies (the retry must reuse the SAME target id so the
-            // engine returns the created chat) and DROPPED on a definitive
-            // reply (Created / typed Unavailable) — the settle arms below
-            // honor `retained`.
-            let retained = Self::fork_request_id_retained(&result);
-            let response = match result {
-                Ok(response) => response,
-                Err(err) => {
-                    // `retained` is true here — nothing removes the mapping.
-                    tracing::warn!(%chat_id, error = %err, "ForkSession failed");
-                    let notice = Self::fork_session_error_text(&err);
-                    crate::notify::post("Fork", &notice);
-                    if let Some(shell) = weak.upgrade() {
-                        shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
-                            cx.notify();
-                        });
-                    }
-                    return;
-                }
-            };
-            match response {
-                cypher_proto::SessionForkResponse::Created(created) => {
-                    // Insert the new chat + seed its composer draft BEFORE the
-                    // selection flips (the composer applies stashed drafts on
-                    // the swap).
-                    let fork_id = created.chat.id.clone();
-                    let title = created
-                        .chat
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Fork".to_string());
-                    state.update(cx, |state, cx| {
-                        state.insert_chat_optimistic(created.chat.clone());
-                        cx.notify();
-                    });
-                    composer.update(cx, |composer, cx| {
-                        if let Some(text) = created.composer_text {
-                            composer.seed_draft(&fork_id, text, cx);
-                        }
-                    });
-                    if let Some(shell) = weak.upgrade() {
-                        shell.update(cx, |shell, cx| {
-                            // Definitive reply: this fork is settled, drop the
-                            // idempotence mapping (a fresh future fork mints a
-                            // fresh id). Errors/lost replies retain it.
-                            if !retained {
-                                shell
-                                    .fork_request_ids
-                                    .remove(&(chat_id.clone(), anchor_message_id.clone()));
-                            }
-                            if shell.active_chat == chat_id {
-                                // Still on the source: select the fork.
-                                shell.state.update(cx, |state, cx| {
-                                    state.select_chat(Some(fork_id.clone()), cx);
-                                });
-                                let notice = format!("Fork created: {title}");
-                                crate::notify::post("Fork", &notice);
-                            } else {
-                                // User switched away: insert-only, never yank.
-                                let notice = format!("Fork created: {title}");
-                                crate::notify::post("Fork", &notice);
-                            }
-                            cx.notify();
-                        });
-                    }
-                }
-                cypher_proto::SessionForkResponse::Unavailable(unavailable) => {
-                    // Definitive refusal: drop the idempotence mapping too.
-                    if let Some(shell) = weak.upgrade() {
-                        shell.update(cx, |shell, cx| {
-                            if !retained {
-                                shell
-                                    .fork_request_ids
-                                    .remove(&(chat_id.clone(), anchor_message_id.clone()));
-                            }
-                            cx.notify();
-                        });
-                    }
-                    let notice = format!("Fork unavailable: {}", unavailable.message);
-                    crate::notify::post("Fork", &notice);
-                    if let Some(shell) = weak.upgrade() {
-                        shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
-                            cx.notify();
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// User-facing notice text for a failed `RewindSession` RPC, mirroring
-    /// [`Self::fork_session_error_text`]: an `unknown method` reply means the
-    /// device hosting the chat runs an engine without Session Rewind.
-    fn rewind_session_error_text(err: &cypher_rpc::RpcError) -> String {
-        if let cypher_rpc::RpcError::UnknownMethod(method) = err
-            && method == methods::REWIND_SESSION
-        {
-            "Restarting a conversation from a message requires a newer Cypher \
-             engine on the device hosting this session. Update that device or \
-             use a session hosted on this device."
-                .to_string()
-        } else {
-            format!("Could not restart the conversation: {err}")
-        }
-    }
-
-    /// `RewindSession` for a settled transcript entry: restart the
-    /// conversation at that anchor INSIDE the same chat — the engine deletes
-    /// everything after the boundary and re-points this chat's Pi session at
-    /// a truncated copy. No chat is created and the selection never moves;
-    /// the transcript shrinks through the doc watch the UI is already on.
-    ///
-    /// The confirming click happened in the transcript (the affordance arms
-    /// first), so this call is the point of no return. A USER anchor hands
-    /// its text back for the composer — seeded only when the composer is
-    /// empty, so a draft in progress is never clobbered.
-    ///
-    /// Deliberately NOT retried under an idempotence key: a lost reply leaves
-    /// the engine's truncation in place (the doc watch shows it), and a blind
-    /// retry would cut at the next boundary instead.
-    fn rewind_session(
-        &mut self,
-        chat_id: String,
-        anchor_message_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.transcript.update(cx, |t, cx| {
-            t.begin_rewind(chat_id.clone(), anchor_message_id.clone());
-            cx.notify();
-        });
-        let settle = {
-            let transcript = self.transcript.clone();
-            let chat_id = chat_id.clone();
-            let anchor_message_id = anchor_message_id.clone();
-            move |cx: &mut Context<Shell>| {
-                transcript.update(cx, |t, cx| {
-                    t.end_rewind(chat_id.clone(), anchor_message_id.clone());
-                    cx.notify();
-                });
-            }
-        };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            tracing::warn!(%chat_id, "RewindSession skipped: engine offline");
-            let notice = "Cannot restart the conversation: the engine is not connected.";
-            crate::notify::post("Restart", notice);
-            self.sidebar_notice = Some(notice.into());
-            settle(cx);
-            cx.notify();
-            return;
-        };
-        let mut params = serde_json::Map::new();
-        params.insert("chatId".into(), serde_json::Value::String(chat_id.clone()));
-        params.insert(
-            "anchorMessageId".into(),
-            serde_json::Value::String(anchor_message_id.clone()),
-        );
-        {
-            let state = self.state.read(cx);
-            if let (Some(chat), Some(local)) = (
-                state.chats.iter().find(|c| c.id == chat_id),
-                state.local_device_id.clone(),
-            ) && chat.device_id != local
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(chat.device_id.clone()),
-                );
-            }
-        }
-        let params = serde_json::Value::Object(params);
-        let weak = cx.weak_entity();
-        let composer = self.composer.clone();
-        cx.spawn(async move |_this, cx| {
-            let value = engine.client().call(methods::REWIND_SESSION, params).await;
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |_shell, cx| {
-                    settle(cx);
-                    cx.notify();
-                });
-            }
-            let result: Result<cypher_proto::SessionRewindResponse, cypher_rpc::RpcError> = value
-                .and_then(|v| {
-                    serde_json::from_value(v)
-                        .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
-                });
-            let notice = match result {
-                Ok(cypher_proto::SessionRewindResponse::Rewound(rewound)) => {
-                    if let Some(text) = rewound.composer_text {
-                        composer.update(cx, |composer, cx| {
-                            if composer.current_draft(cx).trim().is_empty() {
-                                composer.seed_draft(&chat_id, text, cx);
-                            }
-                        });
-                    }
-                    let removed = rewound.removed_message_ids.len();
-                    if removed == 1 {
-                        "Conversation restarted — 1 message removed".to_string()
-                    } else {
-                        format!("Conversation restarted — {removed} messages removed")
-                    }
-                }
-                Ok(cypher_proto::SessionRewindResponse::Unavailable(unavailable)) => {
-                    format!("Cannot restart here: {}", unavailable.message)
-                }
-                Err(err) => {
-                    tracing::warn!(%chat_id, error = %err, "RewindSession failed");
-                    Self::rewind_session_error_text(&err)
-                }
-            };
-            crate::notify::post("Restart", &notice);
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(notice.clone().into());
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// `StartSideChat` for a settled selection: mint the temporary chat on
-    /// the engine (relay-forwarded when the parent chat is remote — the
-    /// parent's host device owns the side chat), then open its right-pane
-    /// tab. `selected_text` is the settled quote IN FULL (the engine
-    /// validates it — empty/oversized are rejected there — and injects it
-    /// into the first send). Capped at [`MAX_SIDE_CHATS_PER_CHAT`] per chat
-    /// as a UX guard (the ENGINE enforces the global cap authoritatively).
-    /// Start/cap/offline failures surface as a desktop notice AND the
-    /// in-app sidebar notice strip, never a silent return.
-    fn open_side_chat(
-        &mut self,
-        parent_chat_id: String,
-        source: cypher_proto::SideChatSource,
-        selected_text: String,
-        origin: Option<cypher_proto::agent_prompt::AgentQuote>,
-        cx: &mut Context<Self>,
-    ) {
-        let key = self.panel_key(cx);
-        let open = self
-            .right_tabs
-            .get(&key)
-            .map(|v| {
-                v.iter()
-                    .filter(|s| matches!(s, RightSurface::SideChat(_)))
-                    .count()
-            })
-            .unwrap_or(0);
-        if open >= MAX_SIDE_CHATS_PER_CHAT {
-            tracing::warn!(%parent_chat_id, "Side Chat tab cap reached per chat");
-            let notice = "Too many side chats open for this chat (max 8).";
-            crate::notify::post("Side Chat", notice);
-            self.sidebar_notice = Some(notice.into());
-            cx.notify();
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            tracing::warn!(%parent_chat_id, "StartSideChat skipped: engine offline");
-            let notice = "Cannot open a side chat: engine is not connected.";
-            crate::notify::post("Side Chat", notice);
-            self.sidebar_notice = Some(notice.into());
-            cx.notify();
-            return;
-        };
-        // Remote parent: the side chat is owned by the PARENT'S host device
-        // (relay-forwarded). The reply's `targetDeviceId` then rides every
-        // subsequent side-chat RPC.
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "parentChatId".into(),
-            serde_json::Value::String(parent_chat_id.clone()),
-        );
-        params.insert(
-            "source".into(),
-            serde_json::to_value(&source).unwrap_or_default(),
-        );
-        params.insert(
-            "selectedText".into(),
-            serde_json::Value::String(selected_text.clone()),
-        );
-        // What the selection stands for in the agent's own words, when it
-        // was taken from a displayed translation.
-        if let Some(origin) = &origin {
-            params.insert(
-                "origin".into(),
-                serde_json::to_value(origin).unwrap_or_default(),
-            );
-        }
-        {
-            let state = self.state.read(cx);
-            if let (Some(chat), Some(local)) = (
-                state.chats.iter().find(|c| c.id == parent_chat_id),
-                state.local_device_id.clone(),
-            ) && chat.device_id != local
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(chat.device_id.clone()),
-                );
-            }
-        }
-        let params = serde_json::Value::Object(params);
-        let weak = cx.weak_entity();
-        let quote = selected_text;
-        cx.spawn(async move |_this, cx| {
-            let value = engine.client().call(methods::START_SIDE_CHAT, params).await;
-            let created: cypher_proto::SideChatCreated = match value.and_then(|v| {
-                serde_json::from_value(v)
-                    .map_err(|e| cypher_rpc::RpcError::BadParams(e.to_string()))
-            }) {
-                Ok(created) => created,
-                Err(err) => {
-                    tracing::warn!(%parent_chat_id, error = %err, "StartSideChat failed");
-                    let notice = Self::side_chat_start_error_text(&err);
-                    crate::notify::post("Side Chat", &notice);
-                    if let Some(shell) = weak.upgrade() {
-                        shell.update(cx, |shell, cx| {
-                            shell.sidebar_notice = Some(notice.clone().into());
-                            cx.notify();
-                        });
-                    }
-                    return;
-                }
-            };
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |shell, cx| {
-                    shell.register_side_chat_tab(created, source.clone(), quote.clone(), cx)
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// A successful `StartSideChat` lands here: build the panel, subscribe to
-    /// its events, and open the tab.
-    ///
-    /// Race guard (round-21 audit): the START round-trip may outlive the user
-    /// switching to a DIFFERENT chat. A side chat belongs to its source
-    /// parent's panel key — attaching it under the new chat's key would
-    /// mis-scope the tab, so the created temp is disposed immediately and
-    /// nothing is opened.
-    fn register_side_chat_tab(
-        &mut self,
-        created: cypher_proto::SideChatCreated,
-        source: cypher_proto::SideChatSource,
-        selected_text: String,
-        cx: &mut Context<Self>,
-    ) {
-        let parent_chat_id = created.parent_chat_id.clone();
-        if self.active_chat != parent_chat_id {
-            tracing::warn!(
-                parent = %parent_chat_id,
-                switched_to = %self.active_chat,
-                side_chat = %created.side_chat_id,
-                "StartSideChat returned after the user switched away; disposing the temp"
-            );
-            let mut params = serde_json::Map::new();
-            params.insert(
-                "sideChatId".into(),
-                serde_json::Value::String(created.side_chat_id.clone()),
-            );
-            let state = self.state.read(cx);
-            if let Some(local) = state.local_device_id.clone()
-                && created.target_device_id != local
-            {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(created.target_device_id.clone()),
-                );
-            }
-            let engine = self.state.read(cx).engine().cloned();
-            if let Some(engine) = engine {
-                cx.spawn(async move |_, _| {
-                    let _ = engine
-                        .client()
-                        .call(
-                            methods::DISPOSE_SIDE_CHAT,
-                            serde_json::Value::Object(params),
-                        )
-                        .await;
-                })
-                .detach();
-            }
-            return;
-        }
-        let panel = cx.new(|cx| {
-            crate::side_chats::SideChatPanel::new(
-                self.state.clone(),
-                parent_chat_id.clone(),
-                created.side_chat_id.clone(),
-                created.target_device_id.clone(),
-                source,
-                selected_text,
-                cx,
-            )
-        });
-        self.side_chat_seq += 1;
-        let id = self.side_chat_seq;
-        let sub = cx.subscribe(&panel, |this: &mut Self, _, event, cx| match event {
-            crate::side_chats::SideChatEvent::Promoted {
-                chat_id,
-                side_chat_id,
-            } => {
-                // Expand: the chat is now a normal root chat. Capture the
-                // panel's fork + composer + parent BEFORE the tab closes
-                // (close drops the panel) — the promoted row inherits the
-                // parent's device/space/cwd/config, and the fork's
-                // transcript/echoes/draft/staged attachments ride into the
-                // main surface so the switch is seamless (no blank flash,
-                // no lost draft). Promotion only changes the main selection
-                // AFTER the RPC succeeded — this handler runs on that.
-                let handoff = this
-                    .side_chats
-                    .values()
-                    .find(|p| p.read(cx).side_chat_id == *side_chat_id)
-                    .map(|p| {
-                        let panel = p.read(cx);
-                        let parent_chat_id = panel.parent_chat_id().to_string();
-                        let fork = panel.fork();
-                        let composer = panel.composer();
-                        let fork_transcript = fork.read(cx).transcript.clone();
-                        let fork_echoes = fork.read(cx).pending_echoes().to_vec();
-                        let draft = composer.read(cx).current_draft(cx);
-                        let staged = composer.read(cx).staged_attachments();
-                        (parent_chat_id, fork_transcript, fork_echoes, draft, staged)
-                    });
-                this.close_side_chat_tab(side_chat_id.clone(), cx);
-                let (parent_chat_id, fork_transcript, fork_echoes, draft, staged) =
-                    handoff.unwrap_or_default();
-                this.state.update(cx, |s, cx| {
-                    // Optimistic insert: the engine already created the row
-                    // (PromoteSideChat is synchronous engine-side), so the
-                    // sidebar renders and selection works before the next
-                    // chats frame replaces it with the authoritative row.
-                    if let Some(parent) = s.chats.iter().find(|c| c.id == parent_chat_id).cloned()
-                        && !s.chats.iter().any(|c| c.id == *chat_id)
-                    {
-                        s.insert_chat_optimistic(cypher_proto::Chat {
-                            pinned: false,
-                            id: chat_id.clone(),
-                            device_id: parent.device_id.clone(),
-                            title: None,
-                            archived: false,
-                            cwd: parent.cwd.clone(),
-                            branch: parent.branch.clone(),
-                            checkout_id: parent.checkout_id.clone(),
-                            config: parent.config.clone(),
-                            last_message_preview: None,
-                            last_message_at: None,
-                            created_at: chrono::Utc::now(),
-                            harness_session_id: None,
-                            harness_session_cwd: None,
-                            space_id: parent.space_id.clone(),
-                            last_seen_at: None,
-                            room_gen: Some(2),
-                            child: None,
-                        });
-                    }
-                    s.select_chat(Some(chat_id.clone()), cx);
-                    // Seed the main transcript from the fork so there is no
-                    // blank flash while the promoted chat's doc watch reset
-                    // lands (same content — the doc watch diff is a no-op),
-                    // and carry any unconfirmed optimistic echoes over.
-                    s.transcript = fork_transcript;
-                    for echo in fork_echoes {
-                        s.push_echo(chat_id, echo);
-                    }
-                    cx.notify();
-                });
-                // Hand the side composer's unsent draft + staged attachments
-                // off to the main composer (keyed by the promoted chat id).
-                this.composer.update(cx, |composer, cx| {
-                    composer.seed_draft(chat_id, draft, cx);
-                    composer.seed_attachments(chat_id, staged, cx);
-                });
-            }
-            crate::side_chats::SideChatEvent::Close { side_chat_id } => {
-                this.close_side_chat_tab(side_chat_id.clone(), cx);
-            }
-        });
-        self.side_chats.insert(id, panel);
-        self.side_chat_subs.insert(id, sub);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key.clone())
-            .or_default()
-            .push(RightSurface::SideChat(id));
-        self.set_right_active(RightSurface::SideChat(id), cx);
-        // Opening a side chat implies the right pane is showing it — at its
-        // NORMAL width (never a takeover/expanded pane: the conversation
-        // stays visible beside the side chat).
-        self.right_pane_expanded = false;
-        if !self.right_pane_open(cx) {
-            self.panels.toggle_changes(&key);
-        }
-        cx.notify();
-    }
-
-    /// Remove a side chat tab by its panel's side-chat id (event path):
-    /// dispose (no-op after promotion) and drop the panel (its transcript /
-    /// status tasks die with it).
-    fn close_side_chat_tab(&mut self, side_chat_id: String, cx: &mut Context<Self>) {
-        if let Some(id) = self
-            .side_chats
-            .iter()
-            .find(|(_, p)| p.read(cx).side_chat_id == side_chat_id)
-            .map(|(id, _)| *id)
-        {
-            self.close_side_chat_by_seq(id, cx);
-        }
-    }
-
-    /// Remove a side chat tab by its shell-minted sequence id (tab-strip ✕
-    /// path).
-    fn close_side_chat_by_seq(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(panel) = self.side_chats.get(&id).cloned() else {
-            return;
-        };
-        // Round-21 audit: a side chat belongs to its PARENT chat's tab strip
-        // — closing/promoting a HIDDEN side tab (the user switched away)
-        // must remove it from the parent's `right_tabs` key, never whichever
-        // main chat is currently selected.
-        let key = panel.read(cx).parent_chat_id().to_string();
-        remove_side_chat_from_tabs(&mut self.right_tabs, &key, id);
-        panel.update(cx, |panel, cx| panel.dispose(cx));
-        self.side_chats.remove(&id);
-        self.side_chat_subs.remove(&id);
-        self.panels.update(&key, |p| {
-            if p.right_active == RightSurface::SideChat(id) {
-                p.right_active = RightSurface::Picker;
-            }
-        });
-        cx.notify();
-    }
-
-    /// The picker's Terminal card / the `+` menu's Terminal row: every click
-    /// opens a fresh embedded terminal tab.
-    fn add_terminal_surface(&mut self, cx: &mut Context<Self>) {
-        let panel = self.right_terminal_panel(cx);
-        let opened = panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.open_tab_for_selected(cx)
-        });
-        if let Some(tab) = opened {
-            let key = self.panel_key(cx);
-            self.right_tabs
-                .entry(key)
-                .or_default()
-                .push(RightSurface::Terminal(tab));
-            self.set_right_active(RightSurface::Terminal(tab), cx);
-        }
-    }
-
-    /// A surface tab's ✕. The active fallback happens naturally through
-    /// [`Self::resolved_right_active`] on the next frame.
-    fn close_right_surface(
-        &mut self,
-        surface: RightSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = self.panel_key(cx);
-        if let Some(tabs) = self.right_tabs.get_mut(&key) {
-            tabs.retain(|s| *s != surface);
-        }
-        match surface {
-            RightSurface::Diff(id) => {
-                // Dropping the entity tears down its diff watch; detach first
-                // so a new pane with the same scope never inherits a stale
-                // selection/comment.
-                if let Some(changes) = self.diffs.remove(&id) {
-                    changes.update(cx, |changes, cx| changes.detach(cx));
-                }
-                self.diff_subs.remove(&id);
-            }
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
-            }
-            RightSurface::Files(id) => {
-                // Dropping the entity drops its editors — unsaved edits go
-                // with them (the tab title carries the ● warning).
-                self.files.remove(&id);
-            }
-            RightSurface::SideChat(id) => {
-                self.close_side_chat_by_seq(id, cx);
-            }
-            RightSurface::Picker => {}
-        }
-        self.panels.update(&key, |p| {
-            if p.right_active == surface {
-                p.right_active = RightSurface::Picker;
-            }
-        });
-        cx.notify();
-    }
-
-    fn terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.terminal {
-            return terminal.clone();
-        }
-        let popup = self.comment_popup.clone().downgrade();
-        let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), popup, cx));
-        self.terminal = Some(terminal.clone());
-        terminal
-    }
-
-    fn terminal_target(&self, cx: &App) -> f32 {
-        if self.terminal_open(cx) {
-            self.settings.terminal_height
-        } else {
-            0.0
-        }
-    }
-
-    /// Cmd/Ctrl+J and the header button (feature-inventory §1.10). Height
-    /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
-    /// The flag is per chat (zeron `sessionPanels`).
-    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.terminal_target(cx);
-        let key = self.panel_key(cx);
-        let open = self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
-        let panel = self.terminal_panel(cx);
-        panel.update(cx, |panel, cx| panel.set_open(open, cx));
-        if open {
-            // Opening lands keyboard focus IN the shell — typing goes straight
-            // to the prompt, no click needed (zeron terminal-panel.tsx: the
-            // visible+active effect calls `terminal.focus()` on every open).
-            // The handle is focusable before the panel's first paint; once the
-            // terminal body mounts with `track_focus` it receives the keys.
-            window.focus(&panel.read(cx).focus_handle(), cx);
-        } else {
-            // Hiding the panel removes the (likely focused) terminal view;
-            // with nothing focused, window key bindings stop dispatching, so
-            // hand focus to the composer. (Cmd+J is a pure toggle — a second
-            // press closes even while the terminal is focused, as in zeron's
-            // `useHotkey(toggleShortcut, ... setOpenScoped(!open))`.)
-            window.focus(&self.composer.focus_handle(cx), cx);
-        }
-        self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
-                .await;
-            this.update(cx, |shell, cx| {
-                shell.terminal_tween = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn on_terminal_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<TerminalResize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((anchor_y, anchor_h)) = self.terminal_drag_anchor else {
-            return;
-        };
-        let dy = anchor_y - f32::from(event.event.position.y);
-        let viewport_h = f32::from(window.viewport_size().height);
-        self.settings.terminal_height = clamp_terminal_height(anchor_h + dy, viewport_h);
-        self.terminal_tween = None; // live drag tracks the pointer
         self.schedule_save(cx);
         cx.notify();
     }
@@ -3187,30 +1868,15 @@ impl Shell {
         cx.notify();
     }
 
-    fn on_right_pane_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<RightPaneResize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let viewport = f32::from(window.viewport_size().width);
-        let width = viewport - f32::from(event.event.position.x);
-        // Cap the pane at 94% of the window on top of the absolute range
-        // (1.8× the previous 52% zeron cap, matching RIGHT_PANE_MAX).
-        let max = RIGHT_PANE_MAX.min(viewport * 0.936);
-        self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max.max(RIGHT_PANE_MIN));
-        self.right_tween = None;
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
     /// Debounced settings write: waits [`SAVE_DEBOUNCE_MS`], then persists the
     /// latest snapshot on the background executor. Re-scheduling drops (cancels)
     /// the previous timer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         // Only the main window writes `ui-settings.json`: a project window's
         // copy is a boot-time snapshot, and saving it whole would clobber
-        // whatever the main window changed since. Its pane sizes stay local.
+        // whatever the main window changed since. What a project window
+        // persists (its layout, session docks) is merged into the main
+        // window's copy instead (`Shell::persist_settings`).
         if self.is_project_window() {
             return;
         }
@@ -3224,8 +1890,13 @@ impl Shell {
             // this shell's in-memory copy — without this, the next pane resize
             // would quietly write the boot-time appearance back over the user's
             // choice.
+            // The layout is stamped here too (every workspace mutation
+            // schedules a save) — once boot restored it, never before.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
+                if shell.boot_landed {
+                    shell.settings.workspace = Some(shell.workspace.clone());
+                }
                 shell.settings.clone()
             }) else {
                 return;
@@ -3419,7 +2090,7 @@ impl Shell {
             page.update(cx, |page, cx| page.dismiss(cx));
         }
         self.route = Route::Chat;
-        self.nav.push(NavEntry::Chat(self.active_chat.clone()));
+        self.nav.push(NavEntry::Chat(self.focused_chat_key()));
         cx.notify();
     }
 
@@ -3447,10 +2118,9 @@ impl Shell {
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.route = Route::Chat;
-                let target = (!chat_id.is_empty()).then_some(chat_id);
-                if self.state.read(cx).selected_chat != target {
-                    self.state.update(cx, |s, cx| s.select_chat(target, cx));
-                }
+                // Land on the entry's tab (reopening it if it was closed);
+                // the follow push then dedups against `current()`.
+                self.open_nav_target(chat_id, cx);
             }
             NavEntry::Settings(section) => {
                 self.dismiss_comment_popup(cx);
@@ -3815,11 +2485,16 @@ impl Shell {
             .iter()
             .find(|c| c.id == chat_id && c.is_scratch())
             .and_then(|c| c.cwd.clone().map(|cwd| (c.device_id.clone(), cwd)));
-        if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
-            self.state.update(cx, |s, cx| s.select_chat(None, cx));
+        // Its tab closes (the slot's composer, and its per-chat stage, go
+        // with it); a stashed draft of a closed tab is dropped too.
+        if let Some(sid) = self.slot_for_tab(&crate::workspace::TabKey::session(chat_id.clone()))
+            && let Some(slot) = self.slots.get(&sid)
+        {
+            slot.composer
+                .update(cx, |composer, _| composer.purge_chat(&chat_id));
         }
-        self.composer
-            .update(cx, |composer, _| composer.purge_chat(&chat_id));
+        self.close_tab(&crate::workspace::TabKey::session(chat_id.clone()), cx);
+        self.closed_drafts.remove(&chat_id);
         self.mutate(
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id.clone() }),
             cx,
@@ -4524,12 +3199,22 @@ impl Shell {
         cluster + CLUSTER_BUTTONS_WIDTH + 10.0
     }
 
-    /// The unified window titlebar: chat → the session tab strip; settings →
-    /// the section label. Full-width on the glass shell; the traffic lights
-    /// and control cluster overlay its left end.
+    /// The unified window titlebar. Chat: only a drag strip over the
+    /// SIDEBAR column's top band — the workspace tiles' own headers are the
+    /// drag regions over the rest (a full-width strip would cover their
+    /// tabs). Settings: the full-width band. The traffic lights and control
+    /// cluster overlay its left end either way.
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
-            Route::Chat => self.render_session_title_bar(cx),
+            Route::Chat => {
+                let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+                let bar = div()
+                    .h(px(Theme::TITLEBAR_HEIGHT))
+                    .w(px(sidebar_now))
+                    .flex_none();
+                self.titlebar_drag_region("chat-titlebar", bar, cx)
+                    .into_any_element()
+            }
             Route::Settings(_) => {
                 let inner = div()
                     .size_full()
@@ -4554,7 +3239,7 @@ impl Shell {
     /// pointer moves with the button down, and double-click zooms.
     fn titlebar_drag_region(
         &self,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         el: gpui::Div,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -4662,6 +3347,10 @@ impl Shell {
                         cx.listener(|this, _, _, cx| this.open_new_session(cx)),
                     ))
             }))
+            // Workspace layout presets (Chat route only).
+            .when(matches!(self.route, Route::Chat), |el| {
+                el.child(self.render_layout_button(&theme, cx))
+            })
             .into_any_element()
     }
 
@@ -5000,6 +3689,11 @@ impl Shell {
         let subline = theme.text_muted.opacity(0.5);
         let select_id = id.clone();
         let menu_id = id.clone();
+        let drag = workspace_view::TabDrag::new(
+            crate::workspace::TabKey::session(id.clone()),
+            title.clone(),
+            harness.flatten(),
+        );
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
         let fade_key = format!("chat-row-{id}");
@@ -5043,9 +3737,14 @@ impl Shell {
             // active row.
             .on_hover(motion::hover_listener(fade_key.clone()))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_chat(select_id.clone(), cx);
+            // ⌘-click (Ctrl elsewhere) opens it in a new split to the right.
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                let split = event.modifiers().secondary();
+                this.open_chat_with(select_id.clone(), split, cx);
             }))
+            // Drag into the workspace: onto a tab bar or tile centre (join)
+            // or a tile edge (split). A plain click still opens it.
+            .on_drag(drag, workspace_view::TabDrag::ghost)
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -6623,10 +5322,46 @@ impl Shell {
         ))
     }
 
+    /// Settings route: just the section outlet — the section label lives in
+    /// the unified window titlebar (render_title_bar). Settings never
+    /// underlaps: pad below the overlaid titlebar.
+    fn render_settings_main(
+        &mut self,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let outlet = self.settings_outlet(section, cx);
+        let card_bg = crate::chat_style::panel_background(
+            crate::chat_style::settings(cx),
+            Theme::of(cx),
+            false,
+        );
+        // The same floating card the workspace tiles sit in. Stretched by
+        // the row, not `h_full` — 100% plus the margins overflowed the
+        // window by the bottom inset.
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .ml(px(4.0))
+            .mt(px(PANEL_EDGE_INSET))
+            .mb(px(PANEL_EDGE_INSET))
+            .mr(px(PANEL_EDGE_INSET))
+            .rounded(px(PANEL_CORNER_RADIUS))
+            .bg(card_bg)
+            .shadow_sm()
+            .overflow_hidden()
+            .pt(px(Theme::TITLEBAR_HEIGHT - PANEL_EDGE_INSET))
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(outlet))
+            .into_any_element()
+    }
+
     fn resize_handle<T>(
         &self,
-        id: &'static str,
-        marker: fn() -> T,
+        id: impl Into<gpui::ElementId>,
+        marker: impl Fn() -> T,
         reset: fn(&mut Shell, &mut Context<Shell>),
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div>
@@ -6653,1019 +5388,6 @@ impl Shell {
                     }
                 }),
             )
-    }
-
-    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme_owned = if matches!(self.route, Route::Chat) {
-            crate::chat_style::theme(cx)
-        } else {
-            Theme::of(cx).clone()
-        };
-        let theme = &theme_owned;
-        let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
-
-        // Settings route: just the section outlet — the section label lives in
-        // the unified window titlebar now (render_title_bar). Settings never
-        // underlaps: pad below the overlaid titlebar.
-        if let Route::Settings(section) = self.route {
-            let outlet = self.settings_outlet(section, cx);
-            return div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(outlet))
-                .into_any_element();
-        }
-
-        let _ = (text, border);
-        let has_selection = self.state.read(cx).selected_chat.is_some();
-        let has_spaces = !self.state.read(cx).spaces.is_empty();
-        let space_name: SharedString = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_default()
-            .into();
-
-        // Content outlet: selected chat → transcript; nothing selected → the
-        // "Send a message to start" canvas with a watermark; no spaces at all
-        // → the onboarding card. The composer sits below the first two
-        // (new-chat mode mints the chat id on first send).
-        let outlet: AnyElement = if has_selection {
-            self.transcript.clone().into_any_element()
-        } else if !has_spaces {
-            // Onboarding (first boot / after the destructive wipe / a
-            // project-less opt-out with nothing to work in): no folders to
-            // target yet — one clear affordance, regardless of `no_project`
-            // (an unselected canvas with zero spaces has nothing to send to).
-            let _ = faint;
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "no-spaces-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            div()
-                                .font_family(theme.font_sans.clone())
-                                .text_size(px(21.0))
-                                .font_weight(gpui::FontWeight::NORMAL)
-                                .text_color(theme.text.opacity(0.18))
-                                .child(SharedString::from("Let's Cypher")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(24.0))
-                                .text_size(px(16.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(px(13.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
-                        )
-                        .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
-                        ),
-                ))
-                .into_any_element()
-        } else {
-            // New-chat canvas: the Cypher wordmark over the target selectors
-            // (device + project — moved up from the composer footer) and the
-            // helper line.
-            let helper: SharedString = if space_name.is_empty() {
-                "Send a message to start a new session.".into()
-            } else {
-                format!("Send a message to start a session in {space_name}.").into()
-            };
-            let pickers = self.composer.read(cx).pickers().clone();
-            let selectors = pickers.update(cx, |p, cx| p.render_target_selectors(cx));
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "new-chat-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            div()
-                                .font_family(theme.font_sans.clone())
-                                .text_size(px(21.0))
-                                .font_weight(gpui::FontWeight::NORMAL)
-                                .text_color(theme.text.opacity(0.32))
-                                .child(SharedString::from("Let's Cypher")),
-                        )
-                        .child(div().mt(px(16.0)).child(selectors))
-                        .child(
-                            div()
-                                .mt(px(12.0))
-                                .text_size(px(14.0))
-                                .text_color(theme.text_muted.opacity(0.6))
-                                .child(helper),
-                        ),
-                ))
-                .into_any_element()
-        };
-
-        let status = self.render_status_strip(cx);
-        // File dropzone over the ENTIRE conversation column (transcript +
-        // composer, not just the pill): dragging OS files anywhere across the
-        // chat area shows the "Drop images to attach" veil; a drop stages the
-        // files in the composer. `has_active_drag` gates the veil so a drag
-        // that left the window (FileDrop Exited) can't strand it.
-        let file_drag_active = self.file_drag_active && cx.has_active_drag();
-        div()
-            .id("chat-dropzone")
-            // Background belongs to the rounded outer card. A rectangular
-            // child fill would cover its corners despite overflow_hidden.
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                this.file_drag_active = false;
-                let paths = paths.paths().to_vec();
-                this.composer
-                    .update(cx, |composer, cx| composer.add_paths(paths, cx));
-                cx.notify();
-            }))
-            .child(
-                // Full-height underlay: the transcript viewport spans the
-                // whole column, scrolling UNDER the titlebar above and the
-                // composer stack below. The per-glyph EdgeFade (glass-safe,
-                // same as the sidebar's) spans the full column with
-                // ASYMMETRIC bands sized to the chrome: content is opaque at
-                // the chrome's inner edge and fades to zero at the window
-                // edge — visible mid-fade through the glass chrome it slides
-                // under. Always on (the resting paddings keep pinned content
-                // out of the bands, and gating on measured scroll state left
-                // the top unfaded for one frame on session switch — user
-                // report). The jump pill floats outside the fade scope,
-                // anchored above the measured stack.
-                {
-                    // The terminal dock is NOT glass the transcript may slide
-                    // under: with the dock's translucent fill, transcript text
-                    // ghosted through the grid (user report). The underlay
-                    // ends at the dock's top instead, riding the same height
-                    // tween the dock animates with; `stack_h` below is only
-                    // the chrome that still overlaps the transcript (status
-                    // strip + composer).
-                    let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
-                    let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
-                    // Opaque from the composer PILL's top (the reserved
-                    // status strip above it is empty air), zero at the
-                    // underlay's bottom edge.
-                    let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bottom(px(term_h))
-                        .child(
-                            crate::edge_fade::edge_faded(
-                                Theme::TRANSCRIPT_FADE_BAND,
-                                true,
-                                true,
-                                div().size_full().child(outlet),
-                            )
-                            // Fully faded BY the titlebar's bottom edge (the
-                            // title text is opaque — overlap read as collision),
-                            // ramping in the band just below it.
-                            .inset_top(Theme::TITLEBAR_HEIGHT)
-                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                            .band_bottom(bottom_band),
-                        )
-                        .children(self.render_jump_to_bottom(stack_h, cx))
-                        // The find bar floats in the same layer, at the top
-                        // — outside the fade scope, over the transcript.
-                        .children(self.render_find_bar(window, cx))
-                },
-            )
-            // The glass chrome stack, floating over the transcript's bottom:
-            // reserved status strip (h-6, the WorkingIndicator — the composer
-            // below never shifts), composer, terminal dock. A paint-time
-            // canvas measures the stack for next frame's fade inset and
-            // transcript clearance. The flex_1 spacer has no id/listeners, so
-            // pointer + wheel events over it fall through to the list below.
-            .child(div().flex_1().min_h_0())
-            .child({
-                let measured = self.bottom_stack.clone();
-                div()
-                    .flex_none()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        gpui::canvas(
-                            move |bounds, _, _| measured.set(f32::from(bounds.size.height)),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                    // The session-level subagents trigger lives INSIDE the
-                    // status strip (right edge, next to the composer); the
-                    // inspector it opens is a floating layer and never
-                    // participates in this stack's measurement.
-                    .child(status)
-                    // A SELECTED chat keeps its composer even with zero live
-                    // spaces (a selected project-less / unavailable-project
-                    // chat still needs its input row); an unselected canvas
-                    // with no spaces shows onboarding instead, so the
-                    // composer only mounts where there is something to send
-                    // into.
-                    .when(has_selection || has_spaces, |el| {
-                        el.child(self.composer.clone())
-                    })
-                    .child(self.render_terminal_container(cx))
-            })
-            .when(file_drag_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(12.0))
-                        .bg(theme.scrim().opacity(0.4 / 0.6))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .child("Drop images to attach"),
-                )
-            })
-            .into_any_element()
-    }
-
-    // ---- in-chat find (⌘F) ----
-
-    /// ⌘F (and Edit → Find in Chat). Opens the find bar over the open
-    /// conversation, or — when it is already open — just puts the caret back
-    /// in the field with the previous query intact, the way every find bar
-    /// behaves. There is nothing to search on the new-chat canvas or in
-    /// Settings, so both are no-ops rather than an empty bar.
-    fn open_find(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat)
-            || self.showing_setup()
-            || self.state.read(cx).selected_chat.is_none()
-        {
-            return;
-        }
-        let query = self.find_input.read(cx).text().to_owned();
-        self.transcript.update(cx, |transcript, cx| {
-            transcript.open_find(cx);
-            // Re-opening with a retained query must re-run it: the index was
-            // dropped when find closed.
-            transcript.set_find_query(&query, cx);
-        });
-        self.find_focus_pending = true;
-        cx.notify();
-    }
-
-    /// Close the bar and hand the keyboard back to the composer — where it
-    /// was before ⌘F, and the only place in the chat route that wants it.
-    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.transcript
-            .update(cx, |transcript, cx| transcript.close_find(cx));
-        self.find_focus_pending = false;
-        window.focus(&self.composer.focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.transcript
-            .update(cx, |transcript, cx| transcript.step_find(delta, cx));
-    }
-
-    /// Find-bar keys, bubbling from the focused field ("PaletteSearch" leaves
-    /// ↵/⇧↵/↑↓/esc unbound exactly so they arrive here).
-    fn find_key(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_find(window, cx),
-            "enter" => {
-                let delta = if event.keystroke.modifiers.shift {
-                    -1
-                } else {
-                    1
-                };
-                self.step_find(delta, cx);
-            }
-            "up" => self.step_find(-1, cx),
-            "down" => self.step_find(1, cx),
-            _ => {}
-        }
-    }
-
-    /// The find bar: a floating pill in the conversation column's top-right,
-    /// below the titlebar and clear of the message rail (which hugs the left
-    /// edge). Rendered by the SHELL rather than inside the transcript for the
-    /// same reason as the jump pill — the transcript outlet sits inside the
-    /// EdgeFade scope, which would fade the bar out against the top band.
-    fn render_find_bar(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.transcript.read(cx).find_open() {
-            return None;
-        }
-        if std::mem::take(&mut self.find_focus_pending) {
-            let handle = self.find_input.focus_handle(cx);
-            window.focus(&handle, cx);
-        }
-        let theme = Theme::of(cx).clone();
-        let (position, total) = self.transcript.read(cx).find_status();
-        let typed = !self.find_input.read(cx).text().trim().is_empty();
-        // Empty field reads as "nothing asked for yet", not "nothing found".
-        let counter: SharedString = match (typed, total) {
-            (false, _) => "".into(),
-            (true, 0) => "No results".into(),
-            (true, total) => format!("{position} of {total}").into(),
-        };
-        let has_matches = total > 0;
-        let step_button = |shell_key: &'static str,
-                           glyph: &'static str,
-                           tooltip: &'static str,
-                           delta: isize,
-                           cx: &mut Context<Self>| {
-            div()
-                .id(shell_key)
-                .size(px(22.0))
-                .flex_none()
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(has_matches, |el| {
-                    el.cursor_pointer()
-                        .bg(motion::hover_blend(
-                            shell_key,
-                            gpui::transparent_black(),
-                            theme.element_hover,
-                        ))
-                        .on_hover(motion::hover_listener(shell_key))
-                        .on_click(cx.listener(move |this, _, _, cx| this.step_find(delta, cx)))
-                })
-                .child(
-                    icon(glyph)
-                        .size(px(12.0))
-                        .text_color(if has_matches {
-                            theme.text_muted
-                        } else {
-                            theme.text_faint.opacity(0.5)
-                        })
-                        .flex_none(),
-                )
-                .tooltip(move |_, cx| cx.new(|_| FindTooltip(tooltip.into())).into())
-        };
-        let bar = div()
-            .id("find-bar")
-            .h(px(34.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .pl(px(10.0))
-            .pr(px(5.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .track_focus(&self.find_focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                this.find_key(event, window, cx)
-            }))
-            .child(
-                icon(icons::MAGNIFER)
-                    .size(px(13.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .w(px(190.0))
-                    .flex_none()
-                    .text_size(px(13.0))
-                    .child(self.find_input.clone()),
-            )
-            .child(
-                div()
-                    // Fixed width so stepping through matches ("9 of 12" →
-                    // "10 of 12") never nudges the buttons under the cursor.
-                    .w(px(64.0))
-                    .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_faint)
-                    .truncate()
-                    .child(counter),
-            )
-            .child(div().w(px(1.0)).h(px(16.0)).flex_none().bg(theme.border))
-            .child(step_button(
-                "find-prev",
-                icons::ARROW_UP,
-                "Previous match (⇧↵)",
-                -1,
-                cx,
-            ))
-            .child(step_button(
-                "find-next",
-                icons::ARROW_DOWN,
-                "Next match (↵)",
-                1,
-                cx,
-            ))
-            .child(
-                div()
-                    .id("find-close")
-                    .size(px(22.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .bg(motion::hover_blend(
-                        "find-close",
-                        gpui::transparent_black(),
-                        theme.element_hover,
-                    ))
-                    .on_hover(motion::hover_listener("find-close"))
-                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
-                    .tooltip(|_, cx| cx.new(|_| FindTooltip("Close (esc)".into())).into()),
-            );
-        Some(
-            div()
-                .absolute()
-                .top(px(Theme::TITLEBAR_HEIGHT + 4.0))
-                .right(px(14.0))
-                .child(motion::dialog_in("find-bar-in", bar))
-                .into_any_element(),
-        )
-    }
-
-    /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
-    /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
-    /// with a hairline — horizontally centered over the transcript column and
-    /// floating a small gap above the composer. It hangs 14px below the
-    /// conversation region (through the reserved h-6 status strip, whose
-    /// content is left-aligned) so its bottom edge sits ~10px above the pill.
-    /// Shown past the transcript's 320px threshold; 180ms fade + 2px rise in.
-    /// `stack_h` is the measured bottom chrome stack the full-height
-    /// transcript scrolls under — the pill anchors just above it (the -14
-    /// carries the old status-strip overlap).
-    fn render_jump_to_bottom(
-        &mut self,
-        stack_h: f32,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.transcript.read(cx).jump_button_shown() {
-            return None;
-        }
-        let theme = Theme::of(cx);
-        Some(
-            div()
-                .absolute()
-                .bottom(px(stack_h - 14.0))
-                .left_0()
-                .right(px(10.0))
-                .flex()
-                .justify_center()
-                .child(motion::dialog_in(
-                    "jump-to-bottom",
-                    div()
-                        .id("jump-to-bottom-btn")
-                        .h(px(30.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .pl(px(11.0))
-                        .pr(px(13.0))
-                        .cursor_pointer()
-                        // Hover must BRIGHTEN the opaque pill, never replace it
-                        // with a translucent wash (a 10%-alpha bg here made the
-                        // pill go see-through on hover — user-reported), and it
-                        // fades over the CSS transition-colors 150ms, not snaps.
-                        .bg(motion::hover_blend(
-                            "jump-pill",
-                            theme.surface_raised,
-                            theme.surface_raised_hover,
-                        ))
-                        .on_hover(motion::hover_listener("jump-pill"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.transcript
-                                .update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("↓")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from("Scroll to bottom")),
-                        ),
-                ))
-                .into_any_element(),
-        )
-    }
-
-    /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
-    /// over the panel, the whole container height-animated 200 ms on toggle.
-    fn render_terminal_container(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let target = self.terminal_target(cx);
-        let tween = self.terminal_tween;
-        if target <= 0.0 && tween.is_none() {
-            return gpui::Empty.into_any_element();
-        }
-        // Defensive: an open flag needs its entity (and set_open) even if
-        // toggle_terminal never created one.
-        if self.terminal_open(cx) && self.terminal.is_none() {
-            let panel = self.terminal_panel(cx);
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
-        }
-        let Some(panel) = self.terminal.clone() else {
-            return gpui::Empty.into_any_element();
-        };
-        let border = Theme::of(cx).border;
-        let handle_hover = Theme::of(cx).border_strong;
-        let height = self.settings.terminal_height;
-
-        let handle = div()
-            .id("terminal-resize")
-            .h(px(5.0))
-            .w_full()
-            .flex_none()
-            .cursor_row_resize()
-            .hover(move |s| s.bg(handle_hover))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, _, _| {
-                    this.terminal_drag_anchor =
-                        Some((f32::from(event.position.y), this.settings.terminal_height));
-                }),
-            )
-            .on_drag(TerminalResize, |_, _point: Point<gpui::Pixels>, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| DragGhost)
-            })
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                    if event.click_count == 2 {
-                        this.settings.terminal_height = TERMINAL_DEFAULT_HEIGHT;
-                        this.schedule_save(cx);
-                        cx.notify();
-                    }
-                }),
-            );
-
-        // Fixed-height inner clipped by the animated container: content never
-        // reflows mid-transition (same trick as the side panes). The handle
-        // FLOATS over the panel's top edge (painted after, so it wins hit
-        // testing) instead of stacking above it — stacked, its 5px read as
-        // dead air between the seam and the tab bar (user report).
-        let inner = div()
-            .h(px(height))
-            .w_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(panel))
-            .child(handle.absolute().top_0().left_0().right_0());
-
-        div()
-            .w_full()
-            .flex_none()
-            .overflow_hidden()
-            .border_t_1()
-            .border_color(border)
-            .h(px(self.eval_tween(tween, target)))
-            .child(inner)
-            .into_any_element()
-    }
-
-    /// Working indicator strip: gradient spinner + rotating flavour word (7s,
-    /// seeded per chat) + elapsed, staleness-gated via [`Indicator`]; falls back
-    /// to a "Sending…" bridge and then the engine mode line. The strip's right
-    /// side hosts the session-level subagents trigger — `[left status][flex
-    /// spacer][Subagents accessory]` — so the left status and the right
-    /// accessory can coexist. Both outer accessories align with the points
-    /// where the composer pill's rounded top corners finish and become flat,
-    /// pulling them slightly inward from the pill's outer edges.
-    fn render_status_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let now = Utc::now();
-        let state = self.state.read(cx);
-
-        // Aligned with the composer column: the pill starts after the
-        // composer's 16px column padding, then its 26px top-corner radius
-        // ends. Inset both accessories by their sum so the left/right trigger
-        // boundaries land exactly on those corner endpoints.
-        let accessory_inset = Theme::SPACE_LG + crate::composer::PILL_RADIUS;
-        let wide = crate::chat_style::settings(cx).wide;
-        let strip = div()
-            .h(px(Theme::STATUS_STRIP_HEIGHT))
-            .flex_none()
-            .w_full()
-            .when(!wide, |el| el.max_w(px(crate::chat_style::COMPOSER_WIDTH)))
-            .mx_auto()
-            .flex()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .px(px(accessory_inset + if wide { 32.0 } else { 0.0 }))
-            .text_size(px(11.0));
-
-        let left: AnyElement = match state.selected_chat.as_deref() {
-            None => Empty.into_any_element(),
-            Some(chat_id) => {
-                let indicator = state.indicator_for(chat_id, now);
-                // Timer base: the freshest of the session row's turn start and
-                // the in-flight send. During the send→ack window the row (if
-                // any) still carries the PREVIOUS turn's start, and using it
-                // opened the timer at the old turn's elapsed instead of 0:00.
-                let started = state
-                    .session_for(chat_id)
-                    .and_then(|s| s.started_at)
-                    .into_iter()
-                    .chain(state.pending_send_started(chat_id, now))
-                    .max();
-                let _ = started;
-                let sending = self.composer.read(cx).is_sending();
-
-                // Unused here since the Working loader moved into the transcript
-                // (its trailer computes its own elapsed).
-                match indicator {
-                    // The working loader lives in the TRANSCRIPT now, under the
-                    // streaming reply (user request) — the strip stays empty
-                    // (its reserved height still steadies the composer).
-                    Indicator::Working => Empty.into_any_element(),
-                    // No label: the QuestionPanel right below IS the
-                    // awaiting-input surface — a strip caption above it was
-                    // redundant (user request).
-                    Indicator::AwaitingInput => Empty.into_any_element(),
-                    Indicator::Errored => div()
-                        .text_color(theme.danger)
-                        .child(SharedString::from("Run failed"))
-                        .into_any_element(),
-                    Indicator::None if sending => div()
-                        .flex()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM))
-                        .child(loaders::gradient_spinner(
-                            "sending-indicator",
-                            &theme,
-                            2.5,
-                            cx.entity_id(),
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("Sending…")),
-                        )
-                        .into_any_element(),
-                    Indicator::None => Empty.into_any_element(),
-                }
-            }
-        };
-
-        // Pending-comments indicator pinned to the strip's upper-left; the
-        // session status sits centered; the Subagents trigger stays right.
-        let comments_trigger = self
-            .composer
-            .update(cx, |composer, cx| composer.render_comments_trigger(cx));
-        strip
-            .child(comments_trigger)
-            .child(div().flex_1())
-            .child(left)
-            // Flex spacer keeps the center status centered and the subagents
-            // trigger pinned to the composer-aligned right edge; when the
-            // trigger renders Empty (no records) the strip is just the left
-            // content.
-            .child(div().flex_1())
-            .child(self.subagents.clone())
-            .into_any_element()
-    }
-
-    /// Right pane — the surface host (t3code RightPanelTabs): hidden by
-    /// default, drag-resizable. Content is the ACTIVE surface — the Diff
-    /// page (its options row + the lazy [`Changes`] viewer), an embedded
-    /// terminal, or the "Open a surface" picker when no tabs exist.
-    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let content: AnyElement = if self.right_pane_open(cx) {
-            match self.resolved_right_active(cx) {
-                RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                    let changes = self.diffs.get(&id).cloned().expect("checked");
-                    // Idempotent — also covers a persisted-open pane on boot.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                    // The diff options (scope dropdown, ref selector,
-                    // fold-all) moved DOWN from the titlebar band — the
-                    // surface tabs own that row now; the expand/close
-                    // buttons stayed up there (user request).
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .flex_none()
-                                .h(px(36.0))
-                                .px(px(8.0))
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(controls),
-                        )
-                        // Full-width opaque diff-row tints must end before
-                        // the rounded card's bottom arcs (GPUI clips rects,
-                        // not descendant pixels to the parent's radius).
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .pb(px(PANEL_CORNER_RADIUS))
-                                .child(changes),
-                        )
-                        .into_any_element()
-                }
-                RightSurface::Terminal(tab) => {
-                    let panel = self.right_terminal_panel(cx);
-                    // Keep the embedded panel's own active tab aligned with
-                    // the resolved surface (fallbacks can move it).
-                    panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
-                    panel.into_any_element()
-                }
-                RightSurface::Files(id) if self.files.contains_key(&id) => {
-                    let panel = self.files.get(&id).cloned().expect("checked");
-                    panel.update(cx, |panel, cx| panel.ensure_content(cx));
-                    // Same two-row shape as the diff pane: the surface's own
-                    // controls row under the tab strip, then the body.
-                    let controls = panel.update(cx, |panel, cx| panel.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .flex_none()
-                                .h(px(36.0))
-                                .px(px(8.0))
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(controls),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .pb(px(PANEL_CORNER_RADIUS))
-                                .child(panel),
-                        )
-                        .into_any_element()
-                }
-                RightSurface::SideChat(id) => {
-                    if let Some(panel) = self.side_chats.get(&id) {
-                        panel.clone().into_any_element()
-                    } else {
-                        self.render_surface_picker(cx)
-                    }
-                }
-                _ => self.render_surface_picker(cx),
-            }
-        } else {
-            gpui::Empty.into_any_element()
-        };
-        // The right sidebar mirrors the conversation surface as its own
-        // opaque floating card. The resize grabber stays in the narrow gutter
-        // between the two cards so the visual surface remains uninterrupted.
-        let handle = self
-            .resize_handle(
-                "right-pane-resize",
-                || RightPaneResize,
-                |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
-                cx,
-            )
-            .absolute()
-            .top(px(8.0))
-            .bottom(px(8.0))
-            // INSIDE the width-clipped container (a negative inset was
-            // clipped into unreachability — user-reported dead resize),
-            // overlapping the card's left edge.
-            .left(px(0.0));
-        let is_side_chat = self.right_pane_open(cx)
-            && matches!(
-                self.resolved_right_active(cx),
-                RightSurface::SideChat(id) if self.side_chats.contains_key(&id)
-            );
-        let panel_bg = crate::chat_style::panel_background(
-            crate::chat_style::settings(cx),
-            &theme,
-            is_side_chat,
-        );
-        // The rounded owner paints the selected surface's background; child
-        // viewports stay transparent instead of covering the corner cutouts.
-        let panel_bg = match self.resolved_right_active(cx) {
-            RightSurface::Diff(_) => {
-                let t = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
-                t.regions.git_background.unwrap_or(panel_bg)
-            }
-            RightSurface::Terminal(_) => {
-                let t = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
-                t.regions.terminal_background.unwrap_or(panel_bg)
-            }
-            _ => panel_bg,
-        };
-        let panel = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .rounded(px(PANEL_CORNER_RADIUS))
-            .bg(panel_bg)
-            .shadow_sm()
-            .overflow_hidden()
-            // The global titlebar overlays this card; its own content starts
-            // below that shared header band.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(content);
-        let target = self.right_target(cx);
-        // Takeover mode has no drag width — the handle would fight the
-        // viewport-derived target.
-        let handle = (!self.right_pane_expanded).then_some(handle);
-        self.pane_container(
-            self.right_tween,
-            target,
-            div()
-                .h_full()
-                .relative()
-                .pt(px(PANEL_EDGE_INSET))
-                .pb(px(PANEL_EDGE_INSET))
-                .pr(px(PANEL_EDGE_INSET))
-                .child(panel)
-                .children(handle)
-                .into_any_element(),
-        )
-    }
-
-    /// The right pane's empty state: the "Open a surface" heading over a
-    /// compact vertical list of surface rows (icon + label) — the Capy
-    /// arrangement (user request): the old two-card grid clipped in narrow
-    /// panes and wasted short ones.
-    fn render_surface_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let text = theme.text;
-        let muted = theme.text_muted;
-        let border = theme.border;
-        let border_strong = theme.border_strong;
-        let row = |id: &'static str, icon_path: &'static str, title: &'static str| {
-            div()
-                .id(id)
-                .w_full()
-                .h(px(44.0))
-                .px(px(14.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border)
-                .bg(crate::theme::ink(0.02))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .cursor_pointer()
-                .hover(move |s| s.bg(crate::theme::ink(0.05)).border_color(border_strong))
-                .child(icon(icon_path).size(px(15.0)).flex_none().text_color(muted))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(text)
-                        .child(SharedString::from(title)),
-                )
-        };
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(16.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(280.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_center()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(text)
-                            .child(SharedString::from("Open a surface")),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .text_center()
-                            .text_size(px(11.5))
-                            .text_color(muted)
-                            .child(SharedString::from(
-                                "Choose what to show in the right panel.",
-                            )),
-                    )
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(
-                                row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.add_terminal_surface(cx);
-                                    }),
-                                ),
-                            )
-                            // Files needs a session with a project checkout
-                            // to browse (same gate as the `+` menu row).
-                            .when(self.files_available(cx), |el| {
-                                el.child(
-                                    row("surface-card-files", icons::FOLDER_WITH_FILES, "Files")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.add_files_surface(cx);
-                                        })),
-                                )
-                            })
-                            // Git only where there IS git — the pane itself
-                            // no longer gates on it (terminals work anywhere).
-                            .when(self.space_git_detected(cx), |el| {
-                                el.child(
-                                    row("surface-card-git", icons::GIT_BRANCH, "Git").on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.add_diff_surface(cx);
-                                        }),
-                                    ),
-                                )
-                            }),
-                    ),
-            )
-            .into_any_element()
     }
 
     fn render_signed_out_restart(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -7749,443 +5471,6 @@ impl Shell {
                     .child(motion::fade_in("signed-out-restart", card)),
             )
             .into_any_element()
-    }
-
-    fn close_right_plus(&mut self, cx: &mut Context<Self>) {
-        if self.right_plus.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
-        }
-        cx.notify();
-    }
-
-    /// Tabs and their toolbar sit on the active pane's background, so they
-    /// must use its text colors too (e.g. a dark terminal in a light app).
-    fn right_header_theme(&self, cx: &App) -> Theme {
-        match self.resolved_right_active(cx) {
-            RightSurface::Terminal(_) => {
-                let mut theme =
-                    crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
-                theme.surface = theme.regions.terminal_background.unwrap_or(theme.surface);
-                theme
-            }
-            RightSurface::Diff(_) => {
-                let mut theme = crate::surface_style::theme(crate::surface_style::Region::Git, cx);
-                theme.surface = theme.regions.git_background.unwrap_or(theme.surface);
-                theme
-            }
-            RightSurface::SideChat(_) => {
-                let mut theme = crate::chat_style::theme(cx);
-                if theme.text != Theme::of(cx).text || theme.bg != Theme::of(cx).bg {
-                    theme.text_muted = theme.bg.blend(theme.text.opacity(0.72));
-                }
-                theme.surface = crate::chat_style::panel_background(
-                    crate::chat_style::settings(cx),
-                    Theme::of(cx),
-                    true,
-                );
-                theme
-            }
-            _ => Theme::of(cx).clone(),
-        }
-    }
-
-    /// The titlebar strip over the right pane: one chip per surface tab
-    /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
-    /// living in the top row; the diff options moved into the pane below.
-    pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        /// Fixed chip slot — the terminal drawer's drag mechanics (drop-index
-        /// quantisation + slide offsets) assume uniform widths.
-        const CHIP_W: f32 = 112.0;
-        const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
-
-        let theme = self.right_header_theme(cx);
-        // Heal drag state if the pointer was released outside the strip.
-        if self.right_tab_drag.is_some() && !cx.has_active_drag() {
-            self.right_tab_drag = None;
-        }
-        let rows = self.right_surface_rows(cx);
-        let count = rows.len();
-        let active = self.resolved_right_active(cx);
-        let drag = self
-            .right_tab_drag
-            .as_ref()
-            .map(|d| (d.from, d.over, d.epoch, d.prev_over));
-
-        // Fade flags from the LAST frame's scroll state (invisible lag).
-        // The EdgeFade scope below fades per-pixel on x for glyphs AND
-        // quads/images (fork 5d1f83d) — washes dissolve across the band.
-        const FADE_WIDTH: f32 = 36.0;
-        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
-        let max_scroll = f32::from(self.right_tab_scroll.max_offset().x);
-        let fade_left = scrolled > 1.0;
-        let fade_right = scrolled < max_scroll - 1.0;
-        // The old session-tab strip's proven scroll shape: the flex row IS
-        // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
-        // relative min_w_0 region below; drop math runs in CONTENT
-        // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
-        let mut strip = div()
-            .id("right-surface-strip")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .min_w_0()
-            .overflow_x_scroll()
-            .track_scroll(&self.right_tab_scroll)
-            .on_drag_move::<RightTabDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
-                    let payload = event.drag(cx);
-                    if payload.panel_key != this.panel_key(cx) {
-                        return;
-                    }
-                    let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
-                    this.update_right_tab_drag_over(from, over, cx);
-                },
-            ))
-            .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
-                if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
-                    return;
-                }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
-                this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
-            }));
-        for (ix, (surface, title)) in rows.into_iter().enumerate() {
-            let is_active = surface == active;
-            let icon_path = match surface {
-                RightSurface::Diff(_) => icons::GIT_BRANCH,
-                RightSurface::Files(_) => icons::FOLDER_WITH_FILES,
-                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
-                _ => icons::TERMINAL,
-            };
-            // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
-            // (same slot, no width jump) — the ✕ only shows while the tab is
-            // hovered (user request).
-            let group: SharedString = format!("right-surface-tab-{ix}").into();
-            let ghost_title = title.clone();
-            let chip = div()
-                .id(("right-surface-tab", ix))
-                .group(group.clone())
-                .h(px(RIGHT_TAB_HEIGHT))
-                .w(px(CHIP_W))
-                .flex_none()
-                .pl(px(4.0))
-                .pr(px(8.0))
-                .rounded(px(RIGHT_TAB_RADIUS))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(3.0))
-                .cursor_pointer()
-                // The old session-tab strip's solved carve-out: NOT
-                // `.occlude()` — a BlockMouse hitbox ends the hit test,
-                // so the scroll container behind the tabs never saw
-                // wheel events and an overflowing strip could not be
-                // scrolled (tabs tile the whole region). ExceptScroll
-                // keeps the titlebar drag-region carve-out and lets the
-                // strip scroll.
-                .block_mouse_except_scroll()
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default()
-                })
-                .when(is_active, |el| el.bg(crate::theme::wash(0.10)))
-                .when(!is_active, |el| {
-                    el.hover(|s| s.bg(crate::theme::wash(0.06)))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_right_active(surface, cx);
-                }))
-                // Middle-click closes, like every tab strip.
-                .on_mouse_down(
-                    gpui::MouseButton::Middle,
-                    cx.listener(move |this, _, window, cx| {
-                        this.close_right_surface(surface, window, cx);
-                    }),
-                )
-                .on_drag(
-                    RightTabDrag {
-                        panel_key: self.panel_key(cx),
-                        from: ix,
-                        title: ghost_title,
-                    },
-                    |payload, _point, _, cx| {
-                        let title = payload.title.clone();
-                        cx.stop_propagation();
-                        cx.new(|_| SurfaceTabGhost { title })
-                    },
-                )
-                .child(
-                    // Leading slot: icon normally, ✕ on tab hover — two
-                    // stacked layers opacity-swapped by the group hover.
-                    div()
-                        .id(("right-surface-close", ix))
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .relative()
-                        .hover(|s| s.bg(crate::theme::wash(0.12)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_right_surface(surface, window, cx);
-                        }))
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .group_hover(group.clone(), |s| s.opacity(0.0))
-                                .child(icon(icon_path).size(px(12.0)).text_color(if is_active {
-                                    theme.text_muted
-                                } else {
-                                    theme.text_muted.opacity(0.7)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .opacity(0.0)
-                                .group_hover(group.clone(), |s| s.opacity(1.0))
-                                .child(
-                                    icon(icons::CLOSE)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.5))
-                        .text_color(if is_active {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(title),
-                );
-            // Sliding transform while a sibling drags over (the terminal
-            // drawer's exact recipe): animate 150ms between committed
-            // offsets; the dragged tab leaves an invisible spacer — the
-            // ghost carries it.
-            let wrapped: AnyElement = match drag {
-                Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target = crate::terminal::panel::slide_offset(ix, from, over) * CHIP_SLOT;
-                    let start =
-                        crate::terminal::panel::slide_offset(ix, from, prev_over) * CHIP_SLOT;
-                    div()
-                        .relative()
-                        .child(chip.with_animation(
-                            ("right-tab-slide", (ix as u64) | ((epoch as u64) << 32)),
-                            TAB_SLIDE.animation(),
-                            move |el, t| el.left(px(motion::lerp(start, target, t))),
-                        ))
-                        .into_any_element()
-                }
-                Some((from, ..)) if ix == from => div()
-                    .w(px(CHIP_W))
-                    .h(px(RIGHT_TAB_HEIGHT))
-                    .flex_none()
-                    .into_any_element(),
-                _ => chip.into_any_element(),
-            };
-            strip = strip.child(wrapped);
-        }
-        // The `+` — a small menu offering the two surfaces (t3 "Add panel
-        // surface"); mirrors the picker cards.
-        let plus_open = self.right_plus.get().is_some();
-        let plus_fade = "right-surface-add-fade";
-        let mut plus = div()
-            .id("right-surface-add")
-            .size(px(RIGHT_TAB_HEIGHT))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(RIGHT_TAB_RADIUS))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                plus_fade,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.11),
-            ))
-            .on_hover(motion::hover_listener(plus_fade))
-            .block_mouse_except_scroll()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    window.prevent_default();
-                    this.right_plus.note_trigger_press();
-                }),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                if this.right_plus.take_press_was_open() {
-                    this.close_right_plus(cx);
-                } else {
-                    this.right_plus.open(());
-                    cx.notify();
-                }
-            }))
-            .child(
-                icon(icons::PLUS)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted),
-            );
-        if plus_open {
-            let theme = Theme::of(cx).clone();
-            let closing = self.right_plus.closing_since();
-            let menu = popover::popover_card(&theme)
-                .w(px(168.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-terminal")
-                                .id("right-plus-terminal-row")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_terminal_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::TERMINAL)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Terminal")),
-                        )
-                        .when(self.files_available(cx), |el| {
-                            el.child(
-                                popover::menu_row(&theme, false, "right-plus-files")
-                                    .id("right-plus-files-row")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.add_files_surface(cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::FOLDER_WITH_FILES)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("Files")),
-                            )
-                        })
-                        // Git only where there IS git — a non-git project's
-                        // diff surface would open a dead pane (same gate as
-                        // the empty-surface picker card). Terminal is always
-                        // available (it hosts a shell, not the project's
-                        // repo).
-                        .when(self.space_git_detected(cx), |el| {
-                            el.child(
-                                popover::menu_row(&theme, false, "right-plus-diff")
-                                    .id("right-plus-diff-row")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.add_diff_surface(cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::GIT_BRANCH)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    // "Git", not "Git diff" — the surface hosts
-                                    // history and per-commit views too (user
-                                    // request; matches the picker card).
-                                    .child(SharedString::from("Git")),
-                            )
-                        }),
-                )
-                .into_any_element();
-            plus = plus.relative().child(popover::anchored_menu_below_gap(
-                "right-plus-menu",
-                menu,
-                closing,
-                10.0,
-            ));
-        }
-        strip = strip.child(plus);
-        // Edge fades on whichever side hides tabs (flags computed above).
-        // Glass: per-glyph EdgeFade scope over the chips' own opacity ramps;
-        // opaque: painted gradients in the shell surface tone.
-        let glass = theme.is_glass();
-        let bar_bg = theme.surface;
-        let region = div()
-            .relative()
-            .min_w_0()
-            .size_full()
-            .flex()
-            .items_center()
-            .child(strip)
-            .when(fade_left && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            90.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
-                )
-            })
-            .when(fade_right && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            270.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
-                )
-            });
-        if glass {
-            crate::edge_fade::edge_faded(FADE_WIDTH, false, false, region)
-                .fade_left(fade_left)
-                .fade_right(fade_right)
-                .into_any_element()
-        } else {
-            region.into_any_element()
-        }
-    }
-
-    /// Toggle the changes-panel takeover (the header's expand button, t3code
-    /// parity): the panel grows to fill everything right of the sidebar,
-    /// hiding the conversation column; toggling back restores the saved
-    /// width. Rides the same width tween as open/close so the jump glides.
-    fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
-        let from = self.right_target(cx);
-        self.right_pane_expanded = !self.right_pane_expanded;
-        self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
-        cx.notify();
     }
 
     fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
@@ -8570,7 +5855,7 @@ fn window_control_button(
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_muted;
     let fade_key = format!("window-control-{id}");
     div()
@@ -8696,11 +5981,12 @@ fn nav_history_button(
 /// A size-7 icon button for the main-panel header (zeron __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
 fn header_icon_button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let id = id.into();
     let muted = theme.text_muted;
     let fade_key = format!("header-icon-{id}");
     div()
@@ -8720,7 +6006,7 @@ fn header_icon_button(
         ))
         .on_hover(motion::hover_listener(fade_key))
         // Same occlusion + click-swallowing as [`window_control_button`]: this
-        // button sits inside the chat header's titlebar drag region, so its
+        // button sits inside a tile header's titlebar drag region, so its
         // rect must be carved out of the strip's drag/double-click surface.
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -8733,6 +6019,10 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "dev-capture")]
+        if !self.is_project_window() {
+            crate::dev_capture::start_once(window.window_handle(), cx);
+        }
         let foreground = window.is_window_active();
         let selected = matches!(self.route, Route::Chat)
             .then(|| self.state.read(cx).selected_chat.clone())
@@ -8802,12 +6092,12 @@ impl Render for Shell {
         // chain — with nothing focused they go dead. Land initial focus on the
         // composer, and whenever focus is lost with no successor (e.g. the
         // focused element unmounted), route it back there.
+        // The landing spot is the FOCUSED tile's composer (the root when
+        // that tile is empty, so window shortcuts keep dispatching).
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 match this.route {
-                    Route::Chat if !this.showing_setup() => {
-                        window.focus(&this.composer.focus_handle(cx), cx)
-                    }
+                    Route::Chat if !this.showing_setup() => this.focus_landing(window, cx),
                     // No composer here — clear the stale handle so `focused()`
                     // reads None (the render hook below re-lands focus when the
                     // route returns to Chat; a lingering unmounted handle would
@@ -8816,26 +6106,32 @@ impl Render for Shell {
                 }
             }));
         }
-        if !restart_required
+        let chat_ready = !restart_required
             && matches!(gate, GatePhase::Ready)
             && matches!(self.route, Route::Chat)
-            && !self.showing_setup()
-            && window.focused(cx).is_none()
-        {
-            window.focus(&self.composer.focus_handle(cx), cx);
+            && !self.showing_setup();
+        if chat_ready && (window.focused(cx).is_none() || std::mem::take(&mut self.focus_pending)) {
+            self.focus_landing(window, cx);
         }
         // The find bar can close out from under the keyboard — selecting
         // another chat closes find inside the transcript, which unmounts the
         // field without ever firing a focus-lost event. Focus would then sit
         // on an element that no longer renders and every key would dead-end.
-        if !self.transcript.read(cx).find_open()
-            && self.find_input.focus_handle(cx).is_focused(window)
-        {
-            self.find_focus_pending = false;
+        let stranded: Vec<session::SlotId> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| {
+                !slot.transcript.read(cx).find_open()
+                    && slot.find_input.focus_handle(cx).is_focused(window)
+            })
+            .map(|(sid, _)| *sid)
+            .collect();
+        for sid in stranded {
+            if let Some(slot) = self.slots.get_mut(&sid) {
+                slot.find_focus_pending = false;
+            }
             match self.route {
-                Route::Chat if !self.showing_setup() => {
-                    window.focus(&self.composer.focus_handle(cx), cx)
-                }
+                Route::Chat if !self.showing_setup() => self.focus_landing(window, cx),
                 Route::Chat | Route::Settings(_) => window.blur(),
             }
         }
@@ -8867,16 +6163,20 @@ impl Render for Shell {
                     cx.notify();
                 }
             }))
+            .track_focus(&self.root_focus)
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
-            .on_drag_move(cx.listener(Self::on_right_pane_drag))
+            .on_drag_move(cx.listener(Self::on_dock_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
+            .on_drag_move(cx.listener(Self::on_split_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_terminal(window, cx)
+                if matches!(this.route, Route::Chat)
+                    && let Some(sid) = this.focused_slot()
+                {
+                    this.toggle_terminal(sid, window, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -8888,10 +6188,64 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NextSession, _, cx| this.cycle_session(true, cx)))
             .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_right_pane(cx)
+                if matches!(this.route, Route::Chat)
+                    && let Some(sid) = this.focused_slot()
+                {
+                    this.toggle_dock(sid, cx)
                 }
             }))
+            // Workspace layout (customizable — see `apply_keymap`).
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                this.split_focused(crate::workspace::Edge::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                this.split_focused(crate::workspace::Edge::Bottom, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusLeft, _, cx| {
+                this.focus_neighbour(crate::workspace::Edge::Left, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusRight, _, cx| {
+                this.focus_neighbour(crate::workspace::Edge::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusUp, _, cx| {
+                this.focus_neighbour(crate::workspace::Edge::Top, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusDown, _, cx| {
+                this.focus_neighbour(crate::workspace::Edge::Bottom, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| this.close_focused_tab(cx)))
+            .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.toggle_zoom_focused(cx)))
+            .on_action(cx.listener(|this, _: &FocusTile1, _, cx| this.focus_tile(0, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile2, _, cx| this.focus_tile(1, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile3, _, cx| this.focus_tile(2, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile4, _, cx| this.focus_tile(3, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile5, _, cx| this.focus_tile(4, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile6, _, cx| this.focus_tile(5, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile7, _, cx| this.focus_tile(6, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile8, _, cx| this.focus_tile(7, cx)))
+            .on_action(cx.listener(|this, _: &FocusTile9, _, cx| this.focus_tile(8, cx)))
+            .map(|root| {
+                use crate::workspace::Preset;
+                macro_rules! layout {
+                    ($root:expr, $($action:ident => $preset:ident),* $(,)?) => {
+                        $root$(.on_action(cx.listener(|this, _: &$action, _, cx| {
+                            this.apply_layout_from_menu(Preset::$preset, cx)
+                        })))*
+                    };
+                }
+                layout!(
+                    root,
+                    LayoutSingle => Single,
+                    LayoutColumns2 => Columns2,
+                    LayoutRows2 => Rows2,
+                    LayoutColumns3 => Columns3,
+                    LayoutRows3 => Rows3,
+                    LayoutGrid2x2 => Grid2x2,
+                    LayoutGrid3x3 => Grid3x3,
+                    LayoutTwoStackedPlusOne => TwoStackedPlusOne,
+                    LayoutOnePlusTwoStacked => OnePlusTwoStacked,
+                )
+            })
             .on_action(
                 cx.listener(|this, _: &crate::app_menus::OpenSettings, _, cx| {
                     this.open_settings(SettingsSection::Harnesses, cx);
@@ -8929,7 +6283,11 @@ impl Render for Shell {
                     this.open_add_space(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &FindInChat, _, cx| this.open_find(cx)));
+            .on_action(cx.listener(|this, _: &FindInChat, _, cx| {
+                if let Some(sid) = this.focused_slot() {
+                    this.open_find(sid, cx)
+                }
+            }));
 
         let render_gate = if restart_required {
             GatePhase::Loading
@@ -8967,14 +6325,19 @@ impl Render for Shell {
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
                 // one extra frame settles it).
+                // Every VISIBLE tile's session counts.
                 if window_active {
-                    let unseen_selected = {
+                    let unseen_visible: Vec<String> = {
                         let s = self.state.read(cx);
-                        s.selected_chat_row()
-                            .filter(|c| c.unseen())
-                            .map(|c| c.id.clone())
+                        self.workspace
+                            .visible_tabs()
+                            .into_iter()
+                            .filter_map(|tab| tab.chat_id())
+                            .filter(|id| s.chats.iter().any(|c| c.id == *id && c.unseen()))
+                            .map(str::to_string)
+                            .collect()
                     };
-                    if let Some(chat_id) = unseen_selected {
+                    for chat_id in unseen_visible {
                         self.state
                             .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
                     }
@@ -8982,28 +6345,15 @@ impl Render for Shell {
                 // Capture knob: `CYPHER_OPEN_DIALOG=model` pops the combined
                 // harness/model menu (needs `window`, so it fires here rather
                 // than in `on_state_changed`).
-                if self.debug_dialog.as_deref() == Some("model") {
+                if self.debug_dialog.as_deref() == Some("model")
+                    && let Some(composer) = self
+                        .focused_slot()
+                        .and_then(|sid| self.slots.get(&sid))
+                        .map(|slot| slot.composer.clone())
+                {
                     self.debug_dialog = None;
-                    self.composer
-                        .update(cx, |c, cx| c.debug_open_model_menu(window, cx));
+                    composer.update(cx, |c, cx| c.debug_open_model_menu(window, cx));
                 }
-                // MessageRail width gate: hide below 48rem of main-panel width.
-                let viewport = f32::from(window.viewport_size().width);
-                // Stamped for `right_target` — the expanded changes panel
-                // sizes itself to the viewport.
-                self.viewport_width = viewport;
-                let main_width =
-                    (viewport - self.sidebar_target() - self.right_target(cx) - 10.0).max(0.0);
-                // Clearance excludes the terminal dock: the transcript
-                // viewport ends at the dock's top (see the underlay in
-                // `render_main`), so only the chrome above it overlaps.
-                let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
-                let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
-                self.transcript.update(cx, |t, cx| {
-                    t.set_rail_enabled(rail::rail_visible(main_width), cx);
-                    t.set_bottom_clearance(stack_h, cx);
-                });
-
                 let sidebar = self.render_sidebar(cx);
                 let sidebar_handle = self.resize_handle(
                     "sidebar-resize",
@@ -9011,54 +6361,22 @@ impl Render for Shell {
                     |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
                     cx,
                 );
-                let main = self.render_main(window, cx);
-                // The Changes pane is chat-scoped chrome: the Settings route
-                // never renders it (zeron __root.tsx `!isSettings && activeChat`
-                // around the diff column) — the per-session open flags stay
-                // intact for the return trip.
-                let on_chat = matches!(self.route, Route::Chat);
-                let right: AnyElement = if on_chat {
-                    self.render_right_pane(cx)
-                } else {
-                    Empty.into_any_element()
+                // Chat: the workspace of session tiles; Settings: the section
+                // outlet. The per-session state stays intact for the return
+                // trip.
+                let main = match self.route {
+                    Route::Chat => self.render_workspace(window, cx),
+                    Route::Settings(section) => self.render_settings_main(section, cx),
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // Copied out (not held) — `render_title_bar` needs `cx` mutable.
-                let card_bg = crate::chat_style::panel_background(
-                    crate::chat_style::settings(cx),
-                    Theme::of(cx),
-                    on_chat,
-                );
-                // The main conversation area is a floating rounded card over
-                // the frost (user request): the slightly lifted `surface`
-                // neutral keeps dark mode from reading as pure black, while
-                // the soft shadow separates it from the shell without drawing
-                // another vertical hairline beside the sidebar. It is inset
-                // 8px on the window edges; the internal sidebar/card seam is
-                // tighter at 4px, matching the card/right-pane seam.
-                let card: AnyElement = div()
-                    .ml(px(4.0))
-                    .mt(px(8.0))
-                    .mb(px(8.0))
-                    .mr(px(if self.right_pane_open(cx) { 4.0 } else { 8.0 }))
-                    .rounded(px(12.0))
-                    .bg(card_bg)
-                    .shadow_sm()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .child(main)
-                    .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
                 // arriving from the splash or any gate fades the page in; the
                 // splash-out crossfades over it on boot.
-                // The sidebar resize handle FLOATS over the sidebar/card seam
-                // (zero layout width, same idiom as the changes-pane grabber)
-                // so the sidebar's right gutter stays exactly as wide as its
-                // left one — a 5px flex child here read as lopsided spacing.
+                // The sidebar resize handle FLOATS over the sidebar/workspace
+                // seam (zero layout width) so the sidebar's right gutter stays
+                // exactly as wide as its left one — a 5px flex child here read
+                // as lopsided spacing.
                 let sidebar_seam = div()
                     .w(px(0.0))
                     .h_full()
@@ -9066,11 +6384,10 @@ impl Render for Shell {
                     .relative()
                     .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
                 let title_bar = self.render_title_bar(cx);
-                // The content row spans the FULL window height — the titlebar
-                // overlays it (glass, no fill), so the transcript can scroll
-                // under the header and fade out at its edge. Columns that
-                // must NOT underlap (sidebar content, the changes panel,
-                // settings) pad themselves down by the titlebar height.
+                // Two columns: sidebar | workspace (or settings). The content
+                // row spans the FULL window height — the titlebar overlays it
+                // (glass, no fill); the sidebar pads itself down, and the
+                // top-row tiles' headers sit in the titlebar band.
                 let page = div()
                     .size_full()
                     .relative()
@@ -9081,8 +6398,7 @@ impl Render for Shell {
                             .flex_row()
                             .child(sidebar)
                             .child(sidebar_seam)
-                            .child(card)
-                            .child(right),
+                            .child(main),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
@@ -9214,6 +6530,586 @@ mod tests {
                 id.label()
             );
         }
+    }
+
+    fn test_chat(id: &str, archived: bool) -> cypher_proto::Chat {
+        cypher_proto::Chat {
+            pinned: false,
+            id: id.into(),
+            device_id: "dev".into(),
+            title: Some(format!("Chat {id}")),
+            archived,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            child: None,
+        }
+    }
+
+    fn test_shell(cx: &mut gpui::TestAppContext) -> (Entity<Shell>, Entity<AppState>) {
+        test_shell_in(tempfile::tempdir().unwrap().keep(), cx)
+    }
+
+    fn test_shell_in(
+        ui: PathBuf,
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Shell>, Entity<AppState>) {
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            crate::composer::init(cx);
+            crate::terminal::panel::init(cx);
+            let state = cx.new(|_| AppState::new());
+            let boot = EngineBootConfig {
+                data_dir: ui.clone(),
+                ipc_socket: cypher_env::ipc_socket(&ui).unwrap(),
+                edge_url: "http://127.0.0.1:1".into(),
+                edge_token: None,
+                org_id: None,
+                workos_client_id: None,
+                default_harness: cypher_proto::HarnessId::Mock,
+            };
+            let shell = cx.new(|cx| Shell::new(state.clone(), boot, ui.clone(), cx));
+            (shell, state)
+        })
+    }
+
+    fn set_chats(
+        state: &Entity<AppState>,
+        chats: Vec<cypher_proto::Chat>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        state.update(cx, |s, cx| {
+            s.apply_chats(chats);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    fn tab_shape(shell: &Entity<Shell>, cx: &mut gpui::TestAppContext) -> Vec<Vec<String>> {
+        shell.read_with(cx, |shell, _| {
+            shell
+                .workspace
+                .groups_in_reading_order()
+                .into_iter()
+                .map(|id| {
+                    shell
+                        .workspace
+                        .group(id)
+                        .unwrap()
+                        .tabs()
+                        .iter()
+                        .map(|tab| match tab {
+                            crate::workspace::TabKey::Session(id) => id.clone(),
+                            crate::workspace::TabKey::NewSession(_) => "+".into(),
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn boot_lands_the_latest_chat_as_a_tab_and_main_follows_focus(cx: &mut gpui::TestAppContext) {
+        let (shell, state) = test_shell(cx);
+        assert!(!state.read_with(cx, |s, _| s.transcript_watches()));
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("b", false)],
+            cx,
+        );
+        let landed = tab_shape(&shell, cx);
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].len(), 1);
+        let first = landed[0][0].clone();
+        assert_eq!(
+            state.read_with(cx, |s, _| s.selected_chat.clone()),
+            Some(first.clone())
+        );
+        // Sidebar click: opens in the focused tile; ⌘-click splits right.
+        let other = if first == "a" { "b" } else { "a" };
+        shell.update(cx, |shell, cx| shell.open_chat(other.into(), cx));
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec![first.clone(), other.into()]]
+        );
+        assert_eq!(
+            state
+                .read_with(cx, |s, _| s.selected_chat.clone())
+                .as_deref(),
+            Some(other)
+        );
+        shell.update(cx, |shell, cx| {
+            shell.open_chat_with(first.clone(), true, cx)
+        });
+        // Already open: focused where it is, never duplicated.
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec![first.clone(), other.into()]]
+        );
+        assert_eq!(
+            state.read_with(cx, |s, _| s.selected_chat.clone()),
+            Some(first.clone())
+        );
+        shell.update(cx, |shell, cx| shell.close_focused_tab(cx));
+        assert_eq!(tab_shape(&shell, cx), vec![vec![other.to_string()]]);
+        shell.update(cx, |shell, cx| {
+            shell.open_chat_with(first.clone(), true, cx)
+        });
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec![other.to_string()], vec![first.clone()]]
+        );
+        // One slot per tab, each pinned to its own session.
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.slots.len(), 2);
+            for slot in shell.slots.values() {
+                assert_eq!(
+                    slot.state.read(cx).selected_chat.as_deref(),
+                    slot.tab.chat_id()
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn a_canvas_becomes_its_session_and_vanished_or_archived_chats_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, state) = test_shell(cx);
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        shell.update(cx, |shell, cx| shell.open_new_session(cx));
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string(), "+".into()]]
+        );
+        let canvas = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
+        // The first send selects the minted chat on the canvas's context.
+        let ctx = shell.read_with(cx, |shell, _| shell.slots[&canvas].state.clone());
+        ctx.update(cx, |s, cx| s.select_chat(Some("new".into()), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string(), "new".into()]]
+        );
+        // Same slot, re-keyed in place.
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.focused_slot(), Some(canvas));
+        });
+        assert_eq!(
+            state
+                .read_with(cx, |s, _| s.selected_chat.clone())
+                .as_deref(),
+            Some("new")
+        );
+        // A tile's context moving to ANOTHER chat (a subagent child) goes
+        // back to its own; the other opens as a tab.
+        set_chats(
+            &state,
+            vec![
+                test_chat("a", false),
+                test_chat("new", false),
+                test_chat("c", false),
+            ],
+            cx,
+        );
+        ctx.update(cx, |s, cx| s.select_chat(Some("c".into()), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string(), "new".into(), "c".into()]]
+        );
+        assert_eq!(
+            ctx.read_with(cx, |s, _| s.selected_chat.clone()).as_deref(),
+            Some("new")
+        );
+        // Deleted elsewhere / archived: the tabs close.
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("c", true)],
+            cx,
+        );
+        assert_eq!(tab_shape(&shell, cx), vec![vec!["a".to_string()]]);
+        shell.read_with(cx, |shell, _| assert_eq!(shell.slots.len(), 1));
+    }
+
+    #[gpui::test]
+    fn background_tabs_of_deleted_chats_close_on_the_chats_frame(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::TabKey;
+        let (shell, state) = test_shell(cx);
+        // The boot landing may open either chat first: compare sorted.
+        let tabs = |cx: &mut gpui::TestAppContext| {
+            let mut shape = tab_shape(&shell, cx);
+            shape.iter_mut().for_each(|group| group.sort());
+            shape
+        };
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("b", false)],
+            cx,
+        );
+        shell.update(cx, |shell, cx| {
+            shell.open_chat("a".into(), cx);
+            shell.open_chat("b".into(), cx);
+            shell.open_chat("a".into(), cx);
+            // A fork this window just created, opened in the background.
+            shell.expect_chat("fork");
+            let group = shell.workspace.focused();
+            shell.workspace.open_in(group, TabKey::session("fork"));
+            shell.open_chat("a".into(), cx);
+        });
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.slot_for_tab(&TabKey::session("fork")).is_none());
+        });
+        // A notify that isn't a chats frame judges nothing missing.
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(tabs(cx), vec![vec!["a", "b", "fork"]]);
+        // "b" was deleted elsewhere: its background tab (with its slot)
+        // closes; the fork's row just hasn't landed yet.
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        assert_eq!(tabs(cx), vec![vec!["a", "fork"]]);
+        // Listed once: no longer expected, so a later frame without it
+        // closes it.
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("fork", false)],
+            cx,
+        );
+        shell.read_with(cx, |shell, _| assert!(!shell.chat_expected("fork")));
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        assert_eq!(tabs(cx), vec![vec!["a"]]);
+    }
+
+    #[gpui::test]
+    fn boot_restores_the_saved_layout_and_docks(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let ui = tempfile::tempdir().unwrap().keep();
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("a"));
+        saved.open(TabKey::session("x")); // deleted since
+        let canvas = saved.new_session_tab();
+        saved.open(canvas);
+        saved.open_split(TabKey::session("b"), left, Edge::Right);
+        saved.open(TabKey::session("c"));
+        saved.activate(saved.focused(), 0); // "b" active and focused
+        UiSettings {
+            workspace: Some(saved),
+            session_docks: std::collections::HashMap::from([(
+                "b".to_string(),
+                crate::settings::SessionDock {
+                    right: Some(0.5),
+                    right_open: true,
+                    used_at: 1,
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }
+        .save(&ui)
+        .unwrap();
+        let (shell, state) = test_shell_in(ui.clone(), cx);
+        set_chats(
+            &state,
+            vec![
+                test_chat("a", false),
+                test_chat("b", false),
+                test_chat("c", false),
+                test_chat("latest", false),
+            ],
+            cx,
+        );
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string()], vec!["b".into(), "c".into()]],
+            "the saved layout wins over the boot landing"
+        );
+        assert_eq!(
+            state
+                .read_with(cx, |s, _| s.selected_chat.clone())
+                .as_deref(),
+            Some("b"),
+            "main follows the restored focus"
+        );
+        shell.read_with(cx, |shell, _| {
+            // Slots only for what's on screen; "c" gets one when shown.
+            let mut open: Vec<_> = shell.slots.values().map(|slot| slot.tab.clone()).collect();
+            open.sort_by_key(|tab| tab.chat_id().map(str::to_string));
+            assert_eq!(open, vec![TabKey::session("a"), TabKey::session("b")]);
+            let b = shell.focused_slot().unwrap();
+            let slot = &shell.slots[&b];
+            assert!(slot.dock.open, "b's dock was open");
+            assert_eq!(slot.right_fraction, Some(0.5));
+            // A session without an entry starts from the latest sizes, closed.
+            let a = shell.slot_for_tab(&TabKey::session("a")).unwrap();
+            assert!(!shell.slots[&a].dock.open);
+            assert_eq!(shell.slots[&a].right_fraction, Some(0.5));
+        });
+        // Showing "c" creates its slot; the change persists.
+        shell.update(cx, |shell, cx| shell.open_chat("c".into(), cx));
+        let c = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
+        shell.update(cx, |shell, cx| shell.toggle_dock(c, cx));
+        cx.executor()
+            .advance_clock(Duration::from_millis(SAVE_DEBOUNCE_MS + 50));
+        cx.run_until_parked();
+        let written = UiSettings::load(&ui);
+        let ws = written.workspace.expect("layout saved");
+        assert_eq!(ws.focused_tab(), Some(&TabKey::session("c")));
+        assert_eq!(ws.tabs().count(), 3);
+        assert!(written.session_docks["c"].right_open);
+    }
+
+    /// A ⌘N before the first chats frame joins the restored layout instead
+    /// of replacing it, and the next save keeps the saved tabs.
+    #[gpui::test]
+    fn a_presync_canvas_joins_the_restored_layout(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let ui = tempfile::tempdir().unwrap().keep();
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("a"));
+        saved.open_split(TabKey::session("b"), left, Edge::Right);
+        UiSettings {
+            workspace: Some(saved),
+            ..Default::default()
+        }
+        .save(&ui)
+        .unwrap();
+        let (shell, state) = test_shell_in(ui.clone(), cx);
+        shell.update(cx, |shell, cx| shell.open_new_session(cx));
+        let canvas = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("b", false)],
+            cx,
+        );
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string()], vec!["b".into(), "+".into()]]
+        );
+        shell.read_with(cx, |shell, _| {
+            // The same canvas slot, re-keyed into the restored layout.
+            assert_eq!(shell.focused_slot(), Some(canvas));
+            assert!(matches!(shell.slots[&canvas].tab, TabKey::NewSession(_)));
+        });
+        shell.update(cx, |shell, cx| shell.save_layout(cx));
+        cx.executor()
+            .advance_clock(Duration::from_millis(SAVE_DEBOUNCE_MS + 50));
+        cx.run_until_parked();
+        let ws = UiSettings::load(&ui).workspace.expect("layout saved");
+        assert!(ws.contains(&TabKey::session("a")) && ws.contains(&TabKey::session("b")));
+    }
+
+    /// Zoomed: only the zoomed tile gets a slot; the hidden ones get theirs
+    /// when shown.
+    #[gpui::test]
+    fn hidden_tiles_start_no_context(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let ui = tempfile::tempdir().unwrap().keep();
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("a"));
+        let right = saved
+            .open_split(TabKey::session("b"), left, Edge::Right)
+            .unwrap();
+        saved.toggle_zoom(right);
+        UiSettings {
+            workspace: Some(saved),
+            ..Default::default()
+        }
+        .save(&ui)
+        .unwrap();
+        let (shell, state) = test_shell_in(ui, cx);
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("b", false)],
+            cx,
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.slots.len(), 1);
+            assert!(shell.slot_for_tab(&TabKey::session("b")).is_some());
+        });
+        shell.update(cx, |shell, cx| shell.toggle_zoom_focused(cx));
+        shell.read_with(cx, |shell, _| assert_eq!(shell.slots.len(), 2));
+    }
+
+    /// Any workspace change that takes a session off screen (here a sidebar
+    /// pick into its tile) closes the shared comment popup; one that hides
+    /// nothing leaves it.
+    #[gpui::test]
+    fn a_session_leaving_the_screen_drops_the_comment_popup(cx: &mut gpui::TestAppContext) {
+        let (shell, state) = test_shell(cx);
+        set_chats(
+            &state,
+            vec![test_chat("a", false), test_chat("b", false)],
+            cx,
+        );
+        shell.update(cx, |shell, cx| {
+            shell.open_chat("a".into(), cx);
+            shell.split_focused(crate::workspace::Edge::Right, cx);
+        });
+        let popup = shell.read_with(cx, |shell, _| shell.comment_popup.clone());
+        let offer = |cx: &mut gpui::TestAppContext| {
+            popup.update(cx, |popup, cx| {
+                popup.offer(
+                    "a".into(),
+                    "quote".into(),
+                    None,
+                    gpui::point(px(10.0), px(10.0)),
+                    crate::comments::CommentOwner::next_terminal(),
+                    None,
+                    std::rc::Rc::new(|_| {}),
+                    None,
+                    cx,
+                )
+            });
+        };
+        // Focusing the other (empty) tile hides nothing.
+        offer(cx);
+        let groups = shell.read_with(cx, |shell, _| shell.workspace.groups_in_reading_order());
+        shell.update(cx, |shell, cx| shell.focus_group(groups[0], cx));
+        assert!(popup.read_with(cx, |popup, _| popup.is_active()));
+        // A sidebar pick replaces "a" in its tile: "a" leaves the screen.
+        shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
+        let mut first = tab_shape(&shell, cx)[0].clone();
+        first.sort();
+        assert_eq!(first, vec!["a".to_string(), "b".into()]);
+        assert!(!popup.read_with(cx, |popup, _| popup.is_active()));
+    }
+
+    /// A slow (remote) canvas send outliving the pending-send overlay: while
+    /// its composer is still sending, a chats frame without the minted row
+    /// neither closes the tab nor leaves its context deselected.
+    #[gpui::test]
+    fn a_tab_stays_while_its_first_send_is_in_flight(cx: &mut gpui::TestAppContext) {
+        let (shell, state) = test_shell(cx);
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        shell.update(cx, |shell, cx| shell.open_new_session(cx));
+        let sid = shell.read_with(cx, |shell, _| shell.focused_slot().unwrap());
+        let (ctx, composer) = shell.read_with(cx, |shell, _| {
+            let slot = &shell.slots[&sid];
+            (slot.state.clone(), slot.composer.clone())
+        });
+        composer.update(cx, |composer, _| composer.set_sending_for_test(true));
+        ctx.update(cx, |s, cx| s.select_chat(Some("new".into()), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string(), "new".into()]]
+        );
+        // No pending-send overlay (expired): only the composer holds it.
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        assert_eq!(
+            tab_shape(&shell, cx),
+            vec![vec!["a".to_string(), "new".into()]]
+        );
+        assert_eq!(
+            ctx.read_with(cx, |s, _| s.selected_chat.clone()).as_deref(),
+            Some("new")
+        );
+        // The send settled and the row never came: the next frame closes it.
+        composer.update(cx, |composer, _| composer.set_sending_for_test(false));
+        set_chats(&state, vec![test_chat("a", false)], cx);
+        assert_eq!(tab_shape(&shell, cx), vec![vec!["a".to_string()]]);
+    }
+
+    /// Render smoke test: the Ready page with a split workspace, docks and
+    /// a terminal paints without panicking, and each tile measures its own
+    /// session area.
+    #[gpui::test]
+    fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
+        let ui = tempfile::tempdir().unwrap().keep();
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            crate::composer::init(cx);
+            crate::terminal::panel::init(cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let boot = EngineBootConfig {
+            data_dir: ui.clone(),
+            ipc_socket: cypher_env::ipc_socket(&ui).unwrap(),
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: cypher_proto::HarnessId::Mock,
+        };
+        let (shell, vcx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, cx| Shell::new(state, boot, ui, cx)
+        });
+        state.update(vcx, |s, cx| {
+            s.connection = ConnectionStatus::Ready;
+            s.workspace_scope = Some(WorkspaceScope::Local);
+            s.auth = Some(AuthState::SignedOut);
+            s.apply_chats(vec![test_chat("a", false), test_chat("b", false)]);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        shell.update(vcx, |shell, cx| {
+            shell.setup_dismissed = true;
+            // Boot landed one of them; the other splits off to the right.
+            shell.open_chat_with("a".into(), true, cx);
+            shell.open_chat_with("b".into(), true, cx);
+            let sid = shell.focused_slot().unwrap();
+            shell.toggle_dock(sid, cx);
+            shell.split_focused(crate::workspace::Edge::Bottom, cx);
+        });
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let focused = shell.read_with(vcx, |shell, _| shell.focused_slot());
+        assert_eq!(focused, None, "the new split is empty and focused");
+        vcx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_new_session(cx);
+                let sid = shell.focused_slot().unwrap();
+                shell.toggle_terminal(sid, window, cx);
+                shell
+                    .workspace
+                    .apply_preset(crate::workspace::Preset::Grid2x2);
+                shell.workspace_changed(cx);
+            });
+            window.refresh();
+        });
+        vcx.run_until_parked();
+        shell.read_with(vcx, |shell, _| {
+            assert_eq!(shell.slots.len(), 3);
+            let widths: Vec<f32> = shell
+                .slots
+                .values()
+                .map(|slot| f32::from(slot.area.get().size.width))
+                .collect();
+            assert!(
+                widths.iter().all(|w| *w > 0.0 && *w < 1000.0),
+                "every tile measured its own area: {widths:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn workspace_shortcuts_parse() {
+        let defaults = crate::settings::ShortcutId::ALL
+            .into_iter()
+            .map(|id| id.default_combo());
+        for combo in defaults.chain(FOCUS_TILE_KEYS) {
+            let keystroke = Keystroke::parse(&platform_combo(combo));
+            assert!(keystroke.is_ok(), "{combo:?} does not parse");
+        }
+        assert_eq!(
+            Keystroke::parse(&platform_combo("mod-\\")).unwrap().key,
+            "\\"
+        );
+        // One tile action per key, in order.
+        assert_eq!(focus_tile_action(0).name(), gpui::Action::name(&FocusTile1));
+        assert_eq!(focus_tile_action(8).name(), gpui::Action::name(&FocusTile9));
     }
 
     #[test]
@@ -10033,135 +7929,6 @@ mod tests {
             cluster_clearance(true, true, 16.0),
             12.0 + 76.0 + 8.0 - 16.0
         );
-    }
-
-    // ---- per-session panel flags (§1.10/1.11 parity: zeron sessionPanels) ----
-
-    #[test]
-    fn session_panels_default_closed_per_chat() {
-        let panels = SessionPanels::default();
-        assert_eq!(panels.get("a"), ChatPanels::default());
-        // Everything closed until explicitly opened (user request — the
-        // brief default-open popped the pane on every visited session).
-        assert!(!panels.get("a").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        assert_eq!(panels.get("a").right_active, RightSurface::Picker);
-        // The new-chat canvas ("" key) is its own session, also closed.
-        assert!(!panels.get("").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_flags_are_chat_scoped() {
-        let mut panels = SessionPanels::default();
-        // Opening the terminal in chat A opens it ONLY in chat A.
-        assert!(panels.toggle_terminal("a"));
-        assert!(panels.get("a").terminal_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("").terminal_open);
-        // Changes pane in B is independent of A's terminal.
-        assert!(panels.toggle_changes("b"));
-        assert!(panels.get("b").changes_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        // Switching back to A restores A's state untouched.
-        assert!(panels.get("a").terminal_open);
-        // Toggling off round-trips.
-        assert!(!panels.toggle_terminal("a"));
-        assert!(!panels.get("a").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_both_flags_coexist_per_chat() {
-        let mut panels = SessionPanels::default();
-        panels.toggle_terminal("a");
-        panels.toggle_changes("a");
-        assert_eq!(
-            panels.get("a"),
-            ChatPanels {
-                terminal_open: true,
-                changes_open: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(panels.get("b"), ChatPanels::default());
-        // The right pane round-trips back closed.
-        assert!(!panels.toggle_changes("a"));
-        assert!(!panels.get("a").changes_open);
-    }
-
-    #[test]
-    fn session_panels_update_tracks_right_surfaces() {
-        let mut panels = SessionPanels::default();
-        panels.update("a", |p| p.right_active = RightSurface::Diff(3));
-        assert_eq!(panels.get("a").right_active, RightSurface::Diff(3));
-        // Other chats keep the picker default.
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-        panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
-        assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        // A Side Chat tab (round 21) is a right surface like any other.
-        panels.update("a", |p| p.right_active = RightSurface::SideChat(11));
-        assert_eq!(panels.get("a").right_active, RightSurface::SideChat(11));
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-    }
-
-    #[test]
-    fn removing_a_hidden_side_chat_only_touches_its_parents_key() {
-        // Round-21 audit: closing/promoting a side chat tab must remove it
-        // from the PARENT chat's `right_tabs`, even when another chat is
-        // currently selected (a hidden side tab).
-        let mut tabs: std::collections::HashMap<String, Vec<RightSurface>> =
-            std::collections::HashMap::new();
-        tabs.insert(
-            "chat-a".into(),
-            vec![RightSurface::SideChat(3), RightSurface::Diff(1)],
-        );
-        tabs.insert("chat-b".into(), vec![RightSurface::Terminal(2)]);
-
-        // The currently-selected chat is B, but the side chat belongs to A.
-        assert!(remove_side_chat_from_tabs(&mut tabs, "chat-a", 3));
-        assert_eq!(tabs["chat-a"], vec![RightSurface::Diff(1)]);
-        assert_eq!(tabs["chat-b"], vec![RightSurface::Terminal(2)]);
-
-        // Unknown parent / absent side chat: no-op, other keys untouched.
-        assert!(!remove_side_chat_from_tabs(&mut tabs, "chat-b", 3));
-        assert!(!remove_side_chat_from_tabs(&mut tabs, "chat-missing", 3));
-        assert_eq!(tabs["chat-a"], vec![RightSurface::Diff(1)]);
-        assert_eq!(tabs["chat-b"], vec![RightSurface::Terminal(2)]);
-    }
-
-    #[test]
-    fn right_surface_reorder_moves_mixed_strips() {
-        // Round 21: the surface strip mixes diffs, terminals, and side chats;
-        // the drag-drop reorder must move them as one ordered list.
-        let mut tabs = vec![
-            RightSurface::Diff(1),
-            RightSurface::Terminal(2),
-            RightSurface::SideChat(3),
-            RightSurface::Diff(4),
-            RightSurface::SideChat(5),
-        ];
-        // Drag the first side chat (index 2) to the end.
-        assert!(reorder_right_surfaces(&mut tabs, 2, 4));
-        assert_eq!(
-            tabs,
-            vec![
-                RightSurface::Diff(1),
-                RightSurface::Terminal(2),
-                RightSurface::Diff(4),
-                RightSurface::SideChat(5),
-                RightSurface::SideChat(3),
-            ]
-        );
-        // Drag it back to the front.
-        assert!(reorder_right_surfaces(&mut tabs, 4, 0));
-        assert_eq!(tabs[0], RightSurface::SideChat(3));
-        assert_eq!(tabs[1], RightSurface::Diff(1));
-        // Out-of-bounds and same-index drags are no-ops (no notify).
-        let before = tabs.clone();
-        assert!(!reorder_right_surfaces(&mut tabs, 9, 1));
-        assert!(!reorder_right_surfaces(&mut tabs, 1, 1));
-        assert!(!reorder_right_surfaces(&mut tabs, 1, 9));
-        assert_eq!(tabs, before);
     }
 
     // ---- sidebar resort FLIP diff (§1.6) ----

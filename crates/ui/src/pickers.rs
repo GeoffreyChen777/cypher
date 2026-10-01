@@ -477,6 +477,9 @@ pub struct Pickers {
     /// the chips DISPLAY the inherited values but never mutate — a synthetic
     /// side-chat row is never a `setChatConfig` target.
     locked: bool,
+    /// The composer is narrow (a small tile): the Traits chip steps aside so
+    /// the model chip keeps a readable label ([`Self::set_narrow`]).
+    narrow: bool,
     config: DraftConfig,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
@@ -537,6 +540,15 @@ pub struct Pickers {
 }
 
 impl Pickers {
+    /// Composer-driven width gate (see `narrow`); the chips also ellipsize
+    /// under row pressure either way.
+    pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
+        if self.narrow != narrow {
+            self.narrow = narrow;
+            cx.notify();
+        }
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| ComposerInput::new("Search…", cx));
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
@@ -649,6 +661,7 @@ impl Pickers {
         Self {
             state,
             locked: false,
+            narrow: false,
             space_owner,
             config: DraftConfig::default(),
             defaults,
@@ -682,13 +695,22 @@ impl Pickers {
         }
     }
 
-    /// Persist the sticky defaults (best-effort; picks are rare and tiny).
-    fn save_defaults(&self) {
-        if let Some(dir) = self.data_dir.as_deref()
-            && let Err(err) = self.defaults.save(dir)
-        {
+    /// Apply one change to the sticky defaults and persist it (best-effort;
+    /// picks are rare and tiny). Every tile's composer holds its own copy, so
+    /// saving that copy whole would drop picks other tiles made since it
+    /// loaded: the file is re-read, only `change` is applied on top, and the
+    /// merged result refreshes this copy.
+    fn update_defaults(&mut self, change: impl FnOnce(&mut ComposerDefaults)) {
+        let Some(dir) = self.data_dir.as_deref() else {
+            change(&mut self.defaults);
+            return;
+        };
+        let mut merged = ComposerDefaults::load(dir);
+        change(&mut merged);
+        if let Err(err) = merged.save(dir) {
             tracing::warn!(error = %err, "composer-defaults save failed");
         }
+        self.defaults = merged;
     }
 
     pub fn draft(&self) -> &DraftConfig {
@@ -1206,11 +1228,15 @@ impl Pickers {
                     return;
                 }
                 if let Loadable::Ready(models) = &loaded {
-                    let fresh = pickers
-                        .defaults
-                        .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+                    let fresh = models
+                        .iter()
+                        .any(|m| pickers.defaults.label_for(&m.id) != Some(m.label.as_str()));
                     if fresh {
-                        pickers.save_defaults();
+                        pickers.update_defaults(|defaults| {
+                            defaults.remember_labels(
+                                models.iter().map(|m| (m.id.as_str(), m.label.as_str())),
+                            );
+                        });
                     }
                 }
                 let previous = pickers.models.insert(harness, loaded);
@@ -1439,8 +1465,7 @@ impl Pickers {
             self.config.model_options.clear();
         }
         self.config.harness = Some(harness);
-        self.defaults.harness = Some(harness);
-        self.save_defaults();
+        self.update_defaults(|defaults| defaults.harness = Some(harness));
         if harness == HarnessId::Mock {
             self.selected_provider = Some("mock".into());
         }
@@ -1533,8 +1558,7 @@ impl Pickers {
                     .and_then(|models| models.iter().find(|m| m.id == model_id))
                     .map(|m| m.label.clone())
                     .unwrap_or_else(|| model_id.clone());
-                self.defaults.remember_model(harness, model_id, label);
-                self.save_defaults();
+                self.update_defaults(|defaults| defaults.remember_model(harness, model_id, label));
             }
         }
         cx.notify();
@@ -1550,8 +1574,7 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
         } else {
             self.config.reasoning = Some(level);
-            self.defaults.reasoning = Some(level);
-            self.save_defaults();
+            self.update_defaults(|defaults| defaults.reasoning = Some(level));
         }
         cx.notify();
     }
@@ -1639,8 +1662,7 @@ impl Pickers {
             }
         }
         self.state.update(cx, |state, cx| {
-            state.apply_chat_config(&chat_id, config.clone());
-            cx.notify();
+            state.set_chat_config_optimistic(&chat_id, config.clone(), cx);
         });
         let Some(engine) = self.engine(cx) else {
             return;
@@ -1828,8 +1850,14 @@ impl Pickers {
 
     /// Star/unstar a model and persist it with the sticky defaults.
     fn toggle_model_favorite(&mut self, harness: HarnessId, model: &str, cx: &mut Context<Self>) {
-        self.defaults.toggle_favorite(harness, model);
-        self.save_defaults();
+        // Set to the opposite of what THIS picker shows (a blind toggle on
+        // the re-read file would undo a star another tile just made).
+        let starred = !self.defaults.is_favorite(harness, model);
+        self.update_defaults(|defaults| {
+            if defaults.is_favorite(harness, model) != starred {
+                defaults.toggle_favorite(harness, model);
+            }
+        });
         // Starring REORDERS the list (stars float to the top / leave the
         // favorites view) — re-home the keyboard highlight onto the SELECTED
         // row so exactly one row reads highlighted afterwards. Following the
@@ -2257,20 +2285,18 @@ impl Pickers {
     /// Persist the device/project picks — the "last selected" defaults the
     /// next boot's canvas restores.
     fn remember_target(&mut self, cx: &App) {
-        {
-            let state = self.state.read(cx);
-            self.defaults.device = state
-                .selected_device
-                .clone()
-                .or_else(|| state.local_device_id.clone());
-            self.defaults.project = state.selected_space.clone();
-            self.defaults.no_project = state.no_project;
-        }
-        if let Some(dir) = &self.data_dir
-            && let Err(err) = self.defaults.save(dir)
-        {
-            tracing::warn!(error = %err, "composer-defaults save failed");
-        }
+        let state = self.state.read(cx);
+        let device = state
+            .selected_device
+            .clone()
+            .or_else(|| state.local_device_id.clone());
+        let project = state.selected_space.clone();
+        let no_project = state.no_project;
+        self.update_defaults(|defaults| {
+            defaults.device = device;
+            defaults.project = project;
+            defaults.no_project = no_project;
+        });
     }
 
     /// Devices in picker order: this device first, then by name.
@@ -2614,6 +2640,8 @@ impl Pickers {
         }
         .into();
         let id = "context-ring";
+        // Hover-fade keys are global: one per composer's pickers.
+        let fade = format!("{id}-{}", cx.entity_id());
         Some(
             div()
                 .id(id)
@@ -2625,11 +2653,11 @@ impl Pickers {
                 .rounded(px(8.0))
                 .when(enabled, |el| {
                     el.bg(motion::hover_blend(
-                        id,
+                        &fade,
                         gpui::transparent_black(),
                         theme.element_hover,
                     ))
-                    .on_hover(motion::hover_listener(id))
+                    .on_hover(motion::hover_listener(fade.clone()))
                     .cursor_pointer()
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(PickerEvent::CompactContext)))
                 })
@@ -2670,6 +2698,7 @@ impl Pickers {
             PickerKind::Device => "picker-device",
         };
         let open = self.open_kind() == Some(kind);
+        let fade = format!("{id}-{}", cx.entity_id());
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
@@ -2691,7 +2720,7 @@ impl Pickers {
             // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
             // and text brighten fade over 150ms.
             .text_color(motion::hover_blend(
-                id,
+                &fade,
                 if set {
                     theme.text.opacity(0.9)
                 } else {
@@ -2702,9 +2731,9 @@ impl Pickers {
             .bg(if open {
                 theme.element_hover
             } else {
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
+                motion::hover_blend(&fade, gpui::transparent_black(), theme.element_hover)
             })
-            .on_hover(motion::hover_listener(id))
+            .on_hover(motion::hover_listener(fade.clone()))
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -2717,6 +2746,7 @@ impl Pickers {
                 el.child(
                     crate::icons::icon(path)
                         .size(px(16.0))
+                        .flex_none()
                         .text_color(tint.unwrap_or(theme.text_muted)),
                 )
             })
@@ -2747,10 +2777,13 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let open = self.open_kind() == Some(kind);
+        let fade = format!("{id}-{}", cx.entity_id());
         div()
             .id(id)
             .h(px(20.0))
             .max_w(px(280.0))
+            // Shrinkable: the canvas's selectors share a narrow tile.
+            .min_w_0()
             .flex()
             .flex_row()
             .items_center()
@@ -2760,16 +2793,16 @@ impl Pickers {
             .text_size(px(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(motion::hover_blend(
-                id,
+                &fade,
                 theme.text_muted.opacity(0.7),
                 theme.text.opacity(0.8),
             ))
             .bg(if open {
                 theme.element_hover
             } else {
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
+                motion::hover_blend(&fade, gpui::transparent_black(), theme.element_hover)
             })
-            .on_hover(motion::hover_listener(id))
+            .on_hover(motion::hover_listener(fade.clone()))
             .cursor_pointer()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -2781,12 +2814,14 @@ impl Pickers {
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(12.0))
+                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             )
             .child(div().min_w_0().truncate().child(label))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
+                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.5)),
             )
     }
@@ -2903,6 +2938,8 @@ impl Pickers {
             cx,
         );
         div()
+            .max_w_full()
+            .min_w_0()
             .flex()
             .flex_row()
             .items_center()
@@ -4275,7 +4312,7 @@ impl Render for Pickers {
             .flex()
             .flex_row()
             .items_center()
-            .min_w_0()
+            .flex_none()
             .gap(px(4.0));
         // Model chip (brand icon + model name) beside a separate Traits chip
         // (t3code TraitsPicker arrangement): the trigger label is the joined
@@ -4293,7 +4330,7 @@ impl Render for Pickers {
             &theme,
             cx,
         );
-        let has_traits = !self.trait_ladder(cx).is_empty()
+        let has_traits = !self.narrow && !self.trait_ladder(cx).is_empty()
             || self
                 .selected_model(cx)
                 .is_some_and(|m| !m.options.is_empty());
@@ -4309,11 +4346,15 @@ impl Render for Pickers {
             )
         });
         let context_ring = self.context_ring_chip(&theme, cx);
+        // Shrinkable, end-aligned: in a narrow tile the chips ellipsize
+        // (they are `min_w_0`) instead of painting over attach/send.
         let right = div()
             .flex()
             .flex_row()
             .items_center()
-            .flex_none()
+            .justify_end()
+            .flex_1()
+            .min_w_0()
             .gap(px(4.0))
             .children(context_ring)
             // End-anchored: the menu's right edge sits flush with the chip's

@@ -20,6 +20,8 @@ pub mod chat_style;
 pub mod comments;
 pub mod composer;
 pub mod context_ring;
+#[cfg(feature = "dev-capture")]
+pub mod dev_capture;
 pub mod edge_fade;
 pub mod files;
 pub mod find;
@@ -47,6 +49,7 @@ pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
 pub mod transcript;
+pub mod workspace;
 
 use std::borrow::Cow;
 use std::path::PathBuf;

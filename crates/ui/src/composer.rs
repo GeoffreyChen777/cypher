@@ -58,6 +58,8 @@ pub const TEXTAREA_MAX: f32 = 260.0;
 /// children; composer/styles.tsx pickerChip) + `pb-2.5` (10) — zeron
 /// composer-actions.tsx line 60.
 pub const ACTIONS_ROW_HEIGHT: f32 = 46.0;
+/// Below this input width the composer's Traits chip hides (small tiles).
+const NARROW_PICKERS_WIDTH: f32 = 380.0;
 /// Outer radius of the composer pill. Chrome sitting immediately above the
 /// pill uses this to align with the point where each top corner becomes flat.
 pub const PILL_RADIUS: f32 = 26.0;
@@ -5356,6 +5358,11 @@ impl Composer {
         self.sending
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_sending_for_test(&mut self, sending: bool) {
+        self.sending = sending;
+    }
+
     // ---- attachment staging (use-attachments.ts) ----
 
     /// Staged attachments for the chat the composer is showing.
@@ -5791,6 +5798,7 @@ impl Composer {
         };
         let open = self.comments_popup.get().is_some();
         let backing = theme.composer_accessory_bg();
+        let comments_fade = format!("comments-trigger-{}", cx.entity_id());
         let mut trigger = div()
             .id("comments-trigger")
             .h(px(22.0))
@@ -5802,11 +5810,11 @@ impl Composer {
             .gap(px(5.0))
             .cursor_pointer()
             .bg(crate::motion::hover_blend(
-                "comments-trigger",
+                &comments_fade,
                 backing,
                 backing.blend(crate::theme::ink(0.06)),
             ))
-            .on_hover(crate::motion::hover_listener("comments-trigger"))
+            .on_hover(crate::motion::hover_listener(comments_fade.clone()))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _cx| this.comments_popup.note_trigger_press()),
@@ -9548,6 +9556,11 @@ impl Render for Composer {
                 input.layout_epoch,
             )
         };
+        // Narrow tile: the Traits chip steps aside (the input's own width —
+        // last frame's — tracks the pill's).
+        let narrow = last_width > 0.0 && last_width < NARROW_PICKERS_WIDTH;
+        self.pickers
+            .update(cx, |pickers, cx| pickers.set_narrow(narrow, cx));
         let now = Instant::now();
         // Only measurements taken *after* the last flip may drive the next one
         // (at most one flip per layout pass — a flip invalidates the widths).
@@ -9856,6 +9869,8 @@ impl Render for Composer {
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. `ml-1` per the source cluster — chips→attach reads
         // 8px (4 gap + 4 margin) in BOTH modes.
+        // Hover-fade keys are global: one per composer (tiles side by side).
+        let attach_fade = format!("composer-attach-{}", cx.entity_id());
         let attach = div()
             .id("composer-attach")
             .ml(px(4.0))
@@ -9868,11 +9883,11 @@ impl Render for Composer {
             .cursor_pointer()
             // zeron composer-actions.tsx attach: `transition-colors`.
             .bg(motion::hover_blend(
-                "composer-attach",
+                &attach_fade,
                 gpui::transparent_black(),
                 crate::theme::ink(0.10),
             ))
-            .on_hover(motion::hover_listener("composer-attach"))
+            .on_hover(motion::hover_listener(attach_fade.clone()))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
                 crate::icons::icon(crate::icons::PAPERCLIP)
@@ -9981,7 +9996,9 @@ impl Render for Composer {
                         .child(
                             div()
                                 .flex_1()
-                                .min_w_0()
+                                // Narrow tiles: the cluster's chips shrink
+                                // before the input loses its last word.
+                                .min_w(px(96.0))
                                 .pl(px(16.0))
                                 .pr(px(8.0))
                                 .relative()
@@ -9990,7 +10007,9 @@ impl Render for Composer {
                         )
                         .child(
                             div()
-                                .flex_none()
+                                // Shrinkable (basis = content): the picker
+                                // chips ellipsize under row pressure.
+                                .min_w_0()
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -10003,7 +10022,7 @@ impl Render for Composer {
                                 .pr(px(morph_cluster_inset(false, morph_t)))
                                 .relative()
                                 .top(px(-cluster_dy))
-                                .child(div().flex_none().child(self.pickers.clone()))
+                                .child(div().min_w_0().child(self.pickers.clone()))
                                 .child(attach)
                                 .child(send_button),
                         ),

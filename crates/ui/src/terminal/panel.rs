@@ -41,6 +41,8 @@ use super::view::{
 /// Fixed tab width — drag-reorder math stays analytic.
 pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
+/// Tab chip height inside the bar (the workspace tile tabs match it).
+pub const TAB_HEIGHT: f32 = 28.0;
 
 actions!(terminal, [ToggleTerminal]);
 
@@ -260,7 +262,7 @@ impl Render for TabGhost {
         let theme = Theme::of(cx);
         div()
             .w(px(TAB_WIDTH))
-            .h(px(28.0))
+            .h(px(TAB_HEIGHT))
             .px(px(Theme::SPACE_SM))
             .flex()
             .items_center()
@@ -281,11 +283,6 @@ pub struct TerminalPanel {
     chats: HashMap<String, ChatTabs>,
     /// Shell-driven visibility gate: no RPC happens while closed (lazy).
     open: bool,
-    /// Right-pane surface host mode: the SHELL owns the tab strip (surface
-    /// tabs), so the internal bar hides, tabs are only ever created
-    /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
-    /// must not dispatch the bottom drawer's [`ToggleTerminal`].
-    embedded: bool,
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
@@ -297,8 +294,8 @@ pub struct TerminalPanel {
     /// a settled terminal selection offers its text; scroll/tab/close/chat/
     /// resize/output dismiss it.
     comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
-    /// THIS panel's popup owner id — allocated per panel so the drawer and
-    /// the embedded right-pane panel never dismiss each other's pill.
+    /// THIS panel's popup owner id — allocated per panel so the panels of
+    /// different session tiles never dismiss each other's pill.
     comment_owner: crate::comments::CommentOwner,
     _observe: Subscription,
 }
@@ -315,7 +312,6 @@ impl TerminalPanel {
             focus_handle: cx.focus_handle(),
             chats: HashMap::new(),
             open: false,
-            embedded: false,
             tab_seq: 0,
             drag: None,
             last_selected: None,
@@ -327,27 +323,55 @@ impl TerminalPanel {
         }
     }
 
-    /// A panel in right-pane surface-host mode (see the `embedded` field).
-    pub fn new_embedded(
-        state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut panel = Self::new(state, comment_popup, cx);
-        panel.embedded = true;
-        panel
-    }
-
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
 
+    /// Re-bind a parked panel (its tab closed; the shell kept it so the
+    /// chat's PTYs stay reachable) to a new tile's session context. The
+    /// chat's tabs are keyed by chat id, so they reattach as they were.
+    pub fn rebind(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        self.state = state;
+        self.on_state_changed(cx);
+        cx.notify();
+    }
+
+    /// Close every terminal this panel holds (its chat is gone): release
+    /// the PTYs host-side and drop the tabs.
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_popup(cx);
+        self.clear_active_selection(cx);
+        let engine = self.engine(cx);
+        for (chat, tabs) in std::mem::take(&mut self.chats) {
+            let target = self.chat_target(&chat, cx);
+            for id in tabs.tabs.into_iter().filter_map(|tab| tab.terminal_id) {
+                let Some(engine) = engine.clone() else {
+                    continue;
+                };
+                let target = target.clone();
+                cx.spawn(async move |_, _| {
+                    let _ = engine
+                        .client()
+                        .call(
+                            methods::CLOSE_TERMINAL,
+                            with_target(serde_json::json!({ "terminalId": id }), &target),
+                        )
+                        .await;
+                })
+                .detach();
+            }
+        }
+        self.drag = None;
+        cx.notify();
+    }
+
     /// Shell toggle hook. Opening lazily creates the first tab for the
-    /// selected chat (drawer mode; embedded tabs are explicit); closing
+    /// selected chat; closing
     /// keeps every session alive (detach ≠ close).
     pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
-        if open && !self.embedded {
+        if open {
             self.ensure_tab(cx);
         }
         if !open {
@@ -370,55 +394,6 @@ impl TerminalPanel {
         }
     }
 
-    // ---- embedded (right-pane surface) API — the shell's tab strip drives
-    // ---- these; keys are stable across reorders/closes.
-
-    /// `(key, title, exited)` for the selected chat's tabs, in tab order.
-    pub fn tab_summaries(&self, cx: &App) -> Vec<(u64, SharedString, bool)> {
-        let Some(chat) = self.selected_chat(cx) else {
-            return Vec::new();
-        };
-        self.chats
-            .get(&chat)
-            .map(|tabs| {
-                tabs.tabs
-                    .iter()
-                    .map(|t| (t.key, Self::display_title(t), t.exited.is_some()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Open a fresh tab for the selected chat and return its key.
-    pub fn open_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
-        let chat = self.selected_chat(cx)?;
-        self.open_tab(chat, cx);
-        Some(self.tab_seq)
-    }
-
-    /// Make `key` the rendered tab of the selected chat.
-    pub fn select_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
-        let Some(chat) = self.selected_chat(cx) else {
-            return;
-        };
-        let Some(ix) = self
-            .chats
-            .get(&chat)
-            .and_then(|tabs| tabs.tabs.iter().position(|t| t.key == key))
-        else {
-            return;
-        };
-        self.select_tab(&chat, ix, cx);
-    }
-
-    /// Close the selected chat's tab `key` (surface-tab ✕).
-    pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chat) = self.selected_chat(cx) else {
-            return;
-        };
-        self.close_tab(&chat, key, window, cx);
-    }
-
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         let selected = self.state.read(cx).selected_chat.clone();
         let switched = selected != self.last_selected;
@@ -432,12 +407,10 @@ impl TerminalPanel {
                 self.clear_chat_active_selection(&previous, cx);
             }
         }
-        if self.open && !self.embedded {
+        if self.open {
             // Returning to a chat with tabs restores them; a fresh chat (or an
             // engine that only just finished booting) gets its first tab —
             // ensure_tab is idempotent, so calling on every state change is safe.
-            // Embedded: surface tabs are explicit — a chat switch just shows
-            // that chat's own tabs (or the shell's surface picker).
             self.ensure_tab(cx);
         }
         if switched {
@@ -1269,9 +1242,7 @@ impl TerminalPanel {
         self.drag = None;
         // Closing the LAST terminal closes the drawer too — an empty dock is
         // dead space (user request). Same path as the collapse chevron.
-        // Embedded, the SHELL owns emptiness (it falls back to the surface
-        // picker) — dispatching here would toggle the bottom drawer instead.
-        if now_empty && self.open && !self.embedded {
+        if now_empty && self.open {
             window.dispatch_action(Box::new(ToggleTerminal), cx);
         }
         if let (Some(engine), Some(id)) = (engine, tab.terminal_id.clone()) {
@@ -1323,6 +1294,9 @@ impl TerminalPanel {
     // ---- render ----
 
     fn render_tab_bar(&mut self, chat: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Hover-fade keys are global: scope them to this panel (one per
+        // session tile).
+        let panel_id = cx.entity_id();
         let theme = crate::surface_style::theme(crate::surface_style::Region::Terminal, cx);
         let tabs = self.chats.get(chat);
         let (active, count) = tabs.map(|t| (t.active, t.tabs.len())).unwrap_or((0, 0));
@@ -1353,9 +1327,9 @@ impl TerminalPanel {
 
         let bar_chat = chat_owned.clone();
         let drop_chat = chat_owned.clone();
-        // Zeron terminal-panel.tsx: `flex h-10 items-center border-b
-        // border-white/[0.07] pl-2 pr-1.5` on the #191919 panel — no separate
-        // bar fill.
+        // Zeron terminal-panel.tsx: `flex h-10 items-center pl-2 pr-1.5` on
+        // the #191919 panel — no separate bar fill, and no hairline under
+        // the tabs (user request: the tile's own tab row has none either).
         div()
             .id("terminal-tab-bar")
             .h(px(TAB_BAR_HEIGHT))
@@ -1364,10 +1338,10 @@ impl TerminalPanel {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .pl(px(8.0))
+            // Same left inset as the tile's session tab row above, so the
+            // two strips' first tabs line up.
+            .pl(px(6.0))
             .pr(px(6.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.07))
             .on_drag_move::<TabDragPayload>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<TabDragPayload>, _, cx| {
                     let payload = event.drag(cx);
@@ -1433,7 +1407,7 @@ impl TerminalPanel {
                         let tab_el = div()
                             .id(("terminal-tab", key))
                             .w(px(TAB_WIDTH))
-                            .h(px(28.0))
+                            .h(px(TAB_HEIGHT))
                             .flex_none()
                             .flex()
                             .flex_row()
@@ -1444,11 +1418,11 @@ impl TerminalPanel {
                             .rounded(px(8.0))
                             // zeron terminal-panel.tsx tab: `transition-colors`.
                             .bg(motion::hover_blend(
-                                &format!("term-tab-{key}"),
+                                &format!("term-tab-{panel_id}-{key}"),
                                 bg,
                                 theme.element_hover,
                             ))
-                            .on_hover(motion::hover_listener(format!("term-tab-{key}")))
+                            .on_hover(motion::hover_listener(format!("term-tab-{panel_id}-{key}")))
                             .text_size(px(12.0))
                             .text_color(text_color)
                             .cursor_pointer()
@@ -1503,7 +1477,7 @@ impl TerminalPanel {
                             // slides into the vacated slot.
                             Some((from, ..)) if ix == from => div()
                                 .w(px(TAB_WIDTH))
-                                .h(px(28.0))
+                                .h(px(TAB_HEIGHT))
                                 .flex_none()
                                 .into_any_element(),
                             _ => tab_el.into_any_element(),
@@ -1522,11 +1496,11 @@ impl TerminalPanel {
                     .cursor_pointer()
                     // zeron terminal-panel.tsx icon buttons: `transition-colors`.
                     .bg(motion::hover_blend(
-                        "term-new-tab",
+                        &format!("term-new-tab-{panel_id}"),
                         gpui::transparent_black(),
                         crate::theme::ink(0.05),
                     ))
-                    .on_hover(motion::hover_listener("term-new-tab"))
+                    .on_hover(motion::hover_listener(format!("term-new-tab-{panel_id}")))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(chat) = this.selected_chat(cx) {
                             this.open_tab(chat, cx);
@@ -1551,11 +1525,11 @@ impl TerminalPanel {
                     .rounded(px(8.0))
                     .cursor_pointer()
                     .bg(motion::hover_blend(
-                        "term-collapse",
+                        &format!("term-collapse-{panel_id}"),
                         gpui::transparent_black(),
                         crate::theme::ink(0.05),
                     ))
-                    .on_hover(motion::hover_listener("term-collapse"))
+                    .on_hover(motion::hover_listener(format!("term-collapse-{panel_id}")))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleTerminal), cx);
                     })
@@ -1580,15 +1554,11 @@ impl Render for TerminalPanel {
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
         }
-        // Embedded, the RIGHT PANE's own surface shows through — a second
-        // fill here stacked another shade on the pane (user report); the
-        // drawer keeps its own tone.
-        let panel_bg: Option<gpui::Hsla> = (!self.embedded).then(|| terminal_panel_bg(&theme));
+        let panel_bg = terminal_panel_bg(&theme);
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
-                .rounded_b(px(12.0))
-                .when_some(panel_bg, |el, bg| el.bg(bg))
+                .bg(panel_bg)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1599,17 +1569,13 @@ impl Render for TerminalPanel {
         };
         let focused = self.focus_handle.is_focused(window);
 
-        // Embedded (right-pane surface host): the shell's surface tabs
-        // replace the internal bar.
-        let tab_bar: Option<gpui::AnyElement> =
-            (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
+        let tab_bar = self.render_tab_bar(&chat, cx);
         div()
             .size_full()
-            .rounded_b(px(12.0))
             .flex()
             .flex_col()
-            .when_some(panel_bg, |el, bg| el.bg(bg))
-            .children(tab_bar)
+            .bg(panel_bg)
+            .child(tab_bar)
             .child(
                 div()
                     .id("terminal-body")

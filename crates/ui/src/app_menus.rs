@@ -148,12 +148,22 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Find in Chat", crate::shell::FindInChat),
         ]),
     ];
-    // Appearance lives under View on every platform — it is the only View verb
-    // today, but "Appearance" as a top-level menu would read oddly next to Edit.
+    // Appearance lives under View on every platform ("Appearance" as a
+    // top-level menu would read oddly next to Edit), with the workspace
+    // layout presets (routed to the shell's root handlers).
+    let layouts = crate::workspace::Preset::ALL.map(|preset| MenuItem::Action {
+        name: crate::shell::layout_label(preset).into(),
+        action: crate::shell::layout_action(preset),
+        os_action: None,
+        checked: false,
+        disabled: false,
+    });
     menus.push(Menu::new("View").items([
         MenuItem::action("Appearance: System", AppearanceSystem),
         MenuItem::action("Appearance: Light", AppearanceLight),
         MenuItem::action("Appearance: Dark", AppearanceDark),
+        MenuItem::separator(),
+        MenuItem::submenu(Menu::new("Layout").items(layouts)),
     ]));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
@@ -258,6 +268,24 @@ mod tests {
                 AppearanceDark.name()
             ]
         );
+    }
+
+    #[test]
+    fn view_menu_offers_every_layout_preset() {
+        let menus = app_menus();
+        let view = menus
+            .iter()
+            .find(|m| m.name.as_ref() == "View")
+            .expect("View menu present");
+        let Some(MenuItem::Submenu(layout)) = view.items.last() else {
+            panic!("View ends with the Layout submenu");
+        };
+        assert_eq!(layout.name.as_ref(), "Layout");
+        let expected: Vec<&str> = crate::workspace::Preset::ALL
+            .into_iter()
+            .map(|preset| crate::shell::layout_action(preset).name())
+            .collect();
+        assert_eq!(action_names(layout), expected);
     }
 
     #[test]

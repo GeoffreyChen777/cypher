@@ -1,92 +1,94 @@
-//! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
-//! the activity sidebar IS the session list, and the titlebar names the
-//! selected session (harness brand icon + title). When the sidebar is
-//! collapsed, a `+` new-session button fades into the titlebar's left end
-//! (riding the sidebar width tween). `UiSettings.open_tabs` is legacy — no
-//! longer read or written.
+//! Session navigation and routing. The activity sidebar IS the session
+//! list; a click opens (or focuses) the session as a tab in the workspace
+//! (docs/workspace-layout.md): the focused tile, or — ⌘-click — a new split
+//! to its right. The main state's selection follows the focused tile
+//! (`Shell::sync_follow`). `UiSettings.open_tabs` is legacy — no longer
+//! read or written; the layout persists as `UiSettings.workspace` (and
+//! `project_workspaces` per project window), restored at boot landing.
 
 use super::*;
+use crate::workspace::{TabKey, Workspace};
 
-const CHAT_TITLEBAR_TOP_PAD: f32 = Theme::TITLEBAR_TOP_PAD + PANEL_EDGE_INSET;
-
-/// The titlebar is window-relative; the card begins PANEL_EDGE_INSET lower.
-/// Use explicit height/start alignment instead of centering a full-height
-/// strip: the first tab's top-left arc must be concentric with the card's.
-fn right_tab_header_frame() -> gpui::Div {
-    div()
-        .flex_none()
-        .self_start()
-        .mt(px(
-            PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD
-        ))
-        .h(px(RIGHT_TAB_HEIGHT))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .overflow_hidden()
-        .pl(px(RIGHT_TAB_INSET))
+/// A saved layout made fit to restore: session tabs survive only while
+/// `live` (the chat exists, isn't archived, and is in this window's scope);
+/// new-session canvases are dropped — a canvas holds nothing but an unsent
+/// project pick, and the boot landing opens a fresh one when no tab is left.
+/// Groups emptied by the pruning collapse; tiles that were already empty
+/// stay. Pure.
+pub(super) fn restore_workspace(mut saved: Workspace, live: impl Fn(&str) -> bool) -> Workspace {
+    saved.retain_tabs(|tab| tab.chat_id().is_some_and(&live));
+    saved
 }
 
-#[cfg(test)]
-mod header_geometry_tests {
-    use super::*;
-
-    #[test]
-    fn surface_tabs_and_panel_have_concentric_top_left_corners() {
-        let mut frame = right_tab_header_frame();
-        let style = frame.style();
-        let margin_top = PANEL_EDGE_INSET + RIGHT_TAB_INSET - CHAT_TITLEBAR_TOP_PAD;
-        assert_eq!(style.margin.top, Some(px(margin_top).into()));
-        assert_eq!(style.padding.left, Some(px(RIGHT_TAB_INSET).into()));
-        assert_eq!(style.size.height, Some(px(RIGHT_TAB_HEIGHT).into()));
-        assert_eq!(style.align_self, Some(gpui::AlignSelf::Start));
-        assert_eq!(RIGHT_TAB_INSET + RIGHT_TAB_RADIUS, PANEL_CORNER_RADIUS);
-        assert_eq!(
-            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_RADIUS,
-            PANEL_EDGE_INSET + PANEL_CORNER_RADIUS,
-        );
-        assert!(
-            CHAT_TITLEBAR_TOP_PAD + margin_top + RIGHT_TAB_HEIGHT <= Theme::TITLEBAR_HEIGHT,
-            "tab hit targets must remain inside the titlebar",
-        );
-    }
-
-    #[test]
-    fn surface_header_retains_native_caption_clearance_and_panel_anchor() {
-        for windows in [false, true] {
-            let padding = titlebar_right_padding(windows, PANEL_EDGE_INSET + RIGHT_TAB_INSET);
-            for panel_width in [RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT, 960.0] {
-                let viewport = 1320.0;
-                let header_width = panel_width - padding;
-                let first_tab_left = viewport - padding - header_width + RIGHT_TAB_INSET;
-                assert_eq!(
-                    first_tab_left + RIGHT_TAB_RADIUS,
-                    viewport - panel_width + PANEL_CORNER_RADIUS,
-                );
+/// Carry the tabs opened before the first chats frame (⌘N, the titlebar
+/// `+`) into the restored layout: each opens in its focused group — a
+/// canvas under a fresh key of the restored layout's own, returned as
+/// `(old, new)` so its slot follows — and the one that had focus stays
+/// focused. Pure.
+pub(super) fn adopt_presync_tabs(
+    restored: &mut Workspace,
+    presync: &Workspace,
+) -> Vec<(TabKey, TabKey)> {
+    let focused = presync.focused_tab();
+    let mut renamed = Vec::new();
+    let mut focus = None;
+    for tab in presync.tabs() {
+        let key = match tab {
+            TabKey::NewSession(_) => {
+                let fresh = restored.new_session_tab();
+                renamed.push((tab.clone(), fresh.clone()));
+                fresh
             }
-            assert_eq!(
-                padding,
-                PANEL_EDGE_INSET
-                    + RIGHT_TAB_INSET
-                    + if windows { WINDOWS_CAPTION_WIDTH } else { 0.0 },
-            );
+            TabKey::Session(_) => tab.clone(),
+        };
+        if Some(tab) == focused {
+            focus = Some(key.clone());
         }
+        restored.open(key);
     }
+    if let Some((group, index)) = focus.and_then(|tab| restored.find(&tab)) {
+        restored.activate(group, index);
+    }
+    renamed
+}
 
-    #[test]
-    fn takeover_header_accounts_for_collapsed_conversation_margins() {
-        let viewport = 1320.0;
-        let sidebar = 256.0;
-        let padding = PANEL_EDGE_INSET + RIGHT_TAB_INSET;
-        let row_gap = 8.0;
-        let available = viewport - sidebar - padding - row_gap;
-        let strip_left = viewport - padding - available;
-        let panel_left = sidebar + 4.0 + 4.0;
-        assert_eq!(
-            strip_left + RIGHT_TAB_INSET + RIGHT_TAB_RADIUS,
-            panel_left + PANEL_CORNER_RADIUS,
-        );
+/// How long a chat this window just created (a fork, a promoted side chat)
+/// may be missing from the chats frames before its tab counts as deleted.
+pub(super) const EXPECTED_CHAT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the chats list says about an open session (or a parked terminal's
+/// chat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionFate {
+    Stays,
+    /// Archived, or outside this window's project scope: its tab closes (the
+    /// chat may come back — terminals stay parked).
+    Hidden,
+    /// Gone from the list: tab and parked terminals close.
+    Deleted,
+}
+
+/// Judge `chat_id` against the synced `chats` list. Pure.
+///
+/// A listed chat is judged on every call (archive / scope changes need no
+/// chats frame). A MISSING chat is judged only on a new chats frame
+/// (`chats_frame`): pre-sync lists are empty, and an optimistic insert or an
+/// unrelated notify says nothing. Even then a chat that is `awaited` — a
+/// canvas's just-minted chat with a live pending send, or a fork /
+/// promoted side chat created moments ago — stays: its row just hasn't
+/// landed yet.
+pub(super) fn session_fate(
+    chat_id: &str,
+    chats: &[cypher_proto::Chat],
+    scope: &crate::state::ProjectScope,
+    chats_frame: bool,
+    awaited: bool,
+) -> SessionFate {
+    match chats.iter().find(|c| c.id == chat_id) {
+        Some(chat) if chat.archived || !scope.chat_visible(chat) => SessionFate::Hidden,
+        Some(_) => SessionFate::Stays,
+        None if chats_frame && !awaited => SessionFate::Deleted,
+        None => SessionFate::Stays,
     }
 }
 
@@ -120,38 +122,269 @@ pub(super) fn cycle_target(
 }
 
 impl Shell {
-    /// Boot landing: the most recently active visible chat once the first
-    /// chats frame has synced (manual selection wins; no chats → the
-    /// new-session canvas shows).
+    /// Boot landing, once the first chats frame has synced: the saved
+    /// layout comes back ([`restore_workspace`]), and only when it holds no
+    /// tab does the old landing run — the most recently active visible chat
+    /// opens as a tab (no chats, or the `CYPHER_OPEN_ROUTE=new` pin → a
+    /// new-session tab). Anything the user opened before the frame landed
+    /// joins the restored layout, focused ([`adopt_presync_tabs`]), and
+    /// replaces the landing. A project window also opens the chat its state
+    /// selected (the chat moves windows with it) into its restored layout.
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
-        let first = {
+        if self.boot_landed {
+            return;
+        }
+        let (landing, pinned) = {
             let state = self.state.read(cx);
-            if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
+            if !state.chats_synced {
                 return;
             }
-            state
-                .overview_chats(Utc::now())
-                .first()
-                .map(|(_, c)| c.id.clone())
+            if self.is_project_window() {
+                (state.selected_chat.clone(), false)
+            } else if state.auto_selected {
+                // Pinned to the canvas (or the user already picked).
+                (None, true)
+            } else {
+                let latest = state
+                    .overview_chats(Utc::now())
+                    .first()
+                    .map(|(_, c)| c.id.clone());
+                (latest, false)
+            }
         };
-        if let Some(first) = first {
-            self.state
-                .update(cx, |s, cx| s.select_chat(Some(first), cx));
+        self.boot_landed = true;
+        self.prune_persisted_layout(cx);
+        let saved = self.saved_workspace.take();
+        let presync = self.workspace.tabs().next().is_some();
+        if let Some(saved) = saved.filter(|_| !pinned) {
+            let live: std::collections::HashSet<String> = {
+                let state = self.state.read(cx);
+                let scope = state.project_scope();
+                state
+                    .chats
+                    .iter()
+                    .filter(|c| !c.archived && scope.chat_visible(c))
+                    .map(|c| c.id.clone())
+                    .collect()
+            };
+            let mut restored = restore_workspace(saved, |id| live.contains(id));
+            if presync {
+                for (old, new) in adopt_presync_tabs(&mut restored, &self.workspace) {
+                    if let Some(slot) = self
+                        .slot_for_tab(&old)
+                        .and_then(|sid| self.slots.get_mut(&sid))
+                    {
+                        slot.tab = new;
+                    }
+                }
+            }
+            self.workspace = restored;
+        }
+        if presync {
+            self.workspace_changed(cx);
+            return;
+        }
+        let restored = self.workspace.tabs().next().is_some();
+        match landing {
+            Some(chat_id) if !restored || self.is_project_window() => {
+                self.workspace.open(TabKey::Session(chat_id));
+            }
+            None if !restored => {
+                self.open_new_session(cx);
+                return;
+            }
+            _ => {}
+        }
+        self.focus_pending = true;
+        self.workspace_changed(cx);
+    }
+
+    /// Main window, at boot: forget the dock sizes of sessions that no
+    /// longer exist (archived ones may come back) and the layouts of
+    /// projects that are gone.
+    fn prune_persisted_layout(&mut self, cx: &mut Context<Self>) {
+        if self.is_project_window() {
+            return;
+        }
+        let (chats, spaces) = {
+            let state = self.state.read(cx);
+            let chats: std::collections::HashSet<String> =
+                state.chats.iter().map(|c| c.id.clone()).collect();
+            let spaces = state.spaces_synced.then(|| {
+                state
+                    .spaces
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<std::collections::HashSet<String>>()
+            });
+            (chats, spaces)
+        };
+        let before = (
+            self.settings.session_docks.len(),
+            self.settings.project_workspaces.len(),
+        );
+        self.settings
+            .prune_session_docks(|chat_id| chats.contains(chat_id));
+        if let Some(spaces) = spaces {
+            self.settings
+                .project_workspaces
+                .retain(|id, _| spaces.contains(id));
+        }
+        let after = (
+            self.settings.session_docks.len(),
+            self.settings.project_workspaces.len(),
+        );
+        if before != after {
+            self.schedule_save(cx);
         }
     }
 
-    /// Open a session from the sidebar: select it, the main area follows.
+    /// Open a session from the sidebar: focus its tab if it is open
+    /// anywhere, else open it in the focused tile.
     pub(super) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.open_chat_with(chat_id, false, cx);
+    }
+
+    /// [`Self::open_chat`], or with `split` (⌘-click) in a new tile to the
+    /// right of the focused one.
+    pub(super) fn open_chat_with(&mut self, chat_id: String, split: bool, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        self.state
-            .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
-        cx.notify();
+        super::workspace_view::route_open(&mut self.workspace, TabKey::Session(chat_id), split);
+        self.focus_pending = true;
+        self.workspace_changed(cx);
+    }
+
+    /// Back/forward landing on a chat route: its tab (reopened if it was
+    /// closed and the chat still exists), or for the canvas entry an open
+    /// new-session tab (else a fresh one).
+    pub(super) fn open_nav_target(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if chat_id.is_empty() {
+            let canvas = self
+                .workspace
+                .tabs()
+                .find(|tab| matches!(tab, TabKey::NewSession(_)))
+                .cloned();
+            match canvas.and_then(|tab| self.workspace.find(&tab)) {
+                Some((group, index)) => {
+                    self.workspace.activate(group, index);
+                    self.focus_pending = true;
+                    self.workspace_changed(cx);
+                }
+                None => self.open_new_session(cx),
+            }
+            return;
+        }
+        let exists = self.state.read(cx).chats.iter().any(|c| c.id == chat_id);
+        if exists {
+            self.open_chat(chat_id, cx);
+        }
+    }
+
+    /// Chats deleted / archived, or hidden by this window's project scope,
+    /// leave the workspace ([`session_fate`]) — background tabs included,
+    /// whose slots (and so contexts) may not exist yet. Deleted chats'
+    /// parked terminals close, and their stashed drafts go, in the same pass.
+    pub(super) fn prune_tabs(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let mut open: Vec<String> = self
+            .workspace
+            .tabs()
+            .filter_map(|tab| tab.chat_id())
+            .map(str::to_string)
+            .collect();
+        open.extend(self.parked_terminals.keys().cloned());
+        open.extend(self.closed_drafts.keys().cloned());
+        let sending: std::collections::HashSet<String> = open
+            .iter()
+            .filter(|id| self.chat_sending(id, cx))
+            .cloned()
+            .collect();
+        let (closing, deleted) = {
+            let state = self.state.read(cx);
+            let generation = state.chats_generation();
+            let chats_frame = state.chats_synced && generation != self.seen_chats_generation;
+            self.seen_chats_generation = generation;
+            // A frame listing an expected chat settles it; stale ones expire.
+            self.expected_chats.retain(|id, created| {
+                now.duration_since(*created) < EXPECTED_CHAT_TTL
+                    && !(chats_frame && state.chats.iter().any(|c| c.id == *id))
+            });
+            let mut closing = std::collections::HashSet::new();
+            let mut deleted = Vec::new();
+            for id in &open {
+                let awaited = self.expected_chats.contains_key(id)
+                    || sending.contains(id)
+                    || state.send_pending(id, Utc::now());
+                match session_fate(
+                    id,
+                    &state.chats,
+                    state.project_scope(),
+                    chats_frame,
+                    awaited,
+                ) {
+                    SessionFate::Stays => {}
+                    SessionFate::Hidden => {
+                        closing.insert(id.clone());
+                    }
+                    SessionFate::Deleted => {
+                        closing.insert(id.clone());
+                        deleted.push(id.clone());
+                    }
+                }
+            }
+            (closing, deleted)
+        };
+        for id in &deleted {
+            if let Some(terminal) = self.parked_terminals.remove(id) {
+                terminal.update(cx, |terminal, cx| terminal.close_all(cx));
+            }
+            self.closed_drafts.remove(id);
+        }
+        if closing.is_empty() {
+            return;
+        }
+        let removed = self
+            .workspace
+            .retain_tabs(|tab| tab.chat_id().is_none_or(|id| !closing.contains(id)));
+        if removed {
+            self.workspace_changed(cx);
+        }
+    }
+
+    /// A chat this window just created: its tab survives chats frames that
+    /// don't list it yet (see [`Self::prune_tabs`]).
+    pub(super) fn expect_chat(&mut self, chat_id: &str) {
+        self.expected_chats
+            .insert(chat_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Whether `chat_id` is a just-created chat still waiting for its row.
+    pub(super) fn chat_expected(&self, chat_id: &str) -> bool {
+        self.expected_chats
+            .get(chat_id)
+            .is_some_and(|created| created.elapsed() < EXPECTED_CHAT_TTL)
+    }
+
+    /// Whether the composer of `chat_id`'s tab is still sending: a slow
+    /// (remote) canvas send may outlive the pending-send overlay's TTL
+    /// before its row lands, and its tab must not close mid-send.
+    fn chat_sending(&self, chat_id: &str, cx: &App) -> bool {
+        self.slot_for_tab(&TabKey::session(chat_id))
+            .and_then(|sid| self.slots.get(&sid))
+            .is_some_and(|slot| slot.composer.read(cx).is_sending())
+    }
+
+    /// Whether a session missing from the chats list is still expected to
+    /// appear: a fork / promoted side chat just created, or a send from its
+    /// tab still in flight. Its tab stays (see [`Self::prune_tabs`]).
+    pub(super) fn chat_awaited(&self, chat_id: &str, cx: &App) -> bool {
+        self.chat_expected(chat_id) || self.chat_sending(chat_id, cx)
     }
 
     /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's session rows in
-    /// the order they are drawn ([`AppState::overview_chats`]). Selection is
-    /// immediate (no MRU overlay held open on the modifier) — one press, one
-    /// session.
+    /// the order they are drawn ([`AppState::overview_chats`]), from the
+    /// focused tile's session. Routing is a sidebar click's (focus an open
+    /// tab, else open in the focused tile) — one press, one session.
     ///
     /// Chat-scoped chrome, like the panel toggles: gpui dispatches a matched
     /// binding before any `on_key_down`, so an unscoped cycle would fire
@@ -163,31 +396,71 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.add_space.is_some() {
             return;
         }
-        let (order, selected) = {
-            let state = self.state.read(cx);
-            let order = state
-                .overview_chats(Utc::now())
-                .into_iter()
-                .map(|(_, chat)| chat.id.clone())
-                .collect::<Vec<_>>();
-            (order, state.selected_chat.clone())
-        };
+        let selected = self
+            .workspace
+            .focused_tab()
+            .and_then(|tab| tab.chat_id())
+            .map(str::to_string);
+        let order = self
+            .state
+            .read(cx)
+            .overview_chats(Utc::now())
+            .into_iter()
+            .map(|(_, chat)| chat.id.clone())
+            .collect::<Vec<_>>();
         if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
             self.open_chat(target, cx);
         }
     }
 
-    /// The global new-session action (shortcut, or the titlebar `+` while the
-    /// sidebar is collapsed): open the new-session canvas. A live project pick
-    /// stands — the sidebar never filters, so there is no filter to re-home
-    /// onto. A missing,
-    /// project-less, or dangling selection is replaced by the last remembered
-    /// live project, else the deterministic live-space fallback
+    /// A new-session tab in the focused tile: its existing one when it has
+    /// one, else a fresh canvas. Returns the canvas slot.
+    fn open_canvas(&mut self, cx: &mut Context<Self>) -> Option<session::SlotId> {
+        self.route = Route::Chat;
+        let focused = self.workspace.focused();
+        let existing = self.workspace.group(focused).and_then(|group| {
+            group
+                .tabs()
+                .iter()
+                .position(|tab| matches!(tab, TabKey::NewSession(_)))
+        });
+        let tab = match existing {
+            Some(index) => {
+                self.workspace.activate(focused, index);
+                self.workspace.group(focused)?.tabs()[index].clone()
+            }
+            None => {
+                let tab = self.workspace.new_session_tab();
+                self.workspace.open(tab.clone());
+                tab
+            }
+        };
+        self.focus_pending = true;
+        self.sync_slots(cx);
+        self.slot_for_tab(&tab)
+    }
+
+    /// The global new-session action (shortcut, the titlebar/sidebar `+`,
+    /// an empty tile's button): a new-session tab in the focused tile. A
+    /// live project pick stands — the sidebar never filters, so there is no
+    /// filter to re-home onto. A missing, project-less, or dangling pick on
+    /// the canvas is replaced by the last remembered live project, else the
+    /// deterministic live-space fallback
     /// (`AppState::first_space_on_picked_device`). With no spaces at all the
     /// selection is left alone — the onboarding canvas blocks here anyway.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
-        self.route = Route::Chat;
-        self.state.update(cx, |s, cx| {
+        let Some(sid) = self.open_canvas(cx) else {
+            return;
+        };
+        let Some((state, composer)) = self
+            .slots
+            .get(&sid)
+            .map(|slot| (slot.state.clone(), slot.composer.clone()))
+        else {
+            return;
+        };
+        let last_space = self.settings.last_space_id.clone();
+        state.update(cx, |s, cx| {
             // A LIVE project pick stands: `selected_space_row` also reads
             // `None` for the explicit no-project opt-out and dangling ids, so
             // a project-less selection is repaired to the last remembered live
@@ -196,291 +469,70 @@ impl Shell {
             s.scratch_pending = false;
             let has_live_selection = s.selected_space_row().is_some();
             if !has_live_selection && !s.spaces.is_empty() {
-                let target = self
-                    .settings
-                    .last_space_id
-                    .clone()
+                let target = last_space
                     .filter(|id| s.space_row(id).is_some() && s.project_scope().space_visible(id))
                     .or_else(|| s.first_space_on_picked_device());
                 if let Some(id) = target {
                     s.select_space(Some(id), cx);
                 }
             }
-            s.select_chat(None, cx);
         });
         // The generic `+` is not a targeted checkout: clear any programmatic
         // pin (sidebar hover add) so an already-pinned canvas reads generically
         // again — the canvas falls back to its ordinary project defaults.
-        self.composer.update(cx, |composer, cx| {
+        composer.update(cx, |composer, cx| {
             composer.clear_checkout_target(cx);
         });
-        // Routing to the canvas is a navigation (the titlebar Back returns
-        // to the session just left). `NavHistory::push` dedups against the
-        // current entry, so a `+` pressed while already on the canvas is a
-        // no-op and the `on_state_changed` canvas push after `select_chat`
-        // never double-stacks.
-        self.nav.push(NavEntry::Chat(String::new()));
-        cx.notify();
+        // Routing to the canvas is a navigation (Back returns to the session
+        // just left) — `sync_follow` records it.
+        self.workspace_changed(cx);
     }
 
-    /// Quick chat: open the new-session canvas aimed at `device_id` with no
-    /// project. The first send asks that device for a throwaway scratch
-    /// folder and the session runs there; deleting the chat removes it.
+    /// Quick chat: a new-session tab aimed at `device_id` with no project.
+    /// The first send asks that device for a throwaway scratch folder and
+    /// the session runs there; deleting the chat removes it.
     pub(super) fn start_quick_chat(&mut self, device_id: String, cx: &mut Context<Self>) {
         self.quick_chat = None;
-        self.route = Route::Chat;
-        self.state.update(cx, |s, cx| {
-            s.begin_quick_chat(device_id, cx);
-            s.select_chat(None, cx);
-        });
-        self.composer.update(cx, |composer, cx| {
+        let Some(sid) = self.open_canvas(cx) else {
+            return;
+        };
+        let Some((state, composer)) = self
+            .slots
+            .get(&sid)
+            .map(|slot| (slot.state.clone(), slot.composer.clone()))
+        else {
+            return;
+        };
+        state.update(cx, |s, cx| s.begin_quick_chat(device_id, cx));
+        composer.update(cx, |composer, cx| {
             composer.clear_checkout_target(cx);
         });
-        self.nav.push(NavEntry::Chat(String::new()));
-        cx.notify();
+        self.workspace_changed(cx);
     }
 
-    /// The sidebar's hover add buttons: open the new-session canvas explicitly
-    /// targeted at `space_id`'s checkout (`plan` — a worktree path or the
-    /// ordinary/current checkout). The pin rides the composer's pickers so the
-    /// target is authoritative without a ListRefs round-trip; the global
-    /// [`Self::open_new_session`] behavior is unchanged.
+    /// The sidebar's hover add buttons: a new-session tab explicitly targeted
+    /// at `space_id`'s checkout (`plan` — a worktree path or the
+    /// ordinary/current checkout). The pin rides the tab's composer pickers
+    /// so the target is authoritative without a ListRefs round-trip; the
+    /// global [`Self::open_new_session`] behavior is unchanged.
     pub(super) fn open_new_session_for(
         &mut self,
         space_id: String,
         plan: crate::pickers::CheckoutPlan,
         cx: &mut Context<Self>,
     ) {
-        self.route = Route::Chat;
         self.settings.last_space_id = Some(space_id.clone());
-        self.composer.update(cx, |composer, cx| {
-            composer.target_checkout(space_id, plan, cx);
-        });
-        // Same deduped canvas navigation as `open_new_session` (see above).
-        self.nav.push(NavEntry::Chat(String::new()));
+        if let Some(composer) = self
+            .open_canvas(cx)
+            .and_then(|sid| self.slots.get(&sid))
+            .map(|slot| slot.composer.clone())
+        {
+            composer.update(cx, |composer, cx| {
+                composer.target_checkout(space_id, plan, cx);
+            });
+        }
         self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// The unified titlebar in chat mode:
-    /// `[fading +] [harness icon + session title] … [toggle-changes]`.
-    /// Replaces the tab strip; inherits its titlebar duties (drag region,
-    /// animated left inset, the toggle-changes button on git projects).
-    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
-        // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. A session appends its target as a muted
-        // "project @ device" tag right of the title (the composer footer no
-        // longer carries it).
-        let (title, target, harness, on_canvas): (
-            SharedString,
-            Option<SharedString>,
-            Option<cypher_proto::HarnessId>,
-            bool,
-        ) = {
-            let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => {
-                    let folder = chat
-                        .space_id
-                        .as_deref()
-                        .and_then(|id| state.space_row(id))
-                        .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "~".to_string());
-                    let device = state
-                        .device_name(&chat.device_id)
-                        .unwrap_or("Unknown device");
-                    (
-                        SharedString::from(transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )),
-                        Some(SharedString::from(format!("{folder} @ {device}"))),
-                        chat.config.as_ref().map(|c| c.harness),
-                        false,
-                    )
-                }
-                None => (SharedString::from(""), None, None, true),
-            }
-        };
-
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER while the
-        // sidebar is collapsed (`render_titlebar_cluster`) — this row only
-        // budgets for it: the title's left inset grows by one button slot as
-        // the + fades in, so the text never sits under it.
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-        let plus_inset = 26.0 * self.titlebar_plus_alpha();
-
-        // Same glide as the old strip: content starts at the inset card's
-        // left edge while the sidebar is open, and slides toward the control
-        // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
-
-        // Trailing titlebar section. With the changes pane open this is the
-        // PANE'S HEADER — a strip exactly as wide as the pane carrying its
-        // controls (scope dropdown, ref selector, fold-all from the Changes
-        // entity; expand + close shell-side). It lives up here because the
-        // titlebar overlay owns this band's hit-testing: controls mounted in
-        // the pane itself would sit under the drag region and never see a
-        // click. Closed, it is just the stable open/close toggle. Hidden on
-        // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
-        let right_padding = titlebar_right_padding(
-            cfg!(target_os = "windows"),
-            if !on_canvas && self.right_pane_open(cx) {
-                PANEL_EDGE_INSET + RIGHT_TAB_INSET
-            } else {
-                Theme::SPACE_LG
-            },
-        );
-        // In takeover the title hides and the strip owns the whole band, so
-        // the row's left inset pulls back to the sidebar seam — the title
-        // inset would push the scope dropdown off the pane's own left gutter
-        // (user report: misaligned dead space). With the sidebar COLLAPSED
-        // the seam is the window edge, where the traffic lights + nav
-        // cluster overlay lives — the strip must still clear it, but only
-        // just: `title_bar_content_start` carries a 10px TEXT margin the
-        // strip doesn't want (it brings its own 8px pad), and doubling up
-        // read as a hole after the `+` (user report).
-        let row_left = if takeover {
-            // The collapsed conversation card still has two 4px margins,
-            // so the expanded panel begins 8px after the sidebar seam.
-            // The title row's 8px child gap supplies that same offset;
-            // cancelling it would put the first tab outside the panel's arc.
-            // Keep clearing native/window controls when the sidebar is hidden.
-            let cluster_end = self.title_bar_content_start() - 10.0 + plus_inset - 14.0;
-            sidebar_now.max(cluster_end)
-        } else {
-            content_left
-        };
-        let trailing: Option<gpui::AnyElement> = if on_canvas {
-            None
-        } else if self.right_pane_open(cx) {
-            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
-            let pr = right_padding;
-            // The row's own left padding is part of its content box: a strip
-            // wider than what's left after it overflows and clips at the right
-            // edge (flex_none never shrinks) — cap to the available width. The
-            // row's 8px child gaps sit OUTSIDE the strip's width (one before
-            // the strip in takeover, two with the title row present): without
-            // budgeting them the capped strip overflows by exactly one gap and
-            // the buttons slide right on expand (user report).
-            let gap_budget = if takeover { 8.0 } else { 16.0 };
-            let avail = self.viewport_width - row_left - pr - gap_budget;
-            // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
-            // options that used to live here moved into the pane's own
-            // second row; expand/close stay in this band (user request).
-            let controls = self.render_right_tab_strip(cx);
-            let header_theme = self.right_header_theme(cx);
-            Some(
-                right_tab_header_frame()
-                    // Right edge already sits at viewport − pr (the row's own
-                    // padding), so this width starts the strip exactly at the
-                    // pane's left border — and rides the open/close tween.
-                    .w(px((right_now - pr).min(avail).max(0.0)))
-                    // Clipped: a long base-ref name must truncate inside the
-                    // controls, never paint under the buttons to the right.
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(controls),
-                    )
-                    .child(header_icon_button(
-                        "expand-changes",
-                        icons::EXPAND_ARROWS,
-                        &header_theme,
-                        cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
-                    ))
-                    .child(header_icon_button(
-                        "toggle-changes",
-                        icons::SIDEBAR_MINIMALISTIC,
-                        &header_theme,
-                        cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                    ))
-                    .into_any_element(),
-            )
-        } else {
-            Some(
-                header_icon_button(
-                    "toggle-changes",
-                    icons::SIDEBAR_MINIMALISTIC,
-                    &theme,
-                    cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                )
-                .into_any_element(),
-            )
-        };
-
-        let inner = div()
-            .size_full()
-            .flex()
-            .items_center()
-            // The conversation card starts 8px below the window edge. Give
-            // its title row matching internal air so the label and trailing
-            // controls do not hug the card's top hairline.
-            .pt(px(CHAT_TITLEBAR_TOP_PAD))
-            .gap(px(8.0))
-            .pl(px(row_left))
-            .pr(px(right_padding))
-            // In panel takeover the header strip spans the whole band — the
-            // title would sit UNDER it (both flex_none, the row overflows and
-            // paint order stacks them), so it hides for the duration.
-            .when(!takeover, |el| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when_some(
-                            harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
-                            },
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        )
-                        .when_some(target, |el, target| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted.opacity(0.5))
-                                    .child(target),
-                            )
-                        }),
-                )
-            })
-            .child(div().flex_1())
-            .children(trailing);
-
-        // The unified window titlebar: full-width on the glass shell, ABOVE
-        // the inset card. No bottom border — the card's tone and shadow are
-        // enough separation, and the glass gutter shows between.
-        let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
-        self.titlebar_drag_region("chat-titlebar", bar, cx)
-            .into_any_element()
+        self.workspace_changed(cx);
     }
 }
 
@@ -559,6 +611,108 @@ mod cycle_tests {
             cycle_target(&list, Some("gone"), false).as_deref(),
             Some("c")
         );
+    }
+
+    #[test]
+    fn restore_prunes_dead_sessions_and_canvases() {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("a"));
+        saved.open(TabKey::session("gone"));
+        let canvas = saved.new_session_tab();
+        saved.open(canvas);
+        let right = saved
+            .open_split(TabKey::session("archived"), left, Edge::Right)
+            .unwrap();
+        saved.split_group(right, Edge::Bottom);
+        let empty = saved.focused();
+        saved.open_in(empty, TabKey::session("b"));
+        saved.activate(left, 1); // "gone" was the active tab
+        let restored = restore_workspace(saved, |id| id == "a" || id == "b");
+        let shape: Vec<Vec<TabKey>> = restored
+            .groups_in_reading_order()
+            .into_iter()
+            .map(|id| restored.group(id).unwrap().tabs().to_vec())
+            .collect();
+        // The archived session's group collapsed; the canvas is dropped.
+        assert_eq!(
+            shape,
+            vec![vec![TabKey::session("a")], vec![TabKey::session("b")]]
+        );
+        let first = restored.groups_in_reading_order()[0];
+        assert_eq!(
+            restored.group(first).unwrap().active_tab(),
+            Some(&TabKey::session("a"))
+        );
+        // Nothing live: an empty (single-group) workspace — the boot
+        // landing takes over.
+        let mut only_dead = Workspace::new();
+        only_dead.open(TabKey::session("gone"));
+        let restored = restore_workspace(only_dead, |_| false);
+        assert_eq!(restored.tabs().count(), 0);
+        assert_eq!(restored.group_count(), 1);
+    }
+
+    #[test]
+    fn presync_tabs_join_the_restored_layout() {
+        use crate::workspace::{Edge, TabKey, Workspace};
+        // The saved layout: two tiles, the right one focused.
+        let mut saved = Workspace::new();
+        let left = saved.open(TabKey::session("a"));
+        saved
+            .open_split(TabKey::session("b"), left, Edge::Right)
+            .unwrap();
+        let mut restored = restore_workspace(saved, |_| true);
+        let taken = restored.new_session_tab();
+        // ⌘N before the first chats frame: a canvas in the boot workspace,
+        // whose key may collide with one the restored layout mints.
+        let mut presync = Workspace::new();
+        let canvas = presync.new_session_tab();
+        presync.open(canvas.clone());
+        let renamed = adopt_presync_tabs(&mut restored, &presync);
+        assert_eq!(renamed.len(), 1);
+        let (old, new) = &renamed[0];
+        assert_eq!(old, &canvas);
+        assert!(matches!(new, TabKey::NewSession(_)));
+        assert_ne!(new, &taken);
+        // The saved tabs survive; the canvas joined the focused tile, focused.
+        assert!(restored.contains(&TabKey::session("a")));
+        assert!(restored.contains(&TabKey::session("b")));
+        assert_eq!(restored.group_count(), 2);
+        assert_eq!(restored.focused_tab(), Some(new));
+        let focused = restored.group(restored.focused()).unwrap();
+        assert_eq!(focused.tabs(), &[TabKey::session("b"), new.clone()]);
+    }
+
+    #[test]
+    fn a_background_session_leaves_when_its_chat_goes() {
+        use crate::state::ProjectScope;
+        let scope = ProjectScope::default();
+        let mut archived = chat("archived", None);
+        archived.archived = true;
+        let chats = [chat("live", None), archived, chat("elsewhere", Some("p"))];
+        let fate = |id: &str, scope: &ProjectScope, frame: bool, awaited: bool| {
+            session_fate(id, &chats, scope, frame, awaited)
+        };
+        assert_eq!(fate("live", &scope, true, false), SessionFate::Stays);
+        // Archived / out of scope: judged on any notify, no frame needed.
+        assert_eq!(fate("archived", &scope, false, false), SessionFate::Hidden);
+        let other_window = ProjectScope {
+            only: Some("q".into()),
+            ..ProjectScope::default()
+        };
+        assert_eq!(
+            fate("elsewhere", &other_window, false, false),
+            SessionFate::Hidden
+        );
+        // Missing: only a new chats frame deletes it…
+        assert_eq!(fate("gone", &scope, false, false), SessionFate::Stays);
+        assert_eq!(fate("gone", &scope, true, false), SessionFate::Deleted);
+        // …and never a chat whose row is still on its way (a live pending
+        // send, a fork / promoted side chat just created).
+        assert_eq!(fate("minted", &scope, true, true), SessionFate::Stays);
+        // Awaiting doesn't shield an archived chat.
+        assert_eq!(fate("archived", &scope, true, true), SessionFate::Hidden);
     }
 
     #[test]

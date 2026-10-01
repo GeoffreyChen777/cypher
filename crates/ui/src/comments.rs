@@ -671,7 +671,7 @@ mod tests {
         // A markdown owner never matches a terminal owner (scoped dismissal).
         assert_ne!(
             a,
-            CommentOwner::Markdown(selection::SelectionScope::Transcript)
+            CommentOwner::Markdown(selection::SelectionScope::Transcript(0))
         );
     }
 
@@ -737,7 +737,7 @@ mod tests {
         let head = Some(CommentHead {
             key: "row-t0".into(),
             ix: 4,
-            scope: SelectionScope::Transcript,
+            scope: SelectionScope::Transcript(0),
         });
         assert_eq!(CommentPopup::resolved_anchor(&head, fixed), fixed);
     }

@@ -1283,7 +1283,7 @@ impl Shell {
                         .size(px(13.0))
                         .text_color(theme.text_muted.opacity(0.7)),
                 )
-                .tooltip(move |_, cx| cx.new(|_| super::FindTooltip(hint.clone())).into())
+                .tooltip(move |_, cx| cx.new(|_| super::session::FindTooltip(hint.clone())).into())
         });
         let mut header = div()
             .id(SharedString::from(format!(

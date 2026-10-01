@@ -6,7 +6,9 @@
 //! own file rather than racing it): last harness, last model per harness
 //! (id + label, so the chip names the pick before the model list loads),
 //! and last reasoning level. Written synchronously on every pick (picks are
-//! rare); corrupt or missing files fall back to defaults.
+//! rare) — re-read and merged first, since every session tile's composer
+//! holds a copy (`Pickers::update_defaults`); corrupt or missing files fall
+//! back to defaults.
 
 use std::collections::HashMap;
 use std::io;

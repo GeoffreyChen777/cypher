@@ -8,7 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::settings::{KeymapConfig, ShortcutId, combo_from_keystroke, display_combo};
+use crate::settings::{
+    KeymapConfig, ShortcutGroup, ShortcutId, combo_from_keystroke, display_combo,
+};
 use crate::state::AppState;
 use crate::theme::{MonoStyled, Theme};
 
@@ -125,12 +127,24 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
 fn description(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
-        ShortcutId::ToggleChanges => "Show or hide changes for the current session.",
-        ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
+        ShortcutId::ToggleChanges => {
+            "Show or hide Git, Files and side chats for the focused session."
+        }
+        ShortcutId::ToggleTerminal => "Show or hide the terminal of the focused session.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
         ShortcutId::PrevSession => {
             "Select the previous session in the sidebar, wrapping at the start."
+        }
+        ShortcutId::SplitRight => "Split the focused tile with a new empty tile on its right.",
+        ShortcutId::SplitDown => "Split the focused tile with a new empty tile below it.",
+        ShortcutId::FocusLeft => "Move focus to the tile on the left.",
+        ShortcutId::FocusRight => "Move focus to the tile on the right.",
+        ShortcutId::FocusUp => "Move focus to the tile above.",
+        ShortcutId::FocusDown => "Move focus to the tile below.",
+        ShortcutId::CloseTab => "Close the focused tile's session tab.",
+        ShortcutId::ToggleZoom => {
+            "Fill the workspace with the focused tile, or restore the layout."
         }
     }
 }
@@ -142,7 +156,7 @@ impl Render for ShortcutsPage {
         let recording = self.recording;
         let customized = self.keymap != KeymapConfig::default();
 
-        let rows = ShortcutId::ALL.into_iter().enumerate().map(|(ix, id)| {
+        let row = |ix: usize, first: bool, id: ShortcutId, cx: &mut Context<Self>| {
             let combo = self.keymap.get(id).to_string();
             let is_recording = recording == Some(id);
             let non_default = combo != id.default_combo();
@@ -161,7 +175,7 @@ impl Render for ShortcutsPage {
                 .flex_row()
                 .items_center()
                 .gap(px(20.0))
-                .when(ix > 0, |el| el.border_t_1().border_color(theme.border))
+                .when(!first, |el| el.border_t_1().border_color(theme.border))
                 .child(
                     div()
                         .flex_1()
@@ -237,7 +251,45 @@ impl Render for ShortcutsPage {
                         }))
                         .child(chip_text),
                 )
-        });
+        };
+        // One card per group; ids index `ShortcutId::ALL` so they stay unique
+        // across cards.
+        let mut sections = Vec::new();
+        for group in ShortcutGroup::ALL {
+            let ids: Vec<(usize, ShortcutId)> = ShortcutId::ALL
+                .into_iter()
+                .enumerate()
+                .filter(|(_, id)| id.group() == group)
+                .collect();
+            let rows: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(n, &(ix, id))| row(ix, n == 0, id, cx))
+                .collect();
+            sections.push(
+                div()
+                    .mt(px(32.0))
+                    .flex()
+                    .flex_col()
+                    .child(widgets::field_label(&theme, group.label()).px(px(4.0)))
+                    .child(widgets::section_card(&theme).mt(px(8.0)).children(rows))
+                    .when(group == ShortcutGroup::Workspace, |el| {
+                        // The fixed tile keys, next to the verbs they extend.
+                        el.child(
+                            div()
+                                .mt(px(8.0))
+                                .px(px(4.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(format!(
+                                    "{}…{} focus the first to ninth tile.",
+                                    display_combo("mod-1"),
+                                    display_combo("mod-9")
+                                ))),
+                        )
+                    }),
+            );
+        }
 
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (zeron settings.shortcuts.tsx).
@@ -311,7 +363,7 @@ impl Render for ShortcutsPage {
                                     .child(SharedString::from("Restore defaults"))
                             }),
                     )
-                    .child(widgets::section_card(&theme).mt(px(32.0)).children(rows))
+                    .children(sections)
                     .child(
                         div()
                             .mt(px(12.0))
