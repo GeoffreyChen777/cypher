@@ -223,6 +223,7 @@ pub(super) struct ChatStyleEditor {
     error: Option<SharedString>,
     preview: Arc<parser::BlockTree>,
     preview_highlights: HashMap<usize, Arc<cypher_syntax::HighlightedDocument>>,
+    selection_scope: crate::markdown::selection::SelectionScope,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -308,6 +309,7 @@ impl ChatStyleEditor {
             error: None,
             preview,
             preview_highlights,
+            selection_scope: crate::markdown::selection::next_preview_scope(),
             _subscriptions: subscriptions,
         }
     }
@@ -807,7 +809,8 @@ impl Render for ChatStyleEditor {
             );
         }
 
-        let options = render::RenderOptions::settled("chat-style-preview".into());
+        let mut options = render::RenderOptions::settled("chat-style-preview".into());
+        options.scope = self.selection_scope;
         let rendered = render::render_tree(&self.preview, &options, &preview, window, &|index| {
             self.preview_highlights.get(&index).cloned()
         });
@@ -818,6 +821,8 @@ impl Render for ChatStyleEditor {
                 .overflow_y_scroll()
                 .bg(preview.bg)
                 .p(px(16.0))
+                // Paints first: clears this preview's selection registry.
+                .child(render::selection_frame_reset(self.selection_scope))
                 .child(
                     div()
                         .w_full()

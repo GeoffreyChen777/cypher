@@ -54,6 +54,10 @@ pub enum SelectionScope {
     /// question, its context and option copy select + copy like transcript
     /// text, with no annotation actions.
     Question(u64),
+    /// A standalone rendered-markdown preview (the Files panel's Markdown
+    /// preview, the Appearance chat preview): one fresh scope per surface
+    /// ([`next_preview_scope`]), selection + copy only.
+    Preview(u64),
 }
 
 /// Allocate a fresh per-transcript selection scope (one per session tile's
@@ -76,6 +80,14 @@ pub fn next_side_chat_scope() -> SelectionScope {
 pub fn next_question_scope() -> SelectionScope {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     SelectionScope::Question(NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Allocate a fresh selection scope for a standalone markdown preview. The
+/// surface must paint [`selection_frame_reset`](super::render::selection_frame_reset)
+/// for it before its text, like every other scope.
+pub fn next_preview_scope() -> SelectionScope {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    SelectionScope::Preview(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Allocate a fresh per-pane diff selection scope. Each [`Changes`](crate::changes::Changes)

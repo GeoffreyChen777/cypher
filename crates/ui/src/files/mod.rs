@@ -35,6 +35,7 @@ use cypher_syntax::{HighlightedDocument, LanguageId};
 use crate::icons::{self, icon};
 use crate::markdown::parser::{Block, BlockTree, parse_full};
 use crate::markdown::render;
+use crate::markdown::selection::{self, SelectionScope};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -232,6 +233,8 @@ pub struct FilesPanel {
     /// previous one for the same folder.
     dir_tasks: HashMap<String, Task<()>>,
     file_tasks: HashMap<String, Task<()>>,
+    /// The Markdown preview's own selection scope (registry reset per frame).
+    selection_scope: SelectionScope,
     _observe: Subscription,
 }
 
@@ -253,6 +256,7 @@ impl FilesPanel {
             context_error: None,
             dir_tasks: HashMap::new(),
             file_tasks: HashMap::new(),
+            selection_scope: selection::next_preview_scope(),
             _observe: observe,
         }
     }
@@ -927,7 +931,9 @@ impl FilesPanel {
         };
         let body: AnyElement = match (file.preview, &file.preview_tree) {
             (true, Some(tree)) => {
-                let options = render::RenderOptions::settled(format!("files-md:{path}").into());
+                let mut options =
+                    render::RenderOptions::settled(format!("files-md:{path}").into());
+                options.scope = self.selection_scope;
                 let highlights = file.preview_highlights.clone();
                 let rendered = render::render_tree(tree, &options, &theme, window, &|ix| {
                     highlights.get(&ix).cloned()
@@ -942,6 +948,10 @@ impl FilesPanel {
                     .text_size(px(theme.markdown.body_size))
                     .line_height(px(theme.markdown.body_line_height))
                     .text_color(theme.text)
+                    // FIRST child ⇒ paints first: without the per-frame reset
+                    // the selection registry grows every repaint, so drags
+                    // hit-test stale geometry and slow to a halt.
+                    .child(render::selection_frame_reset(self.selection_scope))
                     .child(div().w_full().max_w(px(760.0)).child(rendered))
                     .into_any_element()
             }
