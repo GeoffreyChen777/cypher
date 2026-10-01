@@ -682,8 +682,9 @@ impl Shell {
         let chat = self.render_session_chat(sid, chat_height, window, cx);
         let dock = self.render_dock(sid, cx);
         let terminal = self.render_terminal_container(sid, cx);
-        // The session rail lives in the tile's top-right corner
-        // (`render_group`), outside this measured area.
+        // The session rail floats over the tile's top-right corner
+        // (`render_group`), outside this measured area, so it does not
+        // shrink the column.
         div()
             .id(("session", sid))
             .relative()

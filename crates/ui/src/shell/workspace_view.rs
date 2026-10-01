@@ -28,6 +28,30 @@ const TILE_TAB_FADE: f32 = 24.0;
 /// The outer band of a tile body, per side, that splits instead of joins.
 const DROP_EDGE_BAND: f32 = 0.25;
 
+/// Right inset for the tab row. The rail floats over the body and does
+/// not take column width; the tabs still stop where its card begins,
+/// unless a Windows caption inset already clears that corner (the rail
+/// starts below the header there).
+fn tile_header_right_inset(touch: Touch, rail: bool, is_windows: bool) -> f32 {
+    let base = if touch.top && touch.right {
+        titlebar_right_padding(is_windows, 4.0)
+    } else {
+        4.0
+    };
+    let rail_top = if touch.top && touch.right && is_windows {
+        Theme::TITLEBAR_HEIGHT
+    } else {
+        super::dock::RAIL_MARGIN
+    };
+    // 8px: the rail's top padding plus the card's own padding. Past the
+    // header, the buttons no longer cover the tab row.
+    if rail && rail_top + 8.0 < TILE_HEADER_HEIGHT {
+        base + super::dock::RAIL_WIDTH
+    } else {
+        base
+    }
+}
+
 /// A dragged session tab — from a tile's tab bar or a sidebar row.
 pub(super) struct TabDrag {
     tab: TabKey,
@@ -786,12 +810,11 @@ impl Shell {
             .group(group)
             .and_then(|g| g.active_tab().cloned());
         let sid = active.as_ref().and_then(|tab| self.slot_for_tab(tab));
-        let header = self.render_tile_header(group, touch, focused, cx);
-        // The session rail stands in the tile's top-right corner, beside the
-        // tab row (which ends where it begins) and the body. A top-right
-        // tile on Windows keeps it under the native caption buttons.
-        // Only the focused tile shows its rail (user request); it slides
-        // open with a fade each time a tile gains focus.
+        // Only the focused tile shows its rail (user request). It floats over
+        // the tile, out of flow, so the entrance is a fade — growing its
+        // width used to shove the transcript (and the dock) left.
+        let rail_shown = sid.is_some() && focused;
+        let header = self.render_tile_header(group, touch, focused, rail_shown, cx);
         let rail = sid.filter(|_| focused).map(|sid| {
             let top = if touch.top && touch.right && cfg!(target_os = "windows") {
                 Theme::TITLEBAR_HEIGHT
@@ -803,10 +826,14 @@ impl Shell {
             }
             let epoch = self.rail_focus.1;
             let rail = self.render_session_rail(sid, top, cx);
+            // Absolute, fixed width: the fade cannot change anyone's layout.
+            // A top-right Windows tile starts the buttons under the caption
+            // controls (`top` above). The tab row keeps its own right inset.
             let wrapper = div()
-                .flex_none()
-                .h_full()
-                .overflow_hidden()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
                 .w(px(super::dock::RAIL_WIDTH))
                 .child(rail);
             if motion::reduced_motion(cx) {
@@ -816,7 +843,7 @@ impl Shell {
                     .with_animation(
                         SharedString::from(format!("tile-rail-in-{}-{epoch}", group.0)),
                         motion::TAB_SLIDE.animation(),
-                        |el, t| el.w(px(super::dock::RAIL_WIDTH * t)).opacity(t),
+                        |el, t| el.opacity(t),
                     )
                     .into_any_element()
             }
@@ -929,6 +956,7 @@ impl Shell {
         group: GroupId,
         touch: Touch,
         focused: bool,
+        rail: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tabs: Vec<TabKey> = self
@@ -996,11 +1024,7 @@ impl Shell {
             let tile_left = sidebar_now + 4.0;
             left = (cluster_end - tile_left).max(left);
         }
-        let right = if touch.top && touch.right {
-            titlebar_right_padding(cfg!(target_os = "windows"), 4.0)
-        } else {
-            4.0
-        };
+        let right = tile_header_right_inset(touch, rail, cfg!(target_os = "windows"));
         // The tile actions live on the session's right-edge rail now.
         let header = div()
             .flex_none()
@@ -1545,5 +1569,27 @@ mod tests {
         assert!(top_mid.top && !top_mid.left && !top_mid.right);
         let top_right = top_row.child(Axis::Horizontal, 2, 3);
         assert!(top_right.top && !top_right.left && top_right.right);
+    }
+
+    #[test]
+    fn the_rail_insets_tabs_only_where_it_covers_them() {
+        let rail = super::dock::RAIL_WIDTH;
+        // Body text is never inset — the rail floats. Tabs stop at the card
+        // when the card shares the header band.
+        assert_eq!(tile_header_right_inset(Touch::ALL, false, false), 4.0);
+        assert_eq!(tile_header_right_inset(Touch::ALL, true, false), 4.0 + rail);
+        let lower = Touch {
+            top: false,
+            left: true,
+            right: true,
+        };
+        assert_eq!(tile_header_right_inset(lower, true, false), 4.0 + rail);
+        // Windows caption buttons already clear the corner; the rail starts
+        // under them, below the tab row, so the tabs keep only that inset.
+        assert_eq!(
+            tile_header_right_inset(Touch::ALL, true, true),
+            tile_header_right_inset(Touch::ALL, false, true)
+        );
+        assert!(tile_header_right_inset(Touch::ALL, false, true) > rail);
     }
 }
