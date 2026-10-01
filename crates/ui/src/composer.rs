@@ -58,8 +58,13 @@ pub const TEXTAREA_MAX: f32 = 260.0;
 /// children; composer/styles.tsx pickerChip) + `pb-2.5` (10) — zeron
 /// composer-actions.tsx line 60.
 pub const ACTIONS_ROW_HEIGHT: f32 = 46.0;
-/// Below this input width the composer's Traits chip hides (small tiles).
-const NARROW_PICKERS_WIDTH: f32 = 380.0;
+/// Below this PILL width the composer's Traits chip hides (small tiles) —
+/// a 380px expanded input plus its `px-4` padding (measured inside the
+/// border).
+/// Gated on the pill, never the input: the compact input shares its row
+/// with the chips, so hiding the chip widened the input past the gate and
+/// the chip flickered in and out every frame (user report).
+const NARROW_PILL_WIDTH: f32 = 412.0;
 /// Outer radius of the composer pill. Chrome sitting immediately above the
 /// pill uses this to align with the point where each top corner becomes flat.
 pub const PILL_RADIUS: f32 = 26.0;
@@ -5064,6 +5069,8 @@ pub struct Composer {
     last_rendered_height: f32,
     /// Monotonic clock anchor for the morph timeline.
     morph_clock: Instant,
+    /// The pill's laid-out width (last frame), for the narrow-tile gate.
+    pill_width: Rc<std::cell::Cell<f32>>,
     /// Set on every session/route change: flips committed before this instant
     /// SNAP instead of morphing (see [`ROUTE_SNAP_MS`]).
     route_snap_until: Option<Instant>,
@@ -5314,6 +5321,7 @@ impl Composer {
             flip_morph: None,
             last_rendered_height: 0.0,
             morph_clock: Instant::now(),
+            pill_width: Rc::default(),
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
@@ -9629,9 +9637,10 @@ impl Render for Composer {
                 input.layout_epoch,
             )
         };
-        // Narrow tile: the Traits chip steps aside (the input's own width —
-        // last frame's — tracks the pill's).
-        let narrow = last_width > 0.0 && last_width < NARROW_PICKERS_WIDTH;
+        // Narrow tile: the Traits chip steps aside (last frame's pill width —
+        // independent of the chips, so the gate can't feed back on itself).
+        let pill_width = self.pill_width.get();
+        let narrow = pill_width > 0.0 && pill_width < NARROW_PILL_WIDTH;
         self.pickers
             .update(cx, |pickers, cx| pickers.set_narrow(narrow, cx));
         let now = Instant::now();
@@ -9979,12 +9988,28 @@ impl Render for Composer {
         // No drop shadow on glass: it paints BEHIND the translucent fill and
         // shows through as an inner glow (theme.rs's card_selected_shadows
         // lesson; user report).
+        let pill_width = self.pill_width.clone();
         let pill = div()
+            .relative()
             .rounded(px(PILL_RADIUS))
             .bg(pill_bg)
             .border_1()
             .border_color(theme.border)
-            .when(!theme.is_glass(), |el| el.shadow_lg());
+            .when(!theme.is_glass(), |el| el.shadow_lg())
+            .child(
+                gpui::canvas(
+                    move |bounds, window, _| {
+                        let width = f32::from(bounds.size.width);
+                        if (width - pill_width.get()).abs() > 0.5 {
+                            pill_width.set(width);
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
