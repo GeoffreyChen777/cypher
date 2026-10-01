@@ -50,6 +50,10 @@ pub enum SelectionScope {
     /// registry. Side-chat scopes render selection + copy but deliberately
     /// offer NO annotation actions (no Comment pill, no nested Side Chat).
     SideChat(u64),
+    /// The composer's agent-question card ([`next_question_scope`]): the
+    /// question, its context and option copy select + copy like transcript
+    /// text, with no annotation actions.
+    Question(u64),
 }
 
 /// Allocate a fresh per-transcript selection scope (one per session tile's
@@ -66,6 +70,12 @@ pub fn next_transcript_scope() -> SelectionScope {
 pub fn next_side_chat_scope() -> SelectionScope {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     SelectionScope::SideChat(NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Allocate a fresh selection scope for one composer's question card.
+pub fn next_question_scope() -> SelectionScope {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    SelectionScope::Question(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Allocate a fresh per-pane diff selection scope. Each [`Changes`](crate::changes::Changes)

@@ -954,6 +954,33 @@ pub(crate) fn paint_text_selection(
     register_selection_listeners(window, scope, key, text, layout, selection);
 }
 
+/// A run of plain text that selects + copies under `scope` as `key`. Font,
+/// size and color inherit from the parent div. The surface must paint
+/// [`selection_frame_reset`] for `scope` before any of these.
+pub(crate) fn selectable_plain_text(
+    scope: super::selection::SelectionScope,
+    key: std::sync::Arc<str>,
+    text: SharedString,
+    theme: &Theme,
+) -> AnyElement {
+    let styled = StyledText::new(text.clone());
+    let layout = styled.layout().clone();
+    let sel_theme = theme.clone();
+    let underlay = canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            paint_text_selection(window, scope, &key, &text, &layout, &sel_theme, None);
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
+        .into_any_element()
+}
+
 /// One painted text element, registered per frame in document order — the
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).

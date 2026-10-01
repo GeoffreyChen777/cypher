@@ -1255,7 +1255,12 @@ fn parse_listed_options(prompt: &str) -> Option<(String, Vec<ListedOption>)> {
     Some((before.trim().to_owned(), options))
 }
 
-fn wizard_context_block(context: &str, theme: &crate::theme::Theme) -> gpui::Div {
+fn wizard_context_block(
+    context: &str,
+    scope: crate::markdown::selection::SelectionScope,
+    key: Arc<str>,
+    theme: &crate::theme::Theme,
+) -> gpui::Div {
     div()
         .mt(px(10.0))
         .pl(px(10.0))
@@ -1264,7 +1269,13 @@ fn wizard_context_block(context: &str, theme: &crate::theme::Theme) -> gpui::Div
         .text_size(px(12.5))
         .line_height(px(18.0))
         .text_color(theme.text_muted)
-        .child(SharedString::from(context.to_owned()))
+        .cursor_text()
+        .child(crate::markdown::render::selectable_plain_text(
+            scope,
+            key,
+            SharedString::from(context.to_owned()),
+            theme,
+        ))
 }
 
 /// Section label inside the card ("Pick one", "Your answer", …).
@@ -4999,6 +5010,9 @@ pub struct Composer {
     failure: Option<SharedString>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
+    /// Selection scope of the question card's text (question, context and
+    /// option copy select + copy like transcript text).
+    wizard_selection: crate::markdown::selection::SelectionScope,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
@@ -5280,6 +5294,7 @@ impl Composer {
             failure: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
+            wizard_selection: crate::markdown::selection::next_question_scope(),
             answered_requests: HashSet::new(),
             advance_task: None,
             answered_at: None,
@@ -8937,7 +8952,15 @@ impl Composer {
         let input_focused = self.input.read(cx).focus_handle.is_focused(window);
         let input_empty = self.input.read(cx).is_empty();
         let key = event.keystroke.key.as_str();
-        if let Ok(digit) = key.parse::<usize>()
+        let modifiers = event.keystroke.modifiers;
+        if key == "c" && (modifiers.platform || modifiers.control) {
+            // Clicking card text focuses the card, not the input, so Copy
+            // has no input binding to reach: copy the text selection here.
+            if let Some(text) = crate::markdown::selection::selected_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+            }
+        } else if let Ok(digit) = key.parse::<usize>()
             && (1..=9).contains(&digit)
         {
             if !input_focused || input_empty {
@@ -9010,6 +9033,13 @@ impl Composer {
             .clone()
             .unwrap_or_else(|| SharedString::from("Agent question"));
         let multi = question.multi_select;
+        // Card text selects + copies like transcript text. Keys carry the
+        // request and page, so a selection never washes another page's copy.
+        let scope = self.wizard_selection;
+        let text_key = {
+            let prefix = format!("{}:{page}", wizard.request_id);
+            move |part: &str| -> Arc<str> { format!("{prefix}:{part}").into() }
+        };
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             let picked = wizard.is_picked(ix) && typed_empty;
@@ -9072,18 +9102,30 @@ impl Composer {
                             gpui::FontWeight::MEDIUM
                         })
                         .text_color(if custom { theme.text_muted } else { theme.text })
-                        .child(SharedString::from(if custom {
-                            "Write a different answer…".to_owned()
-                        } else {
-                            label.clone()
-                        })),
+                        .map(|el| {
+                            if custom {
+                                el.child("Write a different answer…")
+                            } else {
+                                el.child(crate::markdown::render::selectable_plain_text(
+                                    scope,
+                                    text_key(&format!("option{ix}")),
+                                    SharedString::from(label.clone()),
+                                    &theme,
+                                ))
+                            }
+                        }),
                 )
                 .children(description.map(|description| {
                     div()
                         .text_size(px(12.0))
                         .line_height(px(17.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(description))
+                        .child(crate::markdown::render::selectable_plain_text(
+                            scope,
+                            text_key(&format!("option{ix}-description")),
+                            SharedString::from(description),
+                            &theme,
+                        ))
                 }));
 
             div()
@@ -9115,7 +9157,20 @@ impl Composer {
                 })
                 .on_hover(motion::hover_listener(hover_key))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                    // A drag or double-click over the copy is a text
+                    // selection, not a pick.
+                    if let gpui::ClickEvent::Mouse(click) = event {
+                        let moved = click.up.position - click.down.position;
+                        if click.down.click_count > 1
+                            || f32::from(moved.x).abs() > 3.0
+                            || f32::from(moved.y).abs() > 3.0
+                        {
+                            return;
+                        }
+                    }
+                    this.wizard_select(ix, cx)
+                }))
                 .child(marker)
                 .child(text)
                 // Multi-select and the custom row keep their number key on the
@@ -9230,10 +9285,21 @@ impl Composer {
                 .line_height(px(21.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(SharedString::from(question_text)),
+                .cursor_text()
+                .child(crate::markdown::render::selectable_plain_text(
+                    scope,
+                    text_key("question"),
+                    SharedString::from(question_text),
+                    &theme,
+                )),
         );
         if let Some(context) = context {
-            body = body.child(wizard_context_block(&context, &theme));
+            body = body.child(wizard_context_block(
+                &context,
+                scope,
+                text_key("context"),
+                &theme,
+            ));
         }
         if let Some(copy) = optional_comment.as_ref() {
             // What the user already picked, shown as the answer it is.
@@ -9251,7 +9317,7 @@ impl Composer {
                         &theme,
                     ))
                     .child(div().flex().flex_col().gap(px(6.0)).children(
-                        copy.selected.lines().map(|line| {
+                        copy.selected.lines().enumerate().map(|(ix, line)| {
                             div()
                                 .flex()
                                 .flex_row()
@@ -9287,7 +9353,13 @@ impl Composer {
                                         .line_height(px(18.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text)
-                                        .child(SharedString::from(line.to_owned())),
+                                        .cursor_text()
+                                        .child(crate::markdown::render::selectable_plain_text(
+                                            scope,
+                                            text_key(&format!("picked{ix}")),
+                                            SharedString::from(line.to_owned()),
+                                            &theme,
+                                        )),
                                 )
                         }),
                     )),
@@ -9451,6 +9523,7 @@ impl Composer {
             .shadow_lg()
             .flex()
             .flex_col()
+            .child(crate::markdown::render::selection_frame_reset(scope))
             .child(header)
             .child(body)
             .child(footer)
