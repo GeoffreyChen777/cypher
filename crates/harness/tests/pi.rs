@@ -306,15 +306,15 @@ async fn models_and_commands_are_discovered_from_the_probe() {
         models[0].description.as_deref(),
         Some("anthropic · 200k context")
     );
+    // The ladder is the model's own `thinkingLevelMap`: `minimal` disabled,
+    // `xhigh` opted in, `max` never named.
     assert_eq!(
         models[0].reasoning_levels,
         vec![
-            ReasoningLevel::Minimal,
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
             ReasoningLevel::High,
             ReasoningLevel::XHigh,
-            ReasoningLevel::Max,
         ]
     );
     // Non-reasoning models get no ladder.
@@ -1370,17 +1370,8 @@ fn descriptor_surface_matches_registry_expectations() {
     assert!(harness.supports_steering());
     // Native mid-run steer: step boundary, not turn boundary.
     assert_eq!(harness.steering_mode(), SteeringMode::StepBoundary);
-    assert_eq!(
-        harness.reasoning_levels(),
-        &[
-            ReasoningLevel::Minimal,
-            ReasoningLevel::Low,
-            ReasoningLevel::Medium,
-            ReasoningLevel::High,
-            ReasoningLevel::XHigh,
-            ReasoningLevel::Max,
-        ]
-    );
+    // Ladders are per model; there is no harness-wide fallback.
+    assert!(harness.reasoning_levels().is_empty());
 }
 
 // ── Session Fork (v1) ──────────────────────────────────────────────────────

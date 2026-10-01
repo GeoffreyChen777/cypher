@@ -118,7 +118,8 @@ fn write_temp_prompt(agent: &str, prompt: &str) -> std::io::Result<PathBuf> {
 }
 
 /// pi's thinking ladder in cypher terms (its extra "off" tier has no cypher
-/// equivalent and stays the agent default).
+/// equivalent and stays the agent default). Each model offers a subset of it
+/// ([`model_ladder`]).
 const FULL_LADDER: [ReasoningLevel; 6] = [
     ReasoningLevel::Minimal,
     ReasoningLevel::Low,
@@ -142,6 +143,28 @@ fn thinking_level(level: ReasoningLevel) -> &'static str {
         | ReasoningLevel::Ultracode
         | ReasoningLevel::Ultrathink => "max",
     }
+}
+
+/// The levels pi honors for a `get_available_models` entry — a mirror of
+/// pi-ai's `getSupportedThinkingLevels`: a `null` in `thinkingLevelMap`
+/// disables that level, and `xhigh`/`max` exist only when the map names them.
+/// pi clamps any other request to a neighbouring level, so offering it would
+/// only mislabel what actually runs. Empty when the model cannot think.
+fn model_ladder(m: &Value) -> Vec<ReasoningLevel> {
+    if !m.get("reasoning").and_then(Value::as_bool).unwrap_or(false) {
+        return Vec::new();
+    }
+    let map = m.get("thinkingLevelMap");
+    FULL_LADDER
+        .into_iter()
+        .filter(
+            |&level| match map.and_then(|map| map.get(thinking_level(level))) {
+                Some(Value::Null) => false,
+                Some(_) => true,
+                None => !matches!(level, ReasoningLevel::XHigh | ReasoningLevel::Max),
+            },
+        )
+        .collect()
 }
 
 /// Cypher uses `unknown/unknown` as the empty-catalog placeholder. It is not a
@@ -459,12 +482,11 @@ fn context_window_tag(w: u64) -> String {
 /// name`, and `description = "{provider} · {n}k context"` — the picker
 /// renders the description on the row's muted subline, which is what
 /// distinguishes the same vendor model served by several providers (deepseek
-/// vs opencode-go vs … all offering "DeepSeek V4 Flash"). Full reasoning
-/// ladder applies when the model supports thinking (else none).
+/// vs opencode-go vs … all offering "DeepSeek V4 Flash"). The reasoning
+/// ladder is the model's own ([`model_ladder`]).
 fn model_from_wire(m: &Value) -> Option<Model> {
     let model_id = m.get("id").and_then(Value::as_str)?;
     let provider = m.get("provider").and_then(Value::as_str).unwrap_or("pi");
-    let reasoning = m.get("reasoning").and_then(Value::as_bool).unwrap_or(false);
     let name = m.get("name").and_then(Value::as_str).unwrap_or(model_id);
     let description = match m.get("contextWindow").and_then(Value::as_u64) {
         Some(w) => format!("{provider} · {}", context_window_tag(w)),
@@ -474,11 +496,7 @@ fn model_from_wire(m: &Value) -> Option<Model> {
         id: format!("{provider}/{model_id}"),
         label: name.to_owned(),
         description: Some(description),
-        reasoning_levels: if reasoning {
-            FULL_LADDER.to_vec()
-        } else {
-            Vec::new()
-        },
+        reasoning_levels: model_ladder(m),
         options: Vec::new(),
     })
 }
@@ -1286,8 +1304,11 @@ impl Harness for PiHarness {
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
     }
+    // Every catalog model carries its exact ladder (see `model_ladder`), so
+    // there is no harness-wide fallback: one would re-offer the full ladder
+    // for models that cannot think.
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &FULL_LADDER
+        &[]
     }
 
     /// The pi CLI present on this device: a filesystem probe, never a spawn.
@@ -3281,12 +3302,48 @@ mod tests {
             models[0].description.as_deref(),
             Some("anthropic · 200k context")
         );
-        assert_eq!(models[0].reasoning_levels, FULL_LADDER.to_vec());
+        // No `thinkingLevelMap`: pi's base ladder, without the opt-in tiers.
+        assert_eq!(
+            models[0].reasoning_levels,
+            [
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High
+            ]
+        );
         assert_eq!(models[1].id, "openai/gpt-4o-mini");
         assert!(models[1].reasoning_levels.is_empty());
         // A provider-less entry still composes an id.
         let bare = json!({ "models": [{ "id": "x", "name": "X" }] });
         assert_eq!(models_from_response(&bare)[0].id, "pi/x");
+    }
+
+    #[test]
+    fn model_ladder_follows_thinking_level_map() {
+        use ReasoningLevel::*;
+        let ladder = |map: Value| {
+            model_ladder(&json!({ "id": "m", "reasoning": true, "thinkingLevelMap": map }))
+        };
+        // Live pi shapes (claude-bridge): opt-in tiers, and `null` disabling.
+        assert_eq!(
+            ladder(json!({ "off": null, "minimal": null, "xhigh": "xhigh", "max": "max" })),
+            [Low, Medium, High, XHigh, Max]
+        );
+        assert_eq!(
+            ladder(json!({ "max": "max" })),
+            [Minimal, Low, Medium, High, Max]
+        );
+        assert_eq!(
+            ladder(json!({ "minimal": null, "low": null, "medium": null, "high": "high" })),
+            [High]
+        );
+        // Every level disabled, or no reasoning at all: nothing to offer.
+        assert!(
+            ladder(json!({ "minimal": null, "low": null, "medium": null, "high": null }))
+                .is_empty()
+        );
+        assert!(model_ladder(&json!({ "id": "m", "reasoning": false })).is_empty());
     }
 
     #[test]
@@ -3309,7 +3366,7 @@ mod tests {
             models[0].description.as_deref(),
             Some("mvp-lab · 500k context")
         );
-        assert_eq!(models[0].reasoning_levels, FULL_LADDER.to_vec());
+        assert_eq!(models[0].reasoning_levels.len(), 4);
 
         // A non-empty directory remains authoritative.
         let available = json!({
