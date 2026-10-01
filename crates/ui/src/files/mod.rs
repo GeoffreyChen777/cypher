@@ -931,8 +931,7 @@ impl FilesPanel {
         };
         let body: AnyElement = match (file.preview, &file.preview_tree) {
             (true, Some(tree)) => {
-                let mut options =
-                    render::RenderOptions::settled(format!("files-md:{path}").into());
+                let mut options = render::RenderOptions::settled(format!("files-md:{path}").into());
                 options.scope = self.selection_scope;
                 let highlights = file.preview_highlights.clone();
                 let rendered = render::render_tree(tree, &options, &theme, window, &|ix| {
