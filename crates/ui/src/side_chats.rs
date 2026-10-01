@@ -112,6 +112,9 @@ pub struct SideChatPanel {
     send_task: Option<Task<()>>,
     promoting: bool,
     error: Option<SharedString>,
+    /// The header row's right padding — the dock widens it while the
+    /// tile's floating rail covers the corner.
+    header_right: f32,
 }
 
 impl SideChatPanel {
@@ -178,6 +181,7 @@ impl SideChatPanel {
             send_task: None,
             promoting: false,
             error: None,
+            header_right: 8.0,
         }
     }
 
@@ -357,6 +361,13 @@ impl SideChatPanel {
     /// Rendered panel: a single rounded selection bar with lifecycle actions,
     /// plus the EXISTING Transcript and Composer. No bespoke bubbles, manual
     /// input, or answer prompt — the reused components own all of that.
+    pub fn set_header_right(&mut self, inset: f32, cx: &mut Context<Self>) {
+        if self.header_right != inset {
+            self.header_right = inset;
+            cx.notify();
+        }
+    }
+
     pub fn render_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
 
@@ -368,44 +379,48 @@ impl SideChatPanel {
             // quote rail as the comment editor, plus the promote action.
             // The full selection remains engine-side.
             .child(
-                div().px(px(8.0)).py(px(6.0)).child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .pl(px(8.0))
-                        .pr(px(5.0))
-                        .py(px(5.0))
-                        .rounded(px(8.0))
-                        .bg(crate::theme::ink(0.035))
-                        .child(crate::comments::quote_rail(&theme))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(self.quote_preview())),
-                        )
-                        .child(
-                            div()
-                                .id("side-chat-promote")
-                                .px(px(8.0))
-                                .py(px(3.0))
-                                .rounded(px(6.0))
-                                .text_size(px(10.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text_muted)
-                                .cursor_pointer()
-                                .hover(|style| {
-                                    style.bg(crate::theme::ink(0.08)).text_color(theme.text)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| this.promote(cx)))
-                                .child(SharedString::from("Open as Chat")),
-                        ),
-                ),
+                div()
+                    .pl(px(8.0))
+                    .pr(px(self.header_right))
+                    .py(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .pl(px(8.0))
+                            .pr(px(5.0))
+                            .py(px(5.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.035))
+                            .child(crate::comments::quote_rail(&theme))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(self.quote_preview())),
+                            )
+                            .child(
+                                div()
+                                    .id("side-chat-promote")
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text_muted)
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(crate::theme::ink(0.08)).text_color(theme.text)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.promote(cx)))
+                                    .child(SharedString::from("Open as Chat")),
+                            ),
+                    ),
             )
             .when_some(self.error.clone(), |el, error| {
                 el.child(

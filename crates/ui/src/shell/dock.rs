@@ -583,6 +583,13 @@ impl Shell {
         let open_w = self.dock_open_width(slot);
         let active = self.resolved_dock_active(slot, cx);
         let theme = Theme::of(cx).clone();
+        // The focused tile's rail floats over the dock's top-right corner;
+        // the surfaces' header buttons step left of it.
+        let header_right = if self.workspace.focused_tab() == Some(&slot.tab) {
+            RAIL_WIDTH
+        } else {
+            8.0
+        };
         let content: AnyElement = if slot.dock.open {
             match active {
                 DockSurface::Diff(id) if slot.diffs.contains_key(&id) => {
@@ -598,7 +605,14 @@ impl Shell {
                         .size_full()
                         .flex()
                         .flex_col()
-                        .child(div().flex_none().h(px(36.0)).px(px(8.0)).child(controls))
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(px(36.0))
+                                .pl(px(8.0))
+                                .pr(px(header_right))
+                                .child(controls),
+                        )
                         // Full-width opaque diff-row tints must end before
                         // the rounded card's bottom arcs (GPUI clips rects,
                         // not descendant pixels to the parent's radius).
@@ -621,7 +635,14 @@ impl Shell {
                         .size_full()
                         .flex()
                         .flex_col()
-                        .child(div().flex_none().h(px(36.0)).px(px(8.0)).child(controls))
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(px(36.0))
+                                .pl(px(8.0))
+                                .pr(px(header_right))
+                                .child(controls),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -633,6 +654,7 @@ impl Shell {
                 }
                 DockSurface::SideChat(id) => {
                     if let Some(panel) = slot.side_chats.get(&id) {
+                        panel.update(cx, |panel, cx| panel.set_header_right(header_right, cx));
                         panel.clone().into_any_element()
                     } else {
                         self.render_surface_picker(sid, cx)
