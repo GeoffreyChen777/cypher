@@ -660,17 +660,8 @@ mod tests {
         // Native RPC harness: steer lands mid-turn (after the current
         // assistant message's tool calls), so the descriptor is StepBoundary.
         assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
-        assert_eq!(
-            pi.reasoning_levels(),
-            &[
-                ReasoningLevel::Minimal,
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max
-            ]
-        );
+        // Pi ladders are per model (its `thinkingLevelMap`), never harness-wide.
+        assert!(pi.reasoning_levels().is_empty());
     }
 
     /// `default_registry_with_bridge` re-arms the Pi slot IN PLACE: Pi must be

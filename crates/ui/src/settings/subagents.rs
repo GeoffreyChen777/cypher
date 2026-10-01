@@ -328,12 +328,23 @@ impl SubagentsPage {
 
     /// Levels the editor may offer. A model the device knows decides: no
     /// reasoning support means no ladder at all, so the UI stops offering a
-    /// setting Pi would ignore. An unknown or inherited model keeps the full
-    /// ladder rather than guessing.
+    /// setting Pi would ignore, and otherwise only `off` plus the model's own
+    /// levels (Pi clamps anything else). An unknown or inherited model keeps
+    /// the full ladder rather than guessing.
     fn available_levels(&self, editor: &Editor) -> Vec<&'static str> {
         match editor.model.as_deref().and_then(|id| self.model_entry(id)) {
             Some(model) if model.reasoning_levels.is_empty() => Vec::new(),
-            _ => THINKING_LEVELS.to_vec(),
+            Some(model) => THINKING_LEVELS
+                .into_iter()
+                .filter(|&level| {
+                    level == "off"
+                        || model.reasoning_levels.iter().any(|offered| {
+                            serde_json::to_value(offered)
+                                .is_ok_and(|value| value.as_str() == Some(level))
+                        })
+                })
+                .collect(),
+            None => THINKING_LEVELS.to_vec(),
         }
     }
 
@@ -1684,6 +1695,12 @@ mod tests {
                         "reasoningLevels": ["minimal","low","medium","high","xhigh","max"],
                     },
                     {
+                        "id": "claude-bridge/claude-opus-4-6",
+                        "label": "Opus 4.6",
+                        "description": "claude-bridge · 1M context",
+                        "reasoningLevels": ["minimal","low","medium","high","max"],
+                    },
+                    {
                         "id": "openai/gpt-tiny",
                         "label": "GPT Tiny",
                         "description": "openai · 8k context",
@@ -1969,6 +1986,17 @@ mod tests {
             let editor = page.editor.as_ref().unwrap();
             assert_eq!(editor.thinking.as_deref(), Some("max"));
             assert!(!page.available_levels(editor).is_empty());
+        });
+
+        // A model with a narrower ladder offers only its own levels (plus
+        // Pi's `off`), never the tiers Pi would clamp away.
+        page.update(cx, |page, cx| {
+            page.set_model(Some("claude-bridge/claude-opus-4-6".into()), cx);
+            let editor = page.editor.as_ref().unwrap();
+            assert_eq!(
+                page.available_levels(editor),
+                ["off", "minimal", "low", "medium", "high", "max"]
+            );
         });
 
         // Switching to a model with no reasoning ladder clears the level and
