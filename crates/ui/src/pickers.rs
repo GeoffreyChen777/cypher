@@ -473,10 +473,11 @@ pub enum PickerKind {
 
 pub struct Pickers {
     state: Entity<AppState>,
-    /// Read-only mode for a temporary Side Chat's composer (round 21 refactor):
-    /// the chips DISPLAY the inherited values but never mutate — a synthetic
-    /// side-chat row is never a `setChatConfig` target.
-    locked: bool,
+    /// A temporary Side Chat's composer: the model/traits chips start on the
+    /// inherited values and picks stamp the fork's synthetic row LOCALLY —
+    /// never `setChatConfig` (the row is engine-owned until promotion, which
+    /// carries the picked config over). Checkout/ref/project chips stay inert.
+    side_chat: bool,
     /// The composer is narrow (a small tile): the Traits chip steps aside so
     /// the model chip keeps a readable label ([`Self::set_narrow`]).
     narrow: bool,
@@ -660,7 +661,7 @@ impl Pickers {
         let space_owner = state.read(cx).selected_space.clone();
         Self {
             state,
-            locked: false,
+            side_chat: false,
             narrow: false,
             space_owner,
             config: DraftConfig::default(),
@@ -717,11 +718,11 @@ impl Pickers {
         &self.config
     }
 
-    /// Lock the pickers read-only (temporary Side Chat composer): the chips
-    /// keep displaying the inherited values, but no popover opens and no
-    /// config is ever written to the synthetic row.
-    pub fn set_locked(&mut self) {
-        self.locked = true;
+    /// Bind the pickers to a temporary Side Chat's fork: only the model and
+    /// traits popovers open, and their picks stay on the fork's synthetic row
+    /// ([`Self::update_chat_config`]).
+    pub fn set_side_chat(&mut self) {
+        self.side_chat = true;
     }
 
     /// Harness is locked once the chat exists (feature-inventory §1.7).
@@ -941,9 +942,9 @@ impl Pickers {
     }
 
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
-        // Read-only (temporary Side Chat): the chips are inert — they show
-        // the inherited values, nothing opens.
-        if self.locked {
+        // Temporary Side Chat: only the model/traits chips are live — its
+        // checkout and target are the parent's, fixed.
+        if self.side_chat && !matches!(kind, PickerKind::HarnessModel | PickerKind::Traits) {
             return;
         }
         // A press that found this picker open closes it — the card's
@@ -1535,10 +1536,6 @@ impl Pickers {
     }
 
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
-        // Read-only (temporary Side Chat): inherited values are display-only.
-        if self.locked {
-            return;
-        }
         if let Some(harness) = self.effective_harness(cx) {
             self.selected_provider = Some(model_provider_id(harness, &model_id));
         }
@@ -1565,10 +1562,6 @@ impl Pickers {
     }
 
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
-        // Read-only (temporary Side Chat): inherited values are display-only.
-        if self.locked {
-            return;
-        }
         // Always a concrete selection (no toggle-back-to-default).
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| config.reasoning = Some(level));
@@ -1586,10 +1579,6 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
-        // Read-only (temporary Side Chat): inherited values are display-only.
-        if self.locked {
-            return;
-        }
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -1616,12 +1605,6 @@ impl Pickers {
     /// row always carries the CONCRETE resolved model/reasoning, with the
     /// reasoning re-clamped to the (possibly just-changed) model's ladder.
     fn update_chat_config(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ChatConfig)) {
-        // Read-only (temporary Side Chat): never `setChatConfig` on a
-        // synthetic side-chat row — the row vanishes on dispose and is
-        // engine-owned until promotion.
-        if self.locked {
-            return;
-        }
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return;
         };
@@ -1664,6 +1647,12 @@ impl Pickers {
         self.state.update(cx, |state, cx| {
             state.set_chat_config_optimistic(&chat_id, config.clone(), cx);
         });
+        // Temporary Side Chat: the stamped fork row IS the config — every
+        // send reads it, and promotion persists it. Never `setChatConfig` a
+        // row that doesn't exist in the workspace (it vanishes on dispose).
+        if self.side_chat {
+            return;
+        }
         let Some(engine) = self.engine(cx) else {
             return;
         };
@@ -2616,7 +2605,7 @@ impl Pickers {
     /// A remote host's reading can trail a running turn by up to the session
     /// row's 20s freshness write; it catches up when the turn settles.
     fn context_ring_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.locked {
+        if self.side_chat {
             return None;
         }
         let state = self.state.read(cx);
@@ -4487,6 +4476,53 @@ mod tests {
             assert!(pickers.read(cx).models.is_empty());
             assert!(matches!(pickers.read(cx).harnesses, Loadable::Idle));
             assert_ne!(pickers.read(cx).model_generation, generation);
+        });
+    }
+
+    #[gpui::test]
+    fn side_chat_picks_stamp_the_fork_row(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        // A side-chat fork: one synthetic selected row carrying the parent's
+        // config. Model/traits picks must land on it (every send reads it).
+        let (state, pickers) = cx.update(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local-mac".into());
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "side-1", "deviceId": "local-mac", "archived": false,
+                        "createdAt": chrono::Utc::now(),
+                        "config": {
+                            "harness": "pi", "model": "openai/gpt-5",
+                            "reasoning": "high", "sandbox": "workspace-write",
+                        },
+                    }))
+                    .unwrap(),
+                );
+                state.selected_chat = Some("side-1".into());
+                state
+            });
+            let pickers = cx.new(|cx| {
+                let mut pickers = Pickers::new(state.clone(), cx);
+                pickers.set_side_chat();
+                pickers
+            });
+            (state, pickers)
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_model("claude-bridge/claude-opus-5".into(), cx);
+            pickers.pick_reasoning(ReasoningLevel::Low, cx);
+        });
+        cx.update(|cx| {
+            let config = state
+                .read(cx)
+                .selected_chat_row()
+                .and_then(|c| c.config.clone())
+                .unwrap();
+            assert_eq!(config.harness, HarnessId::Pi);
+            assert_eq!(config.model.as_deref(), Some("claude-bridge/claude-opus-5"));
+            assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
         });
     }
 

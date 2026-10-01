@@ -1375,10 +1375,18 @@ impl Shell {
                 let fork_echoes = fork.read(cx).pending_echoes().to_vec();
                 let draft = composer.read(cx).current_draft(cx);
                 let staged = composer.read(cx).staged_attachments();
-                (parent_chat_id, fork_transcript, fork_echoes, draft, staged)
+                let config = panel.picked_config(cx);
+                (
+                    parent_chat_id,
+                    fork_transcript,
+                    fork_echoes,
+                    draft,
+                    staged,
+                    config,
+                )
             });
         self.close_side_chat_tab(sid, side_chat_id, cx);
-        let (parent_chat_id, fork_transcript, fork_echoes, draft, staged) =
+        let (parent_chat_id, fork_transcript, fork_echoes, draft, staged, picked_config) =
             handoff.unwrap_or_default();
         // Optimistic insert: the engine already created the row
         // (PromoteSideChat is synchronous engine-side), so the sidebar
@@ -1397,7 +1405,9 @@ impl Shell {
                     cwd: parent.cwd.clone(),
                     branch: parent.branch.clone(),
                     checkout_id: parent.checkout_id.clone(),
-                    config: parent.config.clone(),
+                    // The side chat's own model/traits picks (persisted by
+                    // the panel's promote), else the inherited config.
+                    config: picked_config.or_else(|| parent.config.clone()),
                     last_message_preview: None,
                     last_message_at: None,
                     created_at: chrono::Utc::now(),

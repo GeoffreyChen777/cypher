@@ -224,6 +224,15 @@ impl SideChatPanel {
         self.transcript.clone()
     }
 
+    /// The config the side chat runs with: the fork row starts on the
+    /// parent's, and the composer's model/traits picks stamp it locally.
+    pub fn picked_config(&self, cx: &App) -> Option<cypher_proto::ChatConfig> {
+        self.fork
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.config.clone())
+    }
+
     fn local_device(&self, cx: &App) -> Option<String> {
         self.state.read(cx).local_device_id.clone()
     }
@@ -259,6 +268,18 @@ impl SideChatPanel {
             serde_json::Value::String(self.side_chat_id.clone()),
         );
         self.with_target(&mut params, cx);
+        // The engine mints the promoted row with the PARENT's config; a model
+        // or traits pick made in the side chat must survive the promotion.
+        let picked_config = self.picked_config(cx).filter(|picked| {
+            let parent = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == self.parent_chat_id)
+                .and_then(|c| c.config.as_ref());
+            parent != Some(picked)
+        });
         let side_chat_id = self.side_chat_id.clone();
         let weak = cx.weak_entity();
         self.send_task = Some(cx.spawn(async move |this, cx| {
@@ -276,6 +297,16 @@ impl SideChatPanel {
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
                         .unwrap_or_else(|| side_chat_id.clone());
+                    if let Some(config) = picked_config {
+                        let params = serde_json::json!({
+                            "op": "setChatConfig",
+                            "chatId": chat_id,
+                            "config": config,
+                        });
+                        if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                            tracing::warn!(error = %err, "promoted side chat setChatConfig failed");
+                        }
+                    }
                     this.update(cx, |panel, cx| {
                         panel.promoting = false;
                         cx.emit(SideChatEvent::Promoted {

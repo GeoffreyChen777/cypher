@@ -5118,7 +5118,7 @@ impl Composer {
     /// transport branched to the engine's private side-chat methods. The fork
     /// state's synthetic selected row makes every inherited config read
     /// (`selected_chat_row`, `resolved`) resolve to the parent's working
-    /// context; the pickers display those values locked.
+    /// context; the model/traits pickers start there and stamp picks locally.
     pub fn for_side_chat(
         state: Entity<AppState>,
         side_chat: ComposerSideChat,
@@ -5142,11 +5142,11 @@ impl Composer {
         });
         let pickers = cx.new(|cx| {
             let mut pickers = Pickers::new(state.clone(), cx);
-            // A temporary side chat's model/traits controls display the
-            // inherited values but are read-only — the synthetic row is never
-            // a `setChatConfig` target.
+            // A temporary side chat's model/traits chips start on the
+            // inherited values; picks stay on the fork's synthetic row (never
+            // a `setChatConfig` target) and ride every side-chat send.
             if matches!(transport, ComposerTransport::SideChat(_)) {
-                pickers.set_locked();
+                pickers.set_side_chat();
             }
             pickers
         });
