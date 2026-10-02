@@ -158,8 +158,10 @@ bundle id, version/build against the tag, arm64, production APNs,
 device list, the privacy manifest, and a strict deep signature. The existence of
 an IPA is never taken as proof of correctness.
 
-Upload is where `ios.yml` stops. Export-compliance answers, tester groups,
-public links and App Store review submission remain separate, explicit actions.
+Upload is where `ios.yml` stops. Tester groups, public links and App Store
+review submission remain separate, explicit actions. Export compliance is
+declared in `Info.plist` (`ITSAppUsesNonExemptEncryption = NO`), so App Store
+Connect no longer asks per build.
 
 ## First deployment after the checksum migration
 

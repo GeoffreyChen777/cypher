@@ -24,6 +24,8 @@
 	<string>$(CYPHER_APNS_ENVIRONMENT)</string>
 	<key>CypherBuildEnvironment</key>
 	<string>$(CYPHER_BUILD_ENVIRONMENT)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

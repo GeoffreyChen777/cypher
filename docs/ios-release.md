@@ -23,6 +23,13 @@ distribution private key, and one did not.
    exports, verifies the package (`scripts/ci/ios-verify.py`) and uploads to
    TestFlight.
 
+Export compliance is declared in `Cypher/Info.plist` as
+`ITSAppUsesNonExemptEncryption = NO`: the app uses only the encryption iOS
+provides (TLS through `URLSession`, plus CryptoKit SHA-256 and `SecRandom` for
+the sign-in PKCE verifier), so App Store Connect doesn't ask per build. Adding
+encryption of the app's own (for example end-to-end encrypted chats) means
+revisiting that answer.
+
 iOS has its own version series, independent of the desktop app and the Runtime.
 The required secrets are listed in [ci-cd.md](ci-cd.md#ios--testflight-secrets);
 the only ones not already configured are the Apple **Distribution** identity and
