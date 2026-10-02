@@ -28,93 +28,12 @@ impl RemoveMcpServer {
     }
 }
 
-fn checked_path(path: &Path, directory: bool) -> Result<bool, String> {
-    match std::fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Ok(meta)
-            if !meta.file_type().is_symlink()
-                && if directory {
-                    meta.is_dir()
-                } else {
-                    meta.is_file()
-                } =>
-        {
-            Ok(true)
-        }
-        _ => Err("Cypher OAuth storage is unavailable or contains a symlink.".into()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn delete_private_keychain_entry(path: &Path, account: &str) -> Result<(), String> {
-    use std::{
-        process::{Command, Stdio},
-        time::{Duration, Instant},
-    };
-    // Never search/delete from the login keychain or create a keychain here.
-    // No token or keychain password is placed in argv or captured output.
-    let mut child = Command::new("/usr/bin/security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            "pi-mcp-adapter.oauth",
-            "-a",
-            account,
-        ])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "Could not open Cypher's OAuth credential store.")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() || status.code() == Some(44) => return Ok(()),
-            Ok(Some(_)) => {
-                return Err(
-                    "Could not remove Cypher's OAuth credential. Unlock its keychain and retry."
-                        .into(),
-                );
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Removing Cypher's OAuth credential timed out or failed. Retry after unlocking its keychain.".into());
-            }
-        }
-    }
-}
-
-fn remove_private_oauth(agent_dir: &Path, name: &str) -> Result<(), String> {
-    let account = oauth_account(name);
-    let oauth_root = agent_dir.join("mcp-oauth");
-    let has_root = checked_path(&oauth_root, true)?;
-    let account_path = oauth_root.join(&account);
-    let has_account = has_root && checked_path(&account_path, true)?;
-    let keychain = app_keychain_path(agent_dir);
-    let has_keychain = checked_path(&keychain, false)?;
-    #[cfg(target_os = "macos")]
-    if has_keychain {
-        delete_private_keychain_entry(&keychain, &account)?;
-    }
-    #[cfg(not(target_os = "macos"))]
-    if has_keychain {
-        return Err(
-            "A macOS Cypher OAuth keychain is present and cannot be cleared on this platform."
-                .into(),
-        );
-    }
-    if has_account {
-        std::fs::remove_dir_all(account_path)
-            .map_err(|_| "Could not remove Cypher's OAuth token files.")?;
-    }
-    Ok(())
-}
-
-pub fn remove_server(agent_dir: &Path, params: RemoveMcpServer) -> Result<McpSnapshot, String> {
+pub fn remove_server(
+    paths: &PiRuntimePaths,
+    params: RemoveMcpServer,
+) -> Result<McpSnapshot, String> {
     params.validate()?;
+    let agent_dir = &paths.agent_dir;
     let _guard = CONFIG_WRITE
         .lock()
         .map_err(|_| "MCP configuration is busy.")?;
@@ -127,15 +46,15 @@ pub fn remove_server(agent_dir: &Path, params: RemoveMcpServer) -> Result<McpSna
         return Err("MCP server is no longer configured. Refresh the list.".into());
     }
     // Keep the configuration on cleanup failure, so the user can retry. Never
-    // pretend the cross-file/keychain operation is an atomic transaction.
-    remove_private_oauth(agent_dir, &params.name).map_err(|error| format!(
+    // pretend the cross-file operation is an atomic transaction.
+    sign_out(agent_dir, &params.name).map_err(|error| format!(
         "{error} Server configuration was kept; some login data may already have been removed. Retry deletion."
     ))?;
     servers.remove(&params.name);
     write_mcp_root(agent_dir, &root).map_err(|_| {
         "OAuth login data was removed, but the MCP configuration could not be saved. Retry deletion.".to_string()
     })?;
-    Ok(list(agent_dir))
+    Ok(list(paths))
 }
 
 fn string_map(value: &Value) -> bool {
@@ -148,7 +67,29 @@ fn string_map(value: &Value) -> bool {
     })
 }
 
+/// Pi's tool namespace: server names that differ only in `-` and `_` clash.
+fn namespace(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+fn exposure(value: &Value) -> bool {
+    matches!(
+        value.as_str(),
+        Some("codemode" | "codemode-deferred" | "deferred" | "direct" | "hidden")
+    )
+}
+
+fn single_line(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty() && !s.contains(['\0', '\r', '\n']))
+}
+
 impl AddMcpServers {
+    /// Pi's `mcpServers` shape. The adapter-era fields older viewers still
+    /// send (`auth: "oauth" | "bearer" | false`, `bearerToken`,
+    /// `bearerTokenEnv`, `disabled`, `requestTimeoutMs`, `oauth.redirectUri`)
+    /// are accepted and rewritten on save.
     pub fn validate(&self) -> Result<(), String> {
         if self.servers.is_empty()
             || self.servers.len() > 32
@@ -156,18 +97,21 @@ impl AddMcpServers {
         {
             return Err("Add 1–32 MCP servers, with at most 64 KiB of configuration.".into());
         }
+        let mut namespaces = std::collections::BTreeSet::new();
         for (name, value) in &self.servers {
             if name.is_empty()
                 || name.len() > 64
                 || !name
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
                 || matches!(name.as_str(), "__proto__" | "constructor" | "prototype")
             {
                 return Err(
-                    "Server names must use 1–64 letters, digits, dots, underscores or hyphens."
-                        .into(),
+                    "Server names must use 1–64 letters, digits, underscores or hyphens.".into(),
                 );
+            }
+            if !namespaces.insert(namespace(name)) {
+                return Err("Server names that differ only in - and _ count as the same server. Choose distinct names.".into());
             }
             let entry = value
                 .as_object()
@@ -179,18 +123,21 @@ impl AddMcpServers {
                 "cwd",
                 "url",
                 "headers",
+                "oauth",
                 "auth",
+                "enabled",
+                "timeout",
+                "exposure",
+                "toolExposure",
+                "description",
+                "type",
                 "bearerToken",
                 "bearerTokenEnv",
-                "oauth",
                 "disabled",
-                "lifecycle",
-                "protocolVersion",
                 "requestTimeoutMs",
-                "type",
             ];
             if entry.keys().any(|key| !known.contains(&key.as_str())) {
-                return Err("Unsupported MCP option. Supported: command, args, env, cwd, url, headers, auth, bearerToken, bearerTokenEnv, oauth, disabled, lifecycle, protocolVersion, requestTimeoutMs, type.".into());
+                return Err("Unsupported MCP option. Supported: command, args, env, cwd, url, headers, oauth, auth, enabled, timeout, exposure, toolExposure, description, type.".into());
             }
             let http = entry.contains_key("url");
             if http == entry.contains_key("command") {
@@ -200,9 +147,7 @@ impl AddMcpServers {
             }
             for key in ["command", "cwd", "url", "bearerToken", "bearerTokenEnv"] {
                 if let Some(value) = entry.get(key)
-                    && !value
-                        .as_str()
-                        .is_some_and(|s| !s.trim().is_empty() && !s.contains(['\0', '\r', '\n']))
+                    && !single_line(value)
                 {
                     return Err("MCP command, URL, path and token fields must be non-empty single-line strings.".into());
                 }
@@ -267,69 +212,72 @@ impl AddMcpServers {
                     "HTTP authentication fields cannot be used with a stdio command.".into(),
                 );
             }
-            for (key, allowed) in [
-                ("auth", &["bearer", "oauth"][..]),
-                (
-                    "lifecycle",
-                    &["lazy", "eager", "keep-alive", "lazy-keep-alive"][..],
-                ),
-                ("protocolVersion", &["legacy", "auto", "2026-07-28"][..]),
-                (
-                    "type",
-                    if http {
-                        &["http", "sse", "streamable-http"][..]
-                    } else {
-                        &["stdio"][..]
-                    },
-                ),
-            ] {
-                if let Some(value) = entry.get(key)
-                    && !(key == "auth" && value == &Value::Bool(false))
-                    && !value.as_str().is_some_and(|s| allowed.contains(&s))
-                {
-                    return Err(
-                        "Invalid MCP authentication, lifecycle, protocol or transport option."
-                            .into(),
-                    );
-                }
+            let transports: &[&str] = if http {
+                &["http", "streamable-http"]
+            } else {
+                &["stdio"]
+            };
+            if entry
+                .get("type")
+                .is_some_and(|t| !t.as_str().is_some_and(|t| transports.contains(&t)))
+            {
+                return Err("MCP type must be stdio, http or streamable-http. Pi does not support the legacy SSE transport; most servers also serve streamable HTTP, often at /mcp.".into());
             }
-            if entry.get("disabled").is_some_and(|v| !v.is_boolean())
+            if entry.get("auth").is_some_and(|auth| match auth {
+                Value::Object(auth) => {
+                    auth.len() != 1 || !auth.get("provider").is_some_and(single_line)
+                }
+                Value::Bool(false) => false,
+                other => !matches!(other.as_str(), Some("oauth" | "bearer")),
+            }) {
+                return Err("auth must be {\"provider\": \"<Pi provider>\"}; HTTP servers without an Authorization header sign in with OAuth when they require it.".into());
+            }
+            if ["enabled", "disabled"]
+                .iter()
+                .any(|key| entry.get(*key).is_some_and(|v| !v.is_boolean()))
+                || entry
+                    .get("timeout")
+                    .is_some_and(|v| !v.as_f64().is_some_and(|t| t > 0.0))
                 || entry.get("requestTimeoutMs").is_some_and(|v| !v.is_u64())
             {
                 return Err(
-                    "disabled must be boolean and requestTimeoutMs a non-negative integer.".into(),
+                    "enabled must be boolean and timeout a positive number of seconds.".into(),
                 );
+            }
+            if entry.get("exposure").is_some_and(|v| !exposure(v))
+                || entry.get("toolExposure").is_some_and(|v| {
+                    !v.as_object()
+                        .is_some_and(|tools| tools.values().all(exposure))
+                })
+            {
+                return Err("exposure must be codemode, deferred, direct or hidden, and toolExposure map tool names to one of those.".into());
+            }
+            if entry.get("description").is_some_and(|v| !v.is_string()) {
+                return Err("description must be a string.".into());
             }
             if let Some(oauth) = entry.get("oauth") {
                 let oauth = oauth
                     .as_object()
                     .ok_or("OAuth options must be an object.")?;
-                if entry.get("auth").and_then(Value::as_str) != Some("oauth")
-                    || oauth.iter().any(|(key, value)| {
-                        ![
-                            "clientId",
-                            "clientSecret",
-                            "scope",
-                            "redirectUri",
-                            "grantType",
-                        ]
-                        .contains(&key.as_str())
-                            || !value
-                                .as_str()
-                                .is_some_and(|s| !s.contains(['\0', '\r', '\n']))
-                    })
-                {
-                    return Err("OAuth supports clientId, clientSecret, scope, redirectUri and grantType, with auth set to oauth.".into());
-                }
-                if oauth.get("grantType").is_some_and(|v| {
-                    !matches!(
-                        v.as_str(),
-                        Some("authorization_code" | "client_credentials")
-                    )
+                if oauth.iter().any(|(key, value)| match key.as_str() {
+                    "clientId" | "clientSecret" | "scope" | "clientName" => !single_line(value),
+                    "callbackPort" => !value.as_u64().is_some_and(|p| (1..=65_535).contains(&p)),
+                    "callbackUrl" | "redirectUri" => {
+                        !value.as_str().is_some_and(super::legacy::loopback_redirect)
+                    }
+                    "authServerMetadataUrl" => !value.as_str().is_some_and(|url| {
+                        reqwest::Url::parse(url).is_ok_and(|url| {
+                            url.scheme() == "https"
+                                || (url.scheme() == "http"
+                                    && matches!(
+                                        url.host_str(),
+                                        Some("localhost" | "127.0.0.1" | "[::1]")
+                                    ))
+                        })
+                    }),
+                    _ => true,
                 }) {
-                    return Err(
-                        "OAuth grantType must be authorization_code or client_credentials.".into(),
-                    );
+                    return Err("OAuth supports clientId, clientSecret, scope, clientName, callbackPort, a loopback http callbackUrl and an HTTPS authServerMetadataUrl.".into());
                 }
             }
             let bearer = entry.get("auth").and_then(Value::as_str) == Some("bearer");
@@ -366,8 +314,9 @@ pub(super) fn read_for_update(agent_dir: &Path) -> Result<Value, String> {
     Ok(root)
 }
 
-pub fn add_servers(agent_dir: &Path, params: AddMcpServers) -> Result<McpSnapshot, String> {
+pub fn add_servers(paths: &PiRuntimePaths, params: AddMcpServers) -> Result<McpSnapshot, String> {
     params.validate()?;
+    let agent_dir = &paths.agent_dir;
     let _guard = CONFIG_WRITE
         .lock()
         .map_err(|_| "MCP configuration is busy.")?;
@@ -379,19 +328,22 @@ pub fn add_servers(agent_dir: &Path, params: AddMcpServers) -> Result<McpSnapsho
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .unwrap();
-    if params.servers.keys().any(|name| servers.contains_key(name)) {
+    if params.servers.keys().any(|name| {
+        servers
+            .keys()
+            .any(|existing| namespace(existing) == namespace(name))
+    }) {
         return Err("An MCP server with this name already exists. Choose a different name; no servers were added.".into());
     }
     for (name, mut entry) in params.servers {
-        // The adapter chooses its transport from command/url, not type.
-        entry.as_object_mut().unwrap().remove("type");
+        super::legacy::to_builtin(entry.as_object_mut().unwrap());
         servers.insert(name, entry);
     }
     if serde_json::to_vec_pretty(&root).map_or(true, |v| v.len() as u64 > MAX_FILE) {
         return Err("The resulting MCP configuration exceeds 1 MiB.".into());
     }
     write_mcp_root(agent_dir, &root)?;
-    Ok(list(agent_dir))
+    Ok(list(paths))
 }
 
 #[cfg(test)]
@@ -401,56 +353,74 @@ mod tests {
         serde_json::from_value(serde_json::json!({"servers": value})).unwrap()
     }
 
-    #[test]
-    fn deletion_removes_only_the_named_server_and_its_private_oauth_files() {
+    fn runtime() -> (tempfile::TempDir, PiRuntimePaths) {
         let dir = tempfile::tempdir().unwrap();
+        let paths = PiRuntimePaths::for_data_dir(dir.path());
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        (dir, paths)
+    }
+
+    #[test]
+    fn deletion_removes_only_the_named_server_and_its_credentials() {
+        let (_dir, paths) = runtime();
+        let agent = &paths.agent_dir;
         add_servers(
-            dir.path(),
+            &paths,
             request(serde_json::json!({
-                "remove-me":{"command":"node","env":{"KEY":"fixture-secret"}},
-                "keep-me":{"command":"other"}
+                "remove-me":{"url":"https://example.com/mcp"},
+                "keep-me":{"url":"https://example.com/mcp"},
+                "local":{"command":"node","env":{"KEY":"fixture-secret"}}
             })),
         )
         .unwrap();
-        let oauth = dir.path().join("mcp-oauth");
-        for name in ["remove-me", "keep-me"] {
-            let folder = oauth.join(oauth_account(name));
-            std::fs::create_dir_all(&folder).unwrap();
-            std::fs::write(folder.join("tokens.json"), "fixture-oauth-secret").unwrap();
-        }
-        std::fs::write(dir.path().join("unrelated.json"), "keep").unwrap();
+        let signed_in = serde_json::json!({"tokens":{"access_token":"fixture-oauth-secret"}});
+        std::fs::write(
+            credentials_path(agent),
+            serde_json::to_vec(&serde_json::json!({
+                "mcp__remove_me|https://example.com/mcp": signed_in,
+                "mcp__keep_me|https://example.com/mcp": signed_in,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(agent.join("unrelated.json"), "keep").unwrap();
         let result = remove_server(
-            dir.path(),
+            &paths,
             RemoveMcpServer {
                 name: "remove-me".into(),
             },
         )
         .unwrap();
-        assert_eq!(result.servers.len(), 1);
-        assert_eq!(result.servers[0].name, "keep-me");
+        assert_eq!(
+            result
+                .servers
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["keep-me", "local"]
+        );
         assert!(
             !serde_json::to_string(&result)
                 .unwrap()
                 .contains("fixture-secret")
         );
-        assert!(!oauth.join(oauth_account("remove-me")).exists());
-        assert!(
-            oauth
-                .join(oauth_account("keep-me"))
-                .join("tokens.json")
-                .exists()
-        );
+        let credentials = read_credentials(agent);
+        assert_eq!(credentials.len(), 1);
+        assert!(credentials.contains_key("mcp__keep_me|https://example.com/mcp"));
         assert_eq!(
-            std::fs::read(dir.path().join("unrelated.json")).unwrap(),
+            std::fs::read(agent.join("unrelated.json")).unwrap(),
             b"keep"
         );
-        assert!(
-            !app_keychain_path(dir.path()).exists(),
-            "deletion must not create a keychain"
-        );
+        remove_server(
+            &paths,
+            RemoveMcpServer {
+                name: "local".into(),
+            },
+        )
+        .unwrap();
         assert!(
             remove_server(
-                dir.path(),
+                &paths,
                 RemoveMcpServer {
                     name: "missing".into()
                 }
@@ -462,20 +432,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn deletion_refuses_credential_symlinks_and_keeps_configuration_on_failure() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_dir, paths) = runtime();
         let outside = tempfile::tempdir().unwrap();
         add_servers(
-            dir.path(),
-            request(serde_json::json!({"test":{"command":"node"}})),
+            &paths,
+            request(serde_json::json!({"test":{"url":"https://example.com/mcp"}})),
         )
         .unwrap();
-        let before = std::fs::read(mcp_path(dir.path())).unwrap();
-        let external = outside.path().join(oauth_account("test"));
-        std::fs::create_dir_all(&external).unwrap();
-        std::fs::write(external.join("tokens.json"), "do-not-delete").unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join("mcp-oauth")).unwrap();
+        let before = std::fs::read(mcp_path(&paths.agent_dir)).unwrap();
+        let external = outside.path().join("mcp-auth.json");
+        std::fs::write(&external, r#"{"mcp__test|https://example.com/mcp":{}}"#).unwrap();
+        std::os::unix::fs::symlink(&external, credentials_path(&paths.agent_dir)).unwrap();
         let error = remove_server(
-            dir.path(),
+            &paths,
             RemoveMcpServer {
                 name: "test".into(),
             },
@@ -483,24 +452,29 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.contains("configuration was kept"));
-        assert_eq!(std::fs::read(mcp_path(dir.path())).unwrap(), before);
-        assert_eq!(
-            std::fs::read(external.join("tokens.json")).unwrap(),
-            b"do-not-delete"
+        assert_eq!(std::fs::read(mcp_path(&paths.agent_dir)).unwrap(), before);
+        assert!(
+            std::fs::read_to_string(&external)
+                .unwrap()
+                .contains("mcp__test")
         );
     }
 
     #[test]
     fn adds_atomically_preserves_existing_configuration_and_redacts_reply() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_dir, paths) = runtime();
         let original = serde_json::json!({
-            "settings": {"toolPrefix": "short"},
-            "mcpServers": {"existing": {"command": "existing", "disabled": true}},
+            "autoEnableCodemode": true,
+            "mcpServers": {"existing": {"command": "existing", "enabled": false}},
         });
-        std::fs::write(mcp_path(dir.path()), serde_json::to_vec(&original).unwrap()).unwrap();
-        let snapshot = add_servers(dir.path(), request(serde_json::json!({
-            "web": {"url":"https://example.com/mcp", "auth":"bearer", "bearerToken":"fixture-secret"},
-            "local": {"command":"node", "args":["--token","fixture-secret"],
+        std::fs::write(
+            mcp_path(&paths.agent_dir),
+            serde_json::to_vec(&original).unwrap(),
+        )
+        .unwrap();
+        let snapshot = add_servers(&paths, request(serde_json::json!({
+            "web": {"url":"https://example.com/mcp", "headers": {"Authorization": "Bearer fixture-secret"}},
+            "local-tools": {"command":"node", "args":["--token","fixture-secret"],
                 "env":{"SECRET":"fixture-secret"}, "type":"stdio"},
         }))).unwrap();
         assert_eq!(snapshot.servers.len(), 3);
@@ -509,32 +483,37 @@ mod tests {
                 .unwrap()
                 .contains("fixture-secret")
         );
-        let saved = read_for_update(dir.path()).unwrap();
-        assert_eq!(saved["settings"], original["settings"]);
+        let saved = read_for_update(&paths.agent_dir).unwrap();
+        assert_eq!(saved["autoEnableCodemode"], true);
         assert_eq!(
             saved["mcpServers"]["existing"],
             original["mcpServers"]["existing"]
         );
         assert_eq!(
-            saved["mcpServers"]["local"]["env"]["SECRET"],
+            saved["mcpServers"]["local-tools"]["env"]["SECRET"],
             "fixture-secret"
         );
-        let before = std::fs::read(mcp_path(dir.path())).unwrap();
+        let before = std::fs::read(mcp_path(&paths.agent_dir)).unwrap();
+        for duplicate in [
+            serde_json::json!({"existing":{"command":"replacement"}, "another":{"command":"new"}}),
+            // Pi treats `-` and `_` alike in server names.
+            serde_json::json!({"local_tools":{"command":"node"}}),
+        ] {
+            assert!(add_servers(&paths, request(duplicate)).is_err());
+        }
         assert!(
             add_servers(
-                dir.path(),
-                request(serde_json::json!({
-                    "existing":{"command":"replacement"}, "another":{"command":"new"}
-                }))
+                &paths,
+                request(serde_json::json!({"a-b":{"command":"x"}, "a_b":{"command":"y"}}))
             )
             .is_err()
         );
-        assert_eq!(std::fs::read(mcp_path(dir.path())).unwrap(), before);
+        assert_eq!(std::fs::read(mcp_path(&paths.agent_dir)).unwrap(), before);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(mcp_path(dir.path()))
+                std::fs::metadata(mcp_path(&paths.agent_dir))
                     .unwrap()
                     .permissions()
                     .mode()
@@ -545,22 +524,45 @@ mod tests {
     }
 
     #[test]
+    fn adapter_fields_from_older_viewers_are_saved_in_pi_shape() {
+        let (_dir, paths) = runtime();
+        add_servers(
+            &paths,
+            request(serde_json::json!({
+                "web": {"url":"https://example.com/mcp", "auth":"bearer", "bearerToken":"fixture-secret"},
+                "docs": {"url":"https://example.com/docs", "auth":"oauth"},
+                "open": {"url":"https://example.com/open", "auth":false},
+            })),
+        )
+        .unwrap();
+        let saved = read_for_update(&paths.agent_dir).unwrap();
+        assert_eq!(
+            saved["mcpServers"],
+            serde_json::json!({
+                "web": {"url":"https://example.com/mcp", "headers": {"Authorization": "Bearer fixture-secret"}},
+                "docs": {"url":"https://example.com/docs"},
+                "open": {"url":"https://example.com/open"},
+            })
+        );
+    }
+
+    #[test]
     fn invalid_existing_json_is_not_replaced() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_dir, paths) = runtime();
         for bytes in [
             b"invalid fixture-secret".as_slice(),
             b"[]",
             b"{\"mcpServers\":[]}",
         ] {
-            std::fs::write(mcp_path(dir.path()), bytes).unwrap();
+            std::fs::write(mcp_path(&paths.agent_dir), bytes).unwrap();
             let error = add_servers(
-                dir.path(),
+                &paths,
                 request(serde_json::json!({"test":{"command":"node"}})),
             )
             .err()
             .unwrap();
             assert!(!error.contains("fixture-secret"));
-            assert_eq!(std::fs::read(mcp_path(dir.path())).unwrap(), bytes);
+            assert_eq!(std::fs::read(mcp_path(&paths.agent_dir)).unwrap(), bytes);
         }
     }
 
@@ -575,7 +577,14 @@ mod tests {
             serde_json::json!({"command":"node", "env":{"X":123}}),
             serde_json::json!({"url":"https://example.com", "headers":{"X":"fixture-secret\nbad"}}),
             serde_json::json!({"url":"https://example.com", "auth":"bearer"}),
-            serde_json::json!({"url":"https://example.com", "oauth":{"clientSecret":"fixture-secret"}}),
+            serde_json::json!({"url":"https://example.com", "auth":"fixture-secret"}),
+            serde_json::json!({"url":"https://example.com", "auth":{"provider":"x", "token":"fixture-secret"}}),
+            serde_json::json!({"url":"https://example.com", "oauth":{"clientSecret":"fixture-secret\n"}}),
+            serde_json::json!({"url":"https://example.com", "oauth":{"callbackUrl":"https://fixture-secret.example/cb"}}),
+            serde_json::json!({"url":"https://example.com", "oauth":{"grantType":"client_credentials"}}),
+            serde_json::json!({"url":"https://example.com", "type":"sse"}),
+            serde_json::json!({"url":"https://example.com", "exposure":"fixture-secret"}),
+            serde_json::json!({"url":"https://example.com", "timeout":0}),
             serde_json::json!({"url":"https://example.com", "unsupported":"fixture-secret"}),
         ] {
             let error = request(serde_json::json!({"test":entry}))
@@ -583,7 +592,7 @@ mod tests {
                 .unwrap_err();
             assert!(!error.contains("fixture-secret"));
         }
-        for name in ["", "../path", "__proto__", "constructor"] {
+        for name in ["", "../path", "dotted.name", "__proto__", "constructor"] {
             assert!(
                 request(serde_json::json!({name: {"command":"node"}}))
                     .validate()
@@ -599,11 +608,17 @@ mod tests {
     }
 
     #[test]
-    fn validates_http_stdio_oauth_and_loopback() {
+    fn validates_pi_options_and_loopback() {
         for entry in [
-            serde_json::json!({"url":"http://127.0.0.1:3456/mcp", "auth":false}),
-            serde_json::json!({"url":"https://example.com/mcp", "auth":"oauth", "oauth":{"clientId":"public-client"}}),
-            serde_json::json!({"url":"https://example.com/mcp", "headers":{"Authorization":"Bearer fixture-secret"}}),
+            serde_json::json!({"url":"http://127.0.0.1:3456/mcp"}),
+            serde_json::json!({"url":"https://example.com/mcp", "oauth":{"clientId":"public-client",
+                "callbackUrl":"http://localhost:8976/callback", "scope":"read offline_access"}}),
+            serde_json::json!({"url":"https://example.com/mcp", "oauth":{"callbackPort":8765,
+                "clientName":"Claude Code", "authServerMetadataUrl":"https://auth.example/.well-known/openid-configuration"}}),
+            serde_json::json!({"url":"https://example.com/mcp", "headers":{"Authorization":"Bearer ${TOKEN}"},
+                "exposure":"deferred", "toolExposure":{"search":"direct","delete_*":"hidden"},
+                "description":"Docs", "timeout":30, "enabled":false, "type":"http"}),
+            serde_json::json!({"url":"https://example.com/mcp", "auth":{"provider":"github"}}),
             serde_json::json!({"command":"/some path/server","args":["--option","value"],"env":{"KEY":"value"},"cwd":"/work"}),
         ] {
             request(serde_json::json!({"test":entry}))
@@ -614,16 +629,16 @@ mod tests {
 
     #[test]
     fn concurrent_additions_do_not_lose_other_servers() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_dir, paths) = runtime();
         std::thread::scope(|scope| {
             for name in ["first", "second"] {
-                let path = dir.path();
+                let paths = &paths;
                 scope.spawn(move || {
-                    add_servers(path, request(serde_json::json!({name:{"command":"node"}})))
+                    add_servers(paths, request(serde_json::json!({name:{"command":"node"}})))
                         .unwrap()
                 });
             }
         });
-        assert_eq!(list(dir.path()).servers.len(), 2);
+        assert_eq!(list(&paths).servers.len(), 2);
     }
 }

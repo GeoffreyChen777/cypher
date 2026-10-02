@@ -103,11 +103,15 @@ redaction checks. No real provider credentials are needed.
 
 ## Adding MCP servers
 
-Open **Settings → MCP**, select the intended device, and click **Add MCP**.
+MCP is Pi's built-in support; the bundle no longer ships pi-mcp-adapter
+(dropped in 1.0.0.2, which therefore requires Cypher 0.3.38). Open
+**Settings → MCP**, select the intended device, and click **Add MCP**.
 Use the HTTP or stdio form, or import JSON. Entries are added to that device's
 `pi-runtime/agent/mcp.json`; existing servers and unrelated root settings are
-preserved. The importer rejects duplicate names and malformed existing files
-rather than overwriting them. See [MCP settings](../../docs/mcp-settings.md).
+preserved. OAuth sign-in runs Pi's `/mcp login` and stores tokens in
+`agent/mcp-auth.json`. The importer rejects duplicate names and malformed
+existing files rather than overwriting them. See
+[MCP settings](../../docs/mcp-settings.md).
 
 ## Updating the bundle
 

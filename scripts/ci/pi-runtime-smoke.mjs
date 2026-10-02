@@ -140,7 +140,8 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               assert.equal(opus.contextWindow, 1_000_000,
                 "claude-bridge must serve claude-opus-5-5 at 1M");
               const names = new Set(responses.get("commands").commands.map(command => command.name));
-              for (const name of ["provider", "login", "logout", "newapi-provider-add"]) {
+              // `mcp` is Pi's built-in MCP, which Settings → MCP drives.
+              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);
               }
               finish();

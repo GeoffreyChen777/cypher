@@ -11,9 +11,10 @@ enum Mode {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Auth {
-    None,
-    Bearer,
+    /// Pi signs in with OAuth when the server asks for it, else connects
+    /// without credentials.
     Oauth,
+    Bearer,
 }
 
 pub(super) struct AddForm {
@@ -164,27 +165,38 @@ impl McpPage {
                 form.endpoint.read(cx).text().trim().into(),
             );
             if form.mode == Mode::Http {
-                match form.auth {
-                    Auth::None => {
-                        entry.insert("auth".into(), false.into());
+                let text = form.headers.read(cx).text();
+                let mut headers = if text.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    parse_json(text)?
+                };
+                if form.auth == Auth::Bearer {
+                    let token = form.token.read(cx).text().trim();
+                    if token.is_empty() {
+                        return Err(
+                            "Enter a bearer token or choose another authentication method.".into(),
+                        );
                     }
-                    Auth::Oauth => {
-                        entry.insert("auth".into(), "oauth".into());
+                    let headers = headers
+                        .as_object_mut()
+                        .ok_or("Headers must be a JSON object of strings.")?;
+                    if headers
+                        .keys()
+                        .any(|name| name.eq_ignore_ascii_case("authorization"))
+                    {
+                        return Err(
+                            "Headers already set Authorization. Remove it or choose OAuth / none."
+                                .into(),
+                        );
                     }
-                    Auth::Bearer => {
-                        if form.token.read(cx).text().trim().is_empty() {
-                            return Err(
-                                "Enter a bearer token or choose another authentication method."
-                                    .into(),
-                            );
-                        }
-                        entry.insert("auth".into(), "bearer".into());
-                        entry.insert("bearerToken".into(), form.token.read(cx).text().into());
-                    }
+                    headers.insert("Authorization".into(), format!("Bearer {token}").into());
                 }
-                let headers = form.headers.read(cx).text();
-                if !headers.trim().is_empty() {
-                    entry.insert("headers".into(), parse_json(headers)?);
+                if headers
+                    .as_object()
+                    .is_none_or(|headers| !headers.is_empty())
+                {
+                    entry.insert("headers".into(), headers);
                 }
             } else {
                 for (key, input) in [("args", &form.args), ("env", &form.env)] {
@@ -318,9 +330,8 @@ impl McpPage {
             if mode == Mode::Http {
                 let mut choices = div().flex().gap(px(8.0));
                 for (ix, candidate, text) in [
-                    (0, Auth::Oauth, "OAuth"),
+                    (0, Auth::Oauth, "OAuth / none"),
                     (1, Auth::Bearer, "Bearer token"),
-                    (2, Auth::None, "No auth"),
                 ] {
                     choices = choices.child(
                         widgets::ghost_action(theme)
@@ -342,7 +353,7 @@ impl McpPage {
                     fields = fields.child(input_row("Bearer token (masked)", &form.token));
                 }
                 fields = fields.child(input_row("Headers JSON (optional, masked)", &form.headers))
-                    .child(widgets::page_subtitle(theme, "HTTPS required except for loopback. After saving an OAuth server, use Sign in in the server list."));
+                    .child(widgets::page_subtitle(theme, "HTTPS required except for loopback. Pi signs in with OAuth only if the server requires it: after saving, use Sign in in the server list."));
             } else {
                 fields = fields
                     .child(input_row(
@@ -425,7 +436,7 @@ mod tests {
     }
 
     struct McpFixture {
-        agent: std::path::PathBuf,
+        paths: cypher_engine::pi_runtime::PiRuntimePaths,
         additions: AtomicUsize,
         removals: AtomicUsize,
         release: tokio::sync::Notify,
@@ -443,7 +454,7 @@ mod tests {
                 }
                 methods::ENGINE_READY => serde_json::json!({}),
                 methods::LIST_MCP_SERVERS => {
-                    serde_json::to_value(cypher_engine::mcp::list(&self.agent)).unwrap()
+                    serde_json::to_value(cypher_engine::mcp::list(&self.paths)).unwrap()
                 }
                 methods::ADD_MCP_SERVERS => {
                     assert_eq!(params["targetDeviceId"], "mcp-host");
@@ -455,7 +466,7 @@ mod tests {
                     self.additions.fetch_add(1, Ordering::SeqCst);
                     self.release.notified().await;
                     serde_json::to_value(
-                        cypher_engine::mcp::add_servers(&self.agent, request)
+                        cypher_engine::mcp::add_servers(&self.paths, request)
                             .map_err(cypher_rpc::RpcError::Failed)?,
                     )
                     .unwrap()
@@ -469,7 +480,7 @@ mod tests {
                     self.removals.fetch_add(1, Ordering::SeqCst);
                     self.release.notified().await;
                     serde_json::to_value(
-                        cypher_engine::mcp::remove_server(&self.agent, request)
+                        cypher_engine::mcp::remove_server(&self.paths, request)
                             .map_err(cypher_rpc::RpcError::Failed)?,
                     )
                     .unwrap()
@@ -486,7 +497,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let fixture = Arc::new(McpFixture {
-            agent: data.path().join("agent"),
+            paths: cypher_engine::pi_runtime::PiRuntimePaths::for_data_dir(
+                &data.path().join("host"),
+            ),
             additions: AtomicUsize::new(0),
             removals: AtomicUsize::new(0),
             release: tokio::sync::Notify::new(),
@@ -581,7 +594,7 @@ mod tests {
         pump_until(cx, || fixture.additions.load(Ordering::SeqCst) == 2);
         fixture.release.notify_one();
         pump_until(cx, || cx.update(|cx| page.read(cx).form.is_none()));
-        assert_eq!(cypher_engine::mcp::list(&fixture.agent).servers.len(), 3);
+        assert_eq!(cypher_engine::mcp::list(&fixture.paths).servers.len(), 3);
         page.update(cx, |page, cx| page.request_delete("web".into(), cx));
         assert_eq!(
             fixture.removals.load(Ordering::SeqCst),
@@ -607,7 +620,7 @@ mod tests {
         assert!(target.update(cx, |t, cx| t.select(None, cx)).is_err());
         fixture.release.notify_one();
         pump_until(cx, || cx.update(|cx| page.read(cx).delete.is_none()));
-        assert_eq!(cypher_engine::mcp::list(&fixture.agent).servers.len(), 2);
+        assert_eq!(cypher_engine::mcp::list(&fixture.paths).servers.len(), 2);
         page.update(cx, |page, cx| page.request_delete("docs".into(), cx));
         target.update(cx, |t, cx| t.select(None, cx).unwrap());
         cx.run_until_parked();

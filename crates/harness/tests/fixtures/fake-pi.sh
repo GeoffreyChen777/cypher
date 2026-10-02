@@ -235,10 +235,13 @@ while read -r line; do
     case "$line" in
 
     *scenario:mcp-login*)
-      emit '{"type":"extension_ui_request","id":"oauth-dialog","method":"input","title":"Complete OAuth\nhttps://auth.example/authorize?state=attempt&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback\nPaste callback"}'
+      # Pi's built-in `/mcp login`: the link arrives in a notify, then an
+      # input dialog races the paste against the loopback callback.
+      emit '{"type":"extension_ui_request","id":"oauth-link","method":"notify","message":"Sign in to MCP server \"docs\" in your browser:\nhttps://auth.example/authorize?state=attempt&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback","notifyType":"info"}'
+      emit '{"type":"extension_ui_request","id":"oauth-dialog","method":"input","title":"Waiting for sign-in to \"docs\". If the browser cannot reach this machine, paste the URL it was redirected to.","placeholder":"http://127.0.0.1:.../callback?code=..."}'
       next_cmd answer
       if has "$answer" '"id":"oauth-dialog"' && has "$answer" '"value":"http://localhost:8976/callback?state=attempt&code=fixture"'; then
-        emit '{"type":"extension_ui_request","id":"oauth-done","method":"notify","message":"OAuth authentication successful","notifyType":"info"}'
+        emit '{"type":"extension_ui_request","id":"oauth-done","method":"notify","message":"Signed in to MCP server \"docs\" (1 tools).","notifyType":"info"}'
         emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       else
         emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"callback not forwarded\"}"

@@ -43,6 +43,7 @@ pub struct SteerMessage {
 /// Private, ephemeral UI channel for settings commands. Never journal these
 /// payloads: OAuth dialogs and responses may contain authorization codes.
 pub struct SlashUi {
+    /// `(id, payload)` of each dialog (`input`) and non-error `notify`.
     pub requests: mpsc::Sender<(String, serde_json::Value)>,
     pub responses: mpsc::Receiver<(String, serde_json::Value)>,
     pub cancel: CancellationToken,
@@ -123,7 +124,7 @@ pub trait Harness: Send + Sync {
         Ok(Vec::new())
     }
     /// Run one extension slash command in a short-lived child (no chat).
-    /// Used by Settings → MCP so OAuth goes through the same Pi plugin path
+    /// Used by Settings → MCP so OAuth goes through the same Pi command path
     /// as the TUI. Default: unsupported.
     async fn run_slash(&self, _prompt: &str) -> Result<String, HarnessError> {
         Err(HarnessError::Protocol(

@@ -527,7 +527,15 @@ impl Harness for DeviceCatalog {
         _: &str,
         mut ui: cypher_harness::SlashUi,
     ) -> Result<String, HarnessError> {
-        ui.requests.send(("dialog".into(), serde_json::json!({"title":"Complete OAuth\nhttps://auth.example/authorize?state=fixture&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback\nPaste callback"}))).await.unwrap();
+        // Pi's `/mcp login`: the link in a notify, then the paste dialog.
+        ui.requests.send(("link".into(), serde_json::json!({"method":"notify","message":"Sign in to MCP server \"wiki\" in your browser:\nhttps://auth.example/authorize?state=fixture&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback"}))).await.unwrap();
+        ui.requests
+            .send((
+                "dialog".into(),
+                serde_json::json!({"method":"input","title":"Waiting for sign-in to \"wiki\"."}),
+            ))
+            .await
+            .unwrap();
         tokio::select! {
             _ = ui.cancel.cancelled() => {},
             _ = ui.responses.recv() => { ui.cancel.cancelled().await; },
@@ -583,9 +591,10 @@ fn settings_engine(dir: &std::path::Path, device: &'static str) -> EngineCore {
     registry.register(Arc::new(DeviceCatalog(device)));
     let core = EngineCore::assemble(dir, Arc::new(registry), HarnessId::Pi, None).unwrap();
     let current = dir.join("pi-runtime/current");
-    for folder in ["bin", "pi", "npm"] {
+    for folder in ["bin", "pi/dist/extensions/mcp", "npm"] {
         std::fs::create_dir_all(current.join(folder)).unwrap();
     }
+    std::fs::write(current.join("pi/dist/extensions/mcp/index.js"), "").unwrap();
     std::fs::write(
         current.join("runtime.json"),
         r#"{"version":"1","piVersion":"0.85.0","plugins":{}}"#,
@@ -622,11 +631,16 @@ print(json.dumps({{"ok":True,"data":{{"providers":[{{
     std::fs::write(current.join("provider-service.mjs"), helper).unwrap();
     let runtime =
         cypher_engine::pi_runtime::PiRuntimeManager::spawn("http://127.0.0.1:1".into(), dir);
-    std::fs::write(runtime.paths().agent_dir.join("mcp.json"), serde_json::to_vec(&serde_json::json!({
-        "mcpServers": { format!("{device}-mcp"): {
-            "url": "https://user:fixture-secret@example.com/mcp?token=fixture-secret", "auth": false
-        }}
-    })).unwrap()).unwrap();
+    std::fs::write(
+        runtime.paths().agent_dir.join("mcp.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "mcpServers": { format!("{device}-mcp"): {
+                "url": "https://user:fixture-secret@example.com/mcp?token=fixture-secret"
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     core.set_pi_runtime(runtime);
     core
 }
@@ -638,7 +652,7 @@ async fn mcp_login_is_shared_across_services_and_expires_without_a_viewer() {
     let core = settings_engine(dir.path(), "device-a");
     std::fs::write(
         dir.path().join("pi-runtime/agent/mcp.json"),
-        r#"{"mcpServers":{"wiki":{"url":"https://example.com/mcp","auth":"oauth"}}}"#,
+        r#"{"mcpServers":{"wiki":{"url":"https://example.com/mcp"}}}"#,
     )
     .unwrap();
     let first = cypher_rpc::memory_client(core.rpc_service());
@@ -986,10 +1000,11 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
     assert_eq!(local_mcp["servers"][0]["enabled"], true);
     let added = client.call(methods::ADD_MCP_SERVERS, serde_json::json!({
         "targetDeviceId":"device-b", "servers":{
-            "new-web":{"url":"https://example.com/mcp","auth":"bearer","bearerToken":"fixture-mcp-key"}
+            "new-web":{"url":"https://example.com/mcp","auth":"bearer","bearerToken":"fixture-mcp-key"},
+            "new-docs":{"url":"https://example.com/docs"}
         }
     })).await.unwrap();
-    assert_eq!(added["servers"].as_array().unwrap().len(), 2);
+    assert_eq!(added["servers"].as_array().unwrap().len(), 3);
     assert!(!added.to_string().contains("fixture-mcp-key"));
     let local_after = client
         .call(methods::LIST_MCP_SERVERS, serde_json::json!({}))
@@ -1023,35 +1038,30 @@ async fn device_settings_keep_provider_credentials_and_mcp_changes_on_the_target
         .await
         .unwrap_err();
     assert!(!malformed.to_string().contains("fixture-mcp-key"));
-    let account = cypher_engine::mcp::oauth_account("new-web");
+    // Pi's credential store, keyed by tool namespace and URL.
+    let key = "mcp__new_docs|https://example.com/docs";
     for folder in [&a_dir, &b_dir] {
-        let oauth = folder.join("pi-runtime/agent/mcp-oauth").join(&account);
-        std::fs::create_dir_all(&oauth).unwrap();
-        std::fs::write(oauth.join("tokens.json"), "fixture-oauth").unwrap();
+        std::fs::write(
+            folder.join("pi-runtime/agent/mcp-auth.json"),
+            serde_json::json!({ key: {"tokens": {"access_token": "fixture-oauth"}} }).to_string(),
+        )
+        .unwrap();
     }
     let removed = client
         .call(
             methods::REMOVE_MCP_SERVER,
             serde_json::json!({
-                "targetDeviceId":"device-b","name":"new-web"
+                "targetDeviceId":"device-b","name":"new-docs"
             }),
         )
         .await
         .unwrap();
-    assert_eq!(removed["servers"].as_array().unwrap().len(), 1);
-    assert!(
-        !b_dir
-            .join("pi-runtime/agent/mcp-oauth")
-            .join(&account)
-            .exists()
-    );
-    assert!(
-        a_dir
-            .join("pi-runtime/agent/mcp-oauth")
-            .join(&account)
-            .join("tokens.json")
-            .exists()
-    );
+    assert_eq!(removed["servers"].as_array().unwrap().len(), 2);
+    let credentials = |folder: &std::path::Path| {
+        std::fs::read_to_string(folder.join("pi-runtime/agent/mcp-auth.json")).unwrap()
+    };
+    assert!(!credentials(&b_dir).contains(key));
+    assert!(credentials(&a_dir).contains(key));
     assert!(
         client
             .call(

@@ -199,6 +199,12 @@ impl PiRuntimeManager {
         } else {
             None
         };
+        // An unreadable mcp.json stays as it is; Settings → MCP reports it.
+        if paths.installed()
+            && let Err(err) = crate::mcp::adopt_builtin(&paths)
+        {
+            tracing::warn!(error = %err, "could not move MCP servers to Pi's built-in MCP");
+        }
         if let Some(active) = active_version_dir(&paths) {
             mark_used(active);
         }
@@ -504,6 +510,11 @@ impl PiRuntimeManager {
             }
             if let Err(err) = reconcile_bundled_packages(&paths, &destination) {
                 tracing::warn!(error = %err, "could not enable new Pi runtime packages");
+            }
+            // After the prune: a retired pi-mcp-adapter no longer replaces
+            // Pi's built-in MCP.
+            if let Err(err) = crate::mcp::adopt_builtin(&paths) {
+                tracing::warn!(error = %err, "could not move MCP servers to Pi's built-in MCP");
             }
             read_installed(&paths)
                 .ok_or_else(|| "Pi Runtime activation completed without valid metadata.".into())

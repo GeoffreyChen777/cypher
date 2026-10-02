@@ -647,9 +647,8 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
     tx.send(Ok(ev)).await.is_ok()
 }
 
-/// Every Cypher-spawned Pi needs this: the login keychain rejects writes/reads
-/// from these children, so MCP OAuth is stored below `PI_CODING_AGENT_DIR` and
-/// served through a keyring shim.
+/// Private files every Cypher-spawned Pi loads: the engine client module the
+/// bundled extensions import.
 fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
     static DIRECTORY: std::sync::OnceLock<Result<tempfile::TempDir, String>> =
         std::sync::OnceLock::new();
@@ -658,21 +657,16 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
             .prefix("cypher-private-support-")
             .tempdir()
             .map_err(|e| e.to_string())?;
-        for (name, content) in [
-            ("mcp-keyring.cjs", include_str!("mcp_keyring_preload.cjs")),
-            ("engine-client.mjs", include_str!("engine-client.mjs")),
-        ] {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dir.path().join(name))
-                .map_err(|e| e.to_string())?;
-            file.write_all(content.as_bytes())
-                .map_err(|e| e.to_string())?;
-        }
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.path().join("engine-client.mjs"))
+            .map_err(|e| e.to_string())?;
+        file.write_all(include_str!("engine-client.mjs").as_bytes())
+            .map_err(|e| e.to_string())?;
         Ok(dir)
     });
     directory
@@ -681,16 +675,8 @@ fn private_support_dir() -> std::io::Result<&'static std::path::Path> {
         .map_err(|e| std::io::Error::other(e.clone()))
 }
 
-fn inject_mcp_keyring_preload(cmd: &mut Command) -> std::io::Result<()> {
+fn inject_engine_client(cmd: &mut Command) -> std::io::Result<()> {
     let directory = private_support_dir()?;
-    let preload = directory.join("mcp-keyring.cjs");
-    let mut node_options = std::env::var("NODE_OPTIONS").unwrap_or_default();
-    if !node_options.is_empty() {
-        node_options.push(' ');
-    }
-    node_options.push_str("--require ");
-    node_options.push_str(&serde_json::to_string(&preload.to_string_lossy()).unwrap());
-    cmd.env("NODE_OPTIONS", node_options);
     cmd.env(
         "CYPHER_ENGINE_CLIENT_MODULE",
         directory.join("engine-client.mjs"),
@@ -957,7 +943,7 @@ impl PiHarness {
         if let Some(package_dir) = &self.package_dir {
             cmd.env(ENV_PACKAGE_DIR, package_dir);
         }
-        inject_mcp_keyring_preload(&mut cmd)?;
+        inject_engine_client(&mut cmd)?;
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
@@ -1149,7 +1135,7 @@ impl PiHarness {
         }
     }
 
-    /// Run `/command` through a short-lived `pi --mode rpc` child so extension
+    /// Run `/command` through a short-lived `pi --mode rpc` child so command
     /// handlers (MCP OAuth, etc.) execute inside Pi, the same path as the TUI.
     pub async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
         self.run_slash_command_ui(prompt, None).await
@@ -1160,19 +1146,8 @@ impl PiHarness {
         prompt: &str,
         mut ui: Option<crate::SlashUi>,
     ) -> Result<String, HarnessError> {
-        // Same plugin path as the TUI (`pi --mode rpc` + `/mcp-auth`).
+        // Same command path as the TUI (`pi --mode rpc` + `/mcp login`).
         let mut cmd = self.spawn_command(None, &RunHostContext::default(), None)?;
-        if let Some(agent_dir) = &self.agent_dir {
-            cmd.env(
-                "CYPHER_MCP_AUTH_DUMP",
-                agent_dir.join(".cypher-mcp-auth-dump.jsonl"),
-            );
-        } else if let Some(home) = std::env::var_os("HOME") {
-            cmd.env(
-                "CYPHER_MCP_AUTH_DUMP",
-                std::path::PathBuf::from(home).join(".pi/agent/.cypher-mcp-auth-dump.jsonl"),
-            );
-        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if ui.is_some() {
@@ -1251,9 +1226,14 @@ impl PiHarness {
                                         output.push('\n');
                                     }
                                     output.push_str(message);
+                                    // `/mcp login` announces the authorization
+                                    // link in a notify, before its input dialog.
+                                    if let Some(ui) = &ui {
+                                        let _ = ui.requests.try_send((id, payload));
+                                    }
                                 }
                             }
-                            // Do NOT cancel input/select: `/mcp-auth` races
+                            // Do NOT cancel input/select: `/mcp login` races
                             // `ui.input` (paste callback URL) against the
                             // localhost OAuth callback. Cancelling input
                             // wins that race and aborts sign-in. Leave the
