@@ -322,6 +322,142 @@ while read -r line; do
       exit 1
       ;;
 
+    # ---- pi >= 0.99: every accepted input reports its disposition ----------
+    # Having seen one on the first prompt, the harness routes a mid-turn
+    # message as an atomic `prompt` with `streamingBehavior:"steer"` and acts
+    # on what pi says it did. A raw `steer` here is a failure.
+    *scenario:routed-queued*)
+      # pi is running, so it QUEUES the message; the reply is the next
+      # assistant message, where the Steered boundary fires.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"src/main.rs"}}'
+      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"// main"}]},"isError":false}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"prompt"' && has "$steerline" '"streamingBehavior":"steer"' && has "$steerline" 'redirect please'; then
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"queued\"}}"
+        emit '{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"redirect please"}]}}'
+        emit '{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"redirect please"}]}}'
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"steered"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"steered"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"mid-turn message must ride an atomic prompt\"}"
+      exit 1
+      ;;
+    *scenario:routed-settled*)
+      # The settle race: pi settles the turn before it reads the routed
+      # message, so the prompt STARTS a fresh run — and its response follows
+      # the settle on the wire, back to back. The harness must Done the first
+      # turn, open the next with one Steered boundary, and never retry the
+      # message (pi already ran it). Exiting right after keeps a retry from
+      # going unnoticed: it would surface as an extra boundary and an error.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"x"}}'
+      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"x"}]},"isError":false}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"prompt"' && has "$steerline" '"streamingBehavior":"steer"' && has "$steerline" 'redirect'; then
+        emit '{"type":"agent_settled"}'
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+        emit '{"type":"agent_start"}'
+        emit '{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"redirect"}]}}'
+        emit '{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"redirect"}]}}'
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"redirected"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"redirected"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"mid-turn message must ride an atomic prompt\"}"
+      exit 1
+      ;;
+    *scenario:routed-handled*)
+      # A slash command routed mid-turn: pi runs it at once and reports it
+      # `handled` — nothing will stream for it. It still owes the engine one
+      # Steered boundary (its ledger retires one per routed message), at the
+      # next assistant message, and is never retried.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"first"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"first"}],"stopReason":"toolUse"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"read","args":{"path":"x"}}'
+      emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"x"}]},"isError":false}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"prompt"' && has "$steerline" '"streamingBehavior":"steer"' && has "$steerline" '/fast'; then
+        emit '{"type":"extension_ui_request","id":"fast-1","method":"notify","message":"GPT Fast mode enabled.","notifyType":"info"}'
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"handled\"}}"
+        emit '{"type":"message_start","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'
+        emit '{"type":"message_end","message":{"role":"toolResult","toolCallId":"t1","content":[]}}'
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"carried on"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"carried on"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"mid-turn command must ride an atomic prompt\"}"
+      exit 1
+      ;;
+    *scenario:routed-inert*)
+      # A notify-only command turn (pi ran no agent) is still inside its
+      # no-activity grace when the next message arrives. The harness routes
+      # it mid-turn; pi is idle, so it STARTS a fresh run. The inert turn must
+      # close (Done carrying its notify) BEFORE the new turn's boundary — not
+      # absorb the new run's output. The notify follows the response so the
+      # test's send is certain to be routed mid-turn.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"handled\"}}"
+      emit '{"type":"extension_ui_request","id":"goal-1","method":"notify","message":"No goal set.","notifyType":"info"}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"prompt"' && has "$steerline" '"streamingBehavior":"steer"' && has "$steerline" 'next message'; then
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}"
+        emit '{"type":"agent_start"}'
+        emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+        emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"fresh run"}}'
+        emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"fresh run"}],"stopReason":"stop"}}'
+        emit '{"type":"agent_settled"}'
+        exit 0
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"mid-turn message must ride an atomic prompt\"}"
+      exit 1
+      ;;
+    *scenario:inert-stranded*)
+      # No dispositions (pi < 0.99): a steer routed inside a notify-only
+      # command's grace reaches an IDLE pi, which only queues it. When the
+      # grace settles the inert turn, the harness must clear pi's queue and
+      # retry the message as a parked prompt — a stranded steer also blocked
+      # every later parked restart.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"extension_ui_request","id":"goal-1","method":"notify","message":"No goal set.","notifyType":"info"}'
+      next_cmd steerline || exit 1
+      if has "$steerline" '"type":"steer"' && has "$steerline" 'later message'; then
+        emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
+        next_cmd cleared || exit 1
+        if has "$cleared" '"type":"clear_queue"'; then
+          next_cmd retry || exit 1
+          if has "$retry" '"type":"prompt"' && has "$retry" '"streamingBehavior":"steer"' && has "$retry" 'later message'; then
+            emit "{\"id\":$(rid "$retry"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+            emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+            emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"later reply"}}'
+            emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"later reply"}],"stopReason":"stop"}}'
+            emit '{"type":"agent_settled"}'
+            exit 0
+          fi
+          emit "{\"id\":$(rid "$retry"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stranded steer must retry as a parked prompt\"}"
+          exit 1
+        fi
+        emit "{\"id\":$(rid "$cleared"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stranded steer must clear the queue before its retry\"}"
+        exit 1
+      fi
+      emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":false,\"error\":\"legacy pi expects a raw steer\"}"
+      exit 1
+      ;;
+
 
     *scenario:parked-compact*)
       # A `/compact` sent to a PARKED child must run pi's `compact` RPC (pi's
@@ -418,9 +554,16 @@ while read -r line; do
       emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"read","result":{"content":[{"type":"text","text":"x"}]},"isError":false}'
       next_cmd steerline || exit 1
       if has "$steerline" '"type":"steer"' && has "$steerline" 'redirect'; then
-        # Accepted, then settled WITHOUT ever delivering the steer reply.
+        # Accepted, then settled WITHOUT ever delivering the steer reply. The
+        # steer now sits in pi's queue, which its next run drains at start:
+        # without a clear first, the retry would deliver it twice.
         emit "{\"id\":$(rid "$steerline"),\"type\":\"response\",\"command\":\"steer\",\"success\":true}"
         emit '{"type":"agent_settled"}'
+        next_cmd cleared || exit 1
+        if ! has "$cleared" '"type":"clear_queue"'; then
+          emit "{\"id\":$(rid "$cleared"),\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"stranded steer must clear the queue before its retry\"}"
+          exit 1
+        fi
         next_cmd retry || exit 1
         if has "$retry" '"type":"prompt"' && has "$retry" '"streamingBehavior":"steer"' && has "$retry" 'redirect'; then
           emit "{\"id\":$(rid "$retry"),\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"

@@ -1142,11 +1142,226 @@ async fn rapid_double_mailbox_queues_two_parked_turns() {
     }
 }
 
+/// Run `prompt` to the end, sending `message` into the mailbox once, as soon
+/// as an event matching `trigger` streams.
+async fn run_with_mailbox(
+    harness: &PiHarness,
+    prompt: &str,
+    message: &str,
+    trigger: impl Fn(&AgentEvent) -> bool,
+) -> Vec<AgentEvent> {
+    let (controls, steer, _token) = controls();
+    let stream = harness
+        .run(request(prompt), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        let mut steer = Some(steer);
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if trigger(&ev)
+                && let Some(steer) = steer.take()
+            {
+                steer
+                    .send(SteerMessage {
+                        prompt: message.into(),
+                        message_id: None,
+                    })
+                    .await
+                    .expect("mailbox send");
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time")
+}
+
+fn position(events: &[AgentEvent], what: impl Fn(&AgentEvent) -> bool) -> usize {
+    events
+        .iter()
+        .position(what)
+        .unwrap_or_else(|| panic!("event missing: {events:?}"))
+}
+
+fn boundaries(events: &[AgentEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Steered { .. }))
+        .count()
+}
+
+fn is_text(text: &'static str) -> impl Fn(&AgentEvent) -> bool {
+    move |e| matches!(e, AgentEvent::TextDelta { text: t } if t == text)
+}
+
+#[tokio::test]
+async fn routed_steer_rides_an_atomic_prompt_and_splits_at_delivery() {
+    // pi reported a disposition on the first prompt, so the mid-turn message
+    // goes out as `prompt` + `streamingBehavior:"steer"` (the fixture fails a
+    // raw `steer`). pi QUEUES it: one boundary, right before the reply.
+    let events = run_with_mailbox(
+        &harness(),
+        "scenario:routed-queued",
+        "redirect please",
+        is_text("first"),
+    )
+    .await;
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(boundaries(&events), 1, "{events:?}");
+    let boundary = position(&events, |e| matches!(e, AgentEvent::Steered { .. }));
+    assert!(
+        boundary < position(&events, is_text("steered")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn routed_steer_that_starts_a_fresh_run_opens_the_next_turn_without_a_retry() {
+    // pi settled before it read the routed message, so the message STARTED a
+    // fresh run — its response lands right behind the settle. The first turn
+    // Dones, the next opens with exactly one boundary, and nothing is retried
+    // (a retry would add a boundary and an errored Done: the fixture exits).
+    let events = run_with_mailbox(
+        &harness(),
+        "scenario:routed-settled",
+        "redirect",
+        |e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "t1"),
+    )
+    .await;
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(boundaries(&events), 1, "{events:?}");
+    let first_done = position(&events, |e| matches!(e, AgentEvent::Done { .. }));
+    let boundary = position(&events, |e| matches!(e, AgentEvent::Steered { .. }));
+    assert!(first_done < boundary, "{events:?}");
+    assert!(
+        boundary < position(&events, is_text("redirected")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn routed_command_handled_mid_turn_confirms_once_and_never_retries() {
+    // A mid-turn slash command: pi runs it at once and reports `handled`.
+    // Nothing streams for it, yet it still confirms with one boundary (the
+    // engine's ledger retires one per routed message) — at the next assistant
+    // message, never mid-message — and it is not retried after the settle.
+    let events = run_with_mailbox(
+        &harness(),
+        "scenario:routed-handled",
+        "/fast",
+        |e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "t1"),
+    )
+    .await;
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(boundaries(&events), 1, "{events:?}");
+    let note = position(&events, is_text("GPT Fast mode enabled."));
+    let boundary = position(&events, |e| matches!(e, AgentEvent::Steered { .. }));
+    assert!(note < boundary, "{events:?}");
+    assert!(
+        boundary < position(&events, is_text("carried on")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn routed_message_during_an_inert_turn_closes_it_before_the_fresh_run() {
+    // A notify-only command turn is waiting out its no-activity grace when
+    // the next message arrives; pi is idle, so the routed message STARTS a
+    // fresh run. The command's turn closes at once with its notify (no wait
+    // for the long grace), then the new turn opens behind its boundary.
+    let harness = harness().with_no_activity_grace(Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    let events = run_with_mailbox(
+        &harness,
+        "/goal scenario:routed-inert",
+        "next message",
+        is_text("No goal set."),
+    )
+    .await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "waited out the grace"
+    );
+    let results: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { status, result, .. } => Some((*status, result.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![
+            (DoneStatus::Completed, Some("No goal set.".into())),
+            (DoneStatus::Completed, Some("fresh run".into())),
+        ],
+        "{events:?}"
+    );
+    assert_eq!(boundaries(&events), 1, "{events:?}");
+    let first_done = position(&events, |e| matches!(e, AgentEvent::Done { .. }));
+    let boundary = position(&events, |e| matches!(e, AgentEvent::Steered { .. }));
+    assert!(first_done < boundary, "{events:?}");
+    assert!(
+        boundary < position(&events, is_text("fresh run")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn legacy_steer_stranded_in_an_inert_turn_is_cleared_and_retried() {
+    // Without dispositions, a steer routed during a notify-only command's
+    // grace only queues inside the idle pi. The grace's Done must clear pi's
+    // queue and retry it as a parked prompt (the fixture requires both, in
+    // that order) — it used to strand, blocking every later parked restart.
+    let harness = harness().with_no_activity_grace(Duration::from_millis(300));
+    let events = run_with_mailbox(
+        &harness,
+        "scenario:inert-stranded",
+        "later message",
+        is_text("No goal set."),
+    )
+    .await;
+
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(boundaries(&events), 1, "{events:?}");
+    let boundary = position(&events, |e| matches!(e, AgentEvent::Steered { .. }));
+    assert!(
+        boundary < position(&events, is_text("later reply")),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn steer_accepted_around_settle_is_retried_as_an_idle_prompt() {
     // The settle race: a steer ACCEPTED mid-turn whose reply never streams
     // (the turn settles first). The accepted steer must NOT strand forever —
-    // the harness retries it as an idle prompt after the park.
+    // the harness clears it from pi's queue (whose next run would otherwise
+    // deliver it a second time) and retries it as an idle prompt after the
+    // park.
     let (controls, steer, _token) = controls();
     let harness = harness();
     let stream = harness

@@ -54,11 +54,29 @@
   logged, never fatal, like ACP's `set_config_option`) → `get_state` →
   `prompt` (message + inlined `image/*` attachments; the response only means
   acceptance) → the event stream.
-- Steering: a mailbox steer while the turn is ACTIVE sends `{"type":"steer"}`
-  (pi-native mid-run delivery — after the current assistant message's tool
-  calls, before the next LLM call); the NEXT assistant `message_start` emits
-  `Steered { prev, next }` before the steered content streams (the same
-  boundary point as the ACP harness). A mailbox message arriving while the
+- Steering: a mailbox message while the turn is ACTIVE sends `{"type":
+  "prompt", …, "streamingBehavior":"steer"}` (pi-native mid-run delivery —
+  after the current assistant message's tool calls, before the next LLM
+  call). Its response carries pi's `data.disposition` (pi ≥ 0.99; the harness
+  learns support from the first prompt's response) and is read **in stdout
+  order with the events** (`PiClient::send_ordered` → `Incoming::Response`),
+  never ahead of a settle written before it:
+  - `queued` — the NEXT assistant `message_start` emits `Steered { prev,
+    next }` before the steered content streams (the same boundary point as
+    the ACP harness);
+  - `handled` — an extension command or input handler consumed it (a
+    mid-turn `/command` runs at once). Nothing streams for it, but it still
+    owes one `Steered` — the engine's at-least-once ledger retires one routed
+    message per boundary, and an unretired one is re-dispatched (re-run) at
+    run exit. It fires at the next assistant `message_start`, or before the
+    turn's `Done`;
+  - `started` — pi had settled before reading it, so it started a fresh run:
+    the first turn's `Done` is already out, and the message opens the next
+    turn (one `Steered`, no retry). If the open turn was an inert command
+    turn still inside its no-activity grace, it closes first.
+
+  A runtime without dispositions gets a raw `{"type":"steer"}` instead,
+  inferred from the turn state as before. A mailbox message arriving while the
   session is PARKED restarts it via `{"type":"prompt", …,
   "streamingBehavior":"steer"}` — **atomic across pi's real state**: an
   idle pi starts a fresh turn; a pi still (or newly) streaming queues the
@@ -72,8 +90,12 @@
   for the next routed send). Each parked restart RESETS per-turn state for
   the new turn (last text/stopReason, the activity flag, and the progress
   throttle), and a steer pi ACCEPTED but never delivered before a settle
-  (the turn ended while the steer was queued inside pi) is retried through
-  the same parked restart — never dropped or stranded.
+  (the turn ended while the steer was queued inside pi — or a raw `steer`
+  reached an idle pi, which only queues it) is retried through the same
+  parked restart — never dropped or stranded. The retry first sends
+  `clear_queue`: pi drains its steering queue at the start of every run, so
+  the stranded copy would otherwise reach the model alongside the retry. The
+  no-activity grace settles a turn the same way.
 - Interrupt: `{"type":"abort"}`, wait for `agent_settled` → `Done{
   Interrupted}`, escalating SIGTERM → SIGKILL.
 - Extension UI bridge: `select` → `UserInputQuestion{options}`,
@@ -118,7 +140,8 @@ with no RPC equivalent worth dispatching.
 | `message_update.assistantMessageEvent` `text_delta` | `TextDelta` |
 | `…` `thinking_delta` | `ReasoningDelta` |
 | `…` `*_start`/`*_end`/`toolcall_*` | internal state only |
-| `message_start` (assistant, after an accepted steer) | `Steered` boundary |
+| `message_start` (assistant, after a `queued` or `handled` steer) | `Steered` boundary (one per routed message) |
+| routed `prompt` response `started` (pi settled first) | the next turn opens: `Steered` boundary |
 | parked restart (`prompt` + `streamingBehavior:"steer"` dispatched while `in_turn == false`) | `Steered` boundary emitted at DISPATCH, before the prompt — pre-response notify/dialog output folds into the new segment |
 | `message_end` (assistant) | `AssistantMessageCompleted` (journal boundary) |
 | `tool_execution_start` | typed `ToolCall` (pi tool-name mapping, below) |
