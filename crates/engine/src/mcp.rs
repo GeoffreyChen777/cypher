@@ -1,80 +1,21 @@
-//! MCP servers from Cypher's isolated Pi agent directory, plus OAuth via Pi's
-//! `pi-mcp-adapter` slash command (`/mcp-auth`), the same path as the TUI.
+//! MCP servers from Cypher's isolated Pi agent directory, served by Pi's
+//! built-in MCP support. OAuth runs Pi's `/mcp login`, the same path as the
+//! TUI, and Pi keeps the credentials in `<agent-dir>/mcp-auth.json`.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 use cypher_harness::Harness;
 
+use crate::pi_runtime::PiRuntimePaths;
+
 mod config;
+mod legacy;
 pub mod login;
 pub use config::{AddMcpServers, RemoveMcpServer, add_servers, remove_server};
+pub use legacy::adopt_builtin;
 static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Hard bound for every `security` subprocess. An unanswered Keychain consent
-/// dialog blocks `security` indefinitely (see the keychain notes in
-/// `agent_accounts.rs`); without a bound that was a thread pinned for the life
-/// of the process, and on the embedded engine's small runtime, half of it.
-const SECURITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Run `security` with [`SECURITY_TIMEOUT`]: spawn, drain the pipes on helper
-/// threads, poll `try_wait`, kill on the deadline. Blocking by design — every
-/// caller runs on the blocking pool via [`crate::off_runtime`], never on a
-/// runtime worker.
-fn security<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> std::io::Result<std::process::Output> {
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    fn drain(
-        pipe: Option<impl std::io::Read + Send + 'static>,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            bytes
-        })
-    }
-
-    let mut child = Command::new("security")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + SECURITY_TIMEOUT;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                tracing::warn!(
-                    verb = args
-                        .first()
-                        .map(|a| a.as_ref().to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    "security timed out (unanswered Keychain prompt?)"
-                );
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "security timed out; unlock the Keychain and retry",
-                ));
-            }
-        }
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +47,13 @@ pub struct McpServer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSnapshot {
-    pub adapter_installed: bool,
+    /// Whether Pi's built-in MCP serves `mcp.json` on this runtime. Kept under
+    /// its adapter-era wire name, which older viewers require.
+    #[serde(rename = "adapterInstalled")]
+    pub available: bool,
+    /// Why it does not, when it does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
     pub servers: Vec<McpServer>,
 }
 
@@ -127,17 +74,25 @@ fn mcp_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("mcp.json")
 }
 
-fn adapter_dir(agent_dir: &Path) -> PathBuf {
-    let bundled = agent_dir
-        .parent()
-        .map(|root| root.join("current/npm/node_modules/pi-mcp-adapter"));
-    bundled
-        .filter(|path| path.join("mcp-auth-flow.ts").is_file())
-        .unwrap_or_else(|| agent_dir.join("npm/node_modules/pi-mcp-adapter"))
+fn credentials_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("mcp-auth.json")
 }
 
-pub fn oauth_account(server: &str) -> String {
-    format!("sha256-{:x}", Sha256::digest(server.as_bytes()))
+/// Why Pi's built-in MCP cannot serve `mcp.json` with this runtime, if it
+/// cannot: Pi before 1.0 has none, and an extension that registers `/mcp`
+/// (pi-mcp-adapter) replaces it.
+pub fn unavailable(paths: &PiRuntimePaths) -> Option<String> {
+    if !paths
+        .package_dir
+        .join("dist/extensions/mcp/index.js")
+        .is_file()
+    {
+        return Some("Install or update the Pi Runtime in Agents to use MCP servers.".into());
+    }
+    crate::pi_packages::enabled(paths, "npm:pi-mcp-adapter").then(|| {
+        "pi-mcp-adapter replaces Pi's built-in MCP. Disable it in Agents to manage MCP servers here."
+            .into()
+    })
 }
 
 fn read_mcp_root(agent_dir: &Path) -> Value {
@@ -148,24 +103,28 @@ fn read_mcp_root(agent_dir: &Path) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|_| Value::Object(Default::default()))
 }
 
-fn write_mcp_root(agent_dir: &Path, value: &Value) -> Result<(), String> {
-    let path = mcp_path(agent_dir);
+fn write_json(path: &Path, value: &Value, what: &str) -> Result<(), String> {
     let parent = path
         .parent()
-        .ok_or_else(|| "Invalid MCP settings path.".to_string())?;
+        .ok_or_else(|| format!("Invalid {what} path."))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    text.push('\n');
     use std::io::Write;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|_| "Could not stage MCP configuration.".to_string())?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| format!("Could not stage {what}."))?;
     temporary
         .write_all(text.as_bytes())
         .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|_| "Could not write MCP configuration.".to_string())?;
+        .map_err(|_| format!("Could not write {what}."))?;
     temporary
         .persist(path)
-        .map_err(|_| "Could not save MCP configuration.".to_string())?;
+        .map_err(|_| format!("Could not save {what}."))?;
     Ok(())
+}
+
+fn write_mcp_root(agent_dir: &Path, value: &Value) -> Result<(), String> {
+    write_json(&mcp_path(agent_dir), value, "MCP configuration")
 }
 
 fn transport_label(entry: &Value) -> String {
@@ -186,95 +145,113 @@ fn transport_label(entry: &Value) -> String {
         // a command preview, especially when viewed from another device.
         return format!("stdio · {command}");
     }
-    if let Some(socket) = entry.get("socket").and_then(Value::as_str) {
-        return socket.to_string();
-    }
     "Configured".into()
 }
 
+fn has_authorization_header(entry: &Value) -> bool {
+    entry
+        .get("headers")
+        .and_then(Value::as_object)
+        .is_some_and(|headers| {
+            headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        })
+}
+
+/// Pi signs in with OAuth to HTTP servers without an `Authorization` header
+/// or `auth.provider`; the others carry their own credential. Adapter-era
+/// fields still count until [`adopt_builtin`] rewrites them.
 fn auth_kind(entry: &Value) -> McpAuthKind {
+    if entry.get("url").and_then(Value::as_str).is_none() {
+        return McpAuthKind::None;
+    }
     match entry.get("auth") {
-        Some(Value::String(s)) if s == "oauth" => McpAuthKind::Oauth,
-        Some(Value::String(s)) if s == "bearer" => McpAuthKind::Bearer,
         Some(Value::Bool(false)) => McpAuthKind::None,
-        _ if entry.get("url").and_then(Value::as_str).is_some()
-            && entry.get("headers").is_none() =>
+        Some(Value::Object(_)) => McpAuthKind::Bearer,
+        Some(Value::String(s)) if s == "bearer" => McpAuthKind::Bearer,
+        _ if has_authorization_header(entry)
+            || entry.get("bearerToken").is_some()
+            || entry.get("bearerTokenEnv").is_some() =>
         {
-            McpAuthKind::Oauth
+            McpAuthKind::Bearer
         }
-        _ => McpAuthKind::None,
+        _ => McpAuthKind::Oauth,
     }
 }
 
-fn keychain_payload(agent_dir: &Path, account: &str) -> Option<String> {
-    let _ = ensure_app_keychain(agent_dir);
-    let mut args = vec![
-        "find-generic-password".into(),
-        "-s".into(),
-        "pi-mcp-adapter.oauth".into(),
-        "-a".into(),
-        account.to_string(),
-        "-w".into(),
-    ];
-    args.push(app_keychain_path(agent_dir).display().to_string());
-    let output = security(args.as_slice()).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+fn enabled(entry: &Value) -> bool {
+    entry.get("enabled") != Some(&Value::Bool(false))
+        && entry.get("disabled") != Some(&Value::Bool(true))
 }
 
-fn legacy_payload(agent_dir: &Path, account: &str) -> Option<String> {
-    let path = agent_dir
-        .join("mcp-oauth")
-        .join(account)
-        .join("tokens.json");
-    std::fs::read_to_string(path).ok()
+/// Pi's credential keys for a server: its tool namespace plus URL, then the
+/// URL alone, which Pi before 1.0 wrote (`McpOAuthCredentialStore`).
+fn credential_keys(name: &str, url: &str) -> Option<[String; 2]> {
+    let url = reqwest::Url::parse(url).ok()?.to_string();
+    Some([format!("mcp__{}|{url}", name.replace('-', "_")), url])
 }
 
-fn token_status(payload: &str) -> McpAuthStatus {
-    let Ok(value) = serde_json::from_str::<Value>(payload) else {
-        return McpAuthStatus::SignedIn;
-    };
-    let tokens = value.get("tokens").unwrap_or(&value);
-    if tokens.get("accessToken").and_then(Value::as_str).is_none() {
+fn read_credentials(agent_dir: &Path) -> Map<String, Value> {
+    std::fs::read(credentials_path(agent_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn token_status(state: &Value) -> McpAuthStatus {
+    let tokens = &state["tokens"];
+    if tokens["access_token"].as_str().is_none_or(str::is_empty) {
         return McpAuthStatus::NeedsAuth;
     }
-    if let Some(expires) = tokens.get("expiresAt").and_then(Value::as_i64) {
+    // Pi refreshes an expired token itself while it has a refresh token.
+    if tokens["refresh_token"].as_str().is_none_or(str::is_empty)
+        && let Some(expires) = state["tokensExpireAt"].as_i64()
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        if expires > 0 && expires + 30 < now {
+        if expires < now {
             return McpAuthStatus::Expired;
         }
     }
     McpAuthStatus::SignedIn
 }
 
-fn auth_status(agent_dir: &Path, name: &str, kind: McpAuthKind) -> McpAuthStatus {
+fn auth_status(
+    credentials: &Map<String, Value>,
+    name: &str,
+    entry: &Value,
+    kind: McpAuthKind,
+) -> McpAuthStatus {
     match kind {
         McpAuthKind::None => McpAuthStatus::NotRequired,
-        McpAuthKind::Bearer => {
-            // Static bearer is configured in mcp.json; we only know it's required.
-            McpAuthStatus::SignedIn
-        }
-        McpAuthKind::Oauth => {
-            let account = oauth_account(name);
-            match keychain_payload(agent_dir, &account)
-                .or_else(|| legacy_payload(agent_dir, &account))
-            {
-                Some(payload) => token_status(&payload),
-                None => McpAuthStatus::NeedsAuth,
-            }
-        }
+        // The credential is in mcp.json (or a provider login); we only know
+        // one is configured.
+        McpAuthKind::Bearer => McpAuthStatus::SignedIn,
+        McpAuthKind::Oauth => entry["url"]
+            .as_str()
+            .and_then(|url| credential_keys(name, url))
+            .and_then(|keys| keys.iter().find_map(|key| credentials.get(key)))
+            .map_or(McpAuthStatus::NeedsAuth, token_status),
     }
 }
 
-pub fn list(agent_dir: &Path) -> McpSnapshot {
+fn status_of(agent_dir: &Path, name: &str) -> McpAuthStatus {
+    let entry = read_mcp_root(agent_dir)["mcpServers"][name].clone();
+    auth_status(
+        &read_credentials(agent_dir),
+        name,
+        &entry,
+        auth_kind(&entry),
+    )
+}
+
+pub fn list(paths: &PiRuntimePaths) -> McpSnapshot {
+    let agent_dir = &paths.agent_dir;
     let root = read_mcp_root(agent_dir);
+    let credentials = read_credentials(agent_dir);
     let servers = root
         .get("mcpServers")
         .and_then(Value::as_object)
@@ -283,11 +260,8 @@ pub fn list(agent_dir: &Path) -> McpSnapshot {
                 .map(|(name, entry)| {
                     let kind = auth_kind(entry);
                     McpServer {
-                        enabled: !entry
-                            .get("disabled")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                        auth_status: auth_status(agent_dir, name, kind),
+                        enabled: enabled(entry),
+                        auth_status: auth_status(&credentials, name, entry, kind),
                         auth_kind: kind,
                         transport: transport_label(entry),
                         name: name.clone(),
@@ -296,13 +270,19 @@ pub fn list(agent_dir: &Path) -> McpSnapshot {
                 .collect()
         })
         .unwrap_or_default();
+    let unavailable = unavailable(paths);
     McpSnapshot {
-        adapter_installed: adapter_dir(agent_dir).join("mcp-auth-flow.ts").is_file(),
+        available: unavailable.is_none(),
+        unavailable,
         servers,
     }
 }
 
-pub fn set_enabled(agent_dir: &Path, params: SetMcpServerEnabled) -> Result<McpSnapshot, String> {
+pub fn set_enabled(
+    paths: &PiRuntimePaths,
+    params: SetMcpServerEnabled,
+) -> Result<McpSnapshot, String> {
+    let agent_dir = &paths.agent_dir;
     let _guard = CONFIG_WRITE
         .lock()
         .map_err(|_| "MCP configuration is busy.".to_string())?;
@@ -321,253 +301,108 @@ pub fn set_enabled(agent_dir: &Path, params: SetMcpServerEnabled) -> Result<McpS
     let object = entry
         .as_object_mut()
         .ok_or_else(|| "MCP server entry is not an object.".to_string())?;
+    // Pi's own `/mcp` writes the same shape: no key while enabled.
+    object.remove("disabled");
     if params.enabled {
-        object.remove("disabled");
+        object.remove("enabled");
     } else {
-        object.insert("disabled".into(), Value::Bool(true));
+        object.insert("enabled".into(), Value::Bool(false));
     }
     write_mcp_root(agent_dir, &root)?;
-    Ok(list(agent_dir))
+    Ok(list(paths))
 }
 
-pub fn auth_dump_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join(".cypher-mcp-auth-dump.jsonl")
-}
+/// Pi locks `mcp-auth.json` with proper-lockfile: a `<file>.lock` directory,
+/// taken over once its mtime is older than this.
+const CREDENTIALS_LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn persist_auth_dump(agent_dir: &Path, path: &PathBuf) -> Result<usize, String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(0);
-    };
-    let mut wrote = 0usize;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let value: Value =
-            serde_json::from_str(line).map_err(|e| format!("Invalid auth dump: {e}"))?;
-        let service = value
-            .get("service")
-            .and_then(Value::as_str)
-            .unwrap_or("pi-mcp-adapter.oauth");
-        let account = value
-            .get("account")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "Auth dump missing account.".to_string())?;
-        let password = value
-            .get("password")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "Auth dump missing password.".to_string())?;
-        persist_secret(agent_dir, service, account, password)?;
-        wrote += 1;
+/// Remove a server's stored OAuth credentials from Pi's `mcp-auth.json`,
+/// under the lock Pi takes for every read-modify-write of that file.
+fn remove_credentials(agent_dir: &Path, name: &str, url: &str) -> Result<(), String> {
+    let path = credentials_path(agent_dir);
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(meta) if meta.is_file() => {}
+        _ => return Err("Pi's MCP credential store is unavailable or a symlink.".into()),
     }
-    Ok(wrote)
-}
-
-fn persist_secret(
-    agent_dir: &Path,
-    service: &str,
-    account: &str,
-    password: &str,
-) -> Result<(), String> {
-    let dir = agent_dir.join("mcp-oauth").join(account);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("tokens.json"), password).map_err(|e| e.to_string())?;
-    let _ = persist_secret_keychain(agent_dir, service, account, password);
-    Ok(())
-}
-
-fn app_keychain_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("cypher-mcp.keychain-db")
-}
-
-fn app_keychain_pass_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("cypher-mcp.keychain-pass")
-}
-
-fn security_ok(args: &[&str]) -> Result<(), String> {
-    let output = security(args).map_err(|e| e.to_string())?;
-    if output.status.success() {
+    let Some(keys) = credential_keys(name, url) else {
         return Ok(());
-    }
-    let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if err.is_empty() {
-        format!(
-            "security {} failed",
-            args.first().copied().unwrap_or_default()
-        )
-    } else {
-        err
-    })
-}
-
-fn ensure_app_keychain(agent_dir: &Path) -> Result<(PathBuf, String), String> {
-    let path = app_keychain_path(agent_dir);
-    let pass_path = app_keychain_pass_path(agent_dir);
-    let password = if pass_path.is_file() {
-        std::fs::read_to_string(&pass_path)
-            .map_err(|e| e.to_string())?
-            .trim()
-            .to_string()
-    } else {
-        let generated = uuid::Uuid::new_v4().to_string();
-        if let Some(parent) = pass_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&pass_path, &generated).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&pass_path, std::fs::Permissions::from_mode(0o600));
-        }
-        generated
     };
-    if !path.is_file() {
-        security_ok(&[
-            "create-keychain",
-            "-p",
-            &password,
-            path.to_str().unwrap_or_default(),
-        ])?;
-        let _ = security_ok(&[
-            "set-keychain-settings",
-            "-lut",
-            "2147483647",
-            path.to_str().unwrap_or_default(),
-        ]);
+    let lock = PathBuf::from(format!("{}.lock", path.display()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match std::fs::create_dir(&lock) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(&lock)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > CREDENTIALS_LOCK_STALE);
+                if stale {
+                    let _ = std::fs::remove_dir(&lock);
+                } else if std::time::Instant::now() >= deadline {
+                    return Err("Pi's MCP credentials are busy. Retry in a moment.".into());
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            Err(_) => return Err("Could not lock Pi's MCP credential store.".into()),
+        }
     }
-    security_ok(&[
-        "unlock-keychain",
-        "-p",
-        &password,
-        path.to_str().unwrap_or_default(),
-    ])?;
-    prepend_keychain_search(&path)?;
-    Ok((path, password))
-}
-
-fn prepend_keychain_search(path: &Path) -> Result<(), String> {
-    let listed = security(&["list-keychains", "-d", "user"]).map_err(|e| e.to_string())?;
-    let existing: Vec<String> = String::from_utf8_lossy(&listed.stdout)
-        .lines()
-        .map(|line| line.trim().trim_matches('"').to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    let ours = path.display().to_string();
-    if existing.iter().any(|item| item == &ours) {
-        return Ok(());
-    }
-    let mut args = vec![
-        "list-keychains".into(),
-        "-d".into(),
-        "user".into(),
-        "-s".into(),
-        ours,
-    ];
-    args.extend(existing);
-    let status = security(args.as_slice()).map_err(|e| e.to_string())?.status;
-    if status.success() {
+    let result = (|| {
+        let bytes = std::fs::read(&path).map_err(|_| "Could not read Pi's MCP credentials.")?;
+        let mut states: Map<String, Value> = if bytes.iter().all(u8::is_ascii_whitespace) {
+            Map::new()
+        } else {
+            serde_json::from_slice(&bytes).map_err(|_| "Pi's MCP credential file is invalid.")?
+        };
+        if keys.iter().any(|key| states.remove(key).is_some()) {
+            write_json(&path, &Value::Object(states), "MCP credentials")?;
+        }
         Ok(())
-    } else {
-        Err("Could not add Cypher's MCP keychain to the search list.".into())
+    })();
+    let _ = std::fs::remove_dir(&lock);
+    result
+}
+
+/// Remove a server's stored OAuth credentials. Servers without OAuth have
+/// none.
+fn sign_out(agent_dir: &Path, name: &str) -> Result<(), String> {
+    let entry = read_mcp_root(agent_dir)["mcpServers"][name].clone();
+    match entry["url"].as_str() {
+        Some(url) if auth_kind(&entry) == McpAuthKind::Oauth => {
+            remove_credentials(agent_dir, name, url)
+        }
+        _ => Ok(()),
     }
 }
 
-#[cfg(target_os = "macos")]
-fn persist_secret_keychain(
-    agent_dir: &Path,
-    service: &str,
-    account: &str,
-    password: &str,
-) -> Result<(), String> {
-    // Login keychain writes need a UI session (TUI/Terminal has one; a GUI
-    // child and even this process when launched detached do not). Store in an
-    // app-owned keychain we can unlock without a prompt, then put it on the
-    // search list so Pi's adapter can read the same item.
-    let (keychain, _) = ensure_app_keychain(agent_dir)?;
-    let kc = keychain.to_str().unwrap_or_default();
-    let _ = security_ok(&["delete-generic-password", "-s", service, "-a", account, kc]);
-    security_ok(&[
-        "add-generic-password",
-        "-a",
-        account,
-        "-s",
-        service,
-        "-A",
-        "-w",
-        password,
-        kc,
-    ])
+pub fn logout(paths: &PiRuntimePaths, name: &str) -> Result<McpSnapshot, String> {
+    sign_out(&paths.agent_dir, name)?;
+    Ok(list(paths))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn persist_secret_keychain(
-    _agent_dir: &Path,
-    _service: &str,
-    _account: &str,
-    _password: &str,
-) -> Result<(), String> {
-    Ok(())
-}
-
-pub fn logout(agent_dir: &Path, name: &str) -> Result<McpSnapshot, String> {
-    let account = oauth_account(name);
-    let _ = security(&[
-        "delete-generic-password",
-        "-s",
-        "pi-mcp-adapter.oauth",
-        "-a",
-        &account,
-    ]);
-    let kc = app_keychain_path(agent_dir);
-    let _ = security(&[
-        "delete-generic-password",
-        "-s",
-        "pi-mcp-adapter.oauth",
-        "-a",
-        &account,
-        kc.to_str().unwrap_or_default(),
-    ]);
-    let _ = std::fs::remove_dir_all(agent_dir.join("mcp-oauth").join(&account));
-    Ok(list(agent_dir))
-}
-
+/// Non-interactive sign-in for older viewers: only a browser on this host
+/// can complete it, through Pi's loopback callback.
 pub async fn authenticate(
-    agent_dir: &Path,
+    paths: &PiRuntimePaths,
     name: &str,
     harness: &dyn Harness,
 ) -> Result<McpSnapshot, String> {
     let name = name.trim().to_string();
-    if name.is_empty() {
+    if name.is_empty() || name.contains(char::is_whitespace) {
         return Err("Server name is required.".into());
     }
-    let agent_dir = agent_dir.to_path_buf();
-    let dump = auth_dump_path(&agent_dir);
-    // Keychain and config-file work runs on the blocking pool, never on a
-    // runtime worker (see `crate::off_runtime`).
-    {
-        let (agent_dir, name, dump) = (agent_dir.clone(), name.clone(), dump.clone());
-        crate::off_runtime(move || {
-            let _ = std::fs::remove_file(&dump);
-            // Drop a leftover keychain item first. `@napi-rs/keyring` cannot always
-            // overwrite an entry created by a different parent process (TUI vs GUI).
-            let _ = logout(&agent_dir, &name);
-        })
-        .await?;
+    if let Some(reason) = unavailable(paths) {
+        return Err(reason);
     }
-    let slash = harness.run_slash(&format!("/mcp-auth {name}")).await;
-    let dumped = {
-        let (agent_dir, dump) = (agent_dir.clone(), dump.clone());
-        crate::off_runtime(move || {
-            let dumped = persist_auth_dump(&agent_dir, &dump);
-            let _ = std::fs::remove_file(&dump);
-            dumped
-        })
-        .await?
-    };
-    let snapshot = move || crate::off_runtime(move || list(&agent_dir));
-    match (slash, dumped) {
-        (_, Ok(n)) if n > 0 => snapshot().await,
-        (Err(err), _) => Err(err.to_string()),
-        (Ok(_), Err(err)) => Err(err),
-        (Ok(_), Ok(_)) => snapshot().await,
-    }
+    harness
+        .run_slash(&format!("/mcp login {name}"))
+        .await
+        .map_err(|err| err.to_string())?;
+    let paths = paths.clone();
+    crate::off_runtime(move || list(&paths)).await
 }
 
 #[cfg(test)]
@@ -585,37 +420,183 @@ mod tests {
     }
 
     #[test]
-    fn oauth_account_hashes_the_server_name() {
+    fn credential_keys_match_pi() {
+        // Pi: `${mcpNamespace(name)}|${String(new URL(url))}`, then the URL.
         assert_eq!(
-            oauth_account("mvp-lab-discord"),
-            format!("sha256-{:x}", Sha256::digest(b"mvp-lab-discord"))
+            credential_keys("mvp-lab-discord", "https://mcp.mvp-lab.ai/wiki-mcp/mcp").unwrap(),
+            [
+                "mcp__mvp_lab_discord|https://mcp.mvp-lab.ai/wiki-mcp/mcp".to_string(),
+                "https://mcp.mvp-lab.ai/wiki-mcp/mcp".to_string()
+            ]
+        );
+        assert_eq!(
+            credential_keys("docs", "HTTPS://Example.com:443").unwrap()[0],
+            "mcp__docs|https://example.com/"
         );
     }
 
     #[test]
-    fn auth_kind_reads_oauth_and_url_defaults() {
-        let oauth = serde_json::json!({"url": "https://x/mcp", "auth": "oauth"});
+    fn auth_kind_follows_pi_and_reads_adapter_fields() {
+        let oauth = serde_json::json!({"url": "https://x/mcp"});
         assert_eq!(auth_kind(&oauth), McpAuthKind::Oauth);
-        let auto = serde_json::json!({"url": "https://x/mcp"});
-        assert_eq!(auth_kind(&auto), McpAuthKind::Oauth);
+        let header =
+            serde_json::json!({"url": "https://x/mcp", "headers": {"authorization": "Bearer t"}});
+        assert_eq!(auth_kind(&header), McpAuthKind::Bearer);
+        let other_header = serde_json::json!({"url": "https://x/mcp", "headers": {"X-Key": "k"}});
+        assert_eq!(auth_kind(&other_header), McpAuthKind::Oauth);
+        let provider = serde_json::json!({"url": "https://x/mcp", "auth": {"provider": "github"}});
+        assert_eq!(auth_kind(&provider), McpAuthKind::Bearer);
         let off = serde_json::json!({"url": "https://x/mcp", "auth": false});
         assert_eq!(auth_kind(&off), McpAuthKind::None);
+        let legacy =
+            serde_json::json!({"url": "https://x/mcp", "auth": "bearer", "bearerToken": "t"});
+        assert_eq!(auth_kind(&legacy), McpAuthKind::Bearer);
         let stdio = serde_json::json!({"command": "npx", "args": ["-y", "foo"]});
         assert_eq!(auth_kind(&stdio), McpAuthKind::None);
-        assert_eq!(transport_label(&stdio), "stdio · npx");
     }
 
     #[test]
-    fn expired_tokens_are_detected() {
-        let payload = serde_json::json!({
-            "tokens": { "accessToken": "x", "expiresAt": 1 }
-        })
-        .to_string();
-        assert_eq!(token_status(&payload), McpAuthStatus::Expired);
+    fn token_status_reads_pi_state() {
+        assert_eq!(
+            token_status(&serde_json::json!({"clientInformation": {"client_id": "c"}})),
+            McpAuthStatus::NeedsAuth
+        );
+        let expired = serde_json::json!({"tokens": {"access_token": "x"}, "tokensExpireAt": 1});
+        assert_eq!(token_status(&expired), McpAuthStatus::Expired);
+        let refreshable = serde_json::json!({
+            "tokens": {"access_token": "x", "refresh_token": "r"}, "tokensExpireAt": 1
+        });
+        assert_eq!(token_status(&refreshable), McpAuthStatus::SignedIn);
         let live = serde_json::json!({
-            "tokens": { "accessToken": "x", "expiresAt": 4102444800i64 }
-        })
-        .to_string();
+            "tokens": {"access_token": "x"}, "tokensExpireAt": 4102444800000i64
+        });
         assert_eq!(token_status(&live), McpAuthStatus::SignedIn);
+    }
+
+    fn paths_with_builtin(dir: &Path) -> PiRuntimePaths {
+        let paths = PiRuntimePaths::for_data_dir(dir);
+        let mcp = paths.package_dir.join("dist/extensions/mcp");
+        std::fs::create_dir_all(&mcp).unwrap();
+        std::fs::write(mcp.join("index.js"), "").unwrap();
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        paths
+    }
+
+    #[test]
+    fn availability_needs_builtin_mcp_without_the_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = PiRuntimePaths::for_data_dir(dir.path());
+        assert!(!list(&bare).available);
+        let paths = paths_with_builtin(dir.path());
+        assert!(list(&paths).available);
+        std::fs::write(
+            paths.agent_dir.join("settings.json"),
+            r#"{"packages":["npm:pi-mcp-adapter"]}"#,
+        )
+        .unwrap();
+        let snapshot = list(&paths);
+        assert!(!snapshot.available);
+        assert!(snapshot.unavailable.unwrap().contains("pi-mcp-adapter"));
+        assert_eq!(
+            serde_json::to_value(list(&bare)).unwrap()["adapterInstalled"],
+            false
+        );
+    }
+
+    #[test]
+    fn sign_in_status_and_sign_out_use_pi_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_builtin(dir.path());
+        std::fs::write(
+            mcp_path(&paths.agent_dir),
+            r#"{"mcpServers":{"docs-a":{"url":"https://example.com/mcp"},"docs-b":{"url":"https://example.com/mcp","enabled":false}}}"#,
+        )
+        .unwrap();
+        let signed_in =
+            serde_json::json!({"tokens": {"access_token": "fixture-secret", "refresh_token": "r"}});
+        std::fs::write(
+            credentials_path(&paths.agent_dir),
+            serde_json::to_vec(&serde_json::json!({
+                "mcp__docs_a|https://example.com/mcp": signed_in,
+                "mcp__docs_b|https://example.com/mcp": signed_in,
+                "mcp__other|https://other.example/": signed_in,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = list(&paths);
+        assert!(
+            snapshot
+                .servers
+                .iter()
+                .all(|s| s.auth_status == McpAuthStatus::SignedIn)
+        );
+        assert!(!snapshot.servers[1].enabled);
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("fixture-secret")
+        );
+        let snapshot = logout(&paths, "docs-a").unwrap();
+        assert_eq!(snapshot.servers[0].auth_status, McpAuthStatus::NeedsAuth);
+        assert_eq!(snapshot.servers[1].auth_status, McpAuthStatus::SignedIn);
+        let stored = read_credentials(&paths.agent_dir);
+        assert_eq!(stored.len(), 2);
+        assert!(stored.contains_key("mcp__other|https://other.example/"));
+        assert!(
+            !credentials_path(&paths.agent_dir)
+                .with_extension("json.lock")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn sign_out_waits_for_and_takes_over_pi_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_builtin(dir.path());
+        std::fs::write(
+            mcp_path(&paths.agent_dir),
+            r#"{"mcpServers":{"docs":{"url":"https://example.com/mcp"}}}"#,
+        )
+        .unwrap();
+        let path = credentials_path(&paths.agent_dir);
+        std::fs::write(&path, r#"{"mcp__docs|https://example.com/mcp":{}}"#).unwrap();
+        let lock = PathBuf::from(format!("{}.lock", path.display()));
+        std::fs::create_dir(&lock).unwrap();
+        assert!(logout(&paths, "docs").unwrap_err().contains("busy"));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::open(&lock)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        logout(&paths, "docs").unwrap();
+        assert!(read_credentials(&paths.agent_dir).is_empty());
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn enabling_writes_pi_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_builtin(dir.path());
+        std::fs::write(
+            mcp_path(&paths.agent_dir),
+            r#"{"mcpServers":{"docs":{"url":"https://example.com/mcp","disabled":true}}}"#,
+        )
+        .unwrap();
+        assert!(!list(&paths).servers[0].enabled);
+        let enable = |enabled| SetMcpServerEnabled {
+            name: "docs".into(),
+            enabled,
+        };
+        assert!(set_enabled(&paths, enable(true)).unwrap().servers[0].enabled);
+        assert_eq!(
+            read_mcp_root(&paths.agent_dir)["mcpServers"]["docs"],
+            serde_json::json!({"url": "https://example.com/mcp"})
+        );
+        assert!(!set_enabled(&paths, enable(false)).unwrap().servers[0].enabled);
+        assert_eq!(
+            read_mcp_root(&paths.agent_dir)["mcpServers"]["docs"]["enabled"],
+            false
+        );
     }
 }

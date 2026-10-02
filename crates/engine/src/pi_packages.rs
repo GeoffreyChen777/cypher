@@ -102,7 +102,6 @@ const RECOMMENDED: &[(&str, &str)] = &[
         "npm:gpt-fast-pi",
         "Provider-agnostic GPT Fast mode controls.",
     ),
-    ("npm:pi-mcp-adapter", "Use MCP servers from Pi."),
     (
         "npm:pi-permission-control",
         "Permission prompts and controls.",

@@ -192,6 +192,10 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
+# Settings → MCP signs in through Pi's built-in `/mcp login`: the RPC dialog
+# shapes and the credential key the engine reads, against a local OAuth fixture.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/mcp-login.test.mjs"
 
 # The archive has one root directory; the installer validates every listed
 # path, then extracts with --strip-components=1.

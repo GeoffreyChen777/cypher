@@ -64,17 +64,23 @@ async fn mcp_login_forwards_remote_callback_to_the_original_dialog() {
             )
             .await
     });
+    let (_, link) = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(link["method"], "notify");
+    assert!(
+        link["message"]
+            .as_str()
+            .unwrap()
+            .contains("https://auth.example/authorize")
+    );
     let (id, payload) = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(id, "oauth-dialog");
-    assert!(
-        payload["title"]
-            .as_str()
-            .unwrap()
-            .contains("https://auth.example/authorize")
-    );
+    assert_eq!(payload["method"], "input");
     assert!(
         !work.is_finished(),
         "must wait for the browser callback, not cancel input"

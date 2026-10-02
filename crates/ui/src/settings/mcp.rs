@@ -206,7 +206,7 @@ impl McpPage {
                 if removed {
                     page.delete = None;
                     page.notice = Some(format!(
-                        "Deleted from {} and removed its Cypher OAuth login data. Server-side authorization was not revoked.",
+                        "Deleted from {} and removed its stored sign-in. Server-side authorization was not revoked.",
                         ticket.label
                     ));
                 }
@@ -274,7 +274,7 @@ impl McpPage {
                 "Delete “{}” from “{}”?", confirmation.name, confirmation.ticket.label
             )))
             .child(widgets::page_subtitle(theme,
-                "This removes the server configuration, including embedded tokens, and its Cypher-only OAuth login data on this device. Other servers and system Pi credentials are kept. It does not revoke authorization on the server. Active runs must finish first."))
+                "This removes the server configuration, including embedded tokens, and its stored OAuth sign-in on this device. Other servers and system Pi credentials are kept. It does not revoke authorization on the server. Active runs must finish first."))
             .child(div().flex().justify_end().gap(px(8.0))
                 .child(widgets::ghost_action(theme).id("mcp-delete-cancel")
                     .debug_selector(|| "mcp-delete-cancel".into())
@@ -300,7 +300,9 @@ impl McpPage {
         }
         match server.auth_status {
             McpAuthStatus::SignedIn => widgets::badge_active(theme, "signed in"),
-            McpAuthStatus::NeedsAuth => widgets::badge(theme, "needs auth"),
+            // Pi signs in only when the server asks for it, which a listing
+            // cannot tell.
+            McpAuthStatus::NeedsAuth => widgets::badge(theme, "not signed in"),
             McpAuthStatus::Expired => widgets::badge(theme, "expired"),
             McpAuthStatus::NotRequired => widgets::badge(theme, "configured"),
         }
@@ -310,6 +312,7 @@ impl McpPage {
         &mut self,
         theme: &Theme,
         server: McpServer,
+        available: bool,
         index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -358,13 +361,15 @@ impl McpPage {
             );
 
         let needs_auth = server.enabled
+            && available
             && matches!(server.auth_kind, McpAuthKind::Oauth)
             && matches!(
                 server.auth_status,
                 McpAuthStatus::NeedsAuth | McpAuthStatus::Expired
             );
-        let signed_in =
-            server.auth_kind == McpAuthKind::Oauth && server.auth_status == McpAuthStatus::SignedIn;
+        let signed_in = available
+            && server.auth_kind == McpAuthKind::Oauth
+            && server.auth_status == McpAuthStatus::SignedIn;
 
         if needs_auth {
             let label = if busy { "Signing in…" } else { "Sign in" };
@@ -475,12 +480,16 @@ impl Render for McpPage {
             }
             Loadable::Ready(snapshot) => {
                 let mut content = div().flex().flex_col();
-                if !snapshot.adapter_installed {
+                if !snapshot.available {
                     content = content.child(widgets::warning_strip(
                         &theme,
-                        "pi-mcp-adapter is not installed. Sign-in needs it — install it in Agents.",
+                        snapshot.unavailable.clone().unwrap_or_else(|| {
+                            "Update Cypher and the Pi Runtime on this device to manage MCP servers."
+                                .into()
+                        }),
                     ));
                 }
+                let available = snapshot.available;
                 content
                     .child(
                         widgets::section_card(&theme).children(
@@ -488,7 +497,9 @@ impl Render for McpPage {
                                 .servers
                                 .into_iter()
                                 .enumerate()
-                                .map(|(index, server)| self.server_row(&theme, server, index, cx)),
+                                .map(|(index, server)| {
+                                    self.server_row(&theme, server, available, index, cx)
+                                }),
                         ),
                     )
                     .into_any_element()

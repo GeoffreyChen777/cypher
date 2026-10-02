@@ -15,7 +15,6 @@
     "pi-ask-user": "0.15.1",
     "pi-claude-bridge": "git+https://github.com/elidickinson/pi-claude-bridge.git#cd64b9fd9ec0e64ae973f2c0249397893f06b1ff",
     "pi-codex-tools": "0.3.0",
-    "pi-mcp-adapter": "2.36.0",
     "pi-permission-control": "0.2.0",
     "pi-provider-newapi": "0.5.0",
     "pi-web-search": "1.6.0",
