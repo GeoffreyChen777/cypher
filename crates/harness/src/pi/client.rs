@@ -7,7 +7,8 @@
 //! separator. It is NOT JSON-RPC 2.0 (the `jsonrpc.rs` client is not used).
 //!
 //! Inbound lines are three kinds, discriminated by `type`:
-//! - `"response"` — command result, resolved against the pending map by id;
+//! - `"response"` — command result, resolved against the pending map by id
+//!   (or, for [`PiClient::send_ordered`], forwarded in stdout order);
 //! - `"extension_ui_request"` — extension UI dialog / fire-and-forget;
 //! - anything else — an agent event (streamed in stdout order).
 //!
@@ -37,14 +38,29 @@ pub(crate) enum Incoming {
         method: String,
         payload: Value,
     },
+    /// The response to a [`PiClient::send_ordered`] command, in stdout order:
+    /// every event pi wrote before it has already been delivered, and none
+    /// it wrote after. `Err` carries pi's error text.
+    Response {
+        id: String,
+        result: Result<Value, String>,
+    },
     /// stdout EOF / read error: the child exited. All pending requests fail.
     Eof,
+}
+
+/// Who receives a command's response.
+enum Waiter {
+    /// [`PiClient::request`]: resolved directly, out of band.
+    Reply(oneshot::Sender<Result<Value, String>>),
+    /// [`PiClient::send_ordered`]: forwarded as [`Incoming::Response`].
+    Ordered,
 }
 
 /// Awaiting requests by id. `None` once the reader has stopped: every waiter
 /// was failed then, and a request registered afterwards would never resolve,
 /// so it is refused instead.
-type Pending = Arc<Mutex<Option<HashMap<String, oneshot::Sender<Result<Value, String>>>>>>;
+type Pending = Arc<Mutex<Option<HashMap<String, Waiter>>>>;
 
 #[derive(Clone)]
 pub(crate) struct PiClient {
@@ -78,13 +94,43 @@ impl PiClient {
     pub async fn request(
         &self,
         command: &str,
-        mut params: Map<String, Value>,
+        params: Map<String, Value>,
     ) -> Result<Value, HarnessError> {
-        let id = format!("z{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         let (tx, rx) = oneshot::channel();
+        self.dispatch(command, params, Waiter::Reply(tx))?;
+        match rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(message)) => Err(HarnessError::Protocol(format!("{command}: {message}"))),
+            // Sender dropped: the reader hit EOF and failed all pending.
+            Err(_) => Err(HarnessError::Protocol(format!(
+                "{command}: pi exited before responding"
+            ))),
+        }
+    }
+
+    /// Send a command whose response arrives on the incoming channel as
+    /// [`Incoming::Response`] (matched by the returned id), in stdout order
+    /// with the events around it. A response resolved out of band can be
+    /// observed before events pi wrote ahead of it; this one cannot.
+    pub fn send_ordered(
+        &self,
+        command: &str,
+        params: Map<String, Value>,
+    ) -> Result<String, HarnessError> {
+        self.dispatch(command, params, Waiter::Ordered)
+    }
+
+    /// Register the waiter under a fresh id, then write the command.
+    fn dispatch(
+        &self,
+        command: &str,
+        mut params: Map<String, Value>,
+        waiter: Waiter,
+    ) -> Result<String, HarnessError> {
+        let id = format!("z{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         match self.pending.lock().expect("pending lock").as_mut() {
             Some(waiters) => {
-                waiters.insert(id.clone(), tx);
+                waiters.insert(id.clone(), waiter);
             }
             None => {
                 return Err(HarnessError::Protocol(format!(
@@ -103,14 +149,7 @@ impl PiClient {
                 "{command}: pi stdin closed"
             )));
         }
-        match rx.await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(message)) => Err(HarnessError::Protocol(format!("{command}: {message}"))),
-            // Sender dropped: the reader hit EOF and failed all pending.
-            Err(_) => Err(HarnessError::Protocol(format!(
-                "{command}: pi exited before responding"
-            ))),
-        }
+        Ok(id)
     }
 
     /// Fire a command without awaiting its response.
@@ -201,12 +240,12 @@ async fn read_lines(stdout: ChildStdout, pending: &Pending, tx: &mpsc::Sender<In
                 let Some(id) = msg.get("id").and_then(Value::as_str).map(str::to_owned) else {
                     continue;
                 };
-                let sender = pending
+                let waiter = pending
                     .lock()
                     .expect("pending lock")
                     .as_mut()
                     .and_then(|waiters| waiters.remove(&id));
-                let Some(sender) = sender else {
+                let Some(waiter) = waiter else {
                     // A fire-and-forget command's response: nobody awaits it.
                     continue;
                 };
@@ -219,7 +258,20 @@ async fn read_lines(stdout: ChildStdout, pending: &Pending, tx: &mpsc::Sender<In
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("pi command failed: {msg}")))
                 };
-                let _ = sender.send(outcome);
+                match waiter {
+                    Waiter::Reply(sender) => {
+                        let _ = sender.send(outcome);
+                    }
+                    Waiter::Ordered => {
+                        let response = Incoming::Response {
+                            id,
+                            result: outcome,
+                        };
+                        if tx.send(response).await.is_err() {
+                            return false;
+                        }
+                    }
+                }
             }
             Some("extension_ui_request") => {
                 let id = msg
@@ -289,6 +341,38 @@ mod tests {
         let (_child, client, mut incoming) = spawn("exec 1>&-; sleep 5");
         assert!(matches!(incoming.recv().await, Some(Incoming::Eof)));
         assert!(request_settles(&client).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ordered_response_keeps_its_place_among_events() {
+        // The response is written between two events: it must surface on the
+        // incoming channel between them, never ahead of the first.
+        let (_child, client, mut incoming) = spawn(
+            r#"read -r line; id=$(printf '%s' "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+               printf '{"type":"agent_settled"}\n'
+               printf '{"id":"%s","type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$id"
+               printf '{"type":"agent_start"}\n'
+               sleep 5"#,
+        );
+        let id = client
+            .send_ordered("prompt", Map::new())
+            .expect("command sent");
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let next = tokio::time::timeout(Duration::from_secs(5), incoming.recv())
+                .await
+                .expect("line arrives");
+            seen.push(match next {
+                Some(Incoming::Event(ev)) => ev["type"].as_str().unwrap_or_default().to_owned(),
+                Some(Incoming::Response { id: got, result }) => {
+                    assert_eq!(got, id);
+                    assert_eq!(result.expect("success")["disposition"], "started");
+                    "response".to_owned()
+                }
+                _ => panic!("unexpected incoming item"),
+            });
+        }
+        assert_eq!(seen, ["agent_settled", "response", "agent_start"]);
     }
 
     #[tokio::test]

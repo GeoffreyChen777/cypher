@@ -16,12 +16,21 @@
 //! - each assistant `message_end` emits `AssistantMessageCompleted` (a
 //!   journal boundary; the doc fold treats it as a no-op, exactly like the
 //!   ACP turn boundary markers);
-//! - a steer accepted by pi is delivered after the current assistant
-//!   message's tool calls (pi-native mid-run steer); the NEXT assistant
-//!   `message_start` emits `Steered { prev, next }` BEFORE the steered
-//!   content streams — the same point the ACP harness emits it (the engine
-//!   splits the doc entry there; a boundary after Done would re-arm the
-//!   parked session with no turn behind it).
+//! - a mailbox message arriving mid-turn rides RPC `prompt` with
+//!   `streamingBehavior:"steer"`, and pi's response says what it did
+//!   (`disposition`, pi ≥ 0.99): `queued` — delivered after the current
+//!   assistant message's tool calls, and the NEXT assistant `message_start`
+//!   emits `Steered { prev, next }` BEFORE the steered content streams (the
+//!   point the ACP harness emits it; the engine splits the doc entry there);
+//!   `handled` — an extension consumed it, and its boundary still fires at
+//!   the next assistant message or before the turn's Done (the engine retires
+//!   one routed message per boundary); `started` — pi had settled first, so
+//!   the message opened a fresh run and the next turn. The response is read
+//!   in stdout order with the events, so a settle that preceded it on the
+//!   wire is always handled first. Older runtimes report no disposition: they
+//!   get a raw `steer`, and a steer the turn settled ahead of is cleared from
+//!   pi's queue (its next run would deliver it again) and retried as a parked
+//!   prompt.
 //! - a mailbox message arriving while the session is PARKED restarts it via
 //!   RPC `prompt` with `streamingBehavior:"steer"` — atomic across pi's
 //!   REAL state: a truly idle pi starts a fresh turn, a pi still (or newly)
@@ -30,7 +39,9 @@
 //!   `prompt` (pi REJECTS a prompt without `streamingBehavior` while
 //!   streaming — the confirmed parked-session wedge). The `Steered` boundary
 //!   fires BEFORE the routed prompt is dispatched, so pre-response
-//!   notify/dialog output folds into the new turn's segment.
+//!   notify/dialog output folds into the new turn's segment (a boundary after
+//!   Done with no prompt behind it would re-arm the parked session with no
+//!   turn to settle).
 //!
 //! One child per run (persistent across turns within the run, parked between
 //! them while the steering mailbox lives), child-lifecycle hardening
@@ -1268,7 +1279,7 @@ impl PiHarness {
                             _ => {}
                         }
                     }
-                    Some(Incoming::Event(_)) => {}
+                    Some(Incoming::Event(_) | Incoming::Response { .. }) => {}
                     Some(Incoming::Eof) | None => break,
                 },
                 _ = tokio::time::sleep_until(deadline) => {
@@ -1838,21 +1849,108 @@ fn ui_response_payload(method: &str, picked: Option<&str>) -> Value {
     }
 }
 
-/// One steer command as a 'static future (the client clone is moved in so the
-/// future owns its borrow), polled from the main select — awaiting inline
-/// would block draining `incoming` while pi streams. The text rides back out
-/// with the result so a steer the turn settles before delivering can be
-/// retried as an idle prompt (an idle pi only QUEUES steers).
-fn steer_call_future(
-    client: PiClient,
+/// What pi did with an accepted `prompt` / `steer`. pi ≥ 0.99 reports it as
+/// the response's `data.disposition`; older runtimes report nothing, and the
+/// loop falls back to inferring it from its own view of the turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Disposition {
+    /// pi was idle: the message started a fresh run.
+    Started,
+    /// pi was running: the message is queued as a steer and delivered at the
+    /// run's next step (pi re-runs for queued input before it settles).
+    Queued,
+    /// An extension command or input handler consumed it: nothing reaches
+    /// the model for it.
+    Handled,
+}
+
+fn disposition(data: &Value) -> Option<Disposition> {
+    match data.get("disposition")?.as_str()? {
+        "started" => Some(Disposition::Started),
+        "queued" => Some(Disposition::Queued),
+        "handled" => Some(Disposition::Handled),
+        _ => None,
+    }
+}
+
+/// A mailbox message routed into the live turn, awaiting its response —
+/// [`Incoming::Response`] with this id, in order with the event stream.
+struct RoutedSteer {
+    id: String,
     text: String,
-) -> BoxFuture<'static, (String, Result<Value, HarnessError>)> {
-    Box::pin(async move {
-        let mut params = Map::new();
-        params.insert("message".into(), Value::String(text.clone()));
-        let result = client.request("steer", params).await;
-        (text, result)
-    })
+}
+
+/// The next turn a parked run opens (the main loop's top branch).
+enum NextTurn {
+    /// A mailbox message to dispatch as a parked `prompt`.
+    Prompt(String),
+    /// A routed message pi already took after the turn it was meant to steer
+    /// had ended: it started a fresh run, or an extension consumed it. The
+    /// turn opens with nothing left to dispatch.
+    Accepted,
+}
+
+/// Route a mailbox message into the live turn. A pi that reports
+/// dispositions gets `prompt` with `streamingBehavior:"steer"` — atomic
+/// across its real state, and the response says which way it went. Older
+/// runtimes get a raw `steer`, whose fate the loop infers from the turn
+/// state. Either response arrives in stdout order, so one that followed a
+/// settle is always seen after it.
+fn route_steer(client: &PiClient, text: String, atomic: bool) -> Option<RoutedSteer> {
+    let mut params = Map::new();
+    params.insert("message".into(), Value::String(text.clone()));
+    let command = if atomic {
+        params.insert("streamingBehavior".into(), Value::String("steer".into()));
+        "prompt"
+    } else {
+        "steer"
+    };
+    match client.send_ordered(command, params) {
+        Ok(id) => Some(RoutedSteer { id, text }),
+        Err(e) => {
+            // The child is gone; its EOF ends the run.
+            tracing::debug!(target: "cypher_harness::pi", "steer not sent (dropped): {e}");
+            None
+        }
+    }
+}
+
+/// One `Steered` boundary per routed message. The engine retires one
+/// accepted mailbox message per boundary, so a message an extension consumed
+/// must confirm too — otherwise the run's exit re-dispatches (re-runs) it.
+async fn emit_boundaries(
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    assistant_message_id: &mut String,
+    count: usize,
+) -> bool {
+    for _ in 0..count {
+        let (prev, next) = rotate(assistant_message_id);
+        let boundary = AgentEvent::Steered {
+            assistant_message_id: Some(prev),
+            next_assistant_message_id: Some(next),
+        };
+        if !send(event_tx, boundary).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// Steers pi accepted but never delivered before the turn closed sit in its
+/// queue, and pi drains that queue at the start of its next run — a retry
+/// alone would deliver each one twice. Clear the queue first (pi applies
+/// commands in order, so the clear lands before the retry), then retry each
+/// as a parked prompt.
+fn requeue_stranded(
+    client: &PiClient,
+    stranded: &mut VecDeque<String>,
+    backlog: &mut VecDeque<NextTurn>,
+) {
+    if stranded.is_empty() {
+        return;
+    }
+    client.send("clear_queue", Map::new());
+    backlog.extend(stranded.drain(..).map(NextTurn::Prompt));
 }
 
 /// Owns the child prompt temp file for the run's lifetime: removing it on
@@ -2188,15 +2286,23 @@ async fn run_session(session: Session) {
     let mut agent_started = false;
     let mut in_turn = true;
     let mut steering_open = true;
-    // Steers pi has ACCEPTED but not yet delivered (one per assistant
-    // message; pi's default steering mode is one-at-a-time). Texts are kept
-    // so a steer the turn settles before delivering can be retried as an idle
-    // prompt (an idle pi only QUEUES steers).
+    // Steers pi has QUEUED but not yet delivered (one per assistant message;
+    // pi's default steering mode is one-at-a-time). Texts are kept so a steer
+    // the turn settles before delivering can be retried as an idle prompt
+    // (an idle pi only QUEUES steers).
     let mut steers_queued: VecDeque<String> = VecDeque::new();
-    // In-flight steer command (polled so the loop keeps draining `incoming`),
-    // plus followers awaiting their turn.
-    let mut steer_call: Option<BoxFuture<'static, (String, Result<Value, HarnessError>)>> = None;
+    // Routed messages an extension consumed mid-turn (`handled`). Each still
+    // owes the engine its Steered boundary: at the next assistant message (the
+    // next step's output belongs below the message), or before the turn's Done.
+    let mut handled_steers: usize = 0;
+    // The in-flight routed steer (its response arrives in order on
+    // `incoming`), plus followers awaiting their turn.
+    let mut steer_call: Option<RoutedSteer> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
+    // Whether this pi reports dispositions (≥ 0.99), learned from the first
+    // prompt's response — which always resolves before any mid-turn routing.
+    // Mid-turn messages then ride an atomic `prompt` instead of a raw `steer`.
+    let mut atomic_steer = false;
     // In-flight `prompt` RPC: the first turn starts here, and parked-turn
     // restarts reuse the same slot. Serialized with steer calls (never both
     // in flight); followers queue in `prompt_backlog` until the turn settles.
@@ -2218,8 +2324,9 @@ async fn run_session(session: Session) {
     // The zero-grace shortcut is for extension slash commands only: a plain
     // prompt always starts an agent turn, so it keeps the full grace even if
     // a real dialog fires during its preflight.
+    // Runtimes without dispositions only leave the slash prefix to go on.
     let mut prompt_is_command = request.prompt.trim_start().starts_with('/');
-    let mut prompt_backlog: VecDeque<String> = VecDeque::new();
+    let mut prompt_backlog: VecDeque<NextTurn> = VecDeque::new();
     // Interrupt escalation: abort, then SIGTERM → SIGKILL if the agent
     // doesn't wind down.
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
@@ -2242,12 +2349,14 @@ async fn run_session(session: Session) {
         // strand forever. The Steered boundary fires BEFORE the prompt is
         // dispatched: an extension notify can land before the prompt response
         // and must fold into the new turn's segment. If the boundary cannot
-        // be sent, the run is over — do not dispatch.
+        // be sent, the run is over — do not dispatch. A routed message pi
+        // already took (`NextTurn::Accepted`) opens its turn the same way,
+        // minus the dispatch.
         if !in_turn
             && idle_prompt.is_none()
             && steer_call.is_none()
             && steers_queued.is_empty()
-            && let Some(text) = prompt_backlog.pop_front()
+            && let Some(turn) = prompt_backlog.pop_front()
         {
             let (prev, next) = rotate(&mut assistant_message_id);
             if !send(
@@ -2272,6 +2381,18 @@ async fn run_session(session: Session) {
             progress_last.clear();
             progress_ended.clear();
             throughput.start_turn();
+            had_ui = false;
+            let text = match turn {
+                NextTurn::Prompt(text) => text,
+                NextTurn::Accepted => {
+                    // Already accepted: arm the grace as the prompt arm
+                    // would. A fresh run's first event disarms it; a
+                    // consumed message settles through it.
+                    prompt_is_command = false;
+                    no_activity = Box::pin(tokio::time::sleep(no_activity_grace));
+                    continue 'main;
+                }
+            };
             // The no-activity timer is NOT armed here: the previous turn's
             // sleep may already have elapsed and must not fire during this
             // prompt's preflight. The `idle_prompt.is_none()` guard keeps the
@@ -2280,7 +2401,6 @@ async fn run_session(session: Session) {
             // disarm it via agent_started).
             prompt_is_command = text.trim_start().starts_with('/');
             let client = client.clone();
-            had_ui = false;
             // A parked `/compact` is the built-in too: pi's `prompt` never
             // runs TUI built-ins and would hand the text to the model. The
             // RPC's summary rides back through the prompt slot; the accept
@@ -2310,58 +2430,9 @@ async fn run_session(session: Session) {
         }
 
         tokio::select! {
-            // biased: the steer response must resolve BEFORE the steer-reply
-            // message_start that follows it on the wire (both become ready in
-            // the same select round) — otherwise the boundary is missed and
-            // the steer reply folds into the current segment.
+            // biased: queued output drains before the no-activity grace can
+            // fire (a zero grace still yields to `incoming` first).
             biased;
-            res = async { steer_call.as_mut().expect("guarded by if").await },
-                if steer_call.is_some() =>
-            {
-                let _ = steer_call.take();
-                if !interrupted {
-                    match res {
-                        (text, Ok(_)) => {
-                            if in_turn {
-                                // Accepted during a live turn: pi will deliver
-                                // it as the next assistant message (the
-                                // Steered boundary fires at that message_start).
-                                steers_queued.push_back(text);
-                            } else {
-                                // The turn settled while this steer was in
-                                // flight — an idle pi only queues steers, so
-                                // it can never be delivered. Retry it as an
-                                // idle prompt after the park.
-                                prompt_backlog.push_back(text);
-                            }
-                        }
-                        (_text, Err(e)) => {
-                            tracing::debug!(
-                                target: "cypher_harness::pi",
-                                "steer rejected (dropped): {e}"
-                            );
-                        }
-                    }
-                }
-                if !in_turn {
-                    // Parked: queued followers can't be delivered as steers —
-                    // they restart the next turn via prompt instead.
-                    while let Some(text) = steer_backlog.pop_front() {
-                        prompt_backlog.push_back(text);
-                    }
-                } else if let Some(text) = steer_backlog.pop_front() {
-                    steer_call = Some(steer_call_future(client.clone(), text));
-                }
-                if !steering_open
-                    && !in_turn
-                    && steers_queued.is_empty()
-                    && steer_call.is_none()
-                    && prompt_backlog.is_empty()
-                {
-                    break 'main;
-                }
-            },
-
             res = async { idle_prompt.as_mut().expect("guarded by if").await },
                 if idle_prompt.is_some() =>
             {
@@ -2383,7 +2454,9 @@ async fn run_session(session: Session) {
                         }
                         no_activity = Box::pin(tokio::time::sleep(Duration::ZERO));
                     }
-                    Ok(_) => {
+                    Ok(data) => {
+                        let disposition = disposition(&data);
+                        atomic_steer |= disposition.is_some();
                         // Arm the no-activity grace NOW that the prompt is
                         // accepted. Lifecycle events that landed during the
                         // preflight already set agent_started (disarming the
@@ -2391,12 +2464,17 @@ async fn run_session(session: Session) {
                         // a fresh grace window from here — never a stale
                         // timer from the previous turn.
                         // Extension commands ACK only after the handler
-                        // returns. If a slash command already showed a
-                        // dialog or notified and no agent started, skip the
-                        // 2s wait (close-picker spin). Zero-sleep still
-                        // yields to `incoming` first (biased select) so a
+                        // returns. If a command already showed a dialog or
+                        // notified and no agent started, skip the 2s wait
+                        // (close-picker spin). Zero-sleep still yields to
+                        // `incoming` first (biased select) so a
                         // ui-select-then-ACK-then-text burst is not cut off.
-                        let grace = if had_ui && prompt_is_command && !agent_started {
+                        // pi names a consumed prompt `handled`; a `started`
+                        // one (a skill or prompt template, despite its slash)
+                        // always gets the full grace.
+                        let is_command = disposition
+                            .map_or(prompt_is_command, |d| d == Disposition::Handled);
+                        let grace = if had_ui && is_command && !agent_started {
                             Duration::ZERO
                         } else {
                             no_activity_grace
@@ -2487,27 +2565,24 @@ async fn run_session(session: Session) {
                             if message_is_assistant(ev.get("message")) {
                                 last_assistant_text.clear();
                                 throughput.start_message();
-                                // The NEXT assistant message after an accepted
+                                // The NEXT assistant message after a queued
                                 // steer is the steer's reply: split the doc entry
                                 // here (before its content streams), exactly like
                                 // the ACP harness emits Steered at an injection.
-                                if let Some(_text) = steers_queued.pop_front() {
+                                // Messages an extension consumed split here too.
+                                let delivered = steers_queued.pop_front().is_some();
+                                if delivered {
                                     // A steer delivery opens a turn: even if
                                     // an agent_settled raced ahead of it, the
                                     // steer reply's own settle must Done.
                                     in_turn = true;
-                                    let (prev, next) = rotate(&mut assistant_message_id);
-                                    if !send(
-                                        &event_tx,
-                                        AgentEvent::Steered {
-                                            assistant_message_id: Some(prev),
-                                            next_assistant_message_id: Some(next),
-                                        },
-                                    )
+                                }
+                                let boundaries =
+                                    std::mem::take(&mut handled_steers) + usize::from(delivered);
+                                if !emit_boundaries(&event_tx, &mut assistant_message_id, boundaries)
                                     .await
-                                    {
-                                        break 'main;
-                                    }
+                                {
+                                    break 'main;
                                 }
                             }
                         }
@@ -2645,14 +2720,23 @@ async fn run_session(session: Session) {
                             // supersedes any per-message one that raced a
                             // session write.
                             refresh_context_usage(&client, &event_tx, None);
-                            // Steers pi accepted but never delivered (the
-                            // turn settled before the steer reply streamed)
-                            // are stranded — an idle pi only QUEUES steers.
-                            // Retry them as idle prompts after the park,
-                            // never dropped.
-                            while let Some(text) = steers_queued.pop_front() {
-                                prompt_backlog.push_back(text);
+                            // Messages an extension consumed confirm before
+                            // the Done (the last segment then ends empty).
+                            if !emit_boundaries(
+                                &event_tx,
+                                &mut assistant_message_id,
+                                std::mem::take(&mut handled_steers),
+                            )
+                            .await
+                            {
+                                break 'main;
                             }
+                            // Steers pi queued but never delivered (the turn
+                            // settled before the steer reply streamed) are
+                            // stranded — an idle pi only QUEUES steers. Retry
+                            // them as idle prompts after the park, never
+                            // dropped.
+                            requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
                             done_sent = true;
                             let (status, error) = if interrupted {
                                 (DoneStatus::Interrupted, None)
@@ -2721,6 +2805,96 @@ async fn run_session(session: Session) {
                         // summarization_*/bash_execution_update: nothing cypher
                         // renders — ignored.
                         _ => {}
+                    }
+                }
+                // A routed steer's response, in order with the events: any
+                // settle pi wrote before it has already been handled.
+                Some(Incoming::Response { id, result }) => {
+                    let Some(call) = steer_call.take_if(|call| call.id == id) else {
+                        continue;
+                    };
+                    if !interrupted {
+                        match result.map(|data| disposition(&data)) {
+                            // pi was running: delivered at its next step,
+                            // where the Steered boundary fires.
+                            Ok(Some(Disposition::Queued)) => steers_queued.push_back(call.text),
+                            Ok(Some(Disposition::Handled)) if in_turn => handled_steers += 1,
+                            // pi was idle — the turn this message meant to
+                            // steer had ended — so it started a fresh run, or
+                            // an extension took it. Either way it opens the
+                            // next turn; nothing is retried.
+                            Ok(Some(Disposition::Started | Disposition::Handled)) => {
+                                if in_turn {
+                                    // pi is idle, yet the turn is open: only an
+                                    // inert one (command output, no agent run)
+                                    // — any run's settle would have preceded
+                                    // this response. Close it as its grace would.
+                                    if !emit_boundaries(
+                                        &event_tx,
+                                        &mut assistant_message_id,
+                                        std::mem::take(&mut handled_steers),
+                                    )
+                                    .await
+                                    {
+                                        break 'main;
+                                    }
+                                    requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
+                                    in_turn = false;
+                                    done_sent = true;
+                                    let result = (!last_assistant_text.is_empty())
+                                        .then(|| last_assistant_text.clone());
+                                    if !send(
+                                        &event_tx,
+                                        AgentEvent::Done {
+                                            status: DoneStatus::Completed,
+                                            result,
+                                            error: None,
+                                            session_id: Some(session_file.clone()),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        break 'main;
+                                    }
+                                }
+                                prompt_backlog.push_front(NextTurn::Accepted);
+                            }
+                            // A runtime without dispositions: a steer accepted
+                            // in a live turn is delivered at its next step...
+                            Ok(None) if in_turn => steers_queued.push_back(call.text),
+                            // ...but one the turn settled ahead of is stranded
+                            // (an idle pi only QUEUES steers).
+                            Ok(None) => requeue_stranded(
+                                &client,
+                                &mut VecDeque::from([call.text]),
+                                &mut prompt_backlog,
+                            ),
+                            Err(e) if in_turn => {
+                                tracing::debug!(
+                                    target: "cypher_harness::pi",
+                                    "steer rejected (dropped): {e}"
+                                );
+                            }
+                            // Rejected once the turn had ended: restart with
+                            // it like any parked message — a real failure
+                            // surfaces there as that turn's error.
+                            Err(_) => prompt_backlog.push_back(NextTurn::Prompt(call.text)),
+                        }
+                    }
+                    if !in_turn {
+                        // Parked: queued followers can't be delivered as
+                        // steers — they restart the next turn via prompt.
+                        prompt_backlog.extend(steer_backlog.drain(..).map(NextTurn::Prompt));
+                    } else if let Some(text) = steer_backlog.pop_front() {
+                        steer_call = route_steer(&client, text, atomic_steer);
+                    }
+                    if !steering_open
+                        && !in_turn
+                        && steers_queued.is_empty()
+                        && steer_call.is_none()
+                        && prompt_backlog.is_empty()
+                    {
+                        break 'main;
                     }
                 }
                 Some(Incoming::UiRequest { id, method, payload }) => {
@@ -2864,7 +3038,7 @@ async fn run_session(session: Session) {
                         // one idle would strand it forever. Followers queue
                         // for after the turn settles (never concurrent with
                         // the in-flight prompt).
-                        prompt_backlog.push_back(msg.prompt);
+                        prompt_backlog.push_back(NextTurn::Prompt(msg.prompt));
                     } else {
                         // Active turn: pi-native mid-run steer — delivered
                         // after the current assistant message's tool calls,
@@ -2872,7 +3046,7 @@ async fn run_session(session: Session) {
                         if steer_call.is_some() {
                             steer_backlog.push_back(msg.prompt);
                         } else {
-                            steer_call = Some(steer_call_future(client.clone(), msg.prompt));
+                            steer_call = route_steer(&client, msg.prompt, atomic_steer);
                         }
                     }
                 }
@@ -2920,6 +3094,19 @@ async fn run_session(session: Session) {
                 // configured default instead of observing the previous turn.
                 in_turn = false;
                 done_sent = true;
+                // The turn's routed messages settle exactly as at
+                // `agent_settled`: consumed ones confirm, and a steer an idle
+                // pi only queued retries after the park.
+                if !emit_boundaries(
+                    &event_tx,
+                    &mut assistant_message_id,
+                    std::mem::take(&mut handled_steers),
+                )
+                .await
+                {
+                    break 'main;
+                }
+                requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
                 let result = (!last_assistant_text.is_empty())
                     .then(|| last_assistant_text.clone());
                 if !send(
