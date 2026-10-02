@@ -270,6 +270,10 @@ actor ChatRoomClient {
         joined = false
     }
 
+    /// Local batches the server hasn't acked yet. The queue is in-memory
+    /// only, so stopping the client now would drop them.
+    var hasPendingPushes: Bool { !pending.isEmpty }
+
     /// Queue one local update batch for push. The batch survives reconnects
     /// until acked — the server dedupes replays by batchId.
     ///

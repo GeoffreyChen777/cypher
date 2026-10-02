@@ -27,6 +27,14 @@ final class AppModel {
     var demo: DemoDataset?
     let notifications = NotificationController()
     private var sessionStores: [String: SessionStore] = [:]
+    /// Chats with a session store, most recently opened first. Only the
+    /// first `liveSessionLimit` keep their rooms; the rest are released.
+    @ObservationIgnored private var recentSessionIds: [String] = []
+    /// Every live store holds a chat room WebSocket, and each (re)connect is a
+    /// billed DO request plus a catch-up read. Warming every chat made each
+    /// foreground a 100+ request reconnect storm; the sidebar needs none of
+    /// it (registry rows carry previews, activity and unread state).
+    static let liveSessionLimit = 8
     private var config: AppConfig?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathKey: String?
@@ -310,6 +318,7 @@ final class AppModel {
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
         sessionStores.removeAll()
+        recentSessionIds.removeAll()
         config = nil
         demo = nil
         Keychain.delete(key: "accessToken")
@@ -514,6 +523,7 @@ final class AppModel {
         guard let workspace else { return "Not connected" }
         let notice = await workspace.deleteChat(chat, hostOnline: deviceOnline(chat.deviceId))
         sessionStores.removeValue(forKey: chat.id)?.stop()
+        recentSessionIds.removeAll { $0 == chat.id }
         return notice
     }
 
@@ -755,6 +765,7 @@ final class AppModel {
     /// views reconnected on open, freezing sidebar rows and Working
     /// indicators against perfectly live transcripts (2026-08-04).
     func foregrounded() {
+        trimSessionStores()
         kickAllRooms()
     }
 
@@ -807,6 +818,17 @@ final class AppModel {
 
     func sessionStore(for chat: Chat) -> SessionStore? {
         if let demo { return demo.sessionStore(for: chat.id) }
+        let store = warmSessionStore(for: chat)
+        if store != nil, recentSessionIds.first != chat.id {
+            recentSessionIds.removeAll { $0 == chat.id }
+            recentSessionIds.insert(chat.id, at: 0)
+        }
+        return store
+    }
+
+    /// The chat's store, created (hydrated from disk, room started) when
+    /// missing. Doesn't touch recency.
+    private func warmSessionStore(for chat: Chat) -> SessionStore? {
         guard let config else { return nil }
         if let existing = sessionStores[chat.id] {
             existing.hostDeviceId = chat.deviceId
@@ -819,21 +841,51 @@ final class AppModel {
         let store = SessionStore(chatId: chat.id, config: config)
         store.hostDeviceId = chat.deviceId
         sessionStores[chat.id] = store
+        if !recentSessionIds.contains(chat.id) { recentSessionIds.append(chat.id) }
         store.start()
         store.updateRoomGen(chat.roomGen)
         return store
     }
 
     func releaseSessionStore(chatId: String) {
-        // Preloaded stores stay warm — nothing to evict on navigation.
+        trimSessionStores()
     }
 
-    /// Warm every non-archived session: stores hydrate from disk instantly
-    /// and keep their rooms syncing, so opening a session never shows a
-    /// loading state.
+    /// Warm the most recently active sessions, up to the live limit: stores
+    /// hydrate from disk instantly and keep their rooms syncing, so opening
+    /// one never shows a loading state. Any other chat hydrates from its disk
+    /// snapshot on open and catches up over one connection.
     func preloadSessions() {
-        for chat in overviewChats + projectlessChats + quickChats {
-            _ = sessionStore(for: chat)
+        let all = overviewChats + projectlessChats + quickChats
+        if let demo {
+            all.forEach { _ = demo.sessionStore(for: $0.id) }  // offline, no rooms
+            return
+        }
+        let active = all
+            .sorted { ($0.lastMessageAt ?? $0.createdAt) > ($1.lastMessageAt ?? $1.createdAt) }
+        for chat in active where sessionStores.count < Self.liveSessionLimit {
+            _ = warmSessionStore(for: chat)
+        }
+    }
+
+    /// Stop and drop stores beyond the live limit. A store whose local writes
+    /// haven't reached the room yet stays until a later trim — its push queue
+    /// is in memory only.
+    private func trimSessionStores() {
+        for id in recentSessionIds.dropFirst(Self.liveSessionLimit) {
+            guard let store = sessionStores[id] else {
+                recentSessionIds.removeAll { $0 == id }
+                continue
+            }
+            Task { @MainActor [weak self] in
+                guard await !store.hasUnpushedUpdates(), let self,
+                      self.sessionStores[id] === store,
+                      let rank = self.recentSessionIds.firstIndex(of: id),
+                      rank >= Self.liveSessionLimit else { return }
+                self.sessionStores.removeValue(forKey: id)
+                self.recentSessionIds.remove(at: rank)
+                store.stop()
+            }
         }
     }
 }

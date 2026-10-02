@@ -311,6 +311,15 @@ final class SessionStore {
         Task { await chatRoom.kick() }
     }
 
+    /// Whether local commits are still waiting on the room (unacked pushes or
+    /// unmaterialized sends) — stopping now would strand them, since the push
+    /// queue doesn't survive the client.
+    func hasUnpushedUpdates() async -> Bool {
+        if !pendingSends.isEmpty { return true }
+        guard let chatRoom else { return false }
+        return await chatRoom.hasPendingPushes
+    }
+
     func stop() {
         subscriptions.removeAll()
         saver?.flush()
