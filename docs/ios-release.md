@@ -30,6 +30,17 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (20), 2026-10-02
+
+- Covers the one iOS commit since build 19: `3830a0f` (live chat rooms only
+  for the eight most recently opened chats; the rest hydrate from disk on
+  open, so foregrounding no longer reconnects every chat).
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  `CODE_SIGNING_ALLOWED=NO`; `release.py ios-context` accepts the tag.
+- Upload is left to `.github/workflows/ios.yml` via the
+  `cypher-ios-v0.2.0-b20` tag. Export compliance, tester groups, public links
+  and review submission remain separate explicit actions.
+
 ## Release: 0.2.0 (19), 2026-09-26
 
 - Covers the iOS commits since build 18: `6af3ef7` (faded edges on the
