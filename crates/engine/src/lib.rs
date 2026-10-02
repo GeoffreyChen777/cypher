@@ -50,9 +50,9 @@ pub mod workspace_host;
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{
-    CheckoutDiffSync, DiffFileTextPair, DiffSidecar, DiffSnapshot, TurnSnapshot,
-    capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff, merge_base,
-    read_diff_file_text, snapshot_tree, working_diff_base,
+    CheckoutDiffSync, DiffFileTextPair, DiffSnapshot, TurnSnapshot, capture_commit_diff,
+    capture_diff, capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text,
+    snapshot_tree, working_diff_base,
 };
 pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig, attachment_refs_trailer};
 pub use instance_lock::InstanceLock;
@@ -296,7 +296,7 @@ impl EngineCore {
                 platform: std::env::consts::OS.to_string(),
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
-                edge: edge.clone(),
+                edge,
                 allow_device_rejoin: crate::auth::consume_sync_rejoin(data_dir),
             },
         )?;
@@ -360,7 +360,7 @@ impl EngineCore {
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
                 .with_settings(title_settings.clone()),
         );
-        let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
+        let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {

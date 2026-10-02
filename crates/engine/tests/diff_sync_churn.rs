@@ -140,7 +140,6 @@ async fn chat_flap_keeps_entry_until_absence_is_sustained() {
         core.repos.clone(),
         core.workspace.clone(),
         &core.device_id,
-        None,
         Duration::from_millis(250),
     );
 

@@ -94,10 +94,18 @@ const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// an org's long-offline devices are polled forever at exactly this interval,
 /// once per running engine, and that was the account's second largest source
 /// of Durable Object requests. A returning device does not wait it out — its
-/// presence beat clears the backoff the moment it arrives, as do a registry
-/// reconnect, a foreground retry, and a system wake — so the cap only bounds
-/// the FALLBACK path, for the case where presence itself is unavailable.
+/// presence beat clears the backoff the moment it arrives, and a registry
+/// reconnect, a foreground retry, or a system wake re-probes at once — so the
+/// cap only bounds the FALLBACK path, for the case where presence itself is
+/// unavailable.
 const RELAY_PROBE_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1_800);
+
+/// Minimum spacing between honored probe resets (foreground retry, system
+/// wake, registry reconnect). Window activation alone fires a reset many
+/// times an hour; each one used to clear every backoff, re-probing all stale
+/// peers on the spot and restarting their ladders at 30s — which kept two
+/// device rooms at ~900 `/status` requests a day each (2026-10 audit).
+const RELAY_PROBE_RESET_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ceiling for re-verifying a device that keeps answering `hostConnected=true`.
 /// Lower than the offline cap: a live device is worth checking on more often
@@ -145,7 +153,7 @@ impl RelayProbeRetry {
     /// Backing off is safe because this is only ever the FALLBACK path: when
     /// presence works, a real beat clears the entry the moment it arrives and
     /// nothing is probed at all. A registry reconnect, foreground retry and
-    /// system wake clear it too. The cap bounds only how long a badge may keep
+    /// system wake re-probe it early (rate-limited). The cap bounds only how long a badge may keep
     /// showing "online" for a device that went away while its presence channel
     /// was already broken.
     fn alive(previous: Option<&Self>, now: tokio::time::Instant, stamped: i64) -> Self {
@@ -1836,8 +1844,11 @@ fn merge_sessions(device_id: &str, rows: &[Session], local: &[Session]) -> Vec<S
 /// false "offline" now requires BOTH independent paths to be down — at which
 /// point the device is, for every purpose the app has, genuinely offline.
 /// Steady state (healthy room, fresh heartbeats) probes nothing. Repeated
-/// negative answers back off up to five minutes (checked on the 30s sweep).
-/// Foreground retry, system wake, and a registry reconnect reset that backoff.
+/// answers back off ([`RELAY_PROBE_BACKOFF_CAP`] offline,
+/// [`RELAY_PROBE_ALIVE_CAP`] alive; checked on the 30s sweep). Foreground
+/// retry, system wake, and a registry reconnect make every peer due at once,
+/// at most every [`RELAY_PROBE_RESET_MIN_INTERVAL`], without restarting its
+/// backoff ladder.
 async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1847,6 +1858,7 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
     let Some(probe_wake) = weak.upgrade().map(|inner| inner.relay_probe_wake.clone()) else {
         return;
     };
+    let mut last_reset: Option<tokio::time::Instant> = None;
     loop {
         let reset = tokio::select! {
             _ = tick.tick() => false,
@@ -1857,10 +1869,14 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
         let Some(edge) = inner.config.edge.clone() else {
             return;
         };
-        if reset {
-            lock(&inner.relay_probe_backoff).clear();
+        let now = tokio::time::Instant::now();
+        if reset
+            && last_reset.is_none_or(|at| now.duration_since(at) >= RELAY_PROBE_RESET_MIN_INTERVAL)
+        {
+            last_reset = Some(now);
+            inner.expedite_relay_probes(now);
         }
-        let stale = inner.relay_probe_candidates(tokio::time::Instant::now());
+        let stale = inner.relay_probe_candidates(now);
         drop(inner);
         if stale.is_empty() {
             continue;
@@ -1964,6 +1980,14 @@ impl WorkspaceHostInner {
                     .then_some(device.id)
             })
             .collect()
+    }
+
+    /// Make every backed-off peer due now, keeping its delay: the next answer
+    /// continues the ladder instead of restarting it at the sweep interval.
+    fn expedite_relay_probes(&self, now: tokio::time::Instant) {
+        for retry in lock(&self.relay_probe_backoff).values_mut() {
+            retry.retry_at = retry.retry_at.min(now);
+        }
     }
 
     fn record_relay_probe(
@@ -2375,6 +2399,34 @@ mod tests {
         host.delete_device("peer").unwrap();
         assert!(host.inner.relay_probe_candidates(now).is_empty());
         assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
+    }
+
+    #[tokio::test]
+    async fn expedited_probe_keeps_the_backoff_ladder() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let host = open_host(dir.path(), "self", false);
+        add_probe_peer(&host);
+        let now = tokio::time::Instant::now();
+        for _ in 0..8 {
+            host.inner.record_relay_probe("peer", Some(false), now);
+        }
+        assert!(host.inner.relay_probe_candidates(now).is_empty());
+
+        // A reset makes the peer due at once...
+        host.inner.expedite_relay_probes(now);
+        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
+        // ...but another "offline" answer resumes at the cap, not at 30s.
+        host.inner.record_relay_probe("peer", Some(false), now);
+        assert!(
+            host.inner
+                .relay_probe_candidates(now + Duration::from_secs(60))
+                .is_empty()
+        );
+        assert_eq!(
+            super::lock(&host.inner.relay_probe_backoff)["peer"].delay,
+            super::RELAY_PROBE_BACKOFF_CAP
+        );
     }
 
     #[tokio::test]
