@@ -1,8 +1,8 @@
 //! Settings → Commands: which Pi slash commands the composer `/` menu shows.
 //!
-//! Cypher is a GUI app, so the menu starts empty: a command appears only once
-//! the user turns it on here, and that includes commands a newly installed
-//! extension adds later. Discovery is the harness's full `ListCommands` list;
+//! Cypher is a GUI app, so the menu starts with only [`SHOWN_BY_DEFAULT`]: any
+//! other command appears once the user turns it on here, and that includes
+//! commands a newly installed extension adds later. Discovery is the harness's full `ListCommands` list;
 //! the page groups it by purpose ([`placement`]) and keeps commands that only
 //! configure what a Settings page already covers behind each group's
 //! collapsed "Advanced" row. The shown names are a device-local preference in
@@ -35,10 +35,18 @@ pub struct ShownSlashCommands {
 
 impl Global for ShownSlashCommands {}
 
-/// Commands the `/` menu shows until the user turns them off. Each is
-/// turned on once per device ([`offer_defaults`]), so turning one off sticks
-/// and a name added here later still reaches existing installs.
-pub const SHOWN_BY_DEFAULT: &[&str] = &["scripts"];
+/// Commands the `/` menu shows until the user turns them off: the ones whose
+/// row says what is in effect (a badge). Each is turned on once per device
+/// ([`offer_defaults`]), so turning one off sticks and a name added here
+/// later still reaches existing installs.
+pub const SHOWN_BY_DEFAULT: &[&str] = &[
+    "compact",
+    "goal",
+    "fast",
+    "scripts",
+    "orchestrate",
+    "subagent-status",
+];
 
 /// Turn on each [`SHOWN_BY_DEFAULT`] command not yet in `offered`, and record
 /// it there.
@@ -616,13 +624,35 @@ mod tests {
     fn defaults_are_turned_on_once() {
         let (mut shown, mut offered) = (names(&["goal"]), Vec::new());
         offer_defaults(&mut shown, &mut offered);
-        assert_eq!(shown, names(&["goal", "scripts"]));
-        assert_eq!(offered, names(&["scripts"]));
+        // Already on: not listed twice.
+        assert_eq!(
+            shown,
+            names(&[
+                "goal",
+                "compact",
+                "fast",
+                "scripts",
+                "orchestrate",
+                "subagent-status"
+            ])
+        );
+        assert_eq!(offered, names(SHOWN_BY_DEFAULT));
         // Turned off afterwards: the next load leaves it off.
         let mut shown = set_visible(&shown, &names(&["scripts"]), false);
         offer_defaults(&mut shown, &mut offered);
-        assert_eq!(shown, names(&["goal"]));
-        assert_eq!(offered, names(&["scripts"]));
+        assert!(!shows(&shown, "scripts"));
+        assert_eq!(offered, names(SHOWN_BY_DEFAULT));
+    }
+
+    #[test]
+    fn later_defaults_reach_existing_installs() {
+        // Offered `scripts` alone, and turned it off since.
+        let (mut shown, mut offered) = (Vec::new(), names(&["scripts"]));
+        offer_defaults(&mut shown, &mut offered);
+        assert_eq!(
+            shown,
+            names(&["compact", "goal", "fast", "orchestrate", "subagent-status"])
+        );
     }
 
     #[test]

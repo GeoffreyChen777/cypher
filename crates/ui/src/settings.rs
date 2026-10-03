@@ -842,8 +842,11 @@ mod tests {
             appearance: crate::appearance::AppearanceMode::Light,
             setup_completed: true,
             pi_runtime_setup_version: 1,
-            shown_slash_commands: vec!["goal".into(), "scripts".into()],
-            offered_slash_commands: vec!["scripts".into()],
+            shown_slash_commands: vec!["goal".into(), "skill:x".into()],
+            offered_slash_commands: commands::SHOWN_BY_DEFAULT
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             sidebar_sort: SidebarSort::Device,
             sidebar_device_filter: Some("dev-1".into()),
             sidebar_sort_reversed: true,
@@ -915,7 +918,7 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, 300.0, "the rest of the file loads");
-        assert_eq!(loaded.shown_slash_commands, ["scripts"]);
+        assert_eq!(loaded.shown_slash_commands, commands::SHOWN_BY_DEFAULT);
         let json = serde_json::to_string(&loaded).unwrap();
         assert!(!json.contains("hiddenSlashCommands"), "{json}");
     }
