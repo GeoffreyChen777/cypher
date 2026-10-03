@@ -31,7 +31,9 @@ class Fixture(unittest.TestCase):
         self.out = self.root / "plan"
         self.v = "1.2.3"
         self.spec = release.ROOT / "dist/pi-runtime/package.json"
-        self.rv = json.loads(self.spec.with_name("release.json").read_text())["version"]
+        definition = json.loads(self.spec.with_name("release.json").read_text())
+        self.rv = definition["version"]
+        self.minimum = definition["minimumCypherVersion"]
         dependencies = json.loads(self.spec.read_text())["dependencies"]
         self.plugins = {k: v for k, v in dependencies.items() if not k.startswith("@earendil-works/")}
         self.inner = {"version": self.rv, "piVersion": dependencies["@earendil-works/pi-coding-agent"],
@@ -44,7 +46,7 @@ class Fixture(unittest.TestCase):
             members[name + "/runtime.json"] = release.json_bytes(self.inner)
             self.tar(name + ".tar.gz", members)
             h, size = release.digest(self.dist / (name + ".tar.gz"))
-            meta = dict(self.inner, minimumCypherVersion="0.2.2", files={
+            meta = dict(self.inner, minimumCypherVersion=self.minimum, files={
                 platform: {"url": name + ".tar.gz", "size": size, "sha256": h},
             })
             (self.dist / (name + ".json")).write_bytes(release.json_bytes(meta))
