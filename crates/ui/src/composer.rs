@@ -7618,7 +7618,9 @@ impl Composer {
                                 .overflow_hidden()
                                 .truncate()
                                 .text_size(px(12.0))
-                                .text_color(theme.text_muted)
+                                // A shade under the menu's other muted text: the tone Settings →
+                                // Commands gives the same descriptions.
+                                .text_color(theme.text_muted.opacity(0.65))
                                 .child(SharedString::from(description)),
                         )
                         .children(badge.map(|badge| slash_badge(theme, badge)))
@@ -7679,7 +7681,7 @@ impl Composer {
                                 .overflow_hidden()
                                 .truncate()
                                 .text_size(px(12.0))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.text_muted.opacity(0.65))
                                 .child(SharedString::from(choice.description)),
                         )
                     }
