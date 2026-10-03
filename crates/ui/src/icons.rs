@@ -136,6 +136,15 @@ icon_assets![
     // Hand-drawn `</>` in the Solar Linear style — the script chip (Pi
     // codemode); the embedded set has no code glyph.
     (CODE, "code"),
+    // Hand-drawn in the Solar Linear style for the `/` menu's commands (the
+    // embedded set has none of these): Fast mode, a goal, delegating to
+    // subagents, the subagents themselves, live activity, a skill.
+    (BOLT, "bolt"),
+    (FLAG, "flag"),
+    (HIERARCHY, "hierarchy"),
+    (USERS, "users"),
+    (PULSE, "pulse"),
+    (BOOK, "book"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/

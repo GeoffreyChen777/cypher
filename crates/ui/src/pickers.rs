@@ -59,11 +59,7 @@ pub fn bump_harness_catalog(cx: &mut App) {
 
 #[derive(Clone)]
 pub enum PickerEvent {
-    OpenAgentSettings {
-        target_device: String,
-    },
-    /// The context ring was clicked: compact the selected session.
-    CompactContext,
+    OpenAgentSettings { target_device: String },
 }
 
 impl gpui::EventEmitter<PickerEvent> for Pickers {}
@@ -2598,13 +2594,14 @@ impl Pickers {
 
     // ---- render ----
 
-    /// The context ring left of the model chip: the selected session's
-    /// latest context-window reading, clickable to compact when the harness
-    /// has `/compact` and no turn is running. `None` — no ring at all — until
-    /// the host engine has a reading (new chats, hosts on an older version).
-    /// A remote host's reading can trail a running turn by up to the session
-    /// row's 20s freshness write; it catches up when the turn settles.
-    fn context_ring_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What the composer's context gauge shows: the selected session's latest
+    /// context-window reading, and whether a click compacts it (the harness
+    /// has `/compact` and no turn is running). `None` — no ring at all —
+    /// until the host engine has a reading (new chats, hosts on an older
+    /// version), and in a Side Chat. A remote host's reading can trail a
+    /// running turn by up to the session row's 20s freshness write; it
+    /// catches up when the turn settles.
+    pub fn context_ring_reading(&self, cx: &App) -> Option<crate::context_ring::RingReading> {
         if self.side_chat {
             return None;
         }
@@ -2619,51 +2616,11 @@ impl Pickers {
             self.effective_harness(cx),
             Some(HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi)
         );
-        let enabled = compactable && !busy;
-        let fraction = usage.fraction();
-        let summary: SharedString = crate::context_ring::usage_summary(usage).into();
-        let hint: SharedString = match (compactable, busy) {
-            (false, _) => "This agent can't compact its context",
-            (true, true) => "Compact once the agent finishes",
-            (true, false) => "Click to compact",
-        }
-        .into();
-        let id = "context-ring";
-        // Hover-fade keys are global: one per composer's pickers.
-        let fade = format!("{id}-{}", cx.entity_id());
-        Some(
-            div()
-                .id(id)
-                .size(px(32.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(8.0))
-                .when(enabled, |el| {
-                    el.bg(motion::hover_blend(
-                        &fade,
-                        gpui::transparent_black(),
-                        theme.element_hover,
-                    ))
-                    .on_hover(motion::hover_listener(fade.clone()))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PickerEvent::CompactContext)))
-                })
-                .tooltip(move |_, cx| {
-                    cx.new(|_| crate::context_ring::ContextRingTooltip {
-                        summary: summary.clone(),
-                        hint: hint.clone(),
-                    })
-                    .into()
-                })
-                .child(crate::context_ring::ring(
-                    fraction,
-                    theme.text_muted.opacity(0.25),
-                    crate::context_ring::fill_color(fraction, theme),
-                ))
-                .into_any_element(),
-        )
+        Some(crate::context_ring::RingReading {
+            usage,
+            compactable,
+            busy,
+        })
     }
 
     // Chip builder: every argument is one visual slot of the chip.
@@ -4334,9 +4291,8 @@ impl Render for Pickers {
                 cx,
             )
         });
-        let context_ring = self.context_ring_chip(&theme, cx);
         // Shrinkable, end-aligned: in a narrow tile the chips ellipsize
-        // (they are `min_w_0`) instead of painting over attach/send.
+        // (they are `min_w_0`) instead of painting over the send button.
         let right = div()
             .flex()
             .flex_row()
@@ -4345,7 +4301,6 @@ impl Render for Pickers {
             .flex_1()
             .min_w_0()
             .gap(px(4.0))
-            .children(context_ring)
             // End-anchored: the menu's right edge sits flush with the chip's
             // right edge (user request), same as the footer's ref popover.
             .child(attach_overlay_end(
@@ -4446,9 +4401,8 @@ mod tests {
         let captured = emitted.clone();
         let _subscription = cx.update(|cx| {
             cx.subscribe(&pickers, move |_, event, _| {
-                if let PickerEvent::OpenAgentSettings { target_device } = event {
-                    *captured.borrow_mut() = Some(target_device.clone());
-                }
+                let PickerEvent::OpenAgentSettings { target_device } = event;
+                *captured.borrow_mut() = Some(target_device.clone());
             })
         });
         let window = cx.open_window(gpui::size(px(600.0), px(400.0)), |_, _| {
