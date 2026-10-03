@@ -106,10 +106,15 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   current one checked. Picking only fills the draft; commands are sent as
   ordinary text and skip the model-availability gate. The list scrolls
   within what's free above the composer.
-- **Context ring:** the composer shows the session's context usage (registry
-  `sessions.contextUsage`, which can trail a live turn by ~20s). Tapping it
-  shows the reading and a Compact action (`/compact` as its own run), offered
-  only while the session is idle.
+- **Context arc:** the session's context usage (registry
+  `sessions.contextUsage`, which can trail a live turn by ~20s) runs as a
+  short 60° arc round the send button, as on the desktop: muted, amber from
+  75%, red from 90%, filling from the bottom up. It shows in every composer
+  state, the collapsed pill included (its right end leaves 12pt for it). The
+  arc takes no taps; a long press on the send button shows the reading and a
+  Compact action (`/compact` as its own run), offered only while the session
+  is idle, and VoiceOver reads the reading on the button with Compact as a
+  custom action. The `/` menu's /compact row shows the same reading.
 - **Scripts:** a Pi codemode call shows as a Script chip named after the
   tools its script calls; tap it to read the script (80 lines, the rest
   counted). The calls the script made (`{script id}/{n}` part ids) hang off

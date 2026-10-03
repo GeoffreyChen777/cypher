@@ -82,6 +82,9 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    /// The chat's context reading, drawn round the send button; nil draws
+    /// nothing (a new session, a side chat, no reading yet).
+    var contextGauge: ContextGauge? = nil
     @ViewBuilder var chips: Chips
 
     @State private var focus = ComposerFocus()
@@ -183,14 +186,18 @@ struct ComposerShell<Chips: View>: View {
                     // under the attach / send circles.
                     .mask(chipEdgeMask)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    actionButton
+                    gaugedActionButton
                 }
                 .padding(.top, 8)
             } else {
-                actionButton
+                gaugedActionButton
             }
         }
-        .padding(.horizontal, expanded ? 12 : 5)
+        // 12pt right of the send button in both forms, room for the context
+        // arc clear of the button and the edge; the button doesn't slide
+        // sideways as the pill expands.
+        .padding(.leading, expanded ? 12 : 5)
+        .padding(.trailing, 12)
         .padding(.vertical, expanded ? 12 : 5)
         .background(whiteAlpha(0.04), in: surfaceShape)
         // A tall expanded card sits over transcript rows; tint its glass so
@@ -264,6 +271,19 @@ struct ComposerShell<Chips: View>: View {
                                      commentCount: hasComments ? 1 : 0)
     }
 
+    /// The send button with the context arc round it, and its long press
+    /// opening the reading. The menu sits outside the button's own disabled
+    /// state: an empty draft, when the reading matters most, disables send.
+    private var gaugedActionButton: some View {
+        actionButton
+            .overlay {
+                if let contextGauge {
+                    ContextArc(usage: contextGauge.usage, expanded: expanded)
+                }
+            }
+            .modifier(ContextGaugeMenu(gauge: contextGauge))
+    }
+
     private var actionButton: some View {
         Button {
             if showStop, !hasContent {
@@ -318,7 +338,7 @@ struct ComposerView: View {
     let catalog: RemotePiCatalog
     var connectionRetry = 0
     /// A side chat: it runs the parent's model — no model/effort chips, no
-    /// context ring (there's no session row to read or config to write).
+    /// context arc (there's no session row to read or config to write).
     var sideChat = false
     /// The `/` menu's height cap: what's free above the composer.
     var slashMenuMaxHeight = SlashMenuView.defaultMaxHeight
@@ -450,12 +470,12 @@ struct ComposerView: View {
                 attachments: attachments,
                 onAttach: { showPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
-                autoFocus: model.launchFocusComposer
+                autoFocus: model.launchFocusComposer,
+                contextGauge: sideChat ? nil : sessionRow?.contextUsage.map {
+                    ContextGauge(usage: $0, availability: compactAvailability, onCompact: compact)
+                }
             ) {
                 if !sideChat {
-                    if let usage = sessionRow?.contextUsage {
-                        ContextRingChip(usage: usage, availability: compactAvailability, onCompact: compact)
-                    }
                     ModelChip(model: currentModel,
                               fallbackLabel: chat.config?.model ?? "Select model",
                               reasoning: currentReasoning) {
