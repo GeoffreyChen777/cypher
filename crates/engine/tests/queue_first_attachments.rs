@@ -312,7 +312,11 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
     );
 
     let statuses = command_status(&core);
-    assert_eq!(statuses[0].1, SessionCommandStatus::Applied, "statuses: {statuses:?}");
+    assert_eq!(
+        statuses[0].1,
+        SessionCommandStatus::Applied,
+        "statuses: {statuses:?}"
+    );
     core.shutdown().await;
 }
 
