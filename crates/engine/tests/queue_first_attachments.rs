@@ -312,7 +312,7 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
     );
 
     let statuses = command_status(&core);
-    assert_eq!(statuses[0].1, SessionCommandStatus::Applied);
+    assert_eq!(statuses[0].1, SessionCommandStatus::Applied, "statuses: {statuses:?}");
     core.shutdown().await;
 }
 
@@ -429,12 +429,18 @@ async fn non_image_files_upload_seal_and_reach_the_agent() {
         paths[1]
     );
 
-    wait_for(
-        || !harness.requests.lock().unwrap().is_empty(),
-        "run executes after both seals",
-    )
-    .await;
-    let req = harness.requests.lock().unwrap()[0].clone();
+    // Titling runs through the same harness, so its request can land first.
+    let chat_run = || {
+        harness
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.prompt.starts_with("look at the photo"))
+            .cloned()
+    };
+    wait_for(|| chat_run().is_some(), "run executes after both seals").await;
+    let req = chat_run().expect("chat run request");
     assert_eq!(req.attachments, paths, "both final paths reach the harness");
     assert!(
         req.prompt
