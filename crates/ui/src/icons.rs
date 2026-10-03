@@ -133,6 +133,9 @@ icon_assets![
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
     (WIDGET, "widget"),
+    // Hand-drawn `</>` in the Solar Linear style — the script chip (Pi
+    // codemode); the embedded set has no code glyph.
+    (CODE, "code"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/
@@ -160,6 +163,10 @@ icon_assets![
     (CLOSE, "close"),
     (STOP, "stop"),
     (CHECK, "check"),
+    // Tool-chip status pair drawn to `check`'s weight: a cross for a failed
+    // call, and a ring with a quarter arc the chip rotates while it runs.
+    (CROSS, "cross"),
+    (SPINNER, "spinner"),
     (COPY, "copy"),
     // Hand-drawn star pair in the Solar Linear style (like the terminal/
     // plus/return ports) — outline for the favorite affordance, bold for the

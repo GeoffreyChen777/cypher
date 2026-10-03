@@ -407,12 +407,82 @@ fn parse_subagent_run(v: &Value) -> Option<SubagentRun> {
     })
 }
 
+/// The MCP server names a run can see, for naming MCP tool calls: the
+/// agent's `mcp.json` and the project's `.pi/mcp.json` (Pi reads the latter
+/// only for trusted projects; listing it regardless names nothing that never
+/// runs). Best effort — a missing or unreadable file lists nothing.
+fn mcp_server_names(agent_dir: Option<&std::path::Path>, cwd: &str) -> Vec<String> {
+    let files = agent_dir
+        .map(|dir| dir.join("mcp.json"))
+        .into_iter()
+        .chain((!cwd.is_empty()).then(|| std::path::Path::new(cwd).join(".pi/mcp.json")));
+    let mut names: Vec<String> = Vec::new();
+    for file in files {
+        // The engine's own bound on an mcp.json it will parse.
+        if std::fs::metadata(&file).is_ok_and(|meta| meta.len() > 1_048_576) {
+            continue;
+        }
+        let Some(value) = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        for server in value
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|servers| servers.keys())
+        {
+            if !names.contains(server) {
+                names.push(server.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Split a Pi MCP tool name into `(server, tool)`. Pi names every MCP tool
+/// `mcp__{server}__{tool}` with each character outside `[A-Za-z0-9_]`
+/// replaced by `_`, so a configured server whose sanitized name prefixes the
+/// tool gives back the name Settings shows (`mvp-lab`, not `mvp_lab`), and
+/// the longest such match wins. A server the list does not know (added
+/// mid-run) splits at the first `__`.
+fn mcp_tool_parts(name: &str, servers: &[String]) -> Option<(String, String)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let sanitize = |server: &str| -> String {
+        server
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    servers
+        .iter()
+        .filter_map(|server| {
+            let tool = rest.strip_prefix(&sanitize(server))?.strip_prefix("__")?;
+            (!tool.is_empty()).then(|| (server.clone(), tool.to_owned()))
+        })
+        .max_by_key(|(server, _)| server.len())
+        .or_else(|| {
+            let (server, tool) = rest.split_once("__")?;
+            (!server.is_empty() && !tool.is_empty()).then(|| (server.to_owned(), tool.to_owned()))
+        })
+}
+
 /// pi's built-in tool set (`read`/`bash`/`write`/`edit`/`grep`/`find`/`ls`)
 /// maps onto the typed [`ToolCall`] cypher renders, extracting the known arg
-/// names. Extension/MCP tools fall through to [`ToolCall::Unknown`] with the
-/// raw args. This is the pi-flavored counterpart of `acp/normalize.rs`'s
-/// `typed_call` (ACP keys by `kind`, pi by tool name).
-fn pi_typed_call(name: &str, args: &Value) -> ToolCall {
+/// names; so do Pi's MCP tools (`mcp__{server}__{tool}`, named against the
+/// run's `mcp_servers`) and pi-web-search's `web_search`. Other extension
+/// tools fall through to [`ToolCall::Unknown`] with the raw args. This is the
+/// pi-flavored counterpart of `acp/normalize.rs`'s `typed_call` (ACP keys by
+/// `kind`, pi by tool name).
+fn pi_typed_call(name: &str, args: &Value, mcp_servers: &[String]) -> ToolCall {
     let arg = |key: &str| -> Option<String> {
         args.get(key)
             .and_then(Value::as_str)
@@ -446,11 +516,45 @@ fn pi_typed_call(name: &str, args: &Value) -> ToolCall {
             pattern: String::new(),
             path: arg("path"),
         },
-        _ => ToolCall::Unknown {
-            name: name.to_owned(),
-            input: Some(args.clone()),
+        "web_search" if arg("query").is_some() => ToolCall::WebSearch {
+            query: arg("query").unwrap_or_default(),
+        },
+        _ => match mcp_tool_parts(name, mcp_servers) {
+            Some((server, tool)) => ToolCall::Mcp {
+                server,
+                tool,
+                input: Some(args.clone()),
+            },
+            None => ToolCall::Unknown {
+                name: name.to_owned(),
+                input: Some(args.clone()),
+            },
         },
     }
+}
+
+/// A codemode result opens with a status block (`Script completed` or
+/// `Script failed`, `Wall time … seconds`, `Output:`) as its first text
+/// content. The chip already shows the status and the doc keeps only the
+/// first lines of an output, so the block would crowd out the script's own
+/// output: drop it, keep everything after it (a failure's `Script error:`
+/// text included).
+fn without_codemode_header(result: &Value) -> Value {
+    let mut result = result.clone();
+    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut)
+        && content.first().is_some_and(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    (text.starts_with("Script completed\n") || text.starts_with("Script failed\n"))
+                        && text.ends_with("Output:\n")
+                })
+        })
+    {
+        content.remove(0);
+    }
+    result
 }
 
 /// The joined text of a pi tool result's `content` blocks (`{type: "text",
@@ -1431,6 +1535,7 @@ impl Harness for PiHarness {
             Some(discovered) => BuiltinIntercept::from_probe(&discovered),
             None => BuiltinIntercept::all(),
         };
+        let mcp_servers = mcp_server_names(self.agent_dir.as_deref(), &request.cwd);
         tokio::spawn(run_session(Session {
             child,
             client,
@@ -1446,6 +1551,7 @@ impl Harness for PiHarness {
             stderr_tail,
             intercept,
             temp_prompt,
+            mcp_servers,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -1474,6 +1580,9 @@ struct Session {
     /// Temp file holding the child agent's persisted system prompt
     /// (`--append-system-prompt`), removed when the run ends.
     temp_prompt: Option<PathBuf>,
+    /// Configured MCP server names, read at run start, so MCP tool calls
+    /// show the server under the name Settings uses ([`mcp_tool_parts`]).
+    mcp_servers: Vec<String>,
 }
 
 /// Which synthesized built-in commands a run intercepts. A same-name
@@ -2043,6 +2152,7 @@ async fn run_session(session: Session) {
         stderr_tail,
         intercept,
         temp_prompt,
+        mcp_servers,
     } = session;
     // Dropped at the end of every path — the temp prompt file never leaks.
     let _temp_prompt = TempPromptGuard(temp_prompt);
@@ -2615,7 +2725,7 @@ async fn run_session(session: Session) {
                                 &event_tx,
                                 AgentEvent::ToolCall {
                                     id,
-                                    call: pi_typed_call(&name, &args),
+                                    call: pi_typed_call(&name, &args, &mcp_servers),
                                 },
                             )
                             .await
@@ -2660,7 +2770,13 @@ async fn run_session(session: Session) {
                         "tool_execution_end" => {
                             let id = ev.get("toolCallId").and_then(Value::as_str).unwrap_or_default().to_owned();
                             let is_error = ev.get("isError").and_then(Value::as_bool).unwrap_or(false);
-                            let output = ev.get("result").and_then(tool_output_text);
+                            let output = ev.get("result").and_then(|result| {
+                                if ev.get("toolName").and_then(Value::as_str) == Some(cypher_proto::view::CODEMODE_TOOL) {
+                                    tool_output_text(&without_codemode_header(result))
+                                } else {
+                                    tool_output_text(result)
+                                }
+                            });
                             // The tool settled: retire its throttle entry (no
                             // more progress) and stop forwarding late updates.
                             progress_last.remove(&id);
@@ -3354,21 +3470,21 @@ mod tests {
 
     #[test]
     fn core_tools_map_to_typed_calls() {
-        let bash = pi_typed_call("bash", &json!({ "command": "ls -la" }));
+        let bash = pi_typed_call("bash", &json!({ "command": "ls -la" }), &[]);
         assert_eq!(
             bash,
             ToolCall::Exec {
                 command: "ls -la".into()
             }
         );
-        let read = pi_typed_call("read", &json!({ "path": "src/main.rs" }));
+        let read = pi_typed_call("read", &json!({ "path": "src/main.rs" }), &[]);
         assert_eq!(
             read,
             ToolCall::ReadFile {
                 path: "src/main.rs".into()
             }
         );
-        let write = pi_typed_call("write", &json!({ "path": "a.txt", "content": "x" }));
+        let write = pi_typed_call("write", &json!({ "path": "a.txt", "content": "x" }), &[]);
         assert_eq!(
             write,
             ToolCall::WriteFile {
@@ -3376,7 +3492,7 @@ mod tests {
                 content: None
             }
         );
-        let edit = pi_typed_call("edit", &json!({ "path": "a.txt", "edits": [] }));
+        let edit = pi_typed_call("edit", &json!({ "path": "a.txt", "edits": [] }), &[]);
         assert_eq!(
             edit,
             ToolCall::EditFile {
@@ -3385,7 +3501,7 @@ mod tests {
                 new_string: None,
             }
         );
-        let grep = pi_typed_call("grep", &json!({ "pattern": "foo", "path": "src" }));
+        let grep = pi_typed_call("grep", &json!({ "pattern": "foo", "path": "src" }), &[]);
         assert_eq!(
             grep,
             ToolCall::Search {
@@ -3393,14 +3509,14 @@ mod tests {
                 path: Some("src".into()),
             }
         );
-        let find = pi_typed_call("find", &json!({ "pattern": "*.rs" }));
+        let find = pi_typed_call("find", &json!({ "pattern": "*.rs" }), &[]);
         assert_eq!(
             find,
             ToolCall::Glob {
                 pattern: "*.rs".into()
             }
         );
-        let ls = pi_typed_call("ls", &json!({ "path": "." }));
+        let ls = pi_typed_call("ls", &json!({ "path": "." }), &[]);
         assert_eq!(
             ls,
             ToolCall::Search {
@@ -3409,13 +3525,131 @@ mod tests {
             }
         );
         // Extension / unknown tools keep their raw args.
-        let unknown = pi_typed_call("myExt", &json!({ "x": 1 }));
+        let unknown = pi_typed_call("myExt", &json!({ "x": 1 }), &[]);
         assert_eq!(
             unknown,
             ToolCall::Unknown {
                 name: "myExt".into(),
                 input: Some(json!({ "x": 1 })),
             }
+        );
+        // A codemode script is an extension tool too: its `code` rides as is
+        // (the doc's sanitizer decides what persists).
+        let script = pi_typed_call("codemode", &json!({ "code": "return 1" }), &[]);
+        assert_eq!(
+            script,
+            ToolCall::Unknown {
+                name: "codemode".into(),
+                input: Some(json!({ "code": "return 1" })),
+            }
+        );
+        let search = pi_typed_call("web_search", &json!({ "query": "pi 1.0" }), &[]);
+        assert_eq!(
+            search,
+            ToolCall::WebSearch {
+                query: "pi 1.0".into()
+            }
+        );
+        // Without a query it is not a search Cypher can name.
+        assert!(matches!(
+            pi_typed_call("web_search", &json!({}), &[]),
+            ToolCall::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn mcp_tools_name_their_configured_server() {
+        let servers = vec!["mvp-lab-discord".to_string(), "mvp-lab".to_string()];
+        let call = pi_typed_call(
+            "mcp__mvp_lab_discord__search_messages",
+            &json!({ "query": "pi" }),
+            &servers,
+        );
+        assert_eq!(
+            call,
+            ToolCall::Mcp {
+                server: "mvp-lab-discord".into(),
+                tool: "search_messages".into(),
+                input: Some(json!({ "query": "pi" })),
+            }
+        );
+        assert_eq!(
+            mcp_tool_parts("mcp__mvp_lab__read", &servers),
+            Some(("mvp-lab".into(), "read".into()))
+        );
+        // `docs--v2` sanitizes to `docs__v2`, so `docs` also prefixes its
+        // tools: the longest configured match wins.
+        let servers = vec!["docs".to_string(), "docs--v2".to_string()];
+        assert_eq!(
+            mcp_tool_parts("mcp__docs__v2__read", &servers),
+            Some(("docs--v2".into(), "read".into()))
+        );
+        // An unknown server splits at the first `__`.
+        assert_eq!(
+            mcp_tool_parts("mcp__github__create_issue", &servers),
+            Some(("github".into(), "create_issue".into()))
+        );
+        // Not an MCP name, or an incomplete one.
+        assert_eq!(mcp_tool_parts("read", &servers), None);
+        assert_eq!(mcp_tool_parts("mcp__github", &servers), None);
+        assert_eq!(mcp_tool_parts("mcp____tool", &[]), None);
+    }
+
+    #[test]
+    fn mcp_server_names_read_agent_and_project_configs() {
+        let agent = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            agent.path().join("mcp.json"),
+            r#"{"mcpServers":{"mvp-lab":{"url":"https://x"},"github":{}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join(".pi")).unwrap();
+        std::fs::write(
+            project.path().join(".pi/mcp.json"),
+            r#"{"mcpServers":{"github":{},"local-db":{}}}"#,
+        )
+        .unwrap();
+        let mut names = mcp_server_names(Some(agent.path()), project.path().to_str().unwrap());
+        names.sort();
+        assert_eq!(names, ["github", "local-db", "mvp-lab"]);
+        // Missing files list nothing; they never fail a run.
+        assert!(mcp_server_names(None, "/definitely/not/here").is_empty());
+    }
+
+    #[test]
+    fn codemode_results_drop_their_status_header() {
+        let completed = json!({
+            "content": [
+                { "type": "text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+                { "type": "text", "text": "version 1.0.0.2" },
+            ],
+        });
+        assert_eq!(
+            tool_output_text(&without_codemode_header(&completed)).as_deref(),
+            Some("version 1.0.0.2")
+        );
+        // A failure keeps its partial output and the error after the header.
+        let failed = json!({
+            "content": [
+                { "type": "text", "text": "Script failed\nWall time 0.0 seconds\nOutput:\n" },
+                { "type": "text", "text": "Script error:\nTypeError: not a function" },
+            ],
+        });
+        assert_eq!(
+            tool_output_text(&without_codemode_header(&failed)).as_deref(),
+            Some("Script error:\nTypeError: not a function")
+        );
+        // A script that printed nothing leaves nothing to show.
+        let silent = json!({
+            "content": [{ "type": "text", "text": "Script completed\nWall time 0.0 seconds\nOutput:\n" }],
+        });
+        assert_eq!(tool_output_text(&without_codemode_header(&silent)), None);
+        // Output that merely starts like a header is the script's own text.
+        let own = json!({ "content": [{ "type": "text", "text": "Script completed\nall good" }] });
+        assert_eq!(
+            tool_output_text(&without_codemode_header(&own)).as_deref(),
+            Some("Script completed\nall good")
         );
     }
 

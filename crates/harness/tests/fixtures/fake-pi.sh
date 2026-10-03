@@ -277,6 +277,28 @@ while read -r line; do
       exit 0
       ;;
 
+    *scenario:codemode*)
+      # Pi 1.0 codemode, as Pi emits it: the script call, the calls the
+      # script makes (ids `{script}/{n}`, `parentToolCallId`), script updates
+      # that carry only `details.calls`, and a result that opens with the
+      # status header. The nested MCP call uses Pi's sanitized tool name.
+      emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[],"stopReason":"toolUse"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"s1","toolName":"codemode","args":{"code":"const v = await tools.read({ path: \"release.json\" });\nreturn await tools.mcp__mvp_lab_discord__search({ query: v });"}}'
+      emit '{"type":"tool_execution_start","toolCallId":"s1/1","toolName":"read","args":{"path":"release.json"},"parentToolCallId":"s1"}'
+      emit '{"type":"tool_execution_update","toolCallId":"s1","toolName":"codemode","partialResult":{"content":[],"details":{"calls":[{"id":"s1/?","name":"read","status":"running"}]}}}'
+      emit '{"type":"tool_execution_end","toolCallId":"s1/1","toolName":"read","result":{"content":[{"type":"text","text":"1.0.0.2"}]},"isError":false,"parentToolCallId":"s1"}'
+      emit '{"type":"tool_execution_start","toolCallId":"s1/2","toolName":"mcp__mvp_lab_discord__search","args":{"query":"1.0.0.2"},"parentToolCallId":"s1"}'
+      emit '{"type":"tool_execution_end","toolCallId":"s1/2","toolName":"mcp__mvp_lab_discord__search","result":{"content":[{"type":"text","text":"3 messages"}]},"isError":false,"parentToolCallId":"s1"}'
+      emit '{"type":"tool_execution_end","toolCallId":"s1","toolName":"codemode","result":{"content":[{"type":"text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"text","text":"3 messages"}],"details":{"calls":[]}},"isError":false}'
+      emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
+      emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"found 3"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"found 3"}],"stopReason":"stop"}}'
+      emit '{"type":"agent_settled"}'
+      exit 0
+      ;;
+
     *scenario:progress*)
       emit "{\"id\":$pid,\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
       emit '{"type":"message_start","message":{"role":"assistant","id":"m1","content":[]}}'

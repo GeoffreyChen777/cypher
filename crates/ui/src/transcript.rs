@@ -254,6 +254,10 @@ pub struct ToolItem {
     pub output_bytes: Option<u64>,
     /// Sidecar key of the full diff (doc carries only per-file stats).
     pub diff_ref: Option<SharedString>,
+    /// Nesting under the call that made this one: 0 for a call the model
+    /// made, 1 for a call a Pi codemode script made from inside its run
+    /// (deeper if that call made calls of its own). See [`nest_tool_calls`].
+    pub depth: u8,
 }
 
 /// A chip's expandable detail payload.
@@ -283,6 +287,12 @@ pub enum ToolDetail {
 
 /// Max verbatim output lines per chip before the counted tail row.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
+
+/// Max lines of a codemode script's invocation block. The script is the
+/// whole point of the call and the doc keeps it (capped at
+/// [`cypher_doc::parts::CODEMODE_SCRIPT_MAX_CHARS`]), so it gets more room
+/// than a command's echo before the counted tail.
+pub const SCRIPT_DETAIL_MAX_LINES: usize = 80;
 
 /// Max diff lines an inline tool-diff detail renders — the detail is one
 /// stacked element inside its transcript row, so it must stay bounded
@@ -406,6 +416,23 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             ),
             None => format!("{server} · {tool}\nInput details not retained in chat"),
         },
+        // A script reads as the code it is, not as its JSON-escaped input.
+        ToolCall::Unknown { name, .. } if name == cypher_proto::view::CODEMODE_TOOL => {
+            match cypher_proto::view::codemode_script(call) {
+                Some(code) => code.to_owned(),
+                None => format!("{name}\nInput details not retained in chat"),
+            }
+        }
+        ToolCall::Unknown { name, input } if name == cypher_proto::view::TOOL_SEARCH_TOOL => {
+            match input
+                .as_ref()
+                .and_then(|input| input.get("query"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(query) => query.to_owned(),
+                None => format!("{name}\nInput details not retained in chat"),
+            }
+        }
         ToolCall::Unknown { name, input } => match input {
             Some(input) => format!(
                 "{name}\n{}",
@@ -414,8 +441,11 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             None => format!("{name}\nInput details not retained in chat"),
         },
     };
+    // Blank lines around the invocation are formatting, not content (a
+    // model's script routinely opens with a newline).
     let mut lines: Vec<SharedString> = text
         .lines()
+        .skip_while(|l| l.trim().is_empty())
         .flat_map(|l| wrap_cols(l, CALL_WRAP_COLS))
         .collect();
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
@@ -424,8 +454,13 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     if lines.is_empty() {
         return None;
     }
-    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
-    lines.truncate(OUTPUT_DETAIL_MAX_LINES);
+    let max_lines = if cypher_proto::view::codemode_script(call).is_some() {
+        SCRIPT_DETAIL_MAX_LINES
+    } else {
+        OUTPUT_DETAIL_MAX_LINES
+    };
+    let truncated_by = lines.len().saturating_sub(max_lines);
+    lines.truncate(max_lines);
     Some(ToolDetail::Output {
         lines,
         truncated_by,
@@ -925,6 +960,9 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        // A call nesting under its caller once the caller's part arrives
+        // re-indents the chip.
+        acc.push(t.depth);
         // Detail payload arriving (or growing) must re-splice the row even
         // when the resolved bit didn't change.
         match t.detail.as_deref() {
@@ -1157,34 +1195,39 @@ pub fn rows_for_entry(
     // Assistant/system: split parts into block rows, folding consecutive tools.
     let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut group_ix = 0usize;
-    let mut pending_group: Vec<ToolItem> = Vec::new();
+    // Each tool with its part id, which carries the nesting
+    // ([`nest_tool_calls`]).
+    let mut pending_group: Vec<(String, ToolItem)> = Vec::new();
     let mut group_last_part_ix = 0usize;
 
-    let flush_group =
-        |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize, last_ix: usize| {
-            if group.is_empty() {
-                return;
-            }
-            let tools = std::mem::take(group);
-            let auto_open = streaming && last_ix == last_part_ix;
-            rows.push(Row {
-                id: format!("{}#g{}", entry.id, group_ix).into(),
-                version: tool_fingerprint(&tools, auto_open),
-                turn_start: false,
-                kind: RowKind::ToolGroup {
-                    tools: Arc::new(tools),
-                    auto_open,
-                },
-                entry_id: entry.id.clone().into(),
-                role: entry.role,
-                timestamp: None,
-            });
-            *group_ix += 1;
-        };
+    let flush_group = |rows: &mut Vec<Row>,
+                       group: &mut Vec<(String, ToolItem)>,
+                       group_ix: &mut usize,
+                       last_ix: usize| {
+        if group.is_empty() {
+            return;
+        }
+        let tools = nest_tool_calls(std::mem::take(group));
+        let auto_open = streaming && last_ix == last_part_ix;
+        rows.push(Row {
+            id: format!("{}#g{}", entry.id, group_ix).into(),
+            version: tool_fingerprint(&tools, auto_open),
+            turn_start: false,
+            kind: RowKind::ToolGroup {
+                tools: Arc::new(tools),
+                auto_open,
+            },
+            entry_id: entry.id.clone().into(),
+            role: entry.role,
+            timestamp: None,
+        });
+        *group_ix += 1;
+    };
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
             MessagePart::Tool {
+                id: part_id,
                 call,
                 is_error,
                 resolved,
@@ -1196,17 +1239,25 @@ pub fn rows_for_entry(
                 diff_stats,
                 ..
             } => {
-                pending_group.push(ToolItem {
-                    call: call.clone(),
-                    is_error: *is_error,
-                    resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
+                pending_group.push((
+                    part_id.clone(),
+                    ToolItem {
+                        call: call.clone(),
+                        is_error: *is_error,
+                        resolved: *resolved,
+                        detail: tool_detail(
+                            output.as_deref(),
+                            diff.as_ref(),
+                            diff_stats.as_deref(),
+                        )
                         .map(Arc::new),
-                    invocation: call_block(call).map(Arc::new),
-                    output_ref: output_ref.clone().map(SharedString::from),
-                    output_bytes: *output_bytes,
-                    diff_ref: diff_ref.clone().map(SharedString::from),
-                });
+                        invocation: call_block(call).map(Arc::new),
+                        output_ref: output_ref.clone().map(SharedString::from),
+                        output_bytes: *output_bytes,
+                        diff_ref: diff_ref.clone().map(SharedString::from),
+                        depth: 0,
+                    },
+                ));
                 group_last_part_ix = part_ix;
             }
             other => {
@@ -1378,6 +1429,57 @@ pub fn rows_for_entry(
         last.version ^= 1 << 62;
     }
     rows
+}
+
+/// Order a tool group so each call made from inside another call's run
+/// follows that call, one level deeper. Pi runs the calls a codemode script
+/// makes (`await tools.read(…)`) through its own tool pipeline and reports
+/// each as a tool call whose id is `{caller id}/{n}`; the doc keeps those ids,
+/// so the nesting needs no field of its own — old transcripts nest too, and
+/// viewers that predate this list the same calls flat.
+///
+/// A call whose caller is not in the group (a different group, or an id that
+/// merely contains `/`) stays where it is at depth 0. Siblings keep their
+/// arrival order.
+fn nest_tool_calls(items: Vec<(String, ToolItem)>) -> Vec<ToolItem> {
+    let index: HashMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(ix, (id, _))| (id.as_str(), ix))
+        .collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+    let mut roots: Vec<usize> = Vec::new();
+    for (ix, (id, _)) in items.iter().enumerate() {
+        // A caller's id is a strict prefix of its calls' ids, so this never
+        // cycles.
+        match id
+            .rsplit_once('/')
+            .and_then(|(caller, _)| index.get(caller).copied())
+        {
+            Some(caller) => children[caller].push(ix),
+            None => roots.push(ix),
+        }
+    }
+    if roots.len() == items.len() {
+        return items.into_iter().map(|(_, item)| item).collect();
+    }
+    let mut order: Vec<(usize, u8)> = Vec::with_capacity(items.len());
+    let mut stack: Vec<(usize, u8)> = roots.iter().rev().map(|&ix| (ix, 0)).collect();
+    while let Some((ix, depth)) = stack.pop() {
+        order.push((ix, depth));
+        for &child in children[ix].iter().rev() {
+            stack.push((child, depth.saturating_add(1)));
+        }
+    }
+    let mut slots: Vec<Option<ToolItem>> = items.into_iter().map(|(_, item)| Some(item)).collect();
+    order
+        .into_iter()
+        .filter_map(|(ix, depth)| {
+            let mut item = slots[ix].take()?;
+            item.depth = depth;
+            Some(item)
+        })
+        .collect()
 }
 
 /// How many top-level blocks of an append-mode translation's `tree` belong to
@@ -5278,8 +5380,9 @@ impl Transcript {
             .children(tools.iter().enumerate().skip(hidden).map(|(ix, tool)| {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
+                let key = SharedString::from(format!("{row_id}#d{ix}"));
                 if detail.is_none() && invocation.is_none() {
-                    return tool_chip(tool, theme);
+                    return tool_chip(tool, &key, theme);
                 }
                 let affordance = affordances[ix].clone();
                 let affordance_h = if affordance.is_some() {
@@ -5289,7 +5392,6 @@ impl Transcript {
                 };
                 let open = detail_opens[ix];
                 let dfold = detail_folds[ix];
-                let key = SharedString::from(format!("{row_id}#d{ix}"));
                 // Expandable chip: ONE card whose header row is the chip and
                 // whose body is the detail — not a floating card below it.
                 // The guide rail stretches with the row, so an open detail
@@ -5356,7 +5458,7 @@ impl Transcript {
                                 group.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme)),
+                            .child(chip_header(tool, open, &key, theme)),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -5435,6 +5537,7 @@ impl Transcript {
                             .flex_none()
                             .bg(crate::theme::ink(0.08)),
                     )
+                    .children(nested_rails(tool.depth))
                     .child(card)
                     .into_any_element()
             }));
@@ -5741,8 +5844,35 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        ToolCall::Unknown { name, .. } if name == cypher_proto::view::CODEMODE_TOOL => {
+            crate::icons::CODE
+        }
+        ToolCall::Unknown { name, .. } if name == cypher_proto::view::TOOL_SEARCH_TOOL => {
+            crate::icons::MAGNIFER
+        }
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
+}
+
+/// Left inset of a nested chip's guide rail from the rail before it: the
+/// rail lands under the caller chip's icon (rail 1px + card inset 12px +
+/// card border 1px + header padding 8px + half the 18px icon box − the
+/// rail's own pixel), so a script's calls hang off the script's glyph.
+const NESTED_RAIL_INSET: f32 = 30.0;
+
+/// The extra guide rails in front of a chip `depth` levels deep — one per
+/// level, each full row height so consecutive nested chips draw one
+/// continuous line. Chips keep [`CHIP_HEIGHT`], so the group's analytic
+/// heights hold at any depth.
+fn nested_rails(depth: u8) -> impl Iterator<Item = gpui::Div> {
+    // Past a few levels the indent stops helping and starts eating the row.
+    (0..depth.min(3)).map(|_| {
+        div()
+            .ml(px(NESTED_RAIL_INSET))
+            .w(px(1.0))
+            .flex_none()
+            .bg(crate::theme::ink(0.08))
+    })
 }
 
 /// The body of an expanded chip card, under the header's separator. Diffs
@@ -5834,16 +5964,17 @@ fn detail_body(
     }
 }
 
-/// The chip's content row: icon tile + label + detail line (+ chevron tile
-/// when the chip expands). Shared between the plain chip and the header of an
-/// expandable chip card.
-fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpui::Div {
-    let (label, _) = tool_chip_content(&tool.call);
-    // `Tool` is only a generic fallback for extension/custom calls. Showing
-    // it ahead of the actual tool name adds no information (`Tool · read ·
-    // completed`), so generic calls start directly with their real name.
-    let show_label = label != "Tool";
-    let detail = tool_row_summary(tool);
+/// The chip's content row: icon + label + parameter, then the status icon
+/// (+ chevron when the chip expands). Shared between the plain chip and the
+/// header of an expandable chip card. `key` is unique per chip; it names the
+/// running spinner's animation.
+fn chip_header_row(
+    tool: &ToolItem,
+    chevron: Option<bool>,
+    key: &SharedString,
+    theme: &Theme,
+) -> gpui::Div {
+    let (label, parameter) = tool_row_text(tool);
     let tint = if tool.is_error {
         theme.danger
     } else {
@@ -5874,15 +6005,17 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                         .text_color(theme.text_muted),
                 ),
         )
-        .when(show_label, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(tint)
-                    .child(SharedString::from(label)),
-            )
-        })
+        .child(
+            // A generic tool's name can be long: it may take up to half the
+            // line before it ellipsizes, leaving the rest to the parameter.
+            div()
+                .flex_none()
+                .max_w(gpui::relative(0.5))
+                .truncate()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tint)
+                .child(SharedString::from(label)),
+        )
         .child(
             div()
                 .flex_1()
@@ -5893,8 +6026,13 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                 } else {
                     theme.text.opacity(0.85)
                 })
-                .child(SharedString::from(detail)),
+                .child(SharedString::from(parameter)),
         )
+        .child(tool_status_icon(
+            ToolStatus::of(tool),
+            SharedString::from(format!("{key}-status")),
+            theme,
+        ))
         .when_some(chevron, |row, open| {
             // Output/diff affordance: a bare chevron in the tile's former
             // 18px box, flipped while the detail body is open.
@@ -5912,37 +6050,79 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
         })
 }
 
-/// One compact line for a tool chip: tool name, parameters, then lifecycle
-/// status. The result body belongs to the expandable card rather than the
-/// collapsed header.
-fn tool_row_summary(tool: &ToolItem) -> String {
+/// The two text columns of a chip line, each said once: what kind of call
+/// it is ("Read") and what it acted on ("README.md"). The result body
+/// belongs to the expandable card and the status to its icon. A generic
+/// extension tool has no kind of its own, so its name is the label.
+fn tool_row_text(tool: &ToolItem) -> (String, String) {
     let (label, parameter) = tool_chip_content(&tool.call);
-    let status = if tool.is_error {
-        "failed"
-    } else if !tool.resolved {
-        "running…"
-    } else {
-        "completed"
-    };
-    let parameter = parameter.trim();
+    let parameter = parameter.trim().to_owned();
     if label == "Tool" {
-        if parameter.is_empty() {
-            status.to_string()
-        } else {
-            format!("{parameter} · {status}")
-        }
+        (parameter, String::new())
     } else {
-        format!("{label} · {parameter} · {status}")
+        (label.to_owned(), parameter)
     }
 }
 
+/// Where a tool call is in its lifecycle, shown as the chip's status icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ToolStatus {
+    fn of(tool: &ToolItem) -> Self {
+        if tool.is_error {
+            Self::Failed
+        } else if !tool.resolved {
+            Self::Running
+        } else {
+            Self::Completed
+        }
+    }
+}
+
+/// One spinner turn. Linear, so the arc never appears to stall.
+const STATUS_SPIN_PERIOD: Duration = Duration::from_millis(900);
+
+/// The chip's status: a check once the call completed, a cross when it
+/// failed, and a rotating arc while it runs (`key` names the rotation; under
+/// reduced motion gpui holds it still). Same 18px slot as the other icons.
+fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Theme) -> AnyElement {
+    let slot = div()
+        .size(px(18.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center();
+    let icon = |path| crate::icons::icon(path).size(px(12.0));
+    match status {
+        ToolStatus::Completed => slot.child(icon(crate::icons::CHECK).text_color(theme.success)),
+        ToolStatus::Failed => slot.child(icon(crate::icons::CROSS).text_color(theme.danger)),
+        ToolStatus::Running => slot.child(
+            icon(crate::icons::SPINNER)
+                .text_color(theme.text_muted)
+                .with_animation(
+                    key,
+                    gpui::Animation::new(STATUS_SPIN_PERIOD).repeat(),
+                    |icon, t| {
+                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
+                    },
+                ),
+        ),
+    }
+    .into_any_element()
+}
+
 /// The header row of an expandable chip card.
-fn chip_header(tool: &ToolItem, open: bool, theme: &Theme) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme)
+fn chip_header(tool: &ToolItem, open: bool, key: &SharedString, theme: &Theme) -> gpui::Div {
+    chip_header_row(tool, Some(open), key, theme)
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
+fn tool_chip(tool: &ToolItem, key: &SharedString, theme: &Theme) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -5959,6 +6139,7 @@ fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
                 .flex_none()
                 .bg(crate::theme::ink(0.08)),
         )
+        .children(nested_rails(tool.depth).map(|rail| rail.h_full()))
         .child(
             div()
                 .ml(px(12.0))
@@ -5970,7 +6151,7 @@ fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .child(chip_header_row(tool, None, theme)),
+                .child(chip_header_row(tool, None, key, theme)),
         )
         .into_any_element()
 }
@@ -7150,6 +7331,7 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
+            depth: 0,
         };
         let edit = |p: &str| ToolItem {
             call: ToolCall::EditFile {
@@ -7164,6 +7346,7 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
+            depth: 0,
         };
         let tools = vec![
             exec("ls"),
@@ -7194,6 +7377,7 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                depth: 0,
             },
             ToolItem {
                 call: ToolCall::Glob {
@@ -7206,6 +7390,7 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                depth: 0,
             },
             ToolItem {
                 call: ToolCall::WebSearch { query: "q".into() },
@@ -7216,6 +7401,7 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                depth: 0,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
@@ -7300,9 +7486,19 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
+            depth: 0,
         };
-        assert_eq!(tool_row_summary(&tool), "apply_patch · completed");
+        let text = |tool: &ToolItem| {
+            let (label, parameter) = tool_row_text(tool);
+            (label, parameter, ToolStatus::of(tool))
+        };
+        // A generic tool's name is its label; nothing repeats it.
+        assert_eq!(
+            text(&tool),
+            ("apply_patch".into(), String::new(), ToolStatus::Completed)
+        );
 
+        // A known kind says its name once, then what it acted on.
         let no_output = ToolItem {
             call: ToolCall::ReadFile {
                 path: "README.md".into(),
@@ -7310,19 +7506,232 @@ mod tests {
             detail: None,
             ..tool
         };
-        assert_eq!(tool_row_summary(&no_output), "Read · README.md · completed");
+        assert_eq!(
+            text(&no_output),
+            ("Read".into(), "README.md".into(), ToolStatus::Completed)
+        );
 
         let failed = ToolItem {
             is_error: true,
             ..no_output.clone()
         };
-        assert_eq!(tool_row_summary(&failed), "Read · README.md · failed");
+        assert_eq!(text(&failed).2, ToolStatus::Failed);
+        // A failed call that also never resolved still reads as failed.
+        assert_eq!(
+            ToolStatus::of(&ToolItem {
+                resolved: false,
+                ..failed
+            }),
+            ToolStatus::Failed
+        );
 
         let running = ToolItem {
             resolved: false,
             ..no_output
         };
-        assert_eq!(tool_row_summary(&running), "Read · README.md · running…");
+        assert_eq!(text(&running).2, ToolStatus::Running);
+
+        let mcp = ToolItem {
+            call: ToolCall::Mcp {
+                server: "demo-notes".into(),
+                tool: "search_notes".into(),
+                input: None,
+            },
+            ..running.clone()
+        };
+        assert_eq!(
+            text(&mcp),
+            (
+                "MCP".into(),
+                "demo-notes · search_notes".into(),
+                ToolStatus::Running
+            )
+        );
+
+        // A script the doc did not keep has no parameter at all.
+        let script = ToolItem {
+            call: ToolCall::Unknown {
+                name: "codemode".into(),
+                input: None,
+            },
+            ..running
+        };
+        assert_eq!(
+            text(&script),
+            ("Script".into(), String::new(), ToolStatus::Running)
+        );
+    }
+
+    fn script_part(id: &str, code: &str) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: "codemode".into(),
+                input: Some(serde_json::json!({ "code": code })),
+            },
+            is_error: false,
+            resolved: true,
+            output: Some("version 1.0.0.2".into()),
+            progress: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+        }
+    }
+
+    fn group_tools(rows: &[Row]) -> Vec<(String, u8)> {
+        rows.iter()
+            .find_map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => Some(
+                    tools
+                        .iter()
+                        .map(|tool| (tool_chip_content(&tool.call).1, tool.depth))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .expect("a tool group")
+    }
+
+    #[test]
+    fn script_calls_nest_under_their_script() {
+        // Pi ran a script (`s`) next to a direct call (`d`); the script's own
+        // calls (`s/1`, `s/2`) arrived after `d` and still list under `s`.
+        let entry = assistant(
+            "m",
+            MessageStatus::Complete,
+            vec![
+                script_part("s", "await tools.bash({ command: 'ls' })"),
+                tool_part("d", "pwd"),
+                tool_part("s/1", "ls"),
+                tool_part("s/2", "cat release.json"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(
+            group_tools(&rows),
+            vec![
+                ("bash".to_string(), 0),
+                ("ls".to_string(), 1),
+                ("cat release.json".to_string(), 1),
+                ("pwd".to_string(), 0),
+            ]
+        );
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("tool group first");
+        };
+        assert_eq!(tool_group_summary(tools), "Ran 3 commands and 1 script");
+
+        // Nesting only follows ids: a slash with no caller in the group, or
+        // nothing nested at all, keeps arrival order at depth 0.
+        let entry = assistant(
+            "m2",
+            MessageStatus::Complete,
+            vec![tool_part("a", "one"), tool_part("x/1", "two")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(
+            group_tools(&rows),
+            vec![("one".to_string(), 0), ("two".to_string(), 0)]
+        );
+    }
+
+    #[test]
+    fn nested_calls_keep_sibling_order_and_go_deeper() {
+        let item = |command: &str| ToolItem {
+            call: ToolCall::Exec {
+                command: command.into(),
+            },
+            is_error: false,
+            resolved: true,
+            detail: None,
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            depth: 0,
+        };
+        let nested = nest_tool_calls(vec![
+            ("a".into(), item("a")),
+            ("a/1".into(), item("a/1")),
+            ("b".into(), item("b")),
+            ("a/1/1".into(), item("a/1/1")),
+            ("a/2".into(), item("a/2")),
+        ]);
+        let order: Vec<(String, u8)> = nested
+            .iter()
+            .map(|tool| (tool_chip_content(&tool.call).1, tool.depth))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("a".to_string(), 0),
+                ("a/1".to_string(), 1),
+                ("a/1/1".to_string(), 2),
+                ("a/2".to_string(), 1),
+                ("b".to_string(), 0),
+            ]
+        );
+        // Depth is part of the row's identity: re-nesting re-splices.
+        let flat: Vec<ToolItem> = nested
+            .iter()
+            .cloned()
+            .map(|tool| ToolItem { depth: 0, ..tool })
+            .collect();
+        assert_ne!(
+            tool_fingerprint(&nested, false),
+            tool_fingerprint(&flat, false)
+        );
+    }
+
+    #[test]
+    fn script_invocation_is_the_code_itself() {
+        let code = "\n\nconst a = await tools.read({ path: \"x\" });\nreturn a.length;\n";
+        let Some(ToolDetail::Output {
+            lines,
+            truncated_by,
+        }) = call_block(&ToolCall::Unknown {
+            name: "codemode".into(),
+            input: Some(serde_json::json!({ "code": code })),
+        })
+        else {
+            panic!("expected an output block")
+        };
+        assert_eq!(truncated_by, 0);
+        assert_eq!(
+            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            vec![
+                "const a = await tools.read({ path: \"x\" });",
+                "return a.length;"
+            ]
+        );
+        // Scripts get more lines than a command echo before the tail.
+        let long = (0..100)
+            .map(|i| format!("text({i});"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Some(ToolDetail::Output {
+            lines,
+            truncated_by,
+        }) = call_block(&ToolCall::Unknown {
+            name: "codemode".into(),
+            input: Some(serde_json::json!({ "code": long })),
+        })
+        else {
+            panic!("expected an output block")
+        };
+        assert_eq!(lines.len(), SCRIPT_DETAIL_MAX_LINES);
+        assert_eq!(truncated_by, 100 - SCRIPT_DETAIL_MAX_LINES);
+        // tool_search shows its query.
+        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Unknown {
+            name: "tool_search".into(),
+            input: Some(serde_json::json!({ "query": "discord" })),
+        }) else {
+            panic!("expected an output block")
+        };
+        assert_eq!(lines[0].as_ref(), "discord");
     }
 
     #[test]

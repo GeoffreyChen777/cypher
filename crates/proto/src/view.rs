@@ -443,6 +443,92 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// Pi's `codemode` tool: instead of calling tools one at a time, the model
+/// writes a JavaScript script that calls them (`await tools.read({…})`). Pi
+/// runs each call the script makes as a tool call of its own, with the id
+/// `{script call id}/{n}`, so a viewport can list those calls under the
+/// script that made them.
+pub const CODEMODE_TOOL: &str = "codemode";
+
+/// Pi's `tool_search`: finds tools the model was not shown up front (MCP
+/// tools with `deferred` exposure) and loads the matches.
+pub const TOOL_SEARCH_TOOL: &str = "tool_search";
+
+/// The script of a `codemode` call, when the transcript kept it.
+pub fn codemode_script(call: &crate::ToolCall) -> Option<&str> {
+    match call {
+        crate::ToolCall::Unknown { name, input } if name == CODEMODE_TOOL => {
+            input.as_ref()?.get("code")?.as_str()
+        }
+        _ => None,
+    }
+}
+
+/// The tool part of a Pi MCP tool name (`mcp__{server}__{tool}`). A script
+/// names tools by identifier, which only carries Pi's sanitized server
+/// (`mvp-lab` reads `mvp_lab`); the nested MCP chips under the script name
+/// the server as configured, so the summary leaves it to them.
+fn mcp_tool_label(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then(|| tool.to_owned())
+}
+
+/// The tools a script calls, in order of first use: `tools.read(…)` and
+/// `tools["read"](…)`, an MCP tool by its tool name. Read off the source, so
+/// a call the script only makes on some branch is listed too — this names
+/// what the script is about, the nested chips under it say what actually ran.
+pub fn script_tools(code: &str) -> Vec<String> {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let bytes = code.as_bytes();
+    let mut names: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(at) = code[from..].find("tools") {
+        let start = from + at;
+        let end = start + "tools".len();
+        from = end;
+        // `ALL_TOOLS`, `myTools.x` and `x.tools.y` are not the global.
+        if start > 0 && (ident(bytes[start - 1]) || bytes[start - 1] == b'.') {
+            continue;
+        }
+        let rest = &code[end..];
+        let name = if let Some(after) = rest.strip_prefix('.') {
+            &after[..after.bytes().take_while(|b| ident(*b)).count()]
+        } else if let Some(after) = rest.strip_prefix('[') {
+            match after.chars().next() {
+                Some(quote @ ('"' | '\'' | '`')) => {
+                    let inner = &after[1..];
+                    inner.find(quote).map_or("", |len| &inner[..len])
+                }
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let shown = mcp_tool_label(name).unwrap_or_else(|| name.to_owned());
+        if !names.contains(&shown) {
+            names.push(shown);
+        }
+    }
+    names
+}
+
+/// A script chip's one-line detail: the tools it calls, else its first line
+/// of code (the `// @options:` header is configuration, not content).
+fn script_summary(code: &str) -> String {
+    let tools = script_tools(code);
+    if !tools.is_empty() {
+        return tools.join(", ");
+    }
+    code.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("// @options:"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
@@ -475,6 +561,21 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             ("Todo", format!("{done}/{} done", items.len()))
         }
         ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        ToolCall::Unknown { name, .. } if name == CODEMODE_TOOL => (
+            "Script",
+            codemode_script(call)
+                .map(script_summary)
+                .unwrap_or_default(),
+        ),
+        ToolCall::Unknown { name, input } if name == TOOL_SEARCH_TOOL => (
+            "Find tools",
+            input
+                .as_ref()
+                .and_then(|input| input.get("query"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        ),
         ToolCall::Unknown { name, .. } => ("Tool", name.clone()),
     }
 }
@@ -529,6 +630,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     let mut searches = 0usize;
     let mut fetches = 0usize;
     let mut todos = 0usize;
+    let mut scripts = 0usize;
     let mut other = 0usize;
     let mut failed = 0usize;
     for (call, is_error) in tools {
@@ -554,12 +656,22 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             }
             ToolCall::WebFetch { .. } => fetches += 1,
             ToolCall::Todo { .. } => todos += 1,
+            ToolCall::Unknown { name, .. } if name == CODEMODE_TOOL => scripts += 1,
+            ToolCall::Unknown { name, .. } if name == TOOL_SEARCH_TOOL => searches += 1,
             ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
         }
     }
     let mut segments: Vec<String> = Vec::new();
-    if commands > 0 {
-        segments.push(format!("ran {}", plural(commands, "command", "commands")));
+    // Commands and scripts share one verb: "ran 2 commands and 1 script".
+    let ran: Vec<String> = [
+        (commands > 0).then(|| plural(commands, "command", "commands")),
+        (scripts > 0).then(|| plural(scripts, "script", "scripts")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !ran.is_empty() {
+        segments.push(format!("ran {}", ran.join(" and ")));
     }
     if !edited.is_empty() {
         segments.push(format!("edited {}", plural(edited.len(), "file", "files")));
@@ -710,6 +822,87 @@ mod tool_chip_tests {
             tool_chip_content(&call),
             ("Tool", "send_message".to_string())
         );
+    }
+
+    fn script(code: &str) -> ToolCall {
+        ToolCall::Unknown {
+            name: CODEMODE_TOOL.into(),
+            input: Some(serde_json::json!({ "code": code })),
+        }
+    }
+
+    #[test]
+    fn script_chips_name_the_tools_the_script_calls() {
+        let call = script(
+            "const [a, b] = await Promise.all([\n  tools.read({ path: 'x' }),\n  tools.bash({ command: 'ls' }),\n]);\nawait tools.read({ path: 'y' });",
+        );
+        assert_eq!(
+            tool_chip_content(&call),
+            ("Script", "read, bash".to_string())
+        );
+        // Bracket access, and MCP tools by their tool name.
+        let call = script(
+            "await tools[\"my-tool\"]({});\nawait tools.mcp__mvp_lab_discord__search({ q: 1 });",
+        );
+        assert_eq!(
+            tool_chip_content(&call),
+            ("Script", "my-tool, search".to_string())
+        );
+        // Lookalikes are not the `tools` global.
+        assert!(
+            script_tools("ALL_TOOLS.map(t => t.name); myTools.x(); a.tools.y(); tools.").is_empty()
+        );
+        // No tool calls: the first line of code that is not the options header.
+        let call = script("// @options: {\"timeout_ms\": 1000}\n\nreturn 6 * 7;");
+        assert_eq!(
+            tool_chip_content(&call),
+            ("Script", "return 6 * 7;".to_string())
+        );
+        // A script the doc did not keep still labels as a script.
+        let call = ToolCall::Unknown {
+            name: CODEMODE_TOOL.into(),
+            input: None,
+        };
+        assert_eq!(tool_chip_content(&call), ("Script", String::new()));
+        assert_eq!(codemode_script(&call), None);
+    }
+
+    #[test]
+    fn tool_search_chips_show_their_query() {
+        let call = ToolCall::Unknown {
+            name: TOOL_SEARCH_TOOL.into(),
+            input: Some(serde_json::json!({ "query": "discord messages" })),
+        };
+        assert_eq!(
+            tool_chip_content(&call),
+            ("Find tools", "discord messages".to_string())
+        );
+    }
+
+    #[test]
+    fn group_summaries_count_scripts_with_commands() {
+        let exec = ToolCall::Exec {
+            command: "ls".into(),
+        };
+        let read = ToolCall::ReadFile { path: "a".into() };
+        assert_eq!(
+            tool_group_summary(&[(script(""), false), (read.clone(), false)]),
+            "Ran 1 script · read 1 file"
+        );
+        assert_eq!(
+            tool_group_summary(&[
+                (script(""), false),
+                (exec.clone(), false),
+                (exec, true),
+                (read, false),
+            ]),
+            "Ran 2 commands and 1 script · read 1 file · 1 failed"
+        );
+        let search = ToolCall::Unknown {
+            name: TOOL_SEARCH_TOOL.into(),
+            input: None,
+        };
+        assert_eq!(tool_group_summary(&[(search, false)]), "Searched 1 time");
     }
 
     #[test]

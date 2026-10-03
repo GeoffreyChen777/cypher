@@ -19,6 +19,15 @@ pub const TOOL_OUTPUT_SUMMARY_MAX_LINES: usize = 5;
 /// the stored string is always valid UTF-8.
 pub const SUBAGENT_TASK_MAX_CHARS: usize = 500;
 
+/// Char cap for a Pi `codemode` script kept in the doc. The script is the
+/// call's whole invocation — what a `bash` command is to `Exec`, which the doc
+/// keeps uncut — so it stays, bounded: a model writes a few dozen lines, and
+/// a pathological one cannot grow a tool part without limit.
+pub const CODEMODE_SCRIPT_MAX_CHARS: usize = 8_000;
+
+/// Char cap for a Pi `tool_search` query kept in the doc.
+pub const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
+
 /// The doc-resident form of a tool output (docs/chat2-sync.md A1; the R2
 /// sidecar is PARKED as of 2026-08-10, so this IS the whole record in the
 /// doc — the full text survives only in the host's local run journal):
@@ -516,7 +525,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 
 /// Render-only privacy policy — strip heavy/sensitive tool inputs before a call enters the doc.
 ///
-/// Keeps: command / path / pattern / url / query / todo items / server+tool names.
+/// Keeps: command / path / pattern / url / query / todo items / server+tool names, and
+/// the script of a Pi `codemode` call and the query of a `tool_search` (both capped).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -571,6 +581,27 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             ToolCall::Unknown {
                 name: name.clone(),
                 input: Some(serde_json::Value::Object(kept)),
+            }
+        }
+        // Pi's codemode script and tool_search query: the one field each
+        // invocation is about, capped on a char boundary. Nothing else rides.
+        ToolCall::Unknown { name, input }
+            if name == cypher_proto::view::CODEMODE_TOOL
+                || name == cypher_proto::view::TOOL_SEARCH_TOOL =>
+        {
+            let (key, cap) = if name == cypher_proto::view::CODEMODE_TOOL {
+                ("code", CODEMODE_SCRIPT_MAX_CHARS)
+            } else {
+                ("query", TOOL_SEARCH_QUERY_MAX_CHARS)
+            };
+            let value = input
+                .as_ref()
+                .and_then(|input| input.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value.chars().take(cap).collect::<String>());
+            ToolCall::Unknown {
+                name: name.clone(),
+                input: value.map(|value| serde_json::json!({ key: value })),
             }
         }
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
@@ -817,6 +848,61 @@ mod tests {
         let task = args["task"].as_str().expect("task string");
         assert_eq!(task.chars().count(), SUBAGENT_TASK_MAX_CHARS);
         assert!(std::str::from_utf8(task.as_bytes()).is_ok(), "valid UTF-8");
+    }
+
+    /// A codemode call keeps its script — and only its script — cut on a
+    /// char boundary at [`CODEMODE_SCRIPT_MAX_CHARS`]; tool_search keeps its
+    /// query the same way.
+    #[test]
+    fn sanitize_keeps_codemode_script_and_tool_search_query() {
+        let call = ToolCall::Unknown {
+            name: "codemode".into(),
+            input: Some(serde_json::json!({ "code": "return 1", "extra": "dropped" })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Unknown {
+                name: "codemode".into(),
+                input: Some(serde_json::json!({ "code": "return 1" })),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean, "idempotent");
+
+        let long = "é".repeat(CODEMODE_SCRIPT_MAX_CHARS + 10);
+        let call = ToolCall::Unknown {
+            name: "codemode".into(),
+            input: Some(serde_json::json!({ "code": long })),
+        };
+        let ToolCall::Unknown { input, .. } = sanitize_tool_call(&call) else {
+            panic!("stays unknown");
+        };
+        let code = input.as_ref().unwrap()["code"].as_str().unwrap();
+        assert_eq!(code.chars().count(), CODEMODE_SCRIPT_MAX_CHARS);
+
+        let call = ToolCall::Unknown {
+            name: "tool_search".into(),
+            input: Some(serde_json::json!({ "query": "discord", "limit": 8 })),
+        };
+        assert_eq!(
+            sanitize_tool_call(&call),
+            ToolCall::Unknown {
+                name: "tool_search".into(),
+                input: Some(serde_json::json!({ "query": "discord" })),
+            }
+        );
+        // Without the field there is nothing to keep.
+        let call = ToolCall::Unknown {
+            name: "codemode".into(),
+            input: Some(serde_json::json!({ "other": 1 })),
+        };
+        assert_eq!(
+            sanitize_tool_call(&call),
+            ToolCall::Unknown {
+                name: "codemode".into(),
+                input: None
+            }
+        );
     }
 
     /// Ordinary Unknown tools still clear their input wholesale.
