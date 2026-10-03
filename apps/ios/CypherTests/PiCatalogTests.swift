@@ -88,7 +88,7 @@ final class PiCatalogTests: XCTestCase {
         XCTAssertTrue(catalog.models.isEmpty)
         await catalog.load(deviceId: "a") { _ in HarnessCatalog.demoModels }
         XCTAssertFalse(catalog.loading)
-        XCTAssertEqual(catalog.models.count, 1)
+        XCTAssertEqual(catalog.models, HarnessCatalog.demoModels)
     }
 
     func testProvidersGroupInCatalogOrderWithDesktopNamesAndContextOnlySublines() {

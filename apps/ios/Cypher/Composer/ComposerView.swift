@@ -331,7 +331,6 @@ struct ComposerView: View {
     @State private var uploading = false
     @State private var uploadError: String?
     @State private var showModelPicker = false
-    @State private var showTraitPicker = false
     @State private var catalogRevision = 0
     @State private var commands = RemoteCommandCatalog()
     @State private var modes = SlashModesCatalog()
@@ -442,7 +441,7 @@ struct ComposerView: View {
                 showStop: runLive && canControl,
                 busy: uploading,
                 hasComments: !(commentDrafts?.comments.isEmpty ?? true),
-                keepExpanded: showModelPicker || showTraitPicker,
+                keepExpanded: showModelPicker,
                 onSend: send,
                 onStop: {
                     guard canControl else { return }
@@ -457,15 +456,12 @@ struct ComposerView: View {
                     if let usage = sessionRow?.contextUsage {
                         ContextRingChip(usage: usage, availability: compactAvailability, onCompact: compact)
                     }
-                    ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model") {
+                    ModelChip(model: currentModel,
+                              fallbackLabel: chat.config?.model ?? "Select model",
+                              reasoning: currentReasoning) {
                         showModelPicker = true
                     }
                     .disabled(harness != "pi" || !canControl)
-                    if let currentReasoning {
-                        ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
-                            showTraitPicker = true
-                        }
-                    }
                 }
             }
         }
@@ -476,29 +472,15 @@ struct ComposerView: View {
             stage(items)
         }
         .sheet(isPresented: $showModelPicker) {
+            // One write per pick, model and level together: two writes from
+            // this render's `chat` would let the second undo the first.
             ModelPickerSheet(
-                harness: .constant(harness),
-                modelId: Binding(
-                    get: { currentModel?.id ?? "" },
-                    set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
-                ),
-                reasoning: Binding(
-                    get: { chat.config?.reasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                lockedHarness: true,
-                catalogs: [harness: models],
+                models: models,
+                modelId: currentModel?.id ?? "",
+                reasoning: currentReasoning,
                 loading: catalog.loading,
-                onRefresh: { catalogRevision += 1 }
-            )
-        }
-        .sheet(isPresented: $showTraitPicker) {
-            TraitPickerSheet(
-                reasoning: Binding(
-                    get: { currentReasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                levels: currentModel?.reasoningLevels ?? []
+                onRefresh: { catalogRevision += 1 },
+                onSelect: { writeConfig(model: $0, reasoning: $1) }
             )
         }
         .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)") {

@@ -24,10 +24,15 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   but cannot be driven from the mobile composer. The internal mock E2E rig
   remains test infrastructure, not a selectable agent.
 - **Target-device catalogs:** installed/enabled Pi and available models are
-  read from that project's engine. The model picker groups them by provider
-  like the desktop: a rail of provider chips (brand mark, name, count) opens
-  on the current model's provider and the list shows that provider's models
-  with their context size. No static Claude/Codex models or synthetic
+  read from that project's engine. One composer chip shows the model and its
+  thinking level ("Claude Opus 5.5 · High", with the provider's mark) and
+  opens one card for both: a rail of provider chips (brand mark, name,
+  count) opens on the current model's provider, that provider's models list
+  a line each with their context size, and the chosen model's thinking
+  levels sit in a segmented track pinned along the bottom (or a note when it
+  takes none). Each pick writes the model and level together; a model that
+  doesn't take the current level gets its default. No static Claude/Codex
+  models or synthetic
   “Pi default” fallback. Empty/error states explain how to prepare **that
   device** using desktop Agents/Providers settings; the phone does not install
   Runtime. Retry, picker refresh, reconnect and foregrounding reload catalogs.
@@ -320,7 +325,7 @@ Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
 | Status word in the row corner (muted dots; Done keeps its pop; spinner rides bottom-right) | Same, same colors |
 | Composer `white_alpha(0.03)` pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
 | Harness brand SVG marks (icons.rs) | Same path data via a native SVG path parser (`BrandMarks.swift`) |
-| Pi model picker + target-device catalog | Pi-only live catalog + reasoning chips; no offline model fallback |
+| Pi model picker + target-device catalog | Pi-only live catalog; one model chip and card with a pinned thinking track; no offline model fallback |
 | Add-project palette (device + folder browser) | New-project sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
 | ControlRpc over device-room relay | `DeviceRelayClient` — binary `uleb128(len)+header+payload` frames, `{"s","k","to","from"}` header, ndjson ControlRpc; used for ListFolders + direct-to-host `Mutate {createSpace}` (local doc-write fallback when the host is offline) |
 | Hover timestamps / copy | Context menus |

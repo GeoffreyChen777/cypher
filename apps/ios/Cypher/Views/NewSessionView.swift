@@ -25,7 +25,6 @@ struct NewSessionView: View {
 
     @State private var draft = ""
     @State private var showPicker = false
-    @State private var showTraitPicker = false
     @State private var showRefPicker = false
     @State private var showCheckoutPicker = false
     @State private var attachments: [StagedAttachment] = []
@@ -56,10 +55,6 @@ struct NewSessionView: View {
     /// This canvas's own route, swapped for the session on send.
     private var route: Route {
         quickDeviceId.map { .quickChat(deviceId: $0) } ?? .newSession(spaceId: spaceId)
-    }
-
-    private var harnesses: [HarnessInfo] {
-        HarnessCatalog.harnesses
     }
 
     private var models: [ModelInfo] {
@@ -235,23 +230,14 @@ struct NewSessionView: View {
                 await catalog.load(deviceId: targetDeviceId, fetch: model.listPiModels)
             }
             .sheet(isPresented: $showPicker) {
-                ModelPickerSheet(harness: .constant(harness), modelId: Binding(
-                    get: { selectedModel?.id ?? "" },
-                    set: { rememberModel($0) }
-                ), reasoning: Binding(
-                    get: { reasoning },
-                    set: { storedReasoning = $0 ?? "" }
-                ), lockedHarness: true, harnesses: harnesses, catalogs: [harness: models],
-                   loading: catalog.loading, onRefresh: { catalogRevision += 1 })
+                ModelPickerSheet(models: models, modelId: selectedModel?.id ?? "", reasoning: reasoning,
+                                 loading: catalog.loading, onRefresh: { catalogRevision += 1 }) { id, level in
+                    rememberModel(id)
+                    storedReasoning = level ?? ""
+                }
             }
             .onChange(of: showPicker) { _, showing in
                 if showing { catalogRevision += 1 }
-            }
-            .sheet(isPresented: $showTraitPicker) {
-                TraitPickerSheet(reasoning: Binding(
-                    get: { reasoning },
-                    set: { storedReasoning = $0 ?? "" }
-                ), levels: selectedModel?.reasoningLevels ?? [])
             }
     }
 
@@ -279,17 +265,11 @@ struct NewSessionView: View {
                 onAttach: { showPhotoPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } }
             ) {
-                // Model + trait chips, split like the desktop's footer pickers
-                // (they ride right of the shell's attach button).
-                ComposerChip(label: selectedModel?.label ?? "Select model") {
+                // One chip for the model and its thinking level (it rides
+                // right of the shell's attach button).
+                ModelChip(model: selectedModel, reasoning: reasoning) {
                     focused = false
                     showPicker = true
-                }
-                if let reasoning {
-                    ComposerChip(label: HarnessCatalog.reasoningLabel(reasoning)) {
-                        focused = false
-                        showTraitPicker = true
-                    }
                 }
             }
         }
@@ -527,10 +507,12 @@ struct NewSessionView: View {
 
 // MARK: - Composer chip
 
-/// The composer's picker trigger chip: optional brand mark, label, chevron —
-/// one per picker, split like the desktop's footer (model | traits).
+/// The composer's picker trigger chip: optional brand mark, label, an
+/// optional quieter detail, chevron. The model chip carries the thinking
+/// level as its detail ("Claude Opus 5 · High"), so one chip opens both.
 struct ComposerChip: View {
     let label: String
+    var detail: String?
     var badgeHarness: String?
     let action: () -> Void
 
@@ -544,6 +526,15 @@ struct ComposerChip: View {
                     .font(Theme.sans(13, weight: .medium))
                     .foregroundStyle(Theme.text.opacity(0.9))
                     .lineLimit(1)
+                if let detail {
+                    Text("·")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.textFaint)
+                    Text(detail)
+                        .font(Theme.sans(13, weight: .medium))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.textFaint)
@@ -557,38 +548,58 @@ struct ComposerChip: View {
     }
 }
 
+/// The one model chip both composers show: the provider's mark, the model
+/// and, when it takes one, its thinking level.
+struct ModelChip: View {
+    let model: ModelInfo?
+    /// Shown while no catalog model matches (a configured id, or nothing).
+    var fallbackLabel = "Select model"
+    let reasoning: String?
+    let action: () -> Void
+
+    var body: some View {
+        ComposerChip(label: model?.label ?? fallbackLabel,
+                     detail: reasoning.map(HarnessCatalog.reasoningLabel),
+                     badgeHarness: model.flatMap {
+                         HarnessCatalog.providerBadgeHarness(HarnessCatalog.providerId(of: $0.id))
+                     },
+                     action: action)
+            .accessibilityIdentifier("model-chip")
+    }
+}
+
 // MARK: - Model picker sheet
 
-/// Detent bottom sheet, grouped by PROVIDER like the desktop picker: a
-/// horizontal rail of provider chips (brand mark · name · count) across the
-/// top selects the group, and the list below shows only that provider's
-/// models — a flat list of every gateway model was unreadable on a phone.
-/// The rail opens on the current model's provider. Effort lives in its own
-/// TraitPickerSheet, split like the desktop's footer pickers.
+/// One card for both choices. Providers sit in a rail across the top (the
+/// desktop picker's grouping: a flat list of every gateway model was
+/// unreadable on a phone), the viewed provider's models in a card below,
+/// and the chosen model's thinking levels pinned along the bottom, so they
+/// stay in reach however long the list. The rail opens on the current
+/// model's provider.
+///
+/// Every pick reports the model and level together: a model that doesn't
+/// take the current level gets its default, written in the same change.
 struct ModelPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Binding var harness: String
-    @Binding var modelId: String
-    @Binding var reasoning: String?
-    /// True when reconfiguring a live chat: the harness can't change mid-chat.
-    var lockedHarness = false
-    /// Pi-only; legacy harnesses are displayable in history, never selectable.
-    var harnesses: [HarnessInfo] = []
     /// Empty means unavailable, never a static fallback.
-    var catalogs: [String: [ModelInfo]] = [:]
+    let models: [ModelInfo]
+    let modelId: String
+    let reasoning: String?
     var loading = false
     var onRefresh: (() -> Void)?
+    let onSelect: (_ modelId: String, _ reasoning: String?) -> Void
 
     /// The provider whose models the list shows; nil = the current model's.
     @State private var pickedProvider: String?
+    @Namespace private var thinkingSelection
 
-    private var models: [ModelInfo] { catalogs["pi"] ?? [] }
     private var groups: [HarnessCatalog.ProviderGroup] { HarnessCatalog.providerGroups(models) }
+    private var current: ModelInfo? { models.first { $0.id == modelId } }
 
     private var viewedProvider: String? {
         if let pickedProvider, groups.contains(where: { $0.id == pickedProvider }) { return pickedProvider }
-        let current = HarnessCatalog.providerId(of: modelId)
-        if groups.contains(where: { $0.id == current }) { return current }
+        let provider = HarnessCatalog.providerId(of: modelId)
+        if groups.contains(where: { $0.id == provider }) { return provider }
         return groups.first?.id
     }
 
@@ -596,10 +607,18 @@ struct ModelPickerSheet: View {
         groups.first { $0.id == viewedProvider }
     }
 
+    /// The level in effect for the current model: the chosen one if it
+    /// takes it, else its default.
+    private var currentLevel: String? {
+        guard let current else { return nil }
+        if let reasoning, current.reasoningLevels.contains(reasoning) { return reasoning }
+        return HarnessCatalog.defaultReasoning(for: current)
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 16) {
                     if loading {
                         // Centered in the sheet's visible area, not tucked
                         // into the list's top-left corner.
@@ -625,34 +644,36 @@ struct ModelPickerSheet: View {
                         if groups.count > 1 {
                             providerRail
                         }
-                        VStack(alignment: .leading, spacing: 4) {
-                            if let viewedGroup {
-                                SheetLabel(groups.count > 1 ? viewedGroup.name : "Model")
-                                ForEach(viewedGroup.models) { m in
-                                    PickRow(title: m.label,
-                                            subtitle: HarnessCatalog.contextLabel(m),
-                                            selected: m.id == modelId) {
-                                        select(model: m)
-                                    }
-                                }
-                            }
+                        if let viewedGroup {
+                            modelCard(viewedGroup)
                         }
                     }
                 }
-                .padding(20)
-                .padding(.bottom, 12)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 20)
                 // The loading/empty content has a narrow intrinsic width;
-                // don't wait for full-width PickRows to size the sheet.
+                // don't wait for full-width rows to size the sheet.
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !loading, let current {
+                    thinkingBar(current)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(SheetStyle.panel)
-            .navigationTitle("Select model")
+            .navigationTitle("Model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if let onRefresh {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Refresh", action: onRefresh).disabled(loading)
+                        Button(action: onRefresh) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .disabled(loading)
+                        .accessibilityLabel("Refresh")
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -671,9 +692,10 @@ struct ModelPickerSheet: View {
         .presentationCornerRadius(32)
     }
 
+    // MARK: Providers
+
     /// The provider rail: one chip per provider in catalog order. The viewed
-    /// chip is the filled high-contrast pill (the rows' selected language);
-    /// the others carry a faint count.
+    /// chip is the filled high-contrast pill; the others carry a faint count.
     private var providerRail: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -720,79 +742,144 @@ struct ModelPickerSheet: View {
         .accessibilityAddTraits(viewed ? .isSelected : [])
     }
 
-    private func select(model m: ModelInfo) {
-        UISelectionFeedbackGenerator().selectionChanged()
-        if harness != "pi" {
-            harness = "pi"
-        }
-        modelId = m.id
-        if let current = reasoning, m.reasoningLevels.contains(current) {
-            return
-        }
-        reasoning = HarnessCatalog.defaultReasoning(for: m)
-    }
-}
+    // MARK: Models
 
-// MARK: - Trait (effort) picker sheet
-
-/// The effort ladder in its own detent sheet — the composer's second picker
-/// chip, split from the model list like the desktop's Traits dropdown.
-struct TraitPickerSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Binding var reasoning: String?
-    let levels: [String]
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    SheetLabel("Effort")
-                    ForEach(levels, id: \.self) { level in
-                        PickRow(title: HarnessCatalog.reasoningLabel(level),
-                                subtitle: Self.effortHint(level),
-                                selected: reasoning == level) {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                            reasoning = level
-                        }
-                    }
-                }
-                .padding(20)
-                .padding(.bottom, 12)
+    /// The viewed provider's models in one card, a line each: the name, its
+    /// context size, and a check on the current one. With a single provider
+    /// there's no rail, so the card is headed by its name.
+    private func modelCard(_ group: HarnessCatalog.ProviderGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if groups.count == 1 {
+                SheetLabel(group.name)
             }
-            .background(SheetStyle.panel)
-            .navigationTitle("Traits")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
+            VStack(spacing: 0) {
+                ForEach(Array(group.models.enumerated()), id: \.element.id) { ix, m in
+                    if ix > 0 {
+                        Rectangle()
+                            .fill(SheetStyle.rowSeparator)
+                            .frame(height: 1)
+                            .padding(.leading, 16)
                     }
-                    .accessibilityLabel("Close")
+                    modelRow(m)
                 }
             }
+            .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
+            .clipShape(RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
+            .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
+                .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(32)
     }
 
-    /// One-line hints for the ladder (the special modes deserve explanation).
-    static func effortHint(_ level: String) -> String? {
-        switch level {
-        case "minimal": return "Quickest, lightest touch"
-        case "low": return "Fastest responses"
-        case "medium": return "Balanced speed and depth"
-        case "high": return "Thorough reasoning"
-        case "xhigh": return "Extended reasoning"
-        case "max": return "Maximum reasoning budget"
-        case "ultra": return "Highest Codex tier"
-        case "ultracode": return "X-High plus the ultracode setting"
-        case "ultrathink": return "Deep-thinking prompt mode"
-        default: return nil
+    private func modelRow(_ m: ModelInfo) -> some View {
+        let selected = m.id == modelId
+        return Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            onSelect(m.id, Self.level(keeping: reasoning, on: m))
+        } label: {
+            HStack(spacing: 10) {
+                Text(m.label)
+                    .font(Theme.sans(15, weight: selected ? .semibold : .medium))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if let context = HarnessCatalog.contextLabel(m) {
+                    Text(context)
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+                Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 16)
+                    .opacity(selected ? 1 : 0)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+            .background(selected ? whiteAlpha(0.06) : .clear)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(SheetRowButtonStyle())
+        .accessibilityIdentifier("model-row-\(m.id)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// The level a newly picked model runs at: the current one if it takes
+    /// it, else its default (nil for a model without levels).
+    static func level(keeping reasoning: String?, on model: ModelInfo) -> String? {
+        if let reasoning, model.reasoningLevels.contains(reasoning) { return reasoning }
+        return HarnessCatalog.defaultReasoning(for: model)
+    }
+
+    // MARK: Thinking
+
+    /// Pinned under the list: the current model's thinking levels as one
+    /// segmented track, and a line on what the chosen level does.
+    private func thinkingBar(_ model: ModelInfo) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                SheetLabel("Thinking")
+                Spacer(minLength: 8)
+                if let currentLevel, let hint = HarnessCatalog.reasoningHint(currentLevel) {
+                    Text(hint)
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+            }
+            if model.reasoningLevels.isEmpty {
+                Text("\(model.label) doesn't take a thinking level.")
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .padding(.horizontal, 4)
+            } else {
+                HStack(spacing: 2) {
+                    ForEach(model.reasoningLevels, id: \.self) { level in
+                        thinkingSegment(level, model: model)
+                    }
+                }
+                .padding(3)
+                .background(whiteAlpha(0.06), in: Capsule())
+                .motionAnimation(Motion.collapse, value: currentLevel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("thinking-levels")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+        .background(SheetStyle.panel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(SheetStyle.rowSeparator).frame(height: 1)
+        }
+    }
+
+    private func thinkingSegment(_ level: String, model: ModelInfo) -> some View {
+        let selected = level == currentLevel
+        return Button {
+            guard !selected else { return }
+            UISelectionFeedbackGenerator().selectionChanged()
+            onSelect(model.id, level)
+        } label: {
+            Text(HarnessCatalog.reasoningLabel(level))
+                .font(Theme.sans(13, weight: .medium))
+                .foregroundStyle(selected ? Theme.bg : Theme.text.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(maxWidth: .infinity, minHeight: 36)
+                .background {
+                    if selected {
+                        Capsule()
+                            .fill(Theme.text)
+                            .matchedGeometryEffect(id: "level", in: thinkingSelection)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("thinking-\(level)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
