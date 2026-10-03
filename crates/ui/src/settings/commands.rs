@@ -151,6 +151,34 @@ pub fn placement(name: &str) -> Placement {
     }
 }
 
+/// The glyph for a command: what it acts on, matching Settings' own icons
+/// where a command opens or repeats one of its pages (a key for providers, a
+/// globe for MCP). Unknown commands keep the generic command glyph, or the
+/// sliders when their name says they configure something.
+pub fn icon(name: &str) -> &'static str {
+    let name = name.to_ascii_lowercase();
+    match name.as_str() {
+        "compact" => icons::FOLD_VERTICAL,
+        "export-html" => icons::ARCHIVE_UP_MINIMALISTIC,
+        "goal" => icons::FLAG,
+        "fast" => icons::BOLT,
+        "orchestrate" => icons::HIERARCHY,
+        "subagents" => icons::USERS,
+        "subagent-status" => icons::PULSE,
+        "subagent-retry" => icons::RESTART,
+        "provider" | "login" => icons::KEY_MINIMALISTIC,
+        "logout" => icons::LOGOUT_2,
+        "web-search-model" => icons::MAGNIFER,
+        "mcp" => icons::GLOBAL,
+        n if n.starts_with("skill:") => icons::BOOK,
+        n if n.starts_with("mcp-") || n.starts_with("pi-mcp") => icons::GLOBAL,
+        n if n.starts_with("newapi-") => icons::CLOUD,
+        n if n.starts_with("llama") => icons::LAPTOP,
+        n if n.ends_with("-config") => icons::TUNING,
+        _ => icons::COMMAND,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CommandsEvent {
     /// The shown-name list changed — persist and publish.
@@ -562,6 +590,34 @@ mod tests {
         // A name this device does not offer stays in the list.
         let shown = set_visible(&names(&["remote-only"]), &names(&["goal"]), true);
         assert!(shows(&shown, "remote-only"));
+    }
+
+    #[test]
+    fn commands_get_icons_for_what_they_act_on() {
+        let cases = [
+            ("compact", icons::FOLD_VERTICAL),
+            ("export-html", icons::ARCHIVE_UP_MINIMALISTIC),
+            ("goal", icons::FLAG),
+            ("fast", icons::BOLT),
+            ("orchestrate", icons::HIERARCHY),
+            ("subagents", icons::USERS),
+            ("subagent-status", icons::PULSE),
+            ("subagent-retry", icons::RESTART),
+            ("subagent-config", icons::TUNING),
+            ("skill:collabmd", icons::BOOK),
+            ("provider", icons::KEY_MINIMALISTIC),
+            ("login", icons::KEY_MINIMALISTIC),
+            ("logout", icons::LOGOUT_2),
+            ("web-search-model", icons::MAGNIFER),
+            ("mcp", icons::GLOBAL),
+            ("newapi-provider-add", icons::CLOUD),
+            ("llama", icons::LAPTOP),
+            ("compact-ui-config", icons::TUNING),
+            ("my-prompt", icons::COMMAND),
+        ];
+        for (name, icon) in cases {
+            assert_eq!(super::icon(name), icon, "{name}");
+        }
     }
 
     #[test]

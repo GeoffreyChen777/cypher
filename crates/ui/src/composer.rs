@@ -7599,7 +7599,7 @@ impl Composer {
                         let badge = slash_menu::command_badge(&command.name, &facts);
                         let has_choices = !slash_menu::choices(&command.name).is_empty();
                         line.child(
-                            crate::icons::icon(crate::icons::COMMAND)
+                            crate::icons::icon(crate::settings::commands::icon(&command.name))
                                 .size(px(14.0))
                                 .text_color(theme.text_muted),
                         )
