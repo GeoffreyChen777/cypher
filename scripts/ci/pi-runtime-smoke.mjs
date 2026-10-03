@@ -56,6 +56,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       join(runtime, "extensions/cypher-provider-auth.ts"),
       join(runtime, "extensions/cypher-translation.ts"),
       join(runtime, "extensions/cypher-fast-mode.ts"),
+      join(runtime, "extensions/cypher-codemode.ts"),
     ];
     if (brokenExtension) {
       const path = join(root, "broken.ts");
@@ -133,9 +134,10 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               assert.ok(responses.get("models").models.some(model =>
                 model.provider === "cypher-ci" && model.id === "gpt-4o"));
               const names = new Set(responses.get("commands").commands.map(command => command.name));
-              // `mcp` is Pi's built-in MCP, which Settings → MCP drives; `fast` is
-              // cypher-fast-mode.ts, which the composer's / menu drives.
-              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp", "fast"]) {
+              // `mcp` is Pi's built-in MCP, which Settings → MCP drives; `fast`
+              // and `scripts` are Cypher's extensions, which the composer's /
+              // menu drives.
+              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp", "fast", "scripts"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);
               }
               finish();

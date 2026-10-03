@@ -141,6 +141,10 @@ pub struct UiSettings {
     /// user had turned on, so it is ignored and dropped on the next save.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shown_slash_commands: Vec<String>,
+    /// Commands [`commands::SHOWN_BY_DEFAULT`] has already turned on, so a
+    /// user who turns one off keeps it off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offered_slash_commands: Vec<String>,
     /// Sidebar card order (the header's view menu). Pins always lead.
     pub sidebar_sort: SidebarSort,
     /// Sidebar device filter: only cards hosted on this device id. `None`
@@ -289,7 +293,14 @@ impl Default for UiSettings {
             appearance: crate::appearance::AppearanceMode::default(),
             setup_completed: false,
             pi_runtime_setup_version: 0,
-            shown_slash_commands: Vec::new(),
+            shown_slash_commands: commands::SHOWN_BY_DEFAULT
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            offered_slash_commands: commands::SHOWN_BY_DEFAULT
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             sidebar_sort: SidebarSort::Activity,
             sidebar_device_filter: None,
             sidebar_sort_reversed: false,
@@ -704,8 +715,9 @@ impl UiSettings {
     }
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
+    /// Commands shown by default and not offered yet are turned on.
     pub fn load(data_dir: &Path) -> Self {
-        match std::fs::read_to_string(Self::path(data_dir)) {
+        let mut settings = match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<UiSettings>(&text) {
                 Ok(settings) => settings.clamped(),
                 Err(err) => {
@@ -714,7 +726,12 @@ impl UiSettings {
                 }
             },
             Err(_) => Self::default(),
-        }
+        };
+        commands::offer_defaults(
+            &mut settings.shown_slash_commands,
+            &mut settings.offered_slash_commands,
+        );
+        settings
     }
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
@@ -825,7 +842,8 @@ mod tests {
             appearance: crate::appearance::AppearanceMode::Light,
             setup_completed: true,
             pi_runtime_setup_version: 1,
-            shown_slash_commands: vec!["goal".into()],
+            shown_slash_commands: vec!["goal".into(), "scripts".into()],
+            offered_slash_commands: vec!["scripts".into()],
             sidebar_sort: SidebarSort::Device,
             sidebar_device_filter: Some("dev-1".into()),
             sidebar_sort_reversed: true,
@@ -886,7 +904,7 @@ mod tests {
     }
 
     /// The old hidden-command list loads without error and leaves every
-    /// command hidden; it is not written back.
+    /// command but the defaults hidden; it is not written back.
     #[test]
     fn legacy_hidden_slash_commands_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
@@ -897,9 +915,9 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, 300.0, "the rest of the file loads");
-        assert!(loaded.shown_slash_commands.is_empty());
+        assert_eq!(loaded.shown_slash_commands, ["scripts"]);
         let json = serde_json::to_string(&loaded).unwrap();
-        assert!(!json.contains("SlashCommands"), "{json}");
+        assert!(!json.contains("hiddenSlashCommands"), "{json}");
     }
 
     /// A layout of the wrong shape (a newer build's tab kind after a

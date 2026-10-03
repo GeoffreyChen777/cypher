@@ -310,6 +310,7 @@ const CONTEXT_WARNING: f32 = 0.8;
 pub fn command_badge(command: &str, facts: &Facts) -> Option<Badge> {
     match command {
         "fast" => facts.modes.map(|modes| on_off(modes.fast)),
+        "scripts" => facts.modes.map(|modes| on_off(modes.codemode)),
         "orchestrate" => facts.modes.map(|modes| on_off(modes.orchestrate)),
         "goal" => facts.modes?.goal.as_ref().map(|goal| {
             let tone = if goal.status == "active" {
@@ -507,6 +508,7 @@ mod tests {
     fn badges_say_what_is_in_effect() {
         let modes = PiSessionModes {
             fast: true,
+            codemode: false,
             orchestrate: false,
             goal: Some(PiGoal {
                 status: "paused".into(),
@@ -522,6 +524,10 @@ mod tests {
             running_subagents: 2,
         };
         assert_eq!(command_badge("fast", &facts), Some(badge("On", Tone::On)));
+        assert_eq!(
+            command_badge("scripts", &facts),
+            Some(badge("Off", Tone::Off))
+        );
         assert_eq!(
             command_badge("orchestrate", &facts),
             Some(badge("Off", Tone::Off))

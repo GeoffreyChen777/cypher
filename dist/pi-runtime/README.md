@@ -112,6 +112,20 @@ releases qualify without a change; ids without a GPT version (`o3`,
 `gpt-fast-pi.state` session entries and `pi-gpt-fast-mode` default, so chats
 keep their setting and the engine reads both for the `/` menu.
 
+## Scripts (codemode)
+
+`/scripts` comes from Cypher's own `extensions/cypher-codemode.ts` and turns
+Pi's `codemode` tool on or off for one chat. Users see it as Scripts, the name
+the transcript already gives a codemode call. It starts on in every chat, with
+or without MCP servers; Pi alone would turn it on only for MCP servers with
+`codemode` exposure, and the chat's setting is reasserted before every prompt
+so Pi's MCP extension cannot turn it back on. With codemode off, MCP tools
+that are not `direct` are reached through `tool_search`, which the extension
+turns on for them. A run started with an explicit `--tools` list (a subagent)
+keeps that list until the chat itself runs `/scripts`. Each toggle is a
+`cypher-codemode.state` session entry, which the engine reads for the `/`
+menu.
+
 ## Adding MCP servers
 
 MCP is Pi's built-in support; the bundle no longer ships pi-mcp-adapter

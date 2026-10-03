@@ -35,6 +35,25 @@ pub struct ShownSlashCommands {
 
 impl Global for ShownSlashCommands {}
 
+/// Commands the `/` menu shows until the user turns them off. Each is
+/// turned on once per device ([`offer_defaults`]), so turning one off sticks
+/// and a name added here later still reaches existing installs.
+pub const SHOWN_BY_DEFAULT: &[&str] = &["scripts"];
+
+/// Turn on each [`SHOWN_BY_DEFAULT`] command not yet in `offered`, and record
+/// it there.
+pub fn offer_defaults(shown: &mut Vec<String>, offered: &mut Vec<String>) {
+    for name in SHOWN_BY_DEFAULT {
+        if shows(offered, name) {
+            continue;
+        }
+        offered.push((*name).to_string());
+        if !shows(shown, name) {
+            shown.push((*name).to_string());
+        }
+    }
+}
+
 pub fn shows(shown: &[String], name: &str) -> bool {
     shown.iter().any(|item| item == name)
 }
@@ -133,7 +152,7 @@ pub fn placement(name: &str) -> Placement {
     let at = |group, advanced| Placement { group, advanced };
     match name.as_str() {
         "compact" | "export-html" => at(Conversation, false),
-        "goal" | "fast" | "orchestrate" => at(AgentModes, false),
+        "goal" | "fast" | "scripts" | "orchestrate" => at(AgentModes, false),
         "subagent-config" => at(Subagents, true),
         "subagents" => at(Subagents, false),
         n if n.starts_with("subagent-") => at(Subagents, false),
@@ -162,6 +181,7 @@ pub fn icon(name: &str) -> &'static str {
         "export-html" => icons::ARCHIVE_UP_MINIMALISTIC,
         "goal" => icons::FLAG,
         "fast" => icons::BOLT,
+        "scripts" => icons::CODE,
         "orchestrate" => icons::HIERARCHY,
         "subagents" => icons::USERS,
         "subagent-status" => icons::PULSE,
@@ -593,12 +613,26 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_turned_on_once() {
+        let (mut shown, mut offered) = (names(&["goal"]), Vec::new());
+        offer_defaults(&mut shown, &mut offered);
+        assert_eq!(shown, names(&["goal", "scripts"]));
+        assert_eq!(offered, names(&["scripts"]));
+        // Turned off afterwards: the next load leaves it off.
+        let mut shown = set_visible(&shown, &names(&["scripts"]), false);
+        offer_defaults(&mut shown, &mut offered);
+        assert_eq!(shown, names(&["goal"]));
+        assert_eq!(offered, names(&["scripts"]));
+    }
+
+    #[test]
     fn commands_get_icons_for_what_they_act_on() {
         let cases = [
             ("compact", icons::FOLD_VERTICAL),
             ("export-html", icons::ARCHIVE_UP_MINIMALISTIC),
             ("goal", icons::FLAG),
             ("fast", icons::BOLT),
+            ("scripts", icons::CODE),
             ("orchestrate", icons::HIERARCHY),
             ("subagents", icons::USERS),
             ("subagent-status", icons::PULSE),
@@ -628,6 +662,7 @@ mod tests {
             ("export-html", Conversation, false),
             ("goal", AgentModes, false),
             ("fast", AgentModes, false),
+            ("scripts", AgentModes, false),
             ("orchestrate", AgentModes, false),
             ("subagents", Subagents, false),
             ("subagent-status", Subagents, false),

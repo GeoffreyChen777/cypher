@@ -7222,7 +7222,7 @@ impl Composer {
             .harness
             .unwrap_or(HarnessId::Pi)
             == HarnessId::Pi;
-        let relevant = ["fast", "orchestrate", "goal"]
+        let relevant = ["fast", "scripts", "orchestrate", "goal"]
             .iter()
             .any(|name| crate::settings::commands::shows_in_app(cx, name));
         if !pi || !relevant || !matches!(self.transport, ComposerTransport::Main) {
