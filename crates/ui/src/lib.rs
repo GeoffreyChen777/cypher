@@ -41,6 +41,7 @@ pub mod settings;
 pub mod shell;
 pub mod side_chats;
 pub mod slash_menu;
+pub mod soft_shadow;
 pub mod sound;
 pub mod space_style;
 pub mod state;

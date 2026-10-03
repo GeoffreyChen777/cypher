@@ -647,6 +647,16 @@ impl Theme {
         }
     }
 
+    /// The composer pill's lift shadow at its densest ([`crate::soft_shadow`]):
+    /// faint on light surfaces, deeper on dark ones where a light shadow
+    /// would vanish.
+    pub fn lift_shadow(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => hsla(0.0, 0.0, 0.0, 0.30),
+            Appearance::Light => hsla(0.0, 0.0, 0.0, 0.14),
+        }
+    }
+
     /// Section-card fill (settings cards and similar in-panel cards). The
     /// opaque `surface` tone read as a harsh solid slab floating on the
     /// frosted blur (user report), so glass thins it to a translucent tint;

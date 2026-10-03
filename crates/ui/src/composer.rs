@@ -71,6 +71,21 @@ const NARROW_PILL_WIDTH: f32 = 412.0;
 pub const PILL_RADIUS: f32 = 26.0;
 /// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
 pub const PILL_BORDER_V: f32 = 2.0;
+/// The end of the pill that carries the context gauge: the right, round the
+/// send button.
+const EDGE_RING_SIDE: crate::context_ring::EdgeSide = crate::context_ring::EdgeSide::Right;
+/// Width of the gauge's hover/click strip at the pill's right edge: from the
+/// send button's edge outward, so the button keeps its own clicks.
+const EDGE_RING_HIT_WIDTH: f32 = COMPACT_CLUSTER_INSET;
+/// The send/steer/stop circle's diameter (zeron composer-actions `size-7`).
+const SEND_BUTTON_SIZE: f32 = 28.0;
+/// How far the pill's lift shadow reaches: a little above, more at the
+/// sides, most below (Tailwind `shadow-lg`'s drop, roughly).
+const PILL_SHADOW_REACH: crate::soft_shadow::Reach = crate::soft_shadow::Reach {
+    top: 3.0,
+    side: 8.0,
+    bottom: 14.0,
+};
 /// Expanded composer bounds, border-box: 76 + 46 + 2 = 124 when empty (the
 /// new-chat canvas), 260 + 46 + 2 = 308 at the content cap.
 pub const COMPOSER_MIN_HEIGHT: f32 = TEXTAREA_MIN + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
@@ -338,18 +353,22 @@ pub const CLUSTER_Y_DELTA: f32 = 2.5;
 /// ONE element (`clusterRef`: `gap-1` chips + `ml-1` attach) reused by both
 /// layouts, so inter-button distances never change across the flip (round 9:
 /// branch-specific gaps read as a horizontal compression pulse mid-morph).
-/// Only the wrapper's right inset differs: `pr-2` (8) compact vs `px-3` (12)
-/// expanded — a whole-cluster 4px shift that glides with the morph.
-pub const CLUSTER_X_DELTA: f32 = 4.0;
+/// The source's right insets differ (`pr-2` 8 compact vs `px-3` 12 expanded),
+/// a whole-cluster shift the morph glides. Here both are 12: the compact
+/// pill's right end carries the context ring, which needs room between the
+/// send button and the border; so the cluster no longer shifts at all.
+pub const COMPACT_CLUSTER_INSET: f32 = 12.0;
+pub const EXPANDED_CLUSTER_INSET: f32 = 12.0;
+pub const CLUSTER_X_DELTA: f32 = EXPANDED_CLUSTER_INSET - COMPACT_CLUSTER_INSET;
 
 /// The right inset for the in-flight morph: eases from the OLD mode's resting
-/// inset to the committed mode's (compact 8 ↔ expanded 12) — pairwise button
+/// inset to the committed mode's (compact ↔ expanded) — pairwise button
 /// distances stay constant; the cluster glides as one.
 pub fn morph_cluster_inset(expanded: bool, progress: f32) -> f32 {
     let (from, to) = if expanded {
-        (8.0, 8.0 + CLUSTER_X_DELTA)
+        (COMPACT_CLUSTER_INSET, EXPANDED_CLUSTER_INSET)
     } else {
-        (8.0 + CLUSTER_X_DELTA, 8.0)
+        (EXPANDED_CLUSTER_INSET, COMPACT_CLUSTER_INSET)
     };
     motion::lerp(from, to, progress)
 }
@@ -5237,13 +5256,12 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
-        let picker_events = cx.subscribe(&pickers, |this: &mut Self, _, event, cx| match event {
+        let picker_events = cx.subscribe(&pickers, |_: &mut Self, _, event, cx| match event {
             crate::pickers::PickerEvent::OpenAgentSettings { target_device } => {
                 cx.emit(ComposerEvent::OpenAgentSettings {
                     target_device: target_device.clone(),
                 });
             }
-            crate::pickers::PickerEvent::CompactContext => this.compact_context(cx),
         });
         let shown_slash_observe = cx
             .observe_global::<crate::settings::commands::ShownSlashCommands>(
@@ -9914,6 +9932,96 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The context gauge: the reading along the pill's rounded right end,
+    /// round the send button and held off the border (the pill clips
+    /// children to its inside), on the single-line pill and the multi-line
+    /// one alike. `height` is the pill's inside; `send_bottom_inset` how far
+    /// up from it the send button ends. Its tooltip, hover and click ride
+    /// strips over the arc that stay outside the send button, so the button
+    /// keeps its own: one up the right edge, plus, where the gauge sits in
+    /// the bottom corner, one along the bottom under the button.
+    fn render_edge_ring(
+        &self,
+        reading: crate::context_ring::RingReading,
+        height: f32,
+        send_bottom_inset: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let fraction = reading.usage.fraction();
+        let enabled = reading.enabled();
+        let summary = reading.summary();
+        let hint = reading.hint();
+        // Hover-fade keys are global: one per composer.
+        let fade = format!("composer-edge-ring-{}", cx.entity_id());
+        let rest = theme.text_muted.opacity(0.25);
+        let track = if enabled {
+            motion::hover_blend(&fade, rest, theme.text_muted.opacity(0.5))
+        } else {
+            rest
+        };
+        // Inside the 1px border the corner's radius is one less (CSS's inner
+        // radius), which is the curve the stroke follows.
+        let corner_radius = PILL_RADIUS - PILL_BORDER_V / 2.0;
+        let arc = crate::context_ring::edge_arc(
+            EDGE_RING_SIDE,
+            fraction,
+            corner_radius,
+            track,
+            crate::context_ring::fill_color(fraction, theme),
+        )
+        .absolute()
+        .inset_0();
+        let semicircle = crate::context_ring::edge_is_semicircle(height, corner_radius);
+        let zone = |id: &'static str| {
+            let summary = summary.clone();
+            let hint = hint.clone();
+            div()
+                .id(id)
+                .absolute()
+                .bottom_0()
+                .tooltip(move |_, cx| {
+                    cx.new(|_| crate::context_ring::ContextRingTooltip {
+                        summary: summary.clone(),
+                        hint: hint.clone(),
+                    })
+                    .into()
+                })
+                .when(enabled, |el| {
+                    el.cursor_pointer()
+                        .on_hover(motion::hover_listener(fade.clone()))
+                        .on_click(cx.listener(|this, _, _, cx| this.compact_context(cx)))
+                })
+        };
+        // Up the right edge: the whole end on the single line, the bottom
+        // corner on a taller pill.
+        let side = zone("composer-edge-ring")
+            .right_0()
+            .w(px(EDGE_RING_HIT_WIDTH))
+            .when(semicircle, |el| el.top_0())
+            .when(!semicircle, |el| el.h(px(PILL_RADIUS)));
+        // Under the send button, where the corner's arc turns toward it.
+        let under = (!semicircle).then(|| {
+            zone("composer-edge-ring-under")
+                .right(px(EDGE_RING_HIT_WIDTH))
+                .w(px(PILL_RADIUS - EDGE_RING_HIT_WIDTH))
+                .h(px(send_bottom_inset))
+        });
+        motion::fade_quick(
+            "composer-edge-ring-in",
+            div()
+                .absolute()
+                .right_0()
+                .top_0()
+                .bottom_0()
+                .w(px(PILL_RADIUS))
+                .child(arc)
+                .child(side)
+                .children(under),
+        )
+        .into_any_element()
+    }
+
     fn render_send_button(
         &mut self,
         mode: SendButtonMode,
@@ -9925,7 +10033,7 @@ impl Composer {
         match mode {
             SendButtonMode::Stop => div()
                 .id("composer-stop")
-                .size(px(28.0))
+                .size(px(SEND_BUTTON_SIZE))
                 .flex_none()
                 .rounded_full()
                 .bg(theme.text)
@@ -9943,7 +10051,7 @@ impl Composer {
                 let blocked = self.send_blocked(cx);
                 div()
                     .id("composer-send")
-                    .size(px(28.0))
+                    .size(px(SEND_BUTTON_SIZE))
                     .flex_none()
                     .rounded_full()
                     .bg(theme.text)
@@ -10334,9 +10442,9 @@ impl Render for Composer {
         // a hairline over a faint wash, never a solid grey box. Picker chips
         // and the send circle live INSIDE the pill.
         let pill_bg = theme.input_glass_bg();
-        // No drop shadow on glass: it paints BEHIND the translucent fill and
-        // shows through as an inner glow (theme.rs's card_selected_shadows
-        // lesson; user report).
+        // Its shadow is not a box shadow: that paints BEHIND the translucent
+        // fill and shows through as an inner glow (theme.rs's
+        // card_selected_shadows lesson; user report). See `pill_shadow` below.
         let pill_width = self.pill_width.clone();
         let pill = div()
             .relative()
@@ -10344,7 +10452,6 @@ impl Render for Composer {
             .bg(pill_bg)
             .border_1()
             .border_color(theme.border)
-            .when(!theme.is_glass(), |el| el.shadow_lg())
             .child(
                 gpui::canvas(
                     move |bounds, window, _| {
@@ -10365,6 +10472,27 @@ impl Render for Composer {
         // (round-9 follow-up: the send/attach/chips must not ride the height,
         // and none of them fade — the full cluster stays visible throughout).
         let cluster_dy = morph_cluster_dy(morph_t);
+        // The context gauge round the send button, drawn once a mode change
+        // has landed: mid-morph the pill's end is still the old one's shape.
+        // The send button's bottom inset: centered in the compact row, or in
+        // the expanded actions row's 32px zone above its 10px bottom pad.
+        let send_bottom_inset = if expanded {
+            10.0 + (ACTIONS_ROW_HEIGHT - 4.0 - 10.0 - SEND_BUTTON_SIZE) / 2.0
+        } else {
+            (compact_height - PILL_BORDER_V - SEND_BUTTON_SIZE) / 2.0
+        };
+        let edge_ring = (!morphing)
+            .then(|| self.pickers.read(cx).context_ring_reading(cx))
+            .flatten()
+            .map(|reading| {
+                self.render_edge_ring(
+                    reading,
+                    pill_height - PILL_BORDER_V,
+                    send_bottom_inset,
+                    &theme,
+                    cx,
+                )
+            });
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
@@ -10403,9 +10531,8 @@ impl Render for Composer {
                         .flex_row()
                         .items_center()
                         // Shared cluster metrics (see CLUSTER_X_DELTA): gap-1
-                        // internals identical to compact; only the right
-                        // inset (`px-3` 12) differs, and it GLIDES in from
-                        // the compact 8 so the buttons never step sideways.
+                        // internals and the right inset (12) are the compact
+                        // ones, so the buttons never step sideways.
                         .gap(px(4.0))
                         .pl(px(12.0))
                         .pr(px(morph_cluster_inset(true, morph_t)))
@@ -10414,6 +10541,7 @@ impl Render for Composer {
                         .child(div().flex_1().min_w_0().child(self.pickers.clone()))
                         .child(send_button),
                 )
+                .children(edge_ring)
         } else {
             // Compact pill: input and the actions cluster on one 47px line
             // (`py-3 pl-4 pr-2` textarea, `gap-2 py-1.5 pl-1 pr-2` cluster;
@@ -10459,10 +10587,10 @@ impl Render for Composer {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                // Shared cluster metrics (`gap-1 pl-1 pr-2`,
-                                // zeron composer-actions.tsx): identical
-                                // internals to expanded; the right inset
-                                // glides 12→8 on collapse.
+                                // Shared cluster metrics (`gap-1 pl-1`, zeron
+                                // composer-actions.tsx): identical internals
+                                // to expanded, right inset included
+                                // (COMPACT_CLUSTER_INSET).
                                 .gap(px(4.0))
                                 .pl(px(4.0))
                                 .pr(px(morph_cluster_inset(false, morph_t)))
@@ -10472,13 +10600,14 @@ impl Render for Composer {
                                 .child(send_button),
                         ),
                 )
+                .children(edge_ring)
         };
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
         // Frosted: the pill backdrop-blurs the transcript scrolling under it
         // (the popover glass treatment; radius matches the pill's rounding).
-        let container = container.child(crate::frost::frosted(
+        let frosted = crate::frost::frosted(
             PILL_RADIUS,
             16.0,
             // Handed back by an answer, the composer returns instantly — the
@@ -10488,7 +10617,34 @@ impl Render for Composer {
             } else {
                 motion::fade_quick("composer-input", body).into_any_element()
             },
-        ));
+        );
+        // The pill's lift: a soft shadow around it, never under it, painted
+        // after the frost so the blur never samples it. It follows the pill
+        // through every height change (absolute over the same box).
+        let reach = PILL_SHADOW_REACH;
+        let pill_shadow = div()
+            .absolute()
+            .top(px(-reach.top))
+            .bottom(px(-reach.bottom))
+            .left(px(-reach.side))
+            .right(px(-reach.side))
+            .child(
+                crate::soft_shadow::outside_shadow(PILL_RADIUS, reach, theme.lift_shadow())
+                    .size_full(),
+            );
+        let pill_shadow = if self.input_swap_instant {
+            pill_shadow.into_any_element()
+        } else {
+            motion::fade_quick("composer-input-shadow", pill_shadow).into_any_element()
+        };
+        let container = container.child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .child(frosted)
+                .child(pill_shadow),
+        );
         // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
         // checkout-kind selector + ref picker for new sessions, read-only
         // labels once the session exists. Git spaces only.
@@ -12577,15 +12733,18 @@ mod tests {
     fn cluster_inset_glides_between_the_source_endpoints() {
         // The morph starts from the OLD mode's resting inset (no sideways
         // step at the commit) and eases to the committed mode's…
-        assert_eq!(morph_cluster_inset(true, 0.0), 8.0); // expand: from compact pr-2
-        assert_eq!(morph_cluster_inset(true, 1.0), 12.0); // …to expanded px-3
-        assert_eq!(morph_cluster_inset(false, 0.0), 12.0); // collapse: from px-3
-        assert_eq!(morph_cluster_inset(false, 1.0), 8.0); // …to pr-2
+        // Both modes rest at 12 (room for the compact pill's context ring), so
+        // the cluster holds still through the morph.
+        assert_eq!(morph_cluster_inset(true, 0.0), COMPACT_CLUSTER_INSET);
+        assert_eq!(morph_cluster_inset(true, 1.0), EXPANDED_CLUSTER_INSET);
+        assert_eq!(morph_cluster_inset(false, 0.0), EXPANDED_CLUSTER_INSET);
+        assert_eq!(morph_cluster_inset(false, 1.0), COMPACT_CLUSTER_INSET);
+        assert_eq!(CLUSTER_X_DELTA, 0.0);
         // …monotonically, bounded by the 4px source delta.
         let mut prev = morph_cluster_inset(true, 0.0);
         for step in 1..=10 {
             let v = morph_cluster_inset(true, step as f32 / 10.0);
-            assert!(v >= prev && v <= 8.0 + CLUSTER_X_DELTA);
+            assert!(v >= prev && v <= EXPANDED_CLUSTER_INSET);
             prev = v;
         }
         // Internal spacing is SHARED between modes (one cluster in the
