@@ -18,9 +18,27 @@ enum RowKind {
 }
 
 struct ToolItem: Hashable {
+    /// The tool part's id — Pi's call id, which carries the nesting.
+    var id: String
     var call: RenderToolCall
     var isError: Bool
     var resolved: Bool
+    /// Nesting under the call that made this one: 0 for a call the model
+    /// made, 1 for a call a Pi codemode script made from inside its run
+    /// (deeper if that call made calls of its own). See `nestToolCalls`.
+    var depth = 0
+
+    var status: ToolStatus {
+        if isError { return .failed }
+        return resolved ? .completed : .running
+    }
+}
+
+/// transcript.rs `ToolStatus`: where a tool call is in its lifecycle, shown
+/// as the chip's status icon. A failed call reads as failed even if it never
+/// resolved.
+enum ToolStatus: Equatable {
+    case running, completed, failed
 }
 
 struct TranscriptRow: Identifiable {
@@ -139,10 +157,11 @@ enum TranscriptRowBuilder {
             guard !pendingTools.isEmpty else { return }
             let autoOpen = streaming && lastIx == lastPartIx
             let id = "\(entry.id)#g\(groupIx)"
-            var version = toolFingerprint(pendingTools)
+            let tools = nestToolCalls(pendingTools)
+            var version = toolFingerprint(tools)
             if autoOpen { version ^= 1 }
             rows.append(TranscriptRow(id: id, version: version, turnStart: first,
-                                      kind: .toolGroup(tools: pendingTools, autoOpen: autoOpen),
+                                      kind: .toolGroup(tools: tools, autoOpen: autoOpen),
                                       entryId: entry.id, timestamp: nil, partKey: nil))
             first = false
             pendingTools = []
@@ -151,8 +170,8 @@ enum TranscriptRowBuilder {
 
         for (ix, part) in entry.parts.enumerated() {
             switch part {
-            case .tool(_, let call, let isError, let resolved):
-                pendingTools.append(ToolItem(call: call, isError: isError, resolved: resolved))
+            case .tool(let partId, let call, let isError, let resolved):
+                pendingTools.append(ToolItem(id: partId, call: call, isError: isError, resolved: resolved))
                 if ix == lastPartIx { flushTools(lastIx: ix) }
 
             case .text(let partId, let text):
@@ -239,6 +258,10 @@ enum TranscriptRowBuilder {
             }
             hash ^= UInt64(tool.call.fields.count) &+ (tool.isError ? 2 : 0) &+ (tool.resolved ? 4 : 0)
             hash = hash &* 0x100000001b3
+            // A call nesting under its caller once the caller's part arrives
+            // re-indents the chip.
+            hash ^= UInt64(tool.depth)
+            hash = hash &* 0x100000001b3
             for (k, v) in tool.call.fields.sorted(by: { $0.key < $1.key }) {
                 for byte in "\(k)=\(v)".utf8 {
                     hash ^= UInt64(byte)
@@ -247,6 +270,47 @@ enum TranscriptRowBuilder {
             }
         }
         return hash << 3
+    }
+
+    /// transcript.rs `nest_tool_calls`: order a tool group so each call made
+    /// from inside another call's run follows that call, one level deeper.
+    /// Pi runs the calls a codemode script makes (`await tools.read(…)`) as
+    /// tool calls of their own, with the id `{caller id}/{n}`; the doc keeps
+    /// those ids, so the nesting needs no field of its own.
+    ///
+    /// A call whose caller is not in the group (a different group, or an id
+    /// that merely contains `/`) stays where it is at depth 0. Siblings keep
+    /// their arrival order.
+    static func nestToolCalls(_ items: [ToolItem]) -> [ToolItem] {
+        var index: [String: Int] = [:]
+        for (ix, item) in items.enumerated() {
+            index[item.id] = ix
+        }
+        var children = Array(repeating: [Int](), count: items.count)
+        var roots: [Int] = []
+        for (ix, item) in items.enumerated() {
+            // A caller's id is a strict prefix of its calls' ids, so this
+            // never cycles.
+            if let slash = item.id.lastIndex(of: "/"),
+               let caller = index[String(item.id[..<slash])] {
+                children[caller].append(ix)
+            } else {
+                roots.append(ix)
+            }
+        }
+        guard roots.count < items.count else { return items }
+        var nested: [ToolItem] = []
+        nested.reserveCapacity(items.count)
+        var stack: [(ix: Int, depth: Int)] = roots.reversed().map { ($0, 0) }
+        while let (ix, depth) = stack.popLast() {
+            var item = items[ix]
+            item.depth = depth
+            nested.append(item)
+            for child in children[ix].reversed() {
+                stack.append((child, depth + 1))
+            }
+        }
+        return nested
     }
 
     static func fnv1a(_ text: String) -> UInt64 {
@@ -262,7 +326,34 @@ enum TranscriptRowBuilder {
 // MARK: - Tool chip content (transcript.rs tool_chip_content_raw)
 
 extension RenderToolCall {
+    /// Pi's `codemode` tool: instead of calling tools one at a time, the
+    /// model writes a JavaScript script that calls them (`await
+    /// tools.read({…})`), and Pi reports each call the script makes as a tool
+    /// call of its own (view.rs CODEMODE_TOOL).
+    static let codemodeTool = "codemode"
+    /// Pi's `tool_search`: finds and loads tools the model wasn't shown up
+    /// front (view.rs TOOL_SEARCH_TOOL).
+    static let toolSearchTool = "tool_search"
+
+    /// The input field the doc keeps for an extension tool, if any: a
+    /// codemode call's script and a tool_search's query.
+    static func keptInputField(_ name: String) -> String? {
+        switch name {
+        case codemodeTool: return "code"
+        case toolSearchTool: return "query"
+        default: return nil
+        }
+    }
+
+    var isScript: Bool { tag == "unknown" && string("name") == Self.codemodeTool }
+    var isToolSearch: Bool { tag == "unknown" && string("name") == Self.toolSearchTool }
+
+    /// The script of a codemode call, when the transcript kept it.
+    var script: String? { isScript ? string("code") : nil }
+
     var chipLabel: String {
+        if isScript { return "Script" }
+        if isToolSearch { return "Find tools" }
         switch tag {
         case "exec": return "Run"
         case "readFile": return "Read"
@@ -280,6 +371,8 @@ extension RenderToolCall {
     }
 
     var chipDetail: String {
+        if isScript { return script.map(Self.scriptSummary) ?? "" }
+        if isToolSearch { return string("query") ?? "" }
         switch tag {
         case "exec": return string("command") ?? ""
         case "readFile", "writeFile", "editFile": return shortPath(string("path") ?? "")
@@ -300,6 +393,8 @@ extension RenderToolCall {
     }
 
     var chipSymbol: String {
+        if isScript { return "chevron.left.forwardslash.chevron.right" }
+        if isToolSearch { return "magnifyingglass" }
         switch tag {
         case "exec": return "terminal"
         case "readFile", "applyPatch": return "doc.text"
@@ -318,6 +413,88 @@ extension RenderToolCall {
         guard comps.count > 2 else { return path }
         return comps.suffix(2).joined(separator: "/")
     }
+
+    /// view.rs `script_tools`: the tools a script calls, in order of first
+    /// use — `tools.read(…)` and `tools["read"](…)`, an MCP tool by its tool
+    /// name. Read off the source, so this names what the script is about;
+    /// the nested chips under it say what actually ran.
+    static func scriptTools(_ code: String) -> [String] {
+        func ident(_ b: UInt8) -> Bool {
+            (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+                || b == UInt8(ascii: "_") || b == UInt8(ascii: "$")
+        }
+        let bytes = Array(code.utf8)
+        let global = Array("tools".utf8)
+        let quotes: [UInt8] = [UInt8(ascii: "\""), UInt8(ascii: "'"), UInt8(ascii: "`")]
+        var names: [String] = []
+        var at = 0
+        while at + global.count <= bytes.count {
+            guard bytes[at..<at + global.count].elementsEqual(global) else {
+                at += 1
+                continue
+            }
+            let start = at
+            let end = at + global.count
+            at = end
+            // `ALL_TOOLS`, `myTools.x` and `x.tools.y` are not the global.
+            if start > 0, ident(bytes[start - 1]) || bytes[start - 1] == UInt8(ascii: ".") { continue }
+            guard end < bytes.count else { continue }
+            var name = ""
+            if bytes[end] == UInt8(ascii: ".") {
+                var stop = end + 1
+                while stop < bytes.count, ident(bytes[stop]) { stop += 1 }
+                name = String(decoding: bytes[(end + 1)..<stop], as: UTF8.self)
+            } else if bytes[end] == UInt8(ascii: "["), end + 1 < bytes.count, quotes.contains(bytes[end + 1]),
+                      let close = bytes[(end + 2)...].firstIndex(of: bytes[end + 1]) {
+                name = String(decoding: bytes[(end + 2)..<close], as: UTF8.self)
+            }
+            guard !name.isEmpty else { continue }
+            let shown = mcpToolLabel(name) ?? name
+            if !names.contains(shown) { names.append(shown) }
+        }
+        return names
+    }
+
+    /// The tool part of a Pi MCP tool name (`mcp__{server}__{tool}`). A
+    /// script only carries Pi's sanitized server name; the nested MCP chips
+    /// name the server as configured, so the summary leaves it to them.
+    private static func mcpToolLabel(_ name: String) -> String? {
+        guard name.hasPrefix("mcp__") else { return nil }
+        let rest = name.dropFirst("mcp__".count)
+        guard let split = rest.range(of: "__") else { return nil }
+        let server = rest[..<split.lowerBound]
+        let tool = rest[split.upperBound...]
+        return server.isEmpty || tool.isEmpty ? nil : String(tool)
+    }
+
+    /// view.rs `script_summary`: a script chip's one-line detail — the tools
+    /// it calls, else its first line of code (the `// @options:` header is
+    /// configuration, not content).
+    static func scriptSummary(_ code: String) -> String {
+        let tools = scriptTools(code)
+        if !tools.isEmpty { return tools.joined(separator: ", ") }
+        return code.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty && !$0.hasPrefix("// @options:") } ?? ""
+    }
+
+    /// transcript.rs `SCRIPT_DETAIL_MAX_LINES`: a script gets more room than a
+    /// command's echo before the counted tail.
+    static let scriptBodyMaxLines = 80
+
+    /// transcript.rs `call_block` for a script: the code itself, without the
+    /// blank lines around it (a model's script routinely opens with a
+    /// newline), capped at `scriptBodyMaxLines` with the rest counted.
+    static func scriptBody(_ code: String) -> (code: String, truncatedBy: Int)? {
+        var lines = code.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+            .drop(while: { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .map(String.init)
+        while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeLast() }
+        guard !lines.isEmpty else { return nil }
+        let truncatedBy = max(lines.count - scriptBodyMaxLines, 0)
+        return (lines.prefix(scriptBodyMaxLines).joined(separator: "\n"), truncatedBy)
+    }
 }
 
 /// "Ran 3 commands · edited 2 files · 1 failed" (transcript.rs
@@ -325,14 +502,21 @@ extension RenderToolCall {
 func toolGroupSummary(_ tools: [ToolItem]) -> String {
     var segments: [String] = []
     let runs = tools.filter { $0.call.tag == "exec" }.count
-    if runs > 0 { segments.append(runs == 1 ? "ran 1 command" : "ran \(runs) commands") }
+    let scripts = tools.filter(\.call.isScript).count
+    // Commands and scripts share one verb: "ran 2 commands and 1 script".
+    var ran: [String] = []
+    if runs > 0 { ran.append(runs == 1 ? "1 command" : "\(runs) commands") }
+    if scripts > 0 { ran.append(scripts == 1 ? "1 script" : "\(scripts) scripts") }
+    if !ran.isEmpty { segments.append("ran " + ran.joined(separator: " and ")) }
     let edits = tools.filter { ["editFile", "writeFile", "applyPatch"].contains($0.call.tag) }.count
     if edits > 0 { segments.append(edits == 1 ? "edited 1 file" : "edited \(edits) files") }
     let reads = tools.filter { $0.call.tag == "readFile" }.count
     if reads > 0 { segments.append(reads == 1 ? "read 1 file" : "read \(reads) files") }
-    let searches = tools.filter { ["search", "glob", "webSearch", "webFetch"].contains($0.call.tag) }.count
+    let searches = tools.filter {
+        ["search", "glob", "webSearch", "webFetch"].contains($0.call.tag) || $0.call.isToolSearch
+    }.count
     if searches > 0 { segments.append(searches == 1 ? "1 search" : "\(searches) searches") }
-    let other = tools.count - runs - edits - reads - searches
+    let other = tools.count - runs - scripts - edits - reads - searches
     if other > 0 { segments.append(other == 1 ? "1 tool" : "\(other) tools") }
     let failed = tools.filter(\.isError).count
     if failed > 0 { segments.append("\(failed) failed") }

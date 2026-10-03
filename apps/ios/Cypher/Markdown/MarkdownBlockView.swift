@@ -179,8 +179,6 @@ struct CodeBlockView: View {
     let code: String
     var cacheKey: String = ""
 
-    @State private var spans: [[TokenSpan]] = []
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
@@ -195,11 +193,7 @@ struct CodeBlockView: View {
                         Rectangle().fill(Theme.border).frame(height: 1)
                     }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                SelectableTranscriptText(attributed: TranscriptTextStyle.code(code, spans: spans), wraps: false)
-                    .padding(.horizontal, MD.codePaddingX)
-                    .padding(.vertical, MD.codePaddingY)
-            }
+            HighlightedCodeView(language: language, code: code)
         }
         .background(whiteAlpha(0.035))
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
@@ -207,6 +201,26 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
         )
+    }
+}
+
+/// A code block's body without its frame: selectable, scrolling sideways
+/// rather than wrapping, highlighted off the main thread. Also the body of a
+/// tool chip that shows code (a Script's).
+struct HighlightedCodeView: View {
+    let language: String?
+    let code: String
+    var size: CGFloat = MD.codeTextSize
+
+    @State private var spans: [[TokenSpan]] = []
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            SelectableTranscriptText(attributed: TranscriptTextStyle.code(code, spans: spans, size: size),
+                                     wraps: false)
+                .padding(.horizontal, MD.codePaddingX)
+                .padding(.vertical, MD.codePaddingY)
+        }
         .task(id: code) {
             guard let lang = HighlightLanguage.forTag(language) else { return }
             let source = code

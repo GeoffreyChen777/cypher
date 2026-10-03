@@ -77,12 +77,13 @@ enum TranscriptTextStyle {
         return result
     }
 
-    static func code(_ source: String, spans: [[TokenSpan]]) -> NSAttributedString {
+    static func code(_ source: String, spans: [[TokenSpan]],
+                     size: CGFloat = MD.codeTextSize) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = MD.codeLineHeight
         paragraph.maximumLineHeight = MD.codeLineHeight
         let result = NSMutableAttributedString(string: source, attributes: [
-            .font: Theme.monoUI(MD.codeTextSize),
+            .font: Theme.monoUI(size),
             .foregroundColor: UIColor(Theme.text.opacity(0.9)),
             .paragraphStyle: paragraph,
         ])

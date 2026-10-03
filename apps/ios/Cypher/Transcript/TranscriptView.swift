@@ -41,6 +41,8 @@ struct TranscriptView: View {
 
     @State private var veils = VeilStore()
     @State private var folds: [String: Bool] = [:]
+    /// Per tool group row: the part ids of chips whose detail is open.
+    @State private var openChips: [String: Set<String>] = [:]
     @State private var turns = TurnTracker()
     /// One-shot guard for the first non-empty projection.
     @State private var hydrated = false
@@ -627,7 +629,13 @@ struct TranscriptView: View {
             case .toolGroup(let tools, let autoOpen):
                 ToolGroupView(tools: tools,
                               open: folds[row.id] ?? autoOpen,
-                              userToggled: folds[row.id] != nil) {
+                              userToggled: folds[row.id] != nil,
+                              openChips: openChips[row.id] ?? [],
+                              toggleChip: { partId in
+                                  withAnimation(reduceMotion ? nil : Motion.resize) {
+                                      openChips[row.id, default: []].formSymmetricDifference([partId])
+                                  }
+                              }) {
                     withAnimation(reduceMotion ? nil : Motion.resize) {
                         folds[row.id] = !(folds[row.id] ?? autoOpen)
                     }
@@ -908,6 +916,9 @@ struct ToolGroupView: View {
     let tools: [ToolItem]
     let open: Bool
     let userToggled: Bool
+    /// Part ids of the chips whose detail is open.
+    let openChips: Set<String>
+    let toggleChip: (String) -> Void
     let toggle: () -> Void
 
     var body: some View {
@@ -935,7 +946,9 @@ struct ToolGroupView: View {
             if open {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
-                        ToolChipRow(tool: tool)
+                        ToolChipRow(tool: tool, open: openChips.contains(tool.id)) {
+                            toggleChip(tool.id)
+                        }
                     }
                 }
                 .padding(.top, 2)
@@ -944,35 +957,177 @@ struct ToolGroupView: View {
     }
 }
 
-/// 38pt row containing a 30pt card (transcript.rs tool_chip).
+/// 38pt row containing a 30pt card (transcript.rs tool_chip). A Script's
+/// card opens onto its code, like the desktop's expandable chip card; the
+/// calls a script made hang off the script's icon on a guide rail.
 struct ToolChipRow: View {
     let tool: ToolItem
+    var open = false
+    var toggle: () -> Void = {}
+
+    /// transcript.rs NESTED_RAIL_INSET: one nesting level's indent, so each
+    /// rail lands under its caller's icon and the card starts 12pt past it.
+    static let nestedIndent: CGFloat = 30
+    /// Past a few levels the indent stops helping and starts eating the row.
+    static let maxIndentLevels = 3
+    /// A depth-0 chip's icon center (card inset 12 + padding 8 + half the
+    /// 18pt icon), less half the 1pt rail.
+    private static let firstRailX: CGFloat = 28.5
+    private static let radius: CGFloat = 9
+
+    private var levels: Int { min(tool.depth, Self.maxIndentLevels) }
 
     var body: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: tool.call.chipSymbol)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(width: 18, height: 18)
-                    .background(whiteAlpha(0.08), in: RoundedRectangle(cornerRadius: 5))
-                Text(tool.call.chipLabel)
-                    .font(Theme.sans(12, weight: .medium))
-                    .foregroundStyle(tool.isError ? Theme.danger : Theme.textMuted)
-                Text(tool.call.chipDetail)
-                    .font(Theme.sans(12))
-                    .foregroundStyle(tool.isError ? Theme.danger : Theme.text.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
+        let script = tool.call.script.flatMap(RenderToolCall.scriptBody)
+        card(script: script)
+            .padding(.leading, 12 + CGFloat(levels) * Self.nestedIndent)
+            .padding(.vertical, 4)
+            .overlay(alignment: .leading) { rails }
+    }
+
+    private func card(script: (code: String, truncatedBy: Int)?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if script != nil {
+                Button(action: toggle) { header(expandable: true) }
+                    .buttonStyle(PressWashButtonStyle(cornerRadius: Self.radius))
+                    .accessibilityHint(open ? "Hides the script" : "Shows the script")
+                    .accessibilityIdentifier("script-chip")
+            } else {
+                header(expandable: false)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 30)
-            .background(whiteAlpha(0.03), in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(whiteAlpha(0.05), lineWidth: 1))
-            .padding(.leading, 12)
+            if open, let script {
+                Rectangle().fill(whiteAlpha(0.05)).frame(height: 1)
+                // transcript.rs detail_body: tool bodies run a size under
+                // Markdown code (11.5 on 18pt lines).
+                HighlightedCodeView(language: "javascript", code: script.code, size: 11.5)
+                if script.truncatedBy > 0 {
+                    Text("… \(script.truncatedBy) more lines")
+                        .font(Theme.sans(11))
+                        .foregroundStyle(Theme.textFaint)
+                        .padding(.horizontal, MD.codePaddingX)
+                        .padding(.bottom, MD.codePaddingY)
+                }
+            }
         }
-        .frame(height: 38)
+        .background(whiteAlpha(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius).strokeBorder(whiteAlpha(0.05), lineWidth: 1))
+    }
+
+    private func header(expandable: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: tool.call.chipSymbol)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 18, height: 18)
+            Text(tool.call.chipLabel)
+                .font(Theme.sans(12, weight: .medium))
+                .foregroundStyle(tool.isError ? Theme.danger : Theme.textMuted)
+            Text(tool.call.chipDetail)
+                .font(Theme.sans(12))
+                .foregroundStyle(tool.isError ? Theme.danger : Theme.text.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            ToolStatusIcon(status: tool.status)
+            if expandable {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted.opacity(0.8))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 18, height: 18)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 30)
+        .contentShape(Rectangle())
+    }
+
+    /// One guide rail per nesting level, each the row's full height so
+    /// consecutive nested chips draw one continuous line.
+    private var rails: some View {
+        ZStack(alignment: .leading) {
+            ForEach(0..<levels, id: \.self) { level in
+                Rectangle()
+                    .fill(whiteAlpha(0.08))
+                    .frame(width: 1)
+                    .padding(.leading, Self.firstRailX + CGFloat(level) * Self.nestedIndent)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// transcript.rs `tool_status_icon`: a check once the call completed, a
+/// cross when it failed, and an arc turning while it runs (held still under
+/// Reduce Motion). The desktop's own glyphs (icons/check.svg, cross.svg,
+/// spinner.svg), 12pt in the 18pt slot the chip's other icons use.
+struct ToolStatusIcon: View {
+    let status: ToolStatus
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// One spinner turn. Linear, so the arc never appears to stall.
+    static let spinPeriod: TimeInterval = 0.9
+    private static let size: CGFloat = 12
+
+    var body: some View {
+        glyph
+            .frame(width: 18, height: 18)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityIdentifier("tool-status")
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        switch status {
+        case .completed:
+            stroked(StatusGlyph(data: "M3.5 8.5l3 3 6-7"), Theme.success)
+        case .failed:
+            stroked(StatusGlyph(data: "m4.5 4.5 7 7m0-7-7 7"), Theme.danger)
+        case .running:
+            TimelineView(.animation(paused: reduceMotion)) { timeline in
+                let turns = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate / Self.spinPeriod
+                ZStack {
+                    stroked(StatusGlyph(track: true), Theme.textMuted).opacity(0.25)
+                    stroked(StatusGlyph(data: "M8 2.5a5.5 5.5 0 0 1 5.5 5.5"), Theme.textMuted)
+                }
+                .rotationEffect(.degrees(turns.truncatingRemainder(dividingBy: 1) * 360))
+            }
+        }
+    }
+
+    /// The icons' 1.6/16 stroke, round-capped.
+    private func stroked(_ glyph: StatusGlyph, _ color: Color) -> some View {
+        glyph
+            .stroke(color, style: StrokeStyle(lineWidth: 1.6 * Self.size / 16, lineCap: .round, lineJoin: .round))
+            .frame(width: Self.size, height: Self.size)
+    }
+
+    private var label: String {
+        switch status {
+        case .running: return "Running"
+        case .completed: return "Completed"
+        case .failed: return "Failed"
+        }
+    }
+}
+
+/// A glyph in the desktop icons' 16×16 viewbox, scaled to its frame.
+private struct StatusGlyph: Shape {
+    var data: String?
+    /// The spinner's track: the full circle its arc runs along.
+    var track = false
+
+    func path(in rect: CGRect) -> Path {
+        var path = data.map { SVGPathParser.path(from: $0) } ?? Path()
+        if track { path.addEllipse(in: CGRect(x: 2.5, y: 2.5, width: 11, height: 11)) }
+        let scale = min(rect.width, rect.height) / 16
+        let dx = rect.minX + (rect.width - 16 * scale) / 2
+        let dy = rect.minY + (rect.height - 16 * scale) / 2
+        return path.applying(CGAffineTransform(scaleX: scale, y: scale)
+            .concatenating(CGAffineTransform(translationX: dx, y: dy)))
     }
 }
 

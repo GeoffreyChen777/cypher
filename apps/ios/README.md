@@ -94,6 +94,17 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   `sessions.contextUsage`, which can trail a live turn by ~20s). Tapping it
   shows the reading and a Compact action (`/compact` as its own run), offered
   only while the session is idle.
+- **Scripts:** a Pi codemode call shows as a Script chip named after the
+  tools its script calls; tap it to read the script (80 lines, the rest
+  counted). The calls the script made (`{script id}/{n}` part ids) hang off
+  it on a guide rail, as on the desktop, and old transcripts nest too.
+  `tool_search` shows as Find tools with its query, and tool groups count
+  "ran 2 commands and 1 script".
+- **Tool status:** every tool chip ends with the desktop's status icon — an
+  arc turning while the call runs (still under Reduce Motion), a green check
+  once it completed, a red cross when it failed. A chip spins for as long as
+  its doc part is unresolved. The demo's streamed reply (`-stream`, or any
+  send) opens with a script and its call so the spinner can be seen offline.
 - **Fork / Side Chat:** select transcript text for "Edit in Fork" (before a
   prompt; its text returns as the draft), "Fork from Here" (after a reply) and
   "Side Chat" — a temporary chat about the selection, hosted in the parent
@@ -246,6 +257,7 @@ Run these commands from the repository root.
   Subagent inspector fixture:
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
+  Script fixture: `-demo -route chat:chat-deploy`.
   Comment editor/list fixtures:
   `-demo -route chat:chat-tabs -sheet comment` (or `-sheet comments`).
 
