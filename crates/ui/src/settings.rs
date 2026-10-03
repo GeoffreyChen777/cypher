@@ -135,10 +135,12 @@ pub struct UiSettings {
     /// system-independent Pi runtime; pre-runtime settings deserialize as 0
     /// and receive the one-time download prompt.
     pub pi_runtime_setup_version: u32,
-    /// Slash commands hidden from the composer `/` menu. `None` means the
-    /// user hasn't customized yet — [`commands::default_hides`] applies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hidden_slash_commands: Option<Vec<String>>,
+    /// Slash commands the user turned on for the composer `/` menu; every
+    /// other command stays hidden ([`commands::ShownSlashCommands`]). Older
+    /// files kept a `hiddenSlashCommands` list instead, which held nothing a
+    /// user had turned on, so it is ignored and dropped on the next save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown_slash_commands: Vec<String>,
     /// Sidebar card order (the header's view menu). Pins always lead.
     pub sidebar_sort: SidebarSort,
     /// Sidebar device filter: only cards hosted on this device id. `None`
@@ -287,7 +289,7 @@ impl Default for UiSettings {
             appearance: crate::appearance::AppearanceMode::default(),
             setup_completed: false,
             pi_runtime_setup_version: 0,
-            hidden_slash_commands: None,
+            shown_slash_commands: Vec::new(),
             sidebar_sort: SidebarSort::Activity,
             sidebar_device_filter: None,
             sidebar_sort_reversed: false,
@@ -823,7 +825,7 @@ mod tests {
             appearance: crate::appearance::AppearanceMode::Light,
             setup_completed: true,
             pi_runtime_setup_version: 1,
-            hidden_slash_commands: Some(vec!["compact-ui-config".into()]),
+            shown_slash_commands: vec!["goal".into()],
             sidebar_sort: SidebarSort::Device,
             sidebar_device_filter: Some("dev-1".into()),
             sidebar_sort_reversed: true,
@@ -881,6 +883,23 @@ mod tests {
             !json.contains("workspace") && !json.contains("sessionDocks"),
             "{json}"
         );
+    }
+
+    /// The old hidden-command list loads without error and leaves every
+    /// command hidden; it is not written back.
+    #[test]
+    fn legacy_hidden_slash_commands_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "hiddenSlashCommands": ["mcp", "skill:x"]}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0, "the rest of the file loads");
+        assert!(loaded.shown_slash_commands.is_empty());
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(!json.contains("SlashCommands"), "{json}");
     }
 
     /// A layout of the wrong shape (a newer build's tab kind after a

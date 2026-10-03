@@ -1324,7 +1324,7 @@ impl Shell {
         // hold a weak handle to it.
         let comment_popup = cx.new(crate::comments::CommentPopup::new);
         if main_window {
-            crate::settings::commands::publish_hidden(None, cx);
+            crate::settings::commands::publish_shown(Vec::new(), cx);
         }
         // Lists-only: the session tiles' contexts own the transcripts; this
         // state's selection just follows the focused tile.
@@ -1424,7 +1424,7 @@ impl Shell {
             Some(project) => settings.project_workspaces.get(project).cloned(),
         };
         if main_window {
-            crate::settings::commands::publish_hidden(settings.hidden_slash_commands.clone(), cx);
+            crate::settings::commands::publish_shown(settings.shown_slash_commands.clone(), cx);
             // Bind the customizable shortcuts from the persisted keymap.
             apply_keymap(cx, &settings.keymap);
         }
@@ -2206,15 +2206,15 @@ impl Shell {
             SettingsSection::Commands => {
                 if self.commands_page.is_none() {
                     let state = self.state.clone();
-                    let hidden = self.settings.hidden_slash_commands.clone();
+                    let shown = self.settings.shown_slash_commands.clone();
                     let target = self.settings_target.clone();
-                    let page = cx.new(|cx| CommandsPage::new(state, target, hidden, cx));
+                    let page = cx.new(|cx| CommandsPage::new(state, target, shown, cx));
                     self.commands_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &CommandsEvent, cx| {
-                            let CommandsEvent::Changed(hidden) = event;
-                            this.settings.hidden_slash_commands = Some(hidden.clone());
-                            crate::settings::commands::publish_hidden(Some(hidden.clone()), cx);
+                            let CommandsEvent::Changed(shown) = event;
+                            this.settings.shown_slash_commands = shown.clone();
+                            crate::settings::commands::publish_shown(shown.clone(), cx);
                             this.schedule_save(cx);
                             cx.notify();
                         },

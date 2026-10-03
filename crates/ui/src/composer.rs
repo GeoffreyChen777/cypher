@@ -5078,7 +5078,7 @@ pub struct Composer {
     _pickers_observe: Subscription,
     _picker_events: Subscription,
     _catalog_observe: Subscription,
-    _hidden_slash_observe: Subscription,
+    _shown_slash_observe: Subscription,
     _style_observe: Subscription,
     _input_events: Subscription,
 }
@@ -5183,14 +5183,18 @@ impl Composer {
             }
             crate::pickers::PickerEvent::CompactContext => this.compact_context(cx),
         });
-        let hidden_slash_observe = cx
-            .observe_global::<crate::settings::commands::HiddenSlashCommands>(
+        let shown_slash_observe = cx
+            .observe_global::<crate::settings::commands::ShownSlashCommands>(
                 |this: &mut Self, cx| {
-                    if this.slash.token.is_some() {
-                        this.refilter_slash(cx);
-                    } else {
-                        cx.notify();
-                    }
+                    // Turning the first command on (or the last one off) opens
+                    // or closes the menu for what is already typed.
+                    let (text, cursor) = {
+                        let input = this.input.read(cx);
+                        (input.text().to_string(), input.cursor_offset())
+                    };
+                    this.update_slash(&text, cursor, cx);
+                    this.prefetch_slash_commands(cx);
+                    cx.notify();
                 },
             );
         let catalog_observe =
@@ -5327,7 +5331,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             _picker_events: picker_events,
             _catalog_observe: catalog_observe,
-            _hidden_slash_observe: hidden_slash_observe,
+            _shown_slash_observe: shown_slash_observe,
             _style_observe: style_observe,
             _input_events: input_events,
         };
@@ -7043,6 +7047,9 @@ impl Composer {
     /// Warm [`Self::slash_cache`] without opening the popup, so the first `/`
     /// is not a cold `pi --mode rpc` spawn.
     fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
+        if !crate::settings::commands::any_shown_in_app(cx) {
+            return;
+        }
         self.sync_slash_owner(cx);
         let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
             return;
@@ -7086,7 +7093,10 @@ impl Composer {
     /// harness's command list on first open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
         self.sync_slash_owner(cx);
-        let token = slash_token(text, cursor);
+        // With no command turned on there is nothing to offer: `/` opens no
+        // menu (a typed command still runs).
+        let token =
+            slash_token(text, cursor).filter(|_| crate::settings::commands::any_shown_in_app(cx));
         let still_dismissed = token.as_ref().is_some_and(|token| {
             self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
                 token.range == *range && text.get(range.clone()) == Some(value.as_str())
@@ -7187,7 +7197,7 @@ impl Composer {
         let visible: Vec<usize> = commands
             .iter()
             .enumerate()
-            .filter(|(_, command)| !crate::settings::commands::hides_in_app(cx, &command.name))
+            .filter(|(_, command)| crate::settings::commands::shows_in_app(cx, &command.name))
             .map(|(index, _)| index)
             .collect();
         let names: Vec<&str> = visible
@@ -7301,7 +7311,7 @@ impl Composer {
             let all_hidden = !commands.is_empty()
                 && commands
                     .iter()
-                    .all(|command| crate::settings::commands::hides_in_app(cx, &command.name));
+                    .all(|command| !crate::settings::commands::shows_in_app(cx, &command.name));
             card = card.child(
                 div()
                     .px(px(12.0))
@@ -7311,7 +7321,7 @@ impl Composer {
                     .child(if commands.is_empty() {
                         "This agent has no slash commands"
                     } else if all_hidden {
-                        "All slash commands are hidden in Settings"
+                        "None of this agent's commands are turned on in Settings → Commands"
                     } else {
                         "No matching commands"
                     }),
