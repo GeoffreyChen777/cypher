@@ -629,6 +629,75 @@ async fn tool_progress_is_throttled_and_stops_after_end() {
 }
 
 #[tokio::test]
+async fn codemode_scripts_keep_their_calls_and_drop_the_status_header() {
+    // The agent dir names the MCP server the way Settings shows it; Pi's
+    // tool name only carries the sanitized form.
+    let agent = tempfile::tempdir().unwrap();
+    std::fs::write(
+        agent.path().join("mcp.json"),
+        r#"{"mcpServers":{"mvp-lab-discord":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let harness = harness().with_runtime_environment(agent.path(), agent.path());
+    let (controls, steer, _token) = controls();
+    drop(steer);
+    let events = run_to_end(&harness, request("scenario:codemode"), controls).await;
+
+    let calls: Vec<(&str, &ToolCall)> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { id, call } => Some((id.as_str(), call)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "s1",
+                &ToolCall::Unknown {
+                    name: "codemode".into(),
+                    input: Some(serde_json::json!({
+                        "code": "const v = await tools.read({ path: \"release.json\" });\nreturn await tools.mcp__mvp_lab_discord__search({ query: v });"
+                    })),
+                }
+            ),
+            // The script's calls keep Pi's `{script}/{n}` ids: that is what
+            // the transcript nests them by.
+            (
+                "s1/1",
+                &ToolCall::ReadFile {
+                    path: "release.json".into()
+                }
+            ),
+            (
+                "s1/2",
+                &ToolCall::Mcp {
+                    server: "mvp-lab-discord".into(),
+                    tool: "search".into(),
+                    input: Some(serde_json::json!({ "query": "1.0.0.2" })),
+                }
+            ),
+        ]
+    );
+    // Script updates carry no text, so they are not progress.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolProgress { id, .. } if id == "s1")),
+        "{events:?}"
+    );
+    // The script's result is its own output, without the status header.
+    assert!(events.contains(&AgentEvent::ToolResult {
+        id: "s1".into(),
+        is_error: false,
+        output: Some("3 messages".into()),
+        diff: None,
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
 async fn no_agent_activity_settles_with_done_completed_carrying_notify_text() {
     // An extension command whose handler only notifies: pi relays the notify
     // requests, accepts the prompt, then goes silent forever. The harness
