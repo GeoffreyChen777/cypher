@@ -365,8 +365,13 @@ struct SessionView: View {
                             }
                             .id(request.requestId)
                         } else {
+                            // The `/` menu gets what's left above the composer
+                            // and its status row (~175pt), so it never runs
+                            // under the navigation bar with the keyboard up.
                             ComposerView(store: store, chat: chat, runLive: status == .working,
-                                         catalog: catalog, connectionRetry: connectionRetry)
+                                         catalog: catalog, connectionRetry: connectionRetry,
+                                         slashMenuMaxHeight: min(SlashMenuView.defaultMaxHeight,
+                                                                 max(160, viewHeight - 175)))
                         }
                     }
                     .padding(.bottom, 8)

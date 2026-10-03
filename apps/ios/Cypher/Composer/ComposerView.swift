@@ -320,6 +320,8 @@ struct ComposerView: View {
     /// A side chat: it runs the parent's model — no model/effort chips, no
     /// context ring (there's no session row to read or config to write).
     var sideChat = false
+    /// The `/` menu's height cap: what's free above the composer.
+    var slashMenuMaxHeight = SlashMenuView.defaultMaxHeight
 
     @State private var draftState = ComposerDraft()
     private var text: String { draftState.text }
@@ -332,6 +334,7 @@ struct ComposerView: View {
     @State private var showTraitPicker = false
     @State private var catalogRevision = 0
     @State private var commands = RemoteCommandCatalog()
+    @State private var modes = SlashModesCatalog()
 
     private var harness: String { chat.config?.harness ?? "" }
 
@@ -379,6 +382,21 @@ struct ComposerView: View {
         await commands.load(deviceId: chat.deviceId, force: force, fetch: model.listCommands)
     }
 
+    /// The `/` menu's list for the draft, nil while it's closed.
+    private var slashLevel: SlashLevel? {
+        canControl ? SlashMenu.level(in: text, commands: commands.commands) : nil
+    }
+
+    /// What the menu's badges can say about this chat. A side chat has no Pi
+    /// switches, session row or subagents of its own (composer.rs: the main
+    /// transport only).
+    private var slashFacts: SlashFacts {
+        guard !sideChat else { return SlashFacts() }
+        return SlashFacts(modes: modes.chatId == chat.id ? modes.modes : nil,
+                          context: sessionRow?.contextUsage,
+                          runningSubagents: sessionRow?.subagents.filter { $0.status == .running }.count ?? 0)
+    }
+
     private var currentReasoning: String? {
         guard let currentModel else { return nil }
         guard !currentModel.reasoningLevels.isEmpty else { return nil }
@@ -406,12 +424,13 @@ struct ComposerView: View {
             if let commentDrafts {
                 PendingCommentsBar(drafts: commentDrafts)
             }
-            if canControl, let query = SlashMenu.query(in: text) {
-                SlashMenuView(catalog: commands, query: query) { command in
-                    draftState.replace(with: SlashMenu.accept(command))
-                } onRetry: {
-                    Task { await loadCommands(force: true) }
-                }
+            if let slashLevel {
+                SlashMenuView(
+                    catalog: commands, level: slashLevel, facts: slashFacts,
+                    onPickCommand: { draftState.replace(with: SlashMenu.accept($0)) },
+                    onPickChoice: { draftState.replace(with: SlashMenu.accept($0, in: text)) },
+                    onRetry: { Task { await loadCommands(force: true) } },
+                    maxHeight: slashMenuMaxHeight)
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -489,7 +508,14 @@ struct ComposerView: View {
             await catalog.load(deviceId: chat.deviceId, fetch: model.listPiModels)
             await commandList
         }
-        .motionAnimation(Motion.fadeQuick, value: SlashMenu.query(in: text) != nil)
+        .task(id: "\(chat.id)/\(slashLevel != nil)") {
+            // Each opening asks the host afresh: a `/fast` sent since flips
+            // the badge.
+            guard slashLevel != nil, !sideChat else { return }
+            let deviceId = chat.deviceId
+            await modes.load(chatId: chat.id) { try await model.piSessionModes(deviceId: deviceId, chatId: $0) }
+        }
+        .motionAnimation(Motion.fadeQuick, value: slashLevel != nil)
         .onChange(of: showModelPicker) { _, showing in
             if showing { catalogRevision += 1 }
         }

@@ -165,18 +165,32 @@ final class DemoDataset {
         }
     }
 
-    /// Pi's discovery shape: extension commands, then the synthesized
-    /// built-ins. `skill:` rows are hidden by the default rules.
+    /// Pi's discovery shape (the plugins' own wording): extension commands,
+    /// then the synthesized built-ins. With nothing typed the menu lists only
+    /// the stateful ones; the rest are found by name.
     static let slashCommands: [SlashCommand] = [
-        SlashCommand(name: "goal", description: "Keep working toward a goal until it's met",
-                     inputHint: "goal"),
+        SlashCommand(name: "fast", description: "Toggle GPT Fast mode (service_tier: priority)", inputHint: nil),
+        SlashCommand(name: "scripts",
+                     description: "Let the agent run several tools in one script. Faster, and uses less context.",
+                     inputHint: nil),
+        SlashCommand(name: "goal", description: "Run a goal to completion: /goal [--tokens 100k] <goal_to_complete>",
+                     inputHint: nil),
+        SlashCommand(name: "orchestrate",
+                     description: "Enable/disable adaptive subagent delegation (on|off|status, default off)",
+                     inputHint: nil),
+        SlashCommand(name: "subagents", description: "List available subagents", inputHint: nil),
+        SlashCommand(name: "subagent-status", description: "Show live subagent tasks and current-branch task history",
+                     inputHint: nil),
         SlashCommand(name: "review", description: "Review the working tree's changes", inputHint: nil),
-        SlashCommand(name: "subagents", description: "List the subagent profiles", inputHint: nil),
         SlashCommand(name: "skill:frontend-design", description: "Load the frontend skill", inputHint: nil),
-        SlashCommand(name: "compact", description: "Compact the session's context",
+        SlashCommand(name: "compact", description: "Compact the conversation context (pi built-in)",
                      inputHint: "custom instructions"),
-        SlashCommand(name: "export-html", description: "Export the session as HTML", inputHint: "path"),
+        SlashCommand(name: "export-html", description: "Export the session to an HTML file (pi built-in)",
+                     inputHint: "output path"),
     ]
+
+    /// The demo host's Pi switches: Scripts on (its default), the rest off.
+    static let piSessionModes = PiSessionModes(fast: false, codemode: true, orchestrate: false)
 
     // MARK: Fake filesystem (folder browser demo)
 

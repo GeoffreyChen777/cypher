@@ -582,6 +582,13 @@ final class AppModel {
         return try await workspace.listCommands(deviceId: deviceId, harness: "pi")
     }
 
+    /// What the chat's Pi switches are set to, for the `/` menu's badges.
+    func piSessionModes(deviceId: String, chatId: String) async throws -> PiSessionModes {
+        if demo != nil { return DemoDataset.piSessionModes }
+        guard let workspace, deviceOnline(deviceId) else { throw RelayError.hostOffline }
+        return try await workspace.piSessionModes(deviceId: deviceId, chatId: chatId)
+    }
+
     /// The phone never resolves a local Runtime or substitutes a model list.
     func listPiModels(deviceId: String) async throws -> [ModelInfo] {
         if demo != nil {

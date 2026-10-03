@@ -1115,7 +1115,7 @@ struct ToolStatusIcon: View {
 }
 
 /// A glyph in the desktop icons' 16×16 viewbox, scaled to its frame.
-private struct StatusGlyph: Shape {
+struct StatusGlyph: Shape {
     var data: String?
     /// The spinner's track: the full circle its arc runs along.
     var track = false

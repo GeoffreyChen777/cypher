@@ -86,10 +86,21 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   a chosen online device (`CreateScratchDir` on the host, then a row without a
   space). Quick chats get their own Home section; other project-less sessions
   appear under Other Sessions.
-- **Slash commands:** typing `/` opens the host's Pi commands (`ListCommands`),
-  filtered by name; picking one fills `/name `. The desktop's default hide
-  rules apply (its customized list is local to each desktop). Commands are sent
-  as ordinary text and skip the model-availability gate.
+- **Slash commands:** typing `/` opens the desktop's grouped menu over the
+  host's Pi commands (`ListCommands`): headings (Conversation, Agent modes,
+  Subagents…), one line per command with its glyph and a badge for what it
+  controls — how full the context is, Fast mode / Scripts / orchestration
+  On or Off, the goal's status, running subagents. The switches come from
+  `PiSessionModes` on the chat's host, asked each time the menu opens; an
+  older host leaves those badges off. With nothing typed it lists the
+  desktop's default six (`/compact`, `/fast`, `/scripts`, `/goal`,
+  `/orchestrate`, `/subagent-status`). The phone has no Settings → Commands,
+  so a typed name also finds the host's other commands, except those that
+  only configure desktop Settings. `/orchestrate` and `/goal` open their
+  choices (picked or typed with a space) under what is in effect, the
+  current one checked. Picking only fills the draft; commands are sent as
+  ordinary text and skip the model-availability gate. The list scrolls
+  within what's free above the composer.
 - **Context ring:** the composer shows the session's context usage (registry
   `sessions.contextUsage`, which can trail a live turn by ~20s). Tapping it
   shows the reading and a Compact action (`/compact` as its own run), offered
