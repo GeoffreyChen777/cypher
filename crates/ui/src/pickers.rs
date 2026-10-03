@@ -4336,7 +4336,7 @@ impl Render for Pickers {
         });
         let context_ring = self.context_ring_chip(&theme, cx);
         // Shrinkable, end-aligned: in a narrow tile the chips ellipsize
-        // (they are `min_w_0`) instead of painting over attach/send.
+        // (they are `min_w_0`) instead of painting over the send button.
         let right = div()
             .flex()
             .flex_row()

@@ -2,12 +2,13 @@
 //! what each one says about the current chat. Rendering and keys live in the
 //! composer.
 //!
-//! The menu has levels. Typing `/` lists the commands turned on in Settings →
-//! Commands under the same group headers as that page, each with a badge for
-//! what it controls ("On" for Fast mode, a paused goal, how full the context
-//! is). A command that takes named choices — `/orchestrate on|off|status`,
-//! `/goal pause|resume|…`, `/provider add` — shows a chevron, and choosing it
-//! (or typing its name and a space) opens the list of its choices, the one in
+//! The menu has levels. Typing `/` lists Cypher's own actions for the message
+//! (Attach files), then the commands turned on in Settings → Commands under
+//! the same group headers as that page, each with a badge for what it
+//! controls ("On" for Fast mode, a paused goal, how full the context is). A
+//! command that takes named choices — `/orchestrate on|off|status`, `/goal
+//! pause|resume|…`, `/provider add` — shows a chevron, and choosing it (or
+//! typing its name and a space) opens the list of its choices, the one in
 //! effect checked.
 
 use std::ops::Range;
@@ -65,10 +66,54 @@ pub fn choices(command: &str) -> &'static [Choice] {
     }
 }
 
+/// Something the composer itself does from the menu, rather than a command
+/// sent to the agent. Choosing one removes the typed `/…`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Open the file picker (the composer's former paperclip button).
+    Attach,
+}
+
+impl Action {
+    /// Every action, in menu order. Every composer offers them all.
+    pub const ALL: [Self; 1] = [Self::Attach];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Attach => "Attach files",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Attach => "Add files or images to this message",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Attach => crate::icons::PAPERCLIP,
+        }
+    }
+
+    /// What typing after `/` matches: the label and the words someone
+    /// looking for it would type.
+    fn search_text(self) -> &'static str {
+        match self {
+            Self::Attach => "attach files images upload",
+        }
+    }
+}
+
+/// The heading over [`Action`]s: they act on the message being written.
+pub const ACTIONS_HEADING: &str = "Message";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     /// A group's heading; never selected.
-    Header(CommandGroup),
+    Header(&'static str),
+    /// One of the composer's own actions.
+    Action(Action),
     /// A command, by its index in the agent's command list.
     Command(usize),
     /// One choice of the command whose choices are open.
@@ -85,39 +130,66 @@ pub struct Menu {
     pub preferred: Option<usize>,
 }
 
-/// The command list: the commands `shown` lets through that match `query`,
-/// grouped under headers in the page's group order. Within a group the best
-/// matches come first (catalog order with nothing typed). Once something is
-/// typed, the overall best match is preferred even when its group is not
-/// the first; with nothing typed, the top row is.
-pub fn command_level(commands: &[SlashCommand], shown: impl Fn(&str) -> bool, query: &str) -> Menu {
+/// The command list: the `actions` and the commands `shown` lets through
+/// that match `query`, the actions first under their own heading, then the
+/// commands grouped under headers in the Settings page's group order. Within
+/// a group the best matches come first (catalog order with nothing typed).
+/// Once something is typed, the overall best match is preferred even when
+/// its group is not the first; with nothing typed, the top row is.
+pub fn command_level(
+    actions: &[Action],
+    commands: &[SlashCommand],
+    shown: impl Fn(&str) -> bool,
+    query: &str,
+) -> Menu {
     let visible: Vec<usize> = (0..commands.len())
         .filter(|&ix| shown(&commands[ix].name))
         .collect();
-    let names: Vec<&str> = visible
+    // Actions and commands rank together, so the best match wins whichever
+    // it is.
+    let candidates: Vec<Row> = actions
         .iter()
-        .map(|&ix| commands[ix].name.as_str())
+        .map(|&action| Row::Action(action))
+        .chain(visible.iter().map(|&ix| Row::Command(ix)))
         .collect();
-    // Command indices, best match first.
-    let ranked: Vec<usize> = crate::popover::filter_indices(query, &names)
+    let labels: Vec<&str> = candidates
+        .iter()
+        .map(|row| match row {
+            Row::Action(action) => action.search_text(),
+            Row::Command(ix) => commands[*ix].name.as_str(),
+            Row::Header(_) | Row::Choice(_) => "",
+        })
+        .collect();
+    let ranked: Vec<&Row> = crate::popover::filter_indices(query, &labels)
         .into_iter()
-        .map(|position| visible[position])
+        .map(|position| &candidates[position])
         .collect();
-    let mut menu = Menu::default();
-    for group in CommandGroup::ALL {
-        let members: Vec<usize> = ranked
-            .iter()
-            .copied()
-            .filter(|&ix| placement(&commands[ix].name).group == group)
-            .collect();
+    fn push_group(menu: &mut Menu, heading: &'static str, members: Vec<Row>) {
         if members.is_empty() {
-            continue;
+            return;
         }
-        menu.rows.push(Row::Header(group));
-        for ix in members {
+        menu.rows.push(Row::Header(heading));
+        for row in members {
             menu.selectable.push(menu.rows.len());
-            menu.rows.push(Row::Command(ix));
+            menu.rows.push(row);
         }
+    }
+    let mut menu = Menu::default();
+    let actions_found: Vec<Row> = ranked
+        .iter()
+        .filter(|row| matches!(row, Row::Action(_)))
+        .map(|row| (*row).clone())
+        .collect();
+    push_group(&mut menu, ACTIONS_HEADING, actions_found);
+    for group in CommandGroup::ALL {
+        let members: Vec<Row> = ranked
+            .iter()
+            .filter(|row| {
+                matches!(row, Row::Command(ix) if placement(&commands[*ix].name).group == group)
+            })
+            .map(|row| (*row).clone())
+            .collect();
+        push_group(&mut menu, group.title(), members);
     }
     menu.preferred = if query.trim().is_empty() {
         (!menu.selectable.is_empty()).then_some(0)
@@ -125,7 +197,7 @@ pub fn command_level(commands: &[SlashCommand], shown: impl Fn(&str) -> bool, qu
         ranked.first().and_then(|best| {
             menu.selectable
                 .iter()
-                .position(|&row| menu.rows[row] == Row::Command(*best))
+                .position(|&row| menu.rows[row] == **best)
         })
     };
     menu
@@ -334,7 +406,8 @@ mod tests {
         menu.rows
             .iter()
             .map(|row| match row {
-                Row::Header(group) => format!("# {group:?}"),
+                Row::Header(title) => format!("# {title}"),
+                Row::Action(action) => action.label().to_string(),
                 Row::Command(ix) => commands[*ix].name.clone(),
                 Row::Choice(choice) => choice.value.to_string(),
             })
@@ -344,13 +417,15 @@ mod tests {
     #[test]
     fn commands_group_under_headers_in_page_order() {
         let commands = catalog();
-        let menu = command_level(&commands, |name| name != "mcp", "");
+        let menu = command_level(&Action::ALL, &commands, |name| name != "mcp", "");
         assert_eq!(
             names(&menu, &commands),
             [
+                "# Message",
+                "Attach files",
                 "# Conversation",
                 "compact",
-                "# AgentModes",
+                "# Agent modes",
                 "goal",
                 "fast",
                 "orchestrate",
@@ -361,21 +436,42 @@ mod tests {
                 "skill:wiki",
             ]
         );
-        // Headers are skipped by the keyboard; the first command is preferred.
-        assert_eq!(menu.selectable, [1, 3, 4, 5, 7, 8, 10]);
+        // Headers are skipped by the keyboard; the top row is preferred.
+        assert_eq!(menu.selectable, [1, 3, 5, 6, 7, 9, 10, 12]);
         assert_eq!(menu.preferred, Some(0));
+    }
+
+    #[test]
+    fn attach_is_offered_with_no_command_turned_on() {
+        let commands = catalog();
+        let menu = command_level(&Action::ALL, &commands, |_| false, "");
+        assert_eq!(names(&menu, &commands), ["# Message", "Attach files"]);
+        // Found by what someone looking for it would type.
+        for query in ["att", "files", "image", "upload"] {
+            let menu = command_level(&Action::ALL, &commands, |_| false, query);
+            assert_eq!(
+                menu.rows,
+                [Row::Header(ACTIONS_HEADING), Row::Action(Action::Attach)],
+                "{query}"
+            );
+        }
+        assert!(
+            command_level(&Action::ALL, &commands, |_| false, "fast")
+                .rows
+                .is_empty()
+        );
     }
 
     #[test]
     fn the_best_match_is_preferred_even_in_a_later_group() {
         let commands = catalog();
-        let menu = command_level(&commands, |_| true, "fa");
-        assert_eq!(names(&menu, &commands), ["# AgentModes", "fast"]);
+        let menu = command_level(&Action::ALL, &commands, |_| true, "fa");
+        assert_eq!(names(&menu, &commands), ["# Agent modes", "fast"]);
         // Prefix matches beat substrings: `subagents` (Subagents group) wins
         // over `fast` and `orchestrate`, which only contain an "s" and sit in
         // the earlier Agent modes group.
-        let menu = command_level(&commands, |_| true, "s");
-        assert_eq!(menu.rows[0], Row::Header(CommandGroup::AgentModes));
+        let menu = command_level(&[], &commands, |_| true, "s");
+        assert_eq!(menu.rows[0], Row::Header(CommandGroup::AgentModes.title()));
         let preferred = menu.selectable[menu.preferred.unwrap()];
         assert_eq!(menu.rows[preferred], Row::Command(3));
     }

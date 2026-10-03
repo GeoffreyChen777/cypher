@@ -371,7 +371,7 @@ pub fn collapse_text_glide(from: f32, progress: f32) -> f32 {
 }
 
 /// The decaying [`CLUSTER_Y_DELTA`] offset for the in-flight morph.
-/// The whole control cluster — chips AND attach/send — rides the stationary
+/// The whole control cluster — chips AND the send button — rides the stationary
 /// bottom anchor at FULL alpha throughout (round-9 follow-up: any fade on the
 /// picker chips read as flicker; their screen position is near-stationary
 /// across the flip, so nothing needs to be hidden).
@@ -2749,6 +2749,29 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) {
         self.insert_raw(range, replacement.to_owned(), cx);
+    }
+
+    /// Remove a typed plain-text token and the space after it as one undo
+    /// step — a `/` menu action that types nothing, such as Attach files.
+    pub fn remove_plain_token(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        if range.start > range.end
+            || range.end > self.content.len()
+            || !self.content.is_char_boundary(range.start)
+            || !self.content.is_char_boundary(range.end)
+        {
+            return;
+        }
+        let end = range.end + usize::from(self.content[range.end..].starts_with(' '));
+        let range = range.start..end;
+        self.record_edit(&range, "");
+        self.content = self.content[..range.start].to_owned() + &self.content[range.end..];
+        self.refresh_projection();
+        self.selected_range = range.start..range.start;
+        self.selection_reversed = false;
+        self.follow_cursor = true;
+        self.reset_blink();
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -5225,12 +5248,15 @@ impl Composer {
         let shown_slash_observe = cx
             .observe_global::<crate::settings::commands::ShownSlashCommands>(
                 |this: &mut Self, cx| {
-                    // Turning the first command on (or the last one off) opens
-                    // or closes the menu for what is already typed.
+                    // Re-open an open menu from scratch: the first command
+                    // turned on needs the agent's list fetched, which a menu
+                    // with only the actions skipped.
                     let (text, cursor) = {
                         let input = this.input.read(cx);
                         (input.text().to_string(), input.cursor_offset())
                     };
+                    this.slash.token = None;
+                    this.slash.parent = None;
                     this.update_slash(&text, cursor, cx);
                     this.prefetch_slash_commands(cx);
                     cx.notify();
@@ -6017,8 +6043,8 @@ impl Composer {
         )
     }
 
-    /// Paperclip: the native file picker (any file type — images preview,
-    /// everything else stages as a file tile).
+    /// Attach files (the `/` menu): the native file picker (any file type —
+    /// images preview, everything else stages as a file tile).
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -7133,9 +7159,9 @@ impl Composer {
 
     /// The `/` token under the cursor, and the command whose choices it picks
     /// from: the command list while a name is typed, a command's choices
-    /// once a command that has them is followed by a space. With no command
-    /// turned on in Settings there is nothing to offer, so `/` opens no menu
-    /// (a typed command still runs).
+    /// once a command that has them is followed by a space. The command list
+    /// always offers the composer's own actions (Attach files), so `/` opens
+    /// it even with no command turned on in Settings.
     fn slash_target(
         &self,
         text: &str,
@@ -7143,9 +7169,6 @@ impl Composer {
         harness: Option<HarnessId>,
         cx: &App,
     ) -> (Option<MentionToken>, Option<String>) {
-        if !crate::settings::commands::any_shown_in_app(cx) {
-            return (None, None);
-        }
         if let Some(token) = slash_token(text, cursor) {
             return (Some(token), None);
         }
@@ -7254,8 +7277,11 @@ impl Composer {
         if opened {
             self.fetch_slash_modes(cx);
         }
-        // No resolved harness (catalog still loading): empty popup, no fetch.
-        let Some(harness) = harness else {
+        // No resolved harness (catalog still loading): the actions only, no
+        // fetch. Nor is the agent's list worth a fetch (a cold Pi spawn) when
+        // none of its commands is turned on: the menu has only the actions.
+        let Some(harness) = harness.filter(|_| crate::settings::commands::any_shown_in_app(cx))
+        else {
             self.slash.loading = false;
             self.refilter_slash(cx);
             return;
@@ -7329,6 +7355,7 @@ impl Composer {
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 crate::slash_menu::command_level(
+                    &crate::slash_menu::Action::ALL,
                     commands,
                     |name| crate::settings::commands::shows_in_app(cx, name),
                     &query,
@@ -7396,6 +7423,15 @@ impl Composer {
             return;
         };
         let replacement = match row {
+            Row::Action(crate::slash_menu::Action::Attach) => {
+                // The action types nothing: drop the `/…` that summoned it.
+                self.input
+                    .update(cx, |input, cx| input.remove_plain_token(token.range, cx));
+                self.reset_slash(None, cx);
+                self.open_file_picker(cx);
+                cx.notify();
+                return;
+            }
             Row::Command(ix) => {
                 let Some(command) = self
                     .slash
@@ -7479,43 +7515,37 @@ impl Composer {
         let mut card = crate::popover::popover_card(theme)
             .w(px(420.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
-        if self.slash.loading && commands.is_empty() {
-            card = card.child(crate::popover::skeleton_rows(
-                "slash-loading",
-                theme,
-                3,
-                cx.entity_id(),
-                cx,
-            ));
+        // The rows come first (the composer's actions are there even while
+        // the agent's list loads or fails), then a line for that list.
+        let status: Option<gpui::AnyElement> = if self.slash.loading && commands.is_empty() {
+            Some(
+                crate::popover::skeleton_rows("slash-loading", theme, 2, cx.entity_id(), cx)
+                    .into_any_element(),
+            )
         } else if let Some(error) = self.slash.error.clone() {
-            card = card.child(
+            Some(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(px(12.0))
                     .text_color(theme.danger_muted)
-                    .child(error),
-            );
+                    .child(error)
+                    .into_any_element(),
+            )
         } else if self.slash.menu.selectable.is_empty() {
-            let all_hidden = !commands.is_empty()
-                && commands
-                    .iter()
-                    .all(|command| !crate::settings::commands::shows_in_app(cx, &command.name));
-            card = card.child(
+            Some(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child(if commands.is_empty() {
-                        "This agent has no slash commands"
-                    } else if all_hidden {
-                        "None of this agent's commands are turned on in Settings → Commands"
-                    } else {
-                        "No matching commands"
-                    }),
-            );
+                    .child("No matching commands")
+                    .into_any_element(),
+            )
         } else {
+            None
+        };
+        if !self.slash.menu.rows.is_empty() {
             let parent = self.slash.parent.clone();
             let chevron_column = self.slash.menu.rows.iter().any(|row| match row {
                 Row::Command(ix) => commands
@@ -7578,12 +7608,37 @@ impl Composer {
                     .items_center()
                     .gap(px(8.0));
                 let row = match row {
-                    Row::Header(group) => {
-                        rows.push(
-                            crate::popover::menu_heading(theme, group.title()).into_any_element(),
-                        );
+                    Row::Header(title) => {
+                        rows.push(crate::popover::menu_heading(theme, title).into_any_element());
                         continue;
                     }
+                    Row::Action(action) => line
+                        .child(
+                            crate::icons::icon(action.icon())
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(action.label())),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(action.description())),
+                        )
+                        .when(chevron_column, |line| {
+                            line.child(div().size(px(12.0)).flex_none())
+                        }),
                     Row::Command(ix) => {
                         let Some(command) = commands.get(*ix) else {
                             continue;
@@ -7710,6 +7765,7 @@ impl Composer {
                     .children(rows),
             );
         }
+        card = card.children(status);
         let anchor = self
             .input
             .read(cx)
@@ -10267,43 +10323,16 @@ impl Render for Composer {
         self.last_rendered_height = pill_height;
 
         let send_button = self.render_send_button(mode, cx);
-        // Attach button — opens the native image picker (the original's hidden
-        // `<input type=file accept="image/*" multiple>`); paste/drop also feed
-        // the same strip. `ml-1` per the source cluster — chips→attach reads
-        // 8px (4 gap + 4 margin) in BOTH modes.
-        // Hover-fade keys are global: one per composer (tiles side by side).
-        let attach_fade = format!("composer-attach-{}", cx.entity_id());
-        let attach = div()
-            .id("composer-attach")
-            .ml(px(4.0))
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .cursor_pointer()
-            // zeron composer-actions.tsx attach: `transition-colors`.
-            .bg(motion::hover_blend(
-                &attach_fade,
-                gpui::transparent_black(),
-                crate::theme::ink(0.10),
-            ))
-            .on_hover(motion::hover_listener(attach_fade.clone()))
-            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
-            .child(
-                crate::icons::icon(crate::icons::PAPERCLIP)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted),
-            );
+        // Attaching lives in the `/` menu (Attach files), not on the pill;
+        // paste and drop feed the same strip.
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
 
         // The pill chrome (zeron composer.tsx): `rounded-[26px] border
         // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
-        // a hairline over a faint wash, never a solid grey box. Picker chips,
-        // attach, and the send circle all live INSIDE the pill.
+        // a hairline over a faint wash, never a solid grey box. Picker chips
+        // and the send circle live INSIDE the pill.
         let pill_bg = theme.input_glass_bg();
         // No drop shadow on glass: it paints BEHIND the translucent fill and
         // shows through as an inner glow (theme.rs's card_selected_shadows
@@ -10383,7 +10412,6 @@ impl Render for Composer {
                         .pt(px(4.0))
                         .pb(px(10.0))
                         .child(div().flex_1().min_w_0().child(self.pickers.clone()))
-                        .child(attach)
                         .child(send_button),
                 )
         } else {
@@ -10393,7 +10421,7 @@ impl Render for Composer {
             // The row is BOTTOM-justified: during the collapse morph the pill
             // top sweeps down over a stationary row, the text walks down from
             // its expanded resting place via a decaying relative offset, and
-            // the whole inline cluster (chips + attach/send) holds its spot at
+            // the whole inline cluster (chips + send) holds its spot at
             // full alpha (2.5px centering delta gliding in).
             let text_glide = match self.flip_morph {
                 Some(m) if morphing => collapse_text_glide(m.from, morph_t),
@@ -10441,7 +10469,6 @@ impl Render for Composer {
                                 .relative()
                                 .top(px(-cluster_dy))
                                 .child(div().min_w_0().child(self.pickers.clone()))
-                                .child(attach)
                                 .child(send_button),
                         ),
                 )
@@ -10864,6 +10891,32 @@ mod tests {
             mention_token("See (@lib", 9).map(|token| token.range),
             Some(5..9)
         );
+    }
+
+    /// A `/` menu action that types nothing removes the `/…` that summoned
+    /// it and the space after it, keeping the rest of the draft.
+    #[gpui::test]
+    fn removing_a_plain_token_keeps_the_rest_of_the_draft(cx: &mut gpui::TestAppContext) {
+        let input = cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.new(|cx| ComposerInput::new("", cx))
+        });
+        cx.update(|cx| {
+            input.update(cx, |input, cx| {
+                input.set_text("/att fix the bug", cx);
+                input.remove_plain_token(0..4, cx);
+                assert_eq!(input.text(), "fix the bug");
+                assert_eq!(input.selected_range, 0..0);
+                // A token alone in the draft leaves it empty.
+                input.set_text("/a", cx);
+                input.remove_plain_token(0..2, cx);
+                assert_eq!(input.text(), "");
+                // A range past the text changes nothing.
+                input.set_text("/a", cx);
+                input.remove_plain_token(0..9, cx);
+                assert_eq!(input.text(), "/a");
+            })
+        });
     }
 
     #[test]
