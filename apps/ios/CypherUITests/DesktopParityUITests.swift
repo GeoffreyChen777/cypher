@@ -77,6 +77,16 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(compact.isEnabled)
     }
 
+    func testAProjectCardOpensItsProject() {
+        let app = launch([])
+        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'cypher'")).firstMatch
+        XCTAssertTrue(card.waitForHittable(timeout: 10))
+        XCTAssertTrue(card.label.contains("1 needs input"), "the card reads its activity: \(card.label)")
+        card.tap()
+        XCTAssertTrue(text(app, containing: "Tool group header colors").waitForExistence(timeout: 5),
+                      "the project's sessions open")
+    }
+
     func testRenameAndDeleteFromTheProjectList() {
         let app = launch(["-route", "space:space-cypher"])
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Tool group header colors'")).firstMatch

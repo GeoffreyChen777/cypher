@@ -17,6 +17,16 @@ final class ProjectStatusTests: XCTestCase {
         XCTAssertNil(ChatIndicator.projectSummary([]))
     }
 
+    func testActivityBadgesPutAttentionFirstAndSkipIdle() {
+        let counts = ChatIndicator.activityCounts([.completed, .working, .idle, .awaitingInput,
+                                                   .awaitingInput, .errored, .completed])
+        XCTAssertEqual(counts.map(\.indicator), [.awaitingInput, .errored, .working, .completed])
+        XCTAssertEqual(counts.map(\.label), ["2 need input", "1 failed", "1 running", "2 done"])
+        XCTAssertEqual(ChatIndicator.activityCounts([.awaitingInput]).first?.label, "1 needs input")
+        XCTAssertEqual(ChatIndicator.activityCounts([.idle, .idle]), [])
+        XCTAssertEqual(ChatIndicator.activitySummary([.working, .awaitingInput]), ["1 needs input", "1 running"])
+    }
+
     @MainActor
     func testProjectUpdatesFromRunningToUnreadToRead() throws {
         let model = AppModel()
