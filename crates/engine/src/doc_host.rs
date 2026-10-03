@@ -2496,6 +2496,13 @@ impl DocHost {
             // processed and leaves it Pending forever. The in-memory
             // `executing` set excludes commands currently running in this
             // process.
+            //
+            // `commands` is a snapshot, and a concurrent drain may resolve a
+            // command and leave `executing` after it was taken. So once a
+            // candidate is out of `executing`, re-read its status: the
+            // executor writes the outcome before it leaves the set, so a
+            // command it finished reads resolved here, and a stale Pending
+            // never overwrites Applied.
             let dead: Vec<String> = commands
                 .iter()
                 .filter(|command| {
@@ -2506,7 +2513,23 @@ impl DocHost {
                 })
                 .map(|command| command.id.clone())
                 .collect();
+            let still_pending: HashSet<String> = if dead.is_empty() {
+                HashSet::new()
+            } else {
+                handle
+                    .doc
+                    .read_commands()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|command| command.status == SessionCommandStatus::Pending)
+                    .map(|command| command.id)
+                    .collect()
+            };
             for command_id in dead {
+                if !still_pending.contains(&command_id) {
+                    skipped.insert(command_id);
+                    continue;
+                }
                 tracing::warn!(
                     chat = %handle.chat_id,
                     command = %command_id,
