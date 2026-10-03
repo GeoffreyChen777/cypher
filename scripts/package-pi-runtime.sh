@@ -62,14 +62,6 @@ cp "$SPEC/provider-service.mjs" "$STAGE/"
 cp "$SPEC/package.json" "$SPEC/package-lock.json" "$SPEC/.npmrc" "$STAGE/npm/"
 npm ci --prefix "$STAGE/npm" --omit=dev --ignore-scripts
 
-# pi-claude-bridge serves only the models it has measured at 1M with the [1m]
-# id; claude-opus-5-5 is not measured yet, so it would run at 200K. Patch the
-# installed source (the bridge runs from TypeScript) rather than forking the
-# pinned git dependency. Temporary: the patch reports itself inert once upstream
-# lists the model. Missing anchors fail the build on purpose.
-node "$SPEC/patches/pi-claude-bridge-opus-5-5.mjs" \
-  "$STAGE/npm/node_modules/pi-claude-bridge"
-
 # pi-agent-squad runs each subagent as its own hidden child process, so the
 # Subagents inspector had nothing to open. Route its runs through the engine's
 # child-chat bridge instead (see the patch header). Missing anchors fail the
