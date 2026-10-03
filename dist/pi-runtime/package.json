@@ -8,7 +8,7 @@
     "@earendil-works/pi-coding-agent": "1.0.0",
     "@earendil-works/pi-server": "1.0.0",
     "@earendil-works/pi-tui": "1.0.0",
-    "@lll9p/pi-better-compaction": "0.7.1",
+    "@lll9p/pi-better-compaction": "0.7.2",
     "@narumitw/pi-goal": "0.54.8",
     "gpt-fast-pi": "0.1.3",
     "pi-agent-squad": "0.9.0",
