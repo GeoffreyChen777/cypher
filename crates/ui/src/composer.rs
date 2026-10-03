@@ -29,6 +29,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use cypher_doc::{
     MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry, TranscriptFrame,
 };
+use cypher_engine::pi_session_modes::PiSessionModes;
 use cypher_proto::{
     Chat, FileSearchMatch, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SlashCommand,
     UserInputAnswer, UserInputQuestion,
@@ -4665,6 +4666,34 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
+/// A `/` menu row's state badge ([`crate::slash_menu::command_badge`]):
+/// green when something is on or running, amber for a reading worth acting
+/// on, quiet otherwise.
+fn slash_badge(theme: &Theme, badge: crate::slash_menu::Badge) -> gpui::Div {
+    use crate::slash_menu::Tone;
+    let (background, color) = match badge.tone {
+        Tone::On => (theme.success.opacity(0.14), theme.success),
+        Tone::Warning => (theme.warning.opacity(0.16), theme.warning),
+        Tone::Neutral => (crate::theme::ink(0.06), theme.text_muted),
+        Tone::Off => (crate::theme::ink(0.04), theme.text_muted.opacity(0.75)),
+    };
+    div()
+        .flex_none()
+        .h(px(18.0))
+        // "On" and "Off" share a width, so flipping one does not shift it.
+        .min_w(px(30.0))
+        .px(px(6.0))
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(background)
+        .text_size(px(10.5))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color)
+        .child(SharedString::from(badge.label))
+}
+
 /// The leading `/command` token of a whole-prompt slash send, if any.
 /// Used to restyle settings-style extension menus (not agent questions).
 pub fn slash_command_label(text: &str) -> Option<&str> {
@@ -4682,8 +4711,12 @@ pub fn slash_command_label(text: &str) -> Option<&str> {
 #[derive(Debug, Clone, Default)]
 struct SlashState {
     token: Option<MentionToken>,
-    /// Indices into the cached command list, filter-ranked for the query.
-    filtered: Vec<usize>,
+    /// The command whose choices are open (`/orchestrate o…`), or `None` for
+    /// the command list.
+    parent: Option<String>,
+    /// The rows on show ([`crate::slash_menu`]).
+    menu: crate::slash_menu::Menu,
+    /// The highlighted row, as a position in `menu.selectable`.
     active: Option<usize>,
     /// Harness the popup is showing commands for (cache key).
     harness: Option<HarnessId>,
@@ -5010,6 +5043,12 @@ pub struct Composer {
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
     slash_owner: Option<String>,
     slash_generation: u64,
+    /// The Pi plugins' switches for a chat (`None` = no chat), refetched each
+    /// time the `/` menu opens and kept between openings so its badges do
+    /// not flicker.
+    slash_modes: Option<(Option<String>, PiSessionModes)>,
+    slash_modes_task: Option<Task<()>>,
+    slash_modes_request: u64,
     current_key: String,
     sending: bool,
     failure: Option<SharedString>,
@@ -5299,6 +5338,9 @@ impl Composer {
             mention_scroll: ScrollHandle::new(),
             slash_cache: HashMap::new(),
             slash_owner: None,
+            slash_modes: None,
+            slash_modes_task: None,
+            slash_modes_request: 0,
             slash_generation: 0,
             current_key,
             sending: false,
@@ -7039,7 +7081,7 @@ impl Composer {
         self.slash_task = None;
         self.slash.request = self.slash.request.wrapping_add(1);
         self.slash.harness = None;
-        self.slash.filtered.clear();
+        self.slash.menu = Default::default();
         self.slash.loading = false;
         self.slash.error = None;
     }
@@ -7089,14 +7131,99 @@ impl Composer {
         }));
     }
 
+    /// The `/` token under the cursor, and the command whose choices it picks
+    /// from: the command list while a name is typed, a command's choices
+    /// once a command that has them is followed by a space. With no command
+    /// turned on in Settings there is nothing to offer, so `/` opens no menu
+    /// (a typed command still runs).
+    fn slash_target(
+        &self,
+        text: &str,
+        cursor: usize,
+        harness: Option<HarnessId>,
+        cx: &App,
+    ) -> (Option<MentionToken>, Option<String>) {
+        if !crate::settings::commands::any_shown_in_app(cx) {
+            return (None, None);
+        }
+        if let Some(token) = slash_token(text, cursor) {
+            return (Some(token), None);
+        }
+        let Some(choice) = crate::slash_menu::choice_token(text, cursor) else {
+            return (None, None);
+        };
+        let offered = harness
+            .and_then(|harness| self.slash_cache.get(&harness))
+            .is_some_and(|commands| commands.iter().any(|c| c.name == choice.command));
+        if !offered
+            || crate::slash_menu::choices(&choice.command).is_empty()
+            || !crate::settings::commands::shows_in_app(cx, &choice.command)
+        {
+            return (None, None);
+        }
+        (
+            Some(MentionToken {
+                range: choice.range,
+                query: choice.query,
+            }),
+            Some(choice.command),
+        )
+    }
+
+    /// Ask the chat's host what the Pi plugins' switches are, for the menu's
+    /// badges. Only worth asking when a command they belong to is shown; a
+    /// host too old to answer just leaves the badges off.
+    fn fetch_slash_modes(&mut self, cx: &mut Context<Self>) {
+        let pi = self
+            .pickers
+            .read(cx)
+            .resolved(cx)
+            .harness
+            .unwrap_or(HarnessId::Pi)
+            == HarnessId::Pi;
+        let relevant = ["fast", "orchestrate", "goal"]
+            .iter()
+            .any(|name| crate::settings::commands::shows_in_app(cx, name));
+        if !pi || !relevant || !matches!(self.transport, ComposerTransport::Main) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let chat = self.state.read(cx).selected_chat.clone();
+        let target = self.command_target(cx);
+        self.slash_modes_request = self.slash_modes_request.wrapping_add(1);
+        let request = self.slash_modes_request;
+        self.slash_modes_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::json!({ "chatId": chat });
+            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
+                object.insert("targetDeviceId".into(), target.clone().into());
+            }
+            let result = engine
+                .client()
+                .call(methods::PI_SESSION_MODES, params)
+                .await;
+            this.update(cx, |composer, cx| {
+                if composer.slash_modes_request != request {
+                    return;
+                }
+                match result.map(serde_json::from_value::<PiSessionModes>) {
+                    Ok(Ok(modes)) => composer.slash_modes = Some((chat, modes)),
+                    Ok(Err(err)) => tracing::debug!(%err, "Pi session modes decode failed"),
+                    Err(err) => tracing::debug!(%err, "Pi session modes unavailable"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
     /// harness's command list on first open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
         self.sync_slash_owner(cx);
-        // With no command turned on there is nothing to offer: `/` opens no
-        // menu (a typed command still runs).
-        let token =
-            slash_token(text, cursor).filter(|_| crate::settings::commands::any_shown_in_app(cx));
+        let harness = self.pickers.read(cx).resolved(cx).harness;
+        let (token, parent) = self.slash_target(text, cursor, harness, cx);
         let still_dismissed = token.as_ref().is_some_and(|token| {
             self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
                 token.range == *range && text.get(range.clone()) == Some(value.as_str())
@@ -7108,13 +7235,14 @@ impl Composer {
             return;
         }
         self.slash.dismissed = None;
-        let harness = self.pickers.read(cx).resolved(cx).harness;
         let harness_changed = self.slash.harness != harness;
-        if token == self.slash.token && !harness_changed {
+        if token == self.slash.token && parent == self.slash.parent && !harness_changed {
             self.refilter_slash(cx);
             return;
         }
+        let opened = self.slash.token.is_none() && token.is_some();
         self.slash.token = token.clone();
+        self.slash.parent = parent;
         self.slash_scroll.set_offset(Point::default());
         self.slash.harness = harness;
         self.slash.error = None;
@@ -7122,6 +7250,9 @@ impl Composer {
             self.slash.active = None;
             self.sync_mention_controls(cx);
             return;
+        }
+        if opened {
+            self.fetch_slash_modes(cx);
         }
         // No resolved harness (catalog still loading): empty popup, no fetch.
         let Some(harness) = harness else {
@@ -7188,38 +7319,48 @@ impl Composer {
             .as_ref()
             .map(|t| t.query.clone())
             .unwrap_or_default();
-        let commands = self
-            .slash
-            .harness
-            .and_then(|h| self.slash_cache.get(&h))
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let visible: Vec<usize> = commands
-            .iter()
-            .enumerate()
-            .filter(|(_, command)| crate::settings::commands::shows_in_app(cx, &command.name))
-            .map(|(index, _)| index)
-            .collect();
-        let names: Vec<&str> = visible
-            .iter()
-            .filter_map(|&index| commands.get(index).map(|command| command.name.as_str()))
-            .collect();
-        self.slash.filtered = crate::popover::filter_indices(&query, &names)
-            .into_iter()
-            .filter_map(|ranked| visible.get(ranked).copied())
-            .collect();
-        self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
+        let menu = match &self.slash.parent {
+            Some(parent) => crate::slash_menu::choice_level(parent, &query),
+            None => {
+                let commands = self
+                    .slash
+                    .harness
+                    .and_then(|h| self.slash_cache.get(&h))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                crate::slash_menu::command_level(
+                    commands,
+                    |name| crate::settings::commands::shows_in_app(cx, name),
+                    &query,
+                )
+            }
+        };
+        if self.slash.parent.is_some() && menu.selectable.is_empty() {
+            // Typing an argument no choice starts with (a goal's text): the
+            // menu gets out of the way until the word matches one again.
+            self.slash.token = None;
+            self.slash.parent = None;
+            self.slash.menu = Default::default();
+            self.slash.active = None;
+        } else {
+            self.slash.active = menu.preferred;
+            self.slash.menu = menu;
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
 
     fn move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.slash.active =
-            crate::popover::menu_step(self.slash.active, self.slash.filtered.len(), delta);
-        // Keep the keyboard-highlighted row in view (rows are the scroll
-        // container's direct children, indices map 1:1).
-        if let Some(active) = self.slash.active {
-            self.slash_scroll.scroll_to_item(active);
+            crate::popover::menu_step(self.slash.active, self.slash.menu.selectable.len(), delta);
+        // Keep the keyboard-highlighted row in view. Every menu row, group
+        // headings included, is a direct child of the scroll container.
+        if let Some(row) = self
+            .slash
+            .active
+            .and_then(|active| self.slash.menu.selectable.get(active))
+        {
+            self.slash_scroll.scroll_to_item(*row);
         }
         self.sync_mention_controls(cx);
         cx.notify();
@@ -7237,26 +7378,40 @@ impl Composer {
         cx.notify();
     }
 
+    /// Type the highlighted row into the prompt. The input adds a space after
+    /// it, so a command with choices opens them on the edit that follows
+    /// ([`Self::update_slash`]), and a typed choice closes the menu.
     fn accept_slash(&mut self, cx: &mut Context<Self>) {
+        use crate::slash_menu::Row;
         let Some(token) = self.slash.token.clone() else {
             return;
         };
-        let Some(command) = self
+        let Some(row) = self
             .slash
             .active
-            .and_then(|active| self.slash.filtered.get(active))
-            .and_then(|&ix| {
-                self.slash
-                    .harness
-                    .and_then(|h| self.slash_cache.get(&h))
-                    .and_then(|c| c.get(ix))
-            })
+            .and_then(|active| self.slash.menu.selectable.get(active))
+            .and_then(|&row| self.slash.menu.rows.get(row))
             .cloned()
         else {
             return;
         };
+        let replacement = match row {
+            Row::Command(ix) => {
+                let Some(command) = self
+                    .slash
+                    .harness
+                    .and_then(|h| self.slash_cache.get(&h))
+                    .and_then(|commands| commands.get(ix))
+                else {
+                    return;
+                };
+                format!("/{}", command.name)
+            }
+            Row::Choice(choice) => choice.value.to_string(),
+            Row::Header(_) => return,
+        };
         self.input.update(cx, |input, cx| {
-            input.replace_plain_token(token.range, &format!("/{}", command.name), cx)
+            input.replace_plain_token(token.range, &replacement, cx)
         });
         self.reset_slash(None, cx);
         cx.notify();
@@ -7280,6 +7435,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        use crate::slash_menu::{self, Row};
         let token = self.slash.token.as_ref()?;
         let commands = self
             .slash
@@ -7287,8 +7443,41 @@ impl Composer {
             .and_then(|h| self.slash_cache.get(&h))
             .map(Vec::as_slice)
             .unwrap_or_default();
+        // What the badges can say about the chat this prompt goes to. A Side
+        // Chat's composer has no Pi session switches of its own here.
+        let main = matches!(self.transport, ComposerTransport::Main);
+        let (chat, context, running_subagents) = {
+            let state = self.state.read(cx);
+            let chat = state.selected_chat.clone();
+            let session = chat
+                .as_deref()
+                .and_then(|id| state.session_for(id))
+                .filter(|_| main);
+            let running = session.map_or(0, |session| {
+                session
+                    .subagents
+                    .iter()
+                    .filter(|run| run.status == cypher_proto::SubagentRunStatus::Running)
+                    .count()
+            });
+            (
+                chat,
+                session.and_then(|session| session.context_usage),
+                running,
+            )
+        };
+        let modes = self
+            .slash_modes
+            .as_ref()
+            .filter(|(for_chat, _)| main && *for_chat == chat)
+            .map(|(_, modes)| modes);
+        let facts = slash_menu::Facts {
+            modes,
+            context,
+            running_subagents,
+        };
         let mut card = crate::popover::popover_card(theme)
-            .w(px(380.0))
+            .w(px(420.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         if self.slash.loading && commands.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -7307,7 +7496,7 @@ impl Composer {
                     .text_color(theme.danger_muted)
                     .child(error),
             );
-        } else if self.slash.filtered.is_empty() {
+        } else if self.slash.menu.selectable.is_empty() {
             let all_hidden = !commands.is_empty()
                 && commands
                     .iter()
@@ -7327,72 +7516,191 @@ impl Composer {
                     }),
             );
         } else {
-            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
-            for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
-                let Some(command) = commands.get(cmd_ix) else {
-                    continue;
-                };
-                let selected = self.slash.active == Some(row_ix);
-                let name: SharedString = format!("/{}", command.name).into();
-                let mut description = command.description.clone();
-                if let Some(hint) = &command.input_hint {
-                    if description.is_empty() {
-                        description = format!("<{hint}>");
-                    } else {
-                        description = format!("{description} · <{hint}>");
+            let parent = self.slash.parent.clone();
+            let chevron_column = self.slash.menu.rows.iter().any(|row| match row {
+                Row::Command(ix) => commands
+                    .get(*ix)
+                    .is_some_and(|command| !slash_menu::choices(&command.name).is_empty()),
+                _ => false,
+            });
+            // A command's choices: which command, and what is in effect now.
+            if let Some(parent) = &parent {
+                let summary = slash_menu::choice_summary(parent, &facts);
+                card = card
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .pt(px(4.0))
+                            .pb(px(2.0))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(12.0))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(format!("/{parent}"))),
+                            )
+                            .children(summary.map(|summary| {
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(summary))
+                            })),
+                    )
+                    .child(crate::popover::menu_separator());
+            }
+            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.menu.rows.len());
+            for (row_ix, row) in self.slash.menu.rows.iter().enumerate() {
+                let position = self
+                    .slash
+                    .menu
+                    .selectable
+                    .iter()
+                    .position(|&selectable| selectable == row_ix);
+                let selected = position.is_some() && self.slash.active == position;
+                let accept = position.map(|position| {
+                    cx.listener(move |this, _, _, cx| {
+                        this.slash.active = Some(position);
+                        this.accept_slash(cx);
+                    })
+                });
+                let line = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(8.0));
+                let row = match row {
+                    Row::Header(group) => {
+                        rows.push(
+                            crate::popover::menu_heading(theme, group.title()).into_any_element(),
+                        );
+                        continue;
                     }
-                }
-                let description: SharedString = description.into();
+                    Row::Command(ix) => {
+                        let Some(command) = commands.get(*ix) else {
+                            continue;
+                        };
+                        let mut description = command.description.clone();
+                        if let Some(hint) = &command.input_hint {
+                            if description.is_empty() {
+                                description = format!("<{hint}>");
+                            } else {
+                                description = format!("{description} · <{hint}>");
+                            }
+                        }
+                        let badge = slash_menu::command_badge(&command.name, &facts);
+                        let has_choices = !slash_menu::choices(&command.name).is_empty();
+                        line.child(
+                            crate::icons::icon(crate::icons::COMMAND)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(format!("/{}", command.name))),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(description)),
+                        )
+                        .children(badge.map(|badge| slash_badge(theme, badge)))
+                        // The chevron has a column of its own on every row
+                        // once any command has choices, so the badges end at
+                        // one edge whether a chevron follows them or not.
+                        .when(chevron_column, |line| {
+                            line.child(
+                                div()
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(has_choices, |slot| {
+                                        slot.child(
+                                            crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                                .size(px(12.0))
+                                                .text_color(theme.text_muted.opacity(0.7)),
+                                        )
+                                    }),
+                            )
+                        })
+                    }
+                    Row::Choice(choice) => {
+                        let in_effect = parent.as_deref().is_some_and(|parent| {
+                            slash_menu::choice_in_effect(parent, choice, &facts)
+                        });
+                        line.child(
+                            // The check marks the choice in effect; the slot
+                            // keeps every value aligned either way.
+                            div()
+                                .size(px(14.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(in_effect, |slot| {
+                                    slot.child(
+                                        crate::icons::icon(crate::icons::CHECK)
+                                            .size(px(12.0))
+                                            .text_color(theme.success),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(choice.value)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(choice.description)),
+                        )
+                    }
+                };
                 rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.slash.active = Some(row_ix);
-                            this.accept_slash(cx);
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .min_w_0()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    crate::icons::icon(crate::icons::COMMAND)
-                                        .size(px(14.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(12.5))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.text_muted)
-                                        .child(description),
-                                ),
-                        )
+                        .when_some(accept, |el, accept| el.on_click(accept))
+                        .child(row)
                         .into_any_element(),
                 );
             }
-            // The scroll container owns the height cap; rows are its direct
-            // children so `scroll_to_item(active)` maps 1:1 (the pickers'
-            // model-menu pattern). Without it the list hard-clips at the
-            // card's max height and neither wheel nor keys can scroll.
+            // The scroll container owns the height cap; every row (headings
+            // included) is its direct child so `scroll_to_item` maps 1:1 to
+            // `menu.rows` (the pickers' model-menu pattern). Without it the
+            // list hard-clips at the card's max height and neither wheel nor
+            // keys can scroll.
             card = card.child(
                 div()
                     .id("slash-menu-scroll")
-                    .max_h(px(280.0))
+                    .max_h(px(320.0))
                     .flex()
                     .flex_col()
                     .overflow_y_scroll()

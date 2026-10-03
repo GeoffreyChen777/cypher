@@ -509,6 +509,16 @@ impl SessionsEngine {
         Ok(fixed)
     }
 
+    /// The chat's Pi session file, when its harness session is one. Pi names
+    /// a session by its file's absolute path; other harnesses' ids are not
+    /// paths, so anything but an absolute `.jsonl` path is no Pi session.
+    /// Blocking: may scan the chat's journal.
+    pub fn pi_session_file(&self, chat_id: &str) -> Option<std::path::PathBuf> {
+        let (session_id, _) = self.inner.known_harness_session(chat_id)?;
+        let path = std::path::PathBuf::from(session_id);
+        (path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")).then_some(path)
+    }
+
     /// Any run currently working or blocked on input — the auto-updater's
     /// "don't restart from under a session" gate.
     pub fn any_active(&self) -> bool {
@@ -1635,21 +1645,27 @@ impl Inner {
     /// never rides `--resume`. An empty stored id is the explicit tombstone —
     /// no resume, no falling through to staler sources.
     fn resume_for(&self, chat_id: &str, cwd: &str) -> Option<String> {
-        let cwd_ok = |session_cwd: &str| session_cwd.is_empty() || session_cwd == cwd;
+        let (session_id, session_cwd) = self.known_harness_session(chat_id)?;
+        let cwd_ok = session_cwd.is_empty() || session_cwd == cwd;
+        (!session_id.is_empty() && cwd_ok).then_some(session_id)
+    }
+
+    /// The chat's harness session id and the cwd it was created in, from the
+    /// first source that knows it: live-process cache → workspace chat row →
+    /// journal scan. The first source decides, tombstone (empty id) included.
+    fn known_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
         if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
-            return (!known.session_id.is_empty() && cwd_ok(&known.cwd))
-                .then_some(known.session_id);
+            return Some((known.session_id, known.cwd));
         }
         if let Some(ws) = self.workspace()
             && let Some((session_id, session_cwd)) = ws.chat_harness_session(chat_id)
         {
-            return (!session_id.is_empty() && cwd_ok(session_cwd.as_deref().unwrap_or("")))
-                .then_some(session_id);
+            return Some((session_id, session_cwd.unwrap_or_default()));
         }
         let (session_id, session_cwd) = self.journal_harness_session(chat_id)?;
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
         self.remember_harness_session(chat_id, &session_id, &session_cwd);
-        cwd_ok(&session_cwd).then_some(session_id)
+        Some((session_id, session_cwd))
     }
 
     /// The last harness session id named anywhere in the chat's journal, with

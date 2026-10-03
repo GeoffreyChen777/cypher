@@ -94,6 +94,13 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PiSessionModesParams {
+    #[serde(default)]
+    chat_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DetectPiLanguageParams {
     text: String,
 }
@@ -1409,6 +1416,8 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_WEB_SEARCH_FALLBACK
             | methods::SET_WEB_SEARCH_FALLBACK
             | methods::LIST_COMMANDS
+            // Read from the chat's Pi session, which lives on its host.
+            | methods::PI_SESSION_MODES
             | methods::QUEUE_COMMAND
             | methods::RETRY_COMMAND
             | methods::WATCH_DOC_MESSAGES
@@ -2315,6 +2324,21 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
+            }
+            methods::PI_SESSION_MODES => {
+                let p: PiSessionModesParams = parse_params(params)?;
+                let agent_dir = self.pi_runtime()?.paths().agent_dir.clone();
+                let sessions = self.sessions.clone();
+                let modes = crate::off_runtime(move || {
+                    let session = p
+                        .chat_id
+                        .as_deref()
+                        .and_then(|chat_id| sessions.pi_session_file(chat_id));
+                    crate::pi_session_modes::read(session.as_deref(), &agent_dir)
+                })
+                .await
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&modes)
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
@@ -3353,6 +3377,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(forwardable(methods::PI_SESSION_MODES));
         assert!(forwardable(methods::RETRY_COMMAND));
         assert!(forwardable(methods::WATCH_DOC_COMMANDS));
         assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));

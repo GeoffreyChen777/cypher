@@ -92,6 +92,11 @@ pub mod methods {
     pub const GET_WEB_SEARCH_FALLBACK: &str = "GetWebSearchFallback";
     pub const SET_WEB_SEARCH_FALLBACK: &str = "SetWebSearchFallback";
     pub const LIST_COMMANDS: &str = "ListCommands";
+    /// What the Pi plugins' per-chat switches are set to (GPT Fast mode,
+    /// adaptive orchestration, the current goal), read from the chat's Pi
+    /// session on its host device. Params `{chatId?}`; without a chat (or a
+    /// session yet) the reply carries the plugins' defaults.
+    pub const PI_SESSION_MODES: &str = "PiSessionModes";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Re-issue a failed/expired durable message command with a fresh command
     /// id while preserving its logical message identity.

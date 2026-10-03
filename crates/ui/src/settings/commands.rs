@@ -91,7 +91,8 @@ impl CommandGroup {
         Self::SettingsShortcuts,
     ];
 
-    fn title(self) -> &'static str {
+    /// The group's name, on this page and in the composer's `/` menu.
+    pub fn title(self) -> &'static str {
         match self {
             Self::Conversation => "Conversation",
             Self::AgentModes => "Agent modes",
