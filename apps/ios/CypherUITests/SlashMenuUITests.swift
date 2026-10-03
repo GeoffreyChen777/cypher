@@ -73,8 +73,9 @@ final class SlashMenuUITests: XCTestCase {
                       "what is in effect heads the choices")
         XCTAssertEqual(element(app, "slash-choice-off").value as? String, "In effect")
         XCTAssertNotEqual(element(app, "slash-choice-on").value as? String, "In effect")
-        // Every choice's name starts at one edge, checked or not.
-        XCTAssertEqual(app.staticTexts["on"].frame.minX, app.staticTexts["off"].frame.minX, accuracy: 1)
+        // One line a row: the name is the whole label.
+        XCTAssertEqual(element(app, "slash-choice-on").label, "on")
+        XCTAssertEqual(element(app, "slash-choice-off").label, "off")
         capture(app, "dark-slash-choices")
         on.tap()
         XCTAssertEqual(input.value as? String, "/orchestrate on ")
