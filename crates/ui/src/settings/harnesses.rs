@@ -609,11 +609,6 @@ mod tests {
                 icons::STAR,
             ),
             (
-                "gpt-fast-pi",
-                Some("Provider-agnostic GPT Fast mode controls."),
-                icons::TUNING,
-            ),
-            (
                 "pi-mcp-adapter",
                 Some("Use MCP servers from Pi."),
                 icons::COMMAND,

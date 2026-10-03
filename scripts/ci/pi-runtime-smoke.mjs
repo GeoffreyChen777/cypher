@@ -55,6 +55,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
     const extensions = [
       join(runtime, "extensions/cypher-provider-auth.ts"),
       join(runtime, "extensions/cypher-translation.ts"),
+      join(runtime, "extensions/cypher-fast-mode.ts"),
     ];
     if (brokenExtension) {
       const path = join(root, "broken.ts");
@@ -140,8 +141,9 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
               assert.equal(opus.contextWindow, 1_000_000,
                 "claude-bridge must serve claude-opus-5-5 at 1M");
               const names = new Set(responses.get("commands").commands.map(command => command.name));
-              // `mcp` is Pi's built-in MCP, which Settings → MCP drives.
-              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp"]) {
+              // `mcp` is Pi's built-in MCP, which Settings → MCP drives; `fast` is
+              // cypher-fast-mode.ts, which the composer's / menu drives.
+              for (const name of ["provider", "login", "logout", "newapi-provider-add", "mcp", "fast"]) {
                 assert.ok(names.has(name), `Required command missing: ${name}`);
               }
               finish();

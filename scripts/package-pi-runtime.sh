@@ -54,6 +54,7 @@ mkdir -p \
   "$STAGE/extensions"
 cp "$SPEC/extensions/cypher-provider-auth.ts" "$STAGE/extensions/"
 cp "$SPEC/extensions/cypher-translation.ts" "$STAGE/extensions/"
+cp "$SPEC/extensions/cypher-fast-mode.ts" "$STAGE/extensions/"
 cp "$SPEC/provider-service.mjs" "$STAGE/"
 
 # A private production dependency tree: Pi and every Cypher-curated extension
@@ -192,6 +193,7 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
+"$STAGE/bin/node" --test "$SPEC/extensions/cypher-fast-mode.test.mjs"
 # Settings → MCP signs in through Pi's built-in `/mcp login`: the RPC dialog
 # shapes and the credential key the engine reads, against a local OAuth fixture.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \

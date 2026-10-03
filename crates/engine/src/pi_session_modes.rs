@@ -1,6 +1,7 @@
 //! What the Pi plugins' per-chat switches are set to, for the composer's `/`
-//! menu: GPT Fast mode (gpt-fast-pi), adaptive orchestration (pi-agent-squad
-//! `/orchestrate`) and the current goal (pi-goal).
+//! menu: GPT Fast mode (the runtime's cypher-fast-mode.ts), adaptive
+//! orchestration (pi-agent-squad `/orchestrate`) and the current goal
+//! (pi-goal).
 //!
 //! The plugins keep this state only as custom entries in the chat's Pi
 //! session file, the last entry of each type winning, and report it nowhere
@@ -17,12 +18,13 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Custom entry types, as the plugins write them.
+/// Custom entry types, as the plugins write them. Fast mode keeps the type
+/// of gpt-fast-pi, the package cypher-fast-mode.ts replaced.
 const FAST_ENTRY: &str = "gpt-fast-pi.state";
 const ORCHESTRATE_ENTRY: &str = "orchestrator-mode";
 const GOAL_ENTRY: &str = "goal-state";
 
-/// gpt-fast-pi's default: `settings.json` `"pi-gpt-fast-mode": {"enabled": true}`.
+/// Fast mode's default: `settings.json` `"pi-gpt-fast-mode": {"enabled": true}`.
 const FAST_DEFAULT_FIELD: &str = "pi-gpt-fast-mode";
 
 /// Remembered scans. Past this many files the cache starts over; a rescan

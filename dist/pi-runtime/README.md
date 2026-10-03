@@ -101,6 +101,17 @@ The package script runs `provider-service.test.mjs` against the staged Runtime
 and a local fixture endpoint, including the full credential lifecycle and
 redaction checks. No real provider credentials are needed.
 
+## GPT Fast mode
+
+`/fast` comes from Cypher's own `extensions/cypher-fast-mode.ts`, which
+replaced the gpt-fast-pi package. While it is on, requests for GPT models get
+OpenAI's `service_tier: "priority"`. A model qualifies when its provider or id
+says `openai` or `gpt` and the version after `gpt` is 5.4 or later, so new
+releases qualify without a change; ids without a GPT version (`o3`,
+`gpt-oss-120b`, Azure deployment names) never do. It keeps gpt-fast-pi's
+`gpt-fast-pi.state` session entries and `pi-gpt-fast-mode` default, so chats
+keep their setting and the engine reads both for the `/` menu.
+
 ## Adding MCP servers
 
 MCP is Pi's built-in support; the bundle no longer ships pi-mcp-adapter

@@ -99,10 +99,6 @@ const RECOMMENDED: &[(&str, &str)] = &[
         "Goal tracking and completion workflow.",
     ),
     (
-        "npm:gpt-fast-pi",
-        "Provider-agnostic GPT Fast mode controls.",
-    ),
-    (
         "npm:pi-permission-control",
         "Permission prompts and controls.",
     ),

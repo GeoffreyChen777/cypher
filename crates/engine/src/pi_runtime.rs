@@ -748,21 +748,29 @@ fn probe_runtime(directory: &Path, agent_dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Cypher's own extensions, shipped under the runtime's `extensions/`. Each is
+/// registered once the active runtime carries it.
+const CYPHER_EXTENSIONS: &[&str] = &[
+    "cypher-provider-auth.ts",
+    "cypher-translation.ts",
+    "cypher-fast-mode.ts",
+];
+
 fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&paths.agent_dir).map_err(|err| err.to_string())?;
     let settings = paths.agent_dir.join("settings.json");
-    let provider_auth_extension = paths
-        .current
-        .join("extensions/cypher-provider-auth.ts")
-        .display()
-        .to_string();
-    let translation_extension = paths
-        .current
-        .join("extensions/cypher-translation.ts")
-        .display()
-        .to_string();
-    let provider_auth_available = runtime.join("extensions/cypher-provider-auth.ts").is_file();
-    let translation_available = runtime.join("extensions/cypher-translation.ts").is_file();
+    let cypher_extensions = CYPHER_EXTENSIONS
+        .iter()
+        .filter(|name| runtime.join("extensions").join(name).is_file())
+        .map(|name| {
+            paths
+                .current
+                .join("extensions")
+                .join(name)
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
     if !settings.exists() {
         let description = read_installed_dir(runtime)?;
         let packages = description
@@ -787,10 +795,7 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
             .collect::<Vec<_>>();
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "packages": packages,
-            "extensions": ([
-                provider_auth_available.then_some(provider_auth_extension.clone()),
-                translation_available.then_some(translation_extension.clone()),
-            ].into_iter().flatten().collect::<Vec<_>>())
+            "extensions": cypher_extensions
         }))
         .map_err(|err| err.to_string())?;
         std::fs::write(&settings, bytes).map_err(|err| err.to_string())?;
@@ -806,11 +811,8 @@ fn initialize_agent(paths: &PiRuntimePaths, runtime: &Path) -> Result<(), String
             .as_array_mut()
             .ok_or_else(|| "Pi settings extensions must be an array.".to_string())?;
         let mut added = false;
-        if provider_auth_available {
-            added |= register_extension(extensions, provider_auth_extension);
-        }
-        if translation_available {
-            added |= register_extension(extensions, translation_extension);
+        for extension in cypher_extensions {
+            added |= register_extension(extensions, extension);
         }
         // Only a real addition earns a rewrite: this runs on every engine
         // start, and rewriting settings.json each time would churn a file the
@@ -1399,5 +1401,72 @@ mod tests {
         let listed = packages(&paths);
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[1].as_str(), Some(squad.to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_retired_package_gives_way_to_the_cypher_extension_replacing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = PiRuntimePaths::for_data_dir(temp.path());
+        let managed = paths.current.join("npm/node_modules");
+        for name in ["gpt-fast-pi", "pi-web-search"] {
+            std::fs::create_dir_all(managed.join(name)).unwrap();
+            std::fs::write(managed.join(name).join("package.json"), "{}").unwrap();
+        }
+        // The next runtime drops gpt-fast-pi and carries cypher-fast-mode.ts.
+        let next = temp.path().join("next-runtime");
+        std::fs::create_dir_all(next.join("npm/node_modules/pi-web-search")).unwrap();
+        std::fs::write(
+            next.join("npm/node_modules/pi-web-search/package.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(next.join("extensions")).unwrap();
+        for name in ["cypher-provider-auth.ts", "cypher-fast-mode.ts"] {
+            std::fs::write(
+                next.join("extensions").join(name),
+                "export default () => {};",
+            )
+            .unwrap();
+        }
+        let provider_auth = paths.current.join("extensions/cypher-provider-auth.ts");
+        std::fs::create_dir_all(&paths.agent_dir).unwrap();
+        std::fs::write(
+            paths.agent_dir.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "packages": [
+                    managed.join("gpt-fast-pi").display().to_string(),
+                    managed.join("pi-web-search").display().to_string(),
+                    "npm:some-user-package",
+                ],
+                "extensions": [provider_auth.display().to_string()],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        prune_stale_managed_packages(&paths, &next).unwrap();
+        initialize_agent(&paths, &next).unwrap();
+
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(paths.agent_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["packages"],
+            serde_json::json!([
+                managed.join("pi-web-search").display().to_string(),
+                "npm:some-user-package",
+            ])
+        );
+        assert_eq!(
+            settings["extensions"],
+            serde_json::json!([
+                provider_auth.display().to_string(),
+                paths
+                    .current
+                    .join("extensions/cypher-fast-mode.ts")
+                    .display()
+                    .to_string(),
+            ])
+        );
     }
 }
