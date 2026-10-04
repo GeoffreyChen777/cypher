@@ -121,7 +121,9 @@ struct ArcBand: Shape {
         let start = end - ContextArc.span * share
         let steps = max(2, Int((ContextArc.span * share / 3).rounded(.up)))
         for step in 0...steps {
-            let angle = (start + (end - start) * Double(step) / Double(steps)) * .pi / 180
+            // CGFloat, like the radius: Xcode 26.3 finds a Double `cos` here
+            // ambiguous between CoreGraphics and Darwin.
+            let angle = CGFloat((start + (end - start) * Double(step) / Double(steps)) * .pi / 180)
             let point = CGPoint(x: rect.midX + ContextArc.radius * cos(angle),
                                 y: rect.midY + ContextArc.radius * sin(angle))
             if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
