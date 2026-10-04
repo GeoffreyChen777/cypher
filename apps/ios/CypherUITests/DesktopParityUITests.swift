@@ -87,6 +87,22 @@ final class DesktopParityUITests: XCTestCase {
                       "the project's sessions open")
     }
 
+    func testTheStatusRowSitsOnCapsulesOverTheTranscript() {
+        for appearance in ["dark", "light"] {
+            let app = launch(["-route", "chat:chat-veil", "-appAppearance", appearance])
+            let subagents = element(app, "subagents-trigger")
+            XCTAssertTrue(subagents.waitForHittable(timeout: 10))
+            // Scroll back so transcript text passes behind the status row.
+            element(app, "chat-transcript").swipeDown(velocity: .slow)
+            Thread.sleep(forTimeInterval: 1)
+            capture(app, "\(appearance)-status-capsules")
+            XCTAssertTrue(subagents.isHittable, "the count stays tappable on its capsule")
+        }
+        let app = XCUIApplication()
+        element(app, "subagents-trigger").tap()
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5), "the subagents sheet opens")
+    }
+
     func testRenameAndDeleteFromTheProjectList() {
         let app = launch(["-route", "space:space-cypher"])
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Tool group header colors'")).firstMatch

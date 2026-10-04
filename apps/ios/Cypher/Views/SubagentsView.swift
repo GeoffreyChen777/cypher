@@ -52,11 +52,12 @@ struct SubagentsAccessory: View {
                     }
                     .font(Theme.sans(11, weight: .medium))
                     .foregroundStyle(Theme.textMuted)
-                    .padding(.horizontal, 8)
+                    .modifier(StatusCapsule(interactive: true))
+                    // The capsule is 28pt; the tap target stays 44.
                     .frame(minHeight: 44)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(PressWashButtonStyle())
+                .buttonStyle(.plain)
                 .frame(maxWidth: maxWidth, alignment: .trailing)
                 .accessibilityIdentifier("subagents-trigger")
                 .accessibilityLabel("Subagents: \(counts.summary)")
