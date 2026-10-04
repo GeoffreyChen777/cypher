@@ -37,6 +37,20 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (22), 2026-10-04
+
+- Build 21 never reached TestFlight: CI archived with Xcode 26.3, the newest
+  on `macos-15`, which found `cos` ambiguous in the new context arc
+  (`ContextRing.swift`) where Xcode 27 does not. The arc now computes in
+  `CGFloat`, and the archive job moves to the `xcode-27` runner, taking the
+  newest non-beta Xcode at or above 27 (betas are skipped: App Store Connect
+  rejects their builds). `.github/actionlint.yaml` lists the label, which
+  actionlint 1.7.12 predates.
+- Same contents as build 21 below.
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  Xcode 27.0; a manual `ios.yml` run archived on the new runner before the
+  tag was pushed.
+
 ## Release: 0.2.0 (21), 2026-10-04
 
 - Covers the iOS commits since build 20: `fca4822` (Pi codemode scripts as
