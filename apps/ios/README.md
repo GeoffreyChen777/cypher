@@ -162,8 +162,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   using native long-press/drag handles, then choose **Comment** from the system
   selection menu (Copy remains available). User bubbles, assistant paragraphs,
   headings, list/quote text, table cells and multiline code blocks support
-  in-place selection. Selection is scoped to one text block/cell, not across
-  separate messages or Markdown blocks. The editor shows the frozen selected
+  in-place selection. A reply's consecutive paragraphs, headings and lists
+  (lists holding only prose) are one selectable text, so a drag selection
+  crosses them; code blocks, tables, quotes and rules are texts of their own,
+  and a selection stops at them and never crosses messages. While a reply
+  streams, its arriving block stays separate until the reply settles, so only
+  that block re-lays out per frame. The editor shows the frozen selected
   quote and asks only for the comment — no second selection step.
   A selected live text block temporarily freezes its display to keep selection
   handles stable; it catches up on deselection while the rest of the session

@@ -158,7 +158,8 @@ final class DesktopParityTests: XCTestCase {
         ]
         let rows = TranscriptRowBuilder.rows(entries: entries, pendingSends: [
             PendingSend(messageId: "p", text: "later", at: 3)], parsers: &parsers, completed: &completed)
-        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .assistant, .user])
+        // "one" and "two" are one prose row: a selection crosses them.
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .user])
     }
 
     // MARK: Side chats

@@ -11,6 +11,10 @@ import Foundation
 
 enum RowKind {
     case user(text: String, isSteer: Bool = false)
+    /// Consecutive prose blocks of one part (paragraphs, headings, plain
+    /// lists) as one selectable text, so a selection can cross them.
+    case prose(blocks: [MDBlock], streaming: Bool)
+    /// A block with a view of its own: a code block, table, quote or rule.
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
@@ -182,18 +186,31 @@ enum TranscriptRowBuilder {
                 let isLiveTail = streaming && ix == lastPartIx
                 let blocks = parse(text: text, key: key, streaming: isLiveTail,
                                    parsers: &parsers, completed: &completed)
-                for (blockIx, top) in blocks.enumerated() {
-                    var version = (top.fingerprint << 1) | (isLiveTail && blockIx == blocks.count - 1 ? 1 : 0)
-                    if settled, ix == lastPartIx, blockIx == blocks.count - 1 {
+                for run in proseRuns(blocks, liveTail: isLiveTail) {
+                    let lastOfPart = run.upperBound == blocks.count
+                    let live = isLiveTail && lastOfPart
+                    let stamped = settled && ix == lastPartIx && lastOfPart
+                    let kind: RowKind
+                    var version: UInt64
+                    if TranscriptTextStyle.isProse(blocks[run.lowerBound].block) {
+                        var hash: UInt64 = 0xcbf29ce484222325
+                        for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100000001b3 }
+                        version = (hash << 1) | (live ? 1 : 0)
+                        kind = .prose(blocks: blocks[run].map(\.block), streaming: live)
+                    } else {
+                        version = (blocks[run.lowerBound].fingerprint << 1) | (live ? 1 : 0)
+                        kind = .markdown(block: blocks[run.lowerBound].block, streaming: live)
+                    }
+                    if stamped {
                         version ^= 1 << 62  // timestamp attach keeps the diff key honest
                     }
+                    // Named by its first block, so a run keeps its id as blocks
+                    // join it.
                     rows.append(TranscriptRow(
-                        id: "\(key).\(blockIx)", version: version, turnStart: first,
-                        kind: .markdown(block: top.block,
-                                        streaming: isLiveTail && blockIx == blocks.count - 1),
+                        id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
+                        kind: kind,
                         entryId: entry.id,
-                        timestamp: settled && ix == lastPartIx && blockIx == blocks.count - 1
-                            ? entry.createdAt : nil,
+                        timestamp: stamped ? entry.createdAt : nil,
                         partKey: key))
                     first = false
                 }
@@ -218,6 +235,26 @@ enum TranscriptRowBuilder {
             }
         }
         flushTools(lastIx: lastPartIx)
+    }
+
+    /// A part's blocks in rows: each run of consecutive prose blocks
+    /// (`TranscriptTextStyle.isProse`) together, every other block alone.
+    /// While the part streams, its last block keeps a row of its own: only
+    /// that block re-lays out per frame as text arrives, and it joins the
+    /// run above it once the reply settles.
+    static func proseRuns(_ blocks: [TopBlock], liveTail: Bool) -> [Range<Int>] {
+        var runs: [Range<Int>] = []
+        let mergeable = liveTail ? blocks.count - 1 : blocks.count
+        var start = 0
+        while start < blocks.count {
+            var end = start + 1
+            if start < mergeable, TranscriptTextStyle.isProse(blocks[start].block) {
+                while end < mergeable, TranscriptTextStyle.isProse(blocks[end].block) { end += 1 }
+            }
+            runs.append(start..<end)
+            start = end
+        }
+        return runs
     }
 
     private static func userVersion(_ text: String, isSteer: Bool) -> UInt64 {

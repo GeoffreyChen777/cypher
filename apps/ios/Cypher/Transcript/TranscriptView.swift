@@ -623,8 +623,11 @@ struct TranscriptView: View {
                            isSteer: isSteer,
                            deviceId: store.hostDeviceId ?? "")
 
-            case .markdown(let block, let streaming):
-                MarkdownRowView(row: row, block: block, streaming: streaming, veils: veils)
+            case .prose(let blocks, let streaming):
+                ProseRowView(row: row, blocks: blocks, streaming: streaming, veils: veils)
+
+            case .markdown(let block, _):
+                MarkdownBlockView(block: block, cacheKey: row.id)
 
             case .toolGroup(let tools, let autoOpen):
                 ToolGroupView(tools: tools,
@@ -860,53 +863,35 @@ struct UserBubble: View {
     }
 }
 
-// MARK: - Markdown row with veil
+// MARK: - Prose row with veil
 
-struct MarkdownRowView: View {
+/// A run of prose blocks as one selectable text, so a drag selection can
+/// cross its paragraphs, headings and list items. While streaming, the
+/// row's appended text fades in (paint only).
+struct ProseRowView: View {
     let row: TranscriptRow
-    let block: MDBlock
+    let blocks: [MDBlock]
     let streaming: Bool
     let veils: VeilStore
 
     var body: some View {
-        Group {
-            if isVeilable {
-                // Keep the native text view's identity when a live paragraph
-                // settles, so an active selection is not destroyed.
-                TimelineView(.animation(paused: !streaming)) { _ in
-                    veiledText
-                }
-                .onDisappear { veils.drop(row.id) }
-            } else {
-                MarkdownBlockView(block: block, cacheKey: row.id)
-            }
+        // Keep the native text view's identity when a live block settles,
+        // so an active selection is not destroyed.
+        TimelineView(.animation(paused: !streaming)) { _ in
+            SelectableTranscriptText(attributed: text)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onDisappear { veils.drop(row.id) }
     }
 
-    private var isVeilable: Bool {
-        switch block {
-        case .paragraph, .heading: return true
-        default: return false
-        }
-    }
-
-    @ViewBuilder
-    private var veiledText: some View {
-        let veil = streaming ? veils.veil(for: row.id, seeded: false) : nil
-        switch block {
-        case .paragraph(let runs):
-            let _ = veil?.noteLength(runs.map(\.text.count).reduce(0, +))
-            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(runs, veil: veil))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        case .heading(let level, let runs):
-            let m = MD.headingMetrics(level)
-            let _ = veil?.noteLength(runs.map(\.text.count).reduce(0, +))
-            SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-                runs, size: m.size, weight: .semibold, lineHeight: m.line, veil: veil))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        default:
-            MarkdownBlockView(block: block, cacheKey: row.id)
-        }
+    private var text: NSAttributedString {
+        let prose = TranscriptTextStyle.prose(blocks)
+        guard streaming else { return prose }
+        let veil = veils.veil(for: row.id, seeded: false)
+        let faded = NSMutableAttributedString(attributedString: prose)
+        veil.noteLength(faded.string.count)
+        TranscriptTextStyle.applyVeil(veil, to: faded)
+        return faded
     }
 }
 
