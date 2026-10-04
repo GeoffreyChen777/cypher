@@ -60,13 +60,16 @@ jobs:
           # point release is picked up automatically while an image carrying
           # only an older SDK fails loudly rather than archiving against it.
           # Betas are skipped: App Store Connect rejects their builds, and the
-          # xcode-27 image installs them beside the release.
+          # xcode-27 image installs them beside the release under plain-named
+          # aliases too (Xcode_27.2.app -> Xcode_27.2_beta.app), so judge the
+          # resolved install, not the name.
           floor=27
           best_version=""
           best_dir=""
           for app in /Applications/Xcode*.app; do
-            case "$app" in *[Bb]eta*) continue ;; esac
-            dir="$app/Contents/Developer"
+            resolved="$(cd -P "$app" 2>/dev/null && pwd)" || continue
+            case "$resolved" in *[Bb]eta*) continue ;; esac
+            dir="$resolved/Contents/Developer"
             [ -d "$dir" ] || continue
             version="$(DEVELOPER_DIR="$dir" xcodebuild -version 2>/dev/null | awk 'NR==1 {print $2}')"
             [ -n "$version" ] || continue
@@ -82,6 +85,7 @@ jobs:
             exit 1
           fi
           echo "Xcode $best_version ($best_dir)"
+          DEVELOPER_DIR="$best_dir" xcodebuild -version
           echo "DEVELOPER_DIR=$best_dir" >>"$GITHUB_ENV"
       - name: require distribution signing material
         run: |

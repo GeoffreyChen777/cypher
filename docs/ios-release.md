@@ -44,8 +44,10 @@ A `workflow_dispatch` run builds and verifies but never uploads.
   (`ContextRing.swift`) where Xcode 27 does not. The arc now computes in
   `CGFloat`, and the archive job moves to the `xcode-27` runner, taking the
   newest non-beta Xcode at or above 27 (betas are skipped: App Store Connect
-  rejects their builds). `.github/actionlint.yaml` lists the label, which
-  actionlint 1.7.12 predates.
+  rejects their builds). The image aliases betas under plain names
+  (`Xcode_27.2.app` is 27.2 beta 1, `27B5019j`), and the first validation run
+  picked it, so installs are judged by their resolved path.
+  `.github/actionlint.yaml` lists the label, which actionlint 1.7.12 predates.
 - Same contents as build 21 below.
 - Release build for `generic/platform=iOS Simulator` succeeded locally with
   Xcode 27.0; a manual `ios.yml` run archived on the new runner before the
