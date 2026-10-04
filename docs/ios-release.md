@@ -37,6 +37,27 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (21), 2026-10-04
+
+- Covers the iOS commits since build 20: `fca4822` (Pi codemode scripts as
+  Script chips with their nested calls, and status glyphs on every tool chip),
+  `b8108de` and `d5f980f` (the / menu's desktop groups, glyphs, state badges
+  and choice lists), `38508d8` (one model and thinking chip, one card for
+  both), `b01160b` (the context reading as an arc round the send button),
+  `c1b7460` (colored activity badges on Home's project cards), `f7cfbd8`
+  (glass capsules under the session status row) and `5b73c30` (a drag
+  selection crosses a reply's paragraphs and lists). First build to carry
+  `ITSAppUsesNonExemptEncryption = NO` (`c2d4e5c`).
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  `CODE_SIGNING_ALLOWED=NO`; `release.py ios-context` accepts the tag.
+- `CypherTests` on an iPhone 17 Pro Max simulator: 238 of 239 passed. The
+  failure, `WorkspaceDiffWebTests.testSourceVirtualizationPreservesReadingPositionAndTreatsMarkupAsText`
+  (a WebKit scroll position read as 0), passed 3 of 3 runs on its own; nothing
+  since build 20 touches the diff viewer. CypherUI was not rerun.
+- Upload is left to `.github/workflows/ios.yml` via the
+  `cypher-ios-v0.2.0-b21` tag. Tester groups, public links and review
+  submission remain separate explicit actions.
+
 ## Release: 0.2.0 (20), 2026-10-02
 
 - Covers the one iOS commit since build 19: `3830a0f` (live chat rooms only
