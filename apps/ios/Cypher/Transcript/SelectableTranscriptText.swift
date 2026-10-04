@@ -31,8 +31,7 @@ extension EnvironmentValues {
 @MainActor
 enum TranscriptTextStyle {
     static func inline(_ runs: [InlineRun], size: CGFloat = MD.textSize,
-                       weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight,
-                       veil: RowVeil? = nil) -> NSAttributedString {
+                       weight: UIFont.Weight = .regular, lineHeight: CGFloat = MD.lineHeight) -> NSAttributedString {
         let result = NSMutableAttributedString(string: "")
         for run in runs {
             var font = run.style.code ? Theme.monoUI(size - 1.5)
@@ -57,32 +56,152 @@ enum TranscriptTextStyle {
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
         result.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: result.length))
-        if let veil {
-            let characters = Array(result.string)
-            for segment in veil.segments(totalLength: characters.count) where segment.alpha < 1 {
-                let lower = max(0, segment.range.lowerBound), upper = min(characters.count, segment.range.upperBound)
-                guard lower < upper else { continue }
-                let start = String(characters[..<lower]).utf16.count
-                let length = String(characters[lower..<upper]).utf16.count
-                let range = NSRange(location: start, length: length)
-                var colors: [(NSRange, UIColor)] = []
-                result.enumerateAttribute(.foregroundColor, in: range) { value, part, _ in
-                    if let color = value as? UIColor {
-                        colors.append((part, color.withAlphaComponent(color.cgColor.alpha * segment.alpha)))
-                    }
+        return result
+    }
+
+    /// Fade the streamed tail: `veil`'s segments are character offsets into
+    /// `result`, and only text colors change, never the layout.
+    static func applyVeil(_ veil: RowVeil, to result: NSMutableAttributedString) {
+        let characters = Array(result.string)
+        for segment in veil.segments(totalLength: characters.count) where segment.alpha < 1 {
+            let lower = max(0, segment.range.lowerBound), upper = min(characters.count, segment.range.upperBound)
+            guard lower < upper else { continue }
+            let start = String(characters[..<lower]).utf16.count
+            let length = String(characters[lower..<upper]).utf16.count
+            let range = NSRange(location: start, length: length)
+            var colors: [(NSRange, UIColor)] = []
+            result.enumerateAttribute(.foregroundColor, in: range) { value, part, _ in
+                if let color = value as? UIColor {
+                    colors.append((part, color.withAlphaComponent(color.cgColor.alpha * segment.alpha)))
                 }
-                for (part, color) in colors { result.addAttribute(.foregroundColor, value: color, range: part) }
             }
+            for (part, color) in colors { result.addAttribute(.foregroundColor, value: color, range: part) }
+        }
+    }
+
+    // MARK: Prose (consecutive blocks as one selectable text)
+
+    /// Whether a top-level block joins its neighbours in one selectable
+    /// text: paragraphs, headings, and lists holding only those (nested
+    /// lists included). Code blocks, tables, quotes and rules keep their own
+    /// views, so a selection still stops at them.
+    nonisolated static func isProse(_ block: MDBlock) -> Bool {
+        switch block {
+        case .paragraph, .heading:
+            return true
+        case .list(_, let items):
+            return items.allSatisfy { $0.children.allSatisfy(isProse) }
+        case .codeBlock, .blockquote, .table, .rule:
+            return false
+        }
+    }
+
+    /// Indent from a list's edge to its items' text (ListBlockView: an 18pt
+    /// marker column and 8pt to the text).
+    static let listIndent: CGFloat = 26
+    /// Between a list's items, and between the blocks inside one item.
+    static let listItemGap: CGFloat = 4
+
+    /// `blocks` (all `isProse`) as one text, spaced and indented as their
+    /// separate views were: the block gap between top-level blocks, list
+    /// markers in the accent with wrapped lines hanging on the item's text.
+    static func prose(_ blocks: [MDBlock]) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for block in blocks {
+            appendProse(block, to: result, indent: 0, spacingBefore: MD.blockGap)
         }
         return result
     }
 
-    static func code(_ source: String, spans: [[TokenSpan]]) -> NSAttributedString {
+    private static func appendProse(_ block: MDBlock, to result: NSMutableAttributedString,
+                                    indent: CGFloat, spacingBefore: CGFloat, marker: String? = nil,
+                                    markerColor: UIColor? = nil) {
+        switch block {
+        case .paragraph(let runs):
+            appendParagraph(inline(runs), lineHeight: MD.lineHeight, to: result, indent: indent,
+                            spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
+        case .heading(let level, let runs):
+            let m = MD.headingMetrics(level)
+            appendParagraph(inline(runs, size: m.size, weight: .semibold, lineHeight: m.line),
+                            lineHeight: m.line, to: result, indent: indent,
+                            spacingBefore: spacingBefore, marker: marker, markerColor: markerColor)
+        case .list(let start, let items):
+            for (index, item) in items.enumerated() {
+                let gap = index == 0 ? spacingBefore : listItemGap
+                let itemMarker: String
+                let color: UIColor
+                if let checked = item.checked {
+                    itemMarker = checked ? "\u{2611}" : "\u{2610}"
+                    color = UIColor(checked ? Theme.accent.opacity(0.85) : Theme.textMuted)
+                } else {
+                    itemMarker = start.map { "\($0 + index)." } ?? "\u{2022}"
+                    color = UIColor(Theme.accent.opacity(0.85))
+                }
+                guard let first = item.children.first else {
+                    appendParagraph(NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
+                                    spacingBefore: gap, marker: itemMarker, markerColor: color)
+                    continue
+                }
+                // The marker rides the item's first line of text; an item that
+                // opens with a nested list gets a line of its own for it.
+                if case .list = first {
+                    appendParagraph(NSAttributedString(), lineHeight: MD.lineHeight, to: result, indent: indent,
+                                    spacingBefore: gap, marker: itemMarker, markerColor: color)
+                    appendProse(first, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
+                } else {
+                    appendProse(first, to: result, indent: indent, spacingBefore: gap,
+                                marker: itemMarker, markerColor: color)
+                }
+                for child in item.children.dropFirst() {
+                    appendProse(child, to: result, indent: indent + listIndent, spacingBefore: listItemGap)
+                }
+            }
+        case .codeBlock, .blockquote, .table, .rule:
+            // Not prose: callers only pass `isProse` blocks.
+            break
+        }
+    }
+
+    /// One paragraph of `text`, after a line break when the text so far isn't
+    /// empty. With a `marker` the paragraph is a list item's first: the
+    /// marker at `indent`, the text from the list's text edge, and wrapped
+    /// lines hanging there too.
+    private static func appendParagraph(_ text: NSAttributedString, lineHeight: CGFloat,
+                                        to result: NSMutableAttributedString, indent: CGFloat,
+                                        spacingBefore: CGFloat, marker: String?, markerColor: UIColor?) {
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = lineHeight
+        style.maximumLineHeight = lineHeight
+        style.paragraphSpacingBefore = result.length == 0 ? 0 : spacingBefore
+        style.firstLineHeadIndent = indent
+        style.headIndent = marker == nil ? indent : indent + listIndent
+        if marker != nil {
+            style.tabStops = [NSTextTab(textAlignment: .left, location: indent + listIndent)]
+        }
+        if result.length > 0 {
+            // The break belongs to the paragraph before it.
+            let previous = result.attributes(at: result.length - 1, effectiveRange: nil)
+            result.append(NSAttributedString(string: "\n", attributes: previous))
+        }
+        let start = result.length
+        if let marker {
+            result.append(NSAttributedString(string: "\(marker)\t", attributes: [
+                .font: Theme.sansUI(MD.textSize, weight: .regular),
+                .foregroundColor: markerColor ?? UIColor(Theme.accent.opacity(0.85)),
+            ]))
+        }
+        result.append(text)
+        result.addAttribute(.paragraphStyle, value: style,
+                            range: NSRange(location: start, length: result.length - start))
+    }
+
+    static func code(_ source: String, spans: [[TokenSpan]],
+                     size: CGFloat = MD.codeTextSize) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = MD.codeLineHeight
         paragraph.maximumLineHeight = MD.codeLineHeight
         let result = NSMutableAttributedString(string: source, attributes: [
-            .font: Theme.monoUI(MD.codeTextSize),
+            .font: Theme.monoUI(size),
             .foregroundColor: UIColor(Theme.text.opacity(0.9)),
             .paragraphStyle: paragraph,
         ])

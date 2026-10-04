@@ -30,6 +30,22 @@ enum HarnessCatalog {
         level == "xhigh" ? "X-High" : level.capitalized
     }
 
+    /// What a thinking level does, in a few words (the model picker's hint).
+    static func reasoningHint(_ level: String) -> String? {
+        switch level {
+        case "minimal": return "Quickest, lightest touch"
+        case "low": return "Fastest responses"
+        case "medium": return "Balanced speed and depth"
+        case "high": return "Thorough reasoning"
+        case "xhigh": return "Extended reasoning"
+        case "max": return "Maximum reasoning budget"
+        case "ultra": return "Highest Codex tier"
+        case "ultracode": return "X-High plus the ultracode setting"
+        case "ultrathink": return "Deep-thinking prompt mode"
+        default: return nil
+        }
+    }
+
     static func modelLabel(harness: String, modelId: String?) -> String {
         modelId ?? "Select model"
     }
@@ -116,9 +132,22 @@ enum HarnessCatalog {
     ]
 
     /// Used only in explicitly offline demo mode, never a network fallback.
+    /// Several providers, and one model without thinking levels, so the
+    /// picker shows its rail, brand marks and every thinking state offline.
     static let demoModels = [
         ModelInfo(id: "demo/pi", label: "Pi demo model",
                   description: "Offline demonstration", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(id: "anthropic/claude-opus-5-5", label: "Claude Opus 5.5",
+                  description: "anthropic · 1M context",
+                  reasoningLevels: ["minimal", "low", "medium", "high", "xhigh"]),
+        ModelInfo(id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5",
+                  description: "anthropic · 1M context", reasoningLevels: ["low", "medium", "high"]),
+        ModelInfo(id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5",
+                  description: "anthropic · 200k context", reasoningLevels: []),
+        ModelInfo(id: "openai-codex/gpt-6.1-sol", label: "GPT-6.1 Sol",
+                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high", "xhigh"]),
+        ModelInfo(id: "openai-codex/gpt-6-luna", label: "GPT-6 Luna",
+                  description: "openai-codex · 400k context", reasoningLevels: ["low", "medium", "high"]),
     ]
 }
 

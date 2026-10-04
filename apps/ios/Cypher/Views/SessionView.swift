@@ -339,7 +339,7 @@ struct SessionView: View {
                                            maxWidth: max(130, viewWidth * 0.5)) { childId in
                             path = SessionNavigation.opening(childId, in: path)
                         }
-                        .padding(.trailing, 20)
+                        .padding(.trailing, 16)
                     }
                     .frame(minHeight: 44)
                     if forking {
@@ -365,8 +365,13 @@ struct SessionView: View {
                             }
                             .id(request.requestId)
                         } else {
+                            // The `/` menu gets what's left above the composer
+                            // and its status row (~175pt), so it never runs
+                            // under the navigation bar with the keyboard up.
                             ComposerView(store: store, chat: chat, runLive: status == .working,
-                                         catalog: catalog, connectionRetry: connectionRetry)
+                                         catalog: catalog, connectionRetry: connectionRetry,
+                                         slashMenuMaxHeight: min(SlashMenuView.defaultMaxHeight,
+                                                                 max(160, viewHeight - 175)))
                         }
                     }
                     .padding(.bottom, 8)
@@ -413,6 +418,8 @@ struct SessionView: View {
             catalogLoading: catalog.loading,
             catalogError: catalog.error,
             modelAvailable: catalog.models(for: chat.deviceId).contains { $0.id == chat.config?.model })
+        // Every state but a quiet, connected session draws something here.
+        let showing = connection != .ready || status == .working || status == .errored
         return TimelineView(.periodic(from: .now, by: 1)) { _ in
             HStack(spacing: 6) {
                 if connection != .ready {
@@ -442,14 +449,37 @@ struct SessionView: View {
                 }
                 }
             }
-            .frame(height: 24)
+            .modifier(StatusCapsule(active: showing))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 26)  // aligns with the composer's text start
+            .padding(.leading, 16)  // the capsule on the composer's edge, its text on the composer's
         }
     }
 
     private func sessionStartedAt(chat: Chat) -> Int64 {
         let row = model.demo?.sessions[chat.id] ?? model.workspace?.sessions[chat.id]
         return row?.startedAt ?? row?.updatedAt ?? nowMs()
+    }
+}
+
+/// A status item over the transcript (the run status, the subagents count):
+/// its own tinted glass capsule, like the expanded composer's, so the text
+/// scrolling underneath can't read through it. Inactive draws nothing.
+struct StatusCapsule: ViewModifier {
+    var active = true
+    /// A button's capsule: the glass itself answers the press.
+    var interactive = false
+
+    func body(content: Content) -> some View {
+        if active {
+            content
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .glassEffect(interactive ? .regular.tint(Theme.surface.opacity(0.72)).interactive()
+                                         : .regular.tint(Theme.surface.opacity(0.72)),
+                             in: Capsule())
+        } else {
+            content
+                .frame(height: 28)
+        }
     }
 }

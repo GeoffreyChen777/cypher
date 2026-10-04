@@ -24,10 +24,15 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   but cannot be driven from the mobile composer. The internal mock E2E rig
   remains test infrastructure, not a selectable agent.
 - **Target-device catalogs:** installed/enabled Pi and available models are
-  read from that project's engine. The model picker groups them by provider
-  like the desktop: a rail of provider chips (brand mark, name, count) opens
-  on the current model's provider and the list shows that provider's models
-  with their context size. No static Claude/Codex models or synthetic
+  read from that project's engine. One composer chip shows the model and its
+  thinking level ("Claude Opus 5.5 · High", with the provider's mark) and
+  opens one card for both: a rail of provider chips (brand mark, name,
+  count) opens on the current model's provider, that provider's models list
+  a line each with their context size, and the chosen model's thinking
+  levels sit in a segmented track pinned along the bottom (or a note when it
+  takes none). Each pick writes the model and level together; a model that
+  doesn't take the current level gets its default. No static Claude/Codex
+  models or synthetic
   “Pi default” fallback. Empty/error states explain how to prepare **that
   device** using desktop Agents/Providers settings; the phone does not install
   Runtime. Retry, picker refresh, reconnect and foregrounding reload catalogs.
@@ -86,14 +91,41 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   a chosen online device (`CreateScratchDir` on the host, then a row without a
   space). Quick chats get their own Home section; other project-less sessions
   appear under Other Sessions.
-- **Slash commands:** typing `/` opens the host's Pi commands (`ListCommands`),
-  filtered by name; picking one fills `/name `. The desktop's default hide
-  rules apply (its customized list is local to each desktop). Commands are sent
-  as ordinary text and skip the model-availability gate.
-- **Context ring:** the composer shows the session's context usage (registry
-  `sessions.contextUsage`, which can trail a live turn by ~20s). Tapping it
-  shows the reading and a Compact action (`/compact` as its own run), offered
-  only while the session is idle.
+- **Slash commands:** typing `/` opens the desktop's grouped menu over the
+  host's Pi commands (`ListCommands`): headings (Conversation, Agent modes,
+  Subagents…), one line per command with its glyph and a badge for what it
+  controls — how full the context is, Fast mode / Scripts / orchestration
+  On or Off, the goal's status, running subagents. The switches come from
+  `PiSessionModes` on the chat's host, asked each time the menu opens; an
+  older host leaves those badges off. With nothing typed it lists the
+  desktop's default six (`/compact`, `/fast`, `/scripts`, `/goal`,
+  `/orchestrate`, `/subagent-status`). The phone has no Settings → Commands,
+  so a typed name also finds the host's other commands, except those that
+  only configure desktop Settings. `/orchestrate` and `/goal` open their
+  choices (picked or typed with a space) under what is in effect, the
+  current one checked. Picking only fills the draft; commands are sent as
+  ordinary text and skip the model-availability gate. The list scrolls
+  within what's free above the composer.
+- **Context arc:** the session's context usage (registry
+  `sessions.contextUsage`, which can trail a live turn by ~20s) runs as a
+  short 60° arc round the send button, as on the desktop: muted, amber from
+  75%, red from 90%, filling from the bottom up. It shows in every composer
+  state, the collapsed pill included (its right end leaves 12pt for it). The
+  arc takes no taps; a long press on the send button shows the reading and a
+  Compact action (`/compact` as its own run), offered only while the session
+  is idle, and VoiceOver reads the reading on the button with Compact as a
+  custom action. The `/` menu's /compact row shows the same reading.
+- **Scripts:** a Pi codemode call shows as a Script chip named after the
+  tools its script calls; tap it to read the script (80 lines, the rest
+  counted). The calls the script made (`{script id}/{n}` part ids) hang off
+  it on a guide rail, as on the desktop, and old transcripts nest too.
+  `tool_search` shows as Find tools with its query, and tool groups count
+  "ran 2 commands and 1 script".
+- **Tool status:** every tool chip ends with the desktop's status icon — an
+  arc turning while the call runs (still under Reduce Motion), a green check
+  once it completed, a red cross when it failed. A chip spins for as long as
+  its doc part is unresolved. The demo's streamed reply (`-stream`, or any
+  send) opens with a script and its call so the spinner can be seen offline.
 - **Fork / Side Chat:** select transcript text for "Edit in Fork" (before a
   prompt; its text returns as the draft), "Fork from Here" (after a reply) and
   "Side Chat" — a temporary chat about the selection, hosted in the parent
@@ -130,8 +162,12 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   using native long-press/drag handles, then choose **Comment** from the system
   selection menu (Copy remains available). User bubbles, assistant paragraphs,
   headings, list/quote text, table cells and multiline code blocks support
-  in-place selection. Selection is scoped to one text block/cell, not across
-  separate messages or Markdown blocks. The editor shows the frozen selected
+  in-place selection. A reply's consecutive paragraphs, headings and lists
+  (lists holding only prose) are one selectable text, so a drag selection
+  crosses them; code blocks, tables, quotes and rules are texts of their own,
+  and a selection stops at them and never crosses messages. While a reply
+  streams, its arriving block stays separate until the reply settles, so only
+  that block re-lays out per frame. The editor shows the frozen selected
   quote and asks only for the comment — no second selection step.
   A selected live text block temporarily freezes its display to keep selection
   handles stable; it catches up on deselection while the rest of the session
@@ -246,6 +282,7 @@ Run these commands from the repository root.
   Subagent inspector fixture:
   `-demo -route chat:chat-veil -sheet subagents`.
   Child fixture: `-demo -route chat:demo-child-planner`.
+  Script fixture: `-demo -route chat:chat-deploy`.
   Comment editor/list fixtures:
   `-demo -route chat:chat-tabs -sheet comment` (or `-sheet comments`).
 
@@ -297,7 +334,7 @@ Theme/                  theme.rs port: oklch→sRGB converter, exact palette,
 | Status word in the row corner (muted dots; Done keeps its pop; spinner rides bottom-right) | Same, same colors |
 | Composer `white_alpha(0.03)` pill + hairline | Liquid Glass pill (`glassEffect`) + hairline |
 | Harness brand SVG marks (icons.rs) | Same path data via a native SVG path parser (`BrandMarks.swift`) |
-| Pi model picker + target-device catalog | Pi-only live catalog + reasoning chips; no offline model fallback |
+| Pi model picker + target-device catalog | Pi-only live catalog; one model chip and card with a pinned thinking track; no offline model fallback |
 | Add-project palette (device + folder browser) | New-project sheet: device tabs + remote folder browser (ListFolders over the device-room relay, git repos badged) |
 | ControlRpc over device-room relay | `DeviceRelayClient` — binary `uleb128(len)+header+payload` frames, `{"s","k","to","from"}` header, ndjson ControlRpc; used for ListFolders + direct-to-host `Mutate {createSpace}` (local doc-write fallback when the host is offline) |
 | Hover timestamps / copy | Context menus |

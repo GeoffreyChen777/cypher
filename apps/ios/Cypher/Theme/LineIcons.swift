@@ -8,6 +8,19 @@ enum LineIcon {
     case gitBranch
     case folder
     case folderWithFiles
+    // The composer `/` menu's command glyphs (settings/commands.rs `icon`).
+    case foldVertical
+    case archiveUp
+    case flag
+    case bolt
+    case code
+    case hierarchy
+    case users
+    case pulse
+    case restart
+    case book
+    case command
+    case chevronRight
 
     /// (paths, circles cx/cy/r) in a 24×24 viewbox.
     var elements: (paths: [String], circles: [(CGFloat, CGFloat, CGFloat)]) {
@@ -37,6 +50,55 @@ enum LineIcon {
                 ],
                 circles: []
             )
+        case .foldVertical:
+            return (paths: ["M7 3.5l5 4.5 5-4.5M7 20.5l5-4.5 5 4.5M5 12h14"], circles: [])
+        case .archiveUp:
+            return (
+                paths: [
+                    "M2 12c0-4.714 0-7.071 1.464-8.536C4.93 2 7.286 2 12 2s7.071 0 8.535 1.464C22 4.93 22 7.286 22 12",
+                    "M2 14c0-2.8 0-4.2.545-5.27A5 5 0 0 1 4.73 6.545C5.8 6 7.2 6 10 6h4c2.8 0 4.2 0 5.27.545a5 5 0 0 1 2.185 2.185C22 9.8 22 11.2 22 14s0 4.2-.545 5.27a5 5 0 0 1-2.185 2.185C18.2 22 16.8 22 14 22h-4c-2.8 0-4.2 0-5.27-.545a5 5 0 0 1-2.185-2.185C2 18.2 2 16.8 2 14Z",
+                    "M12 16.5V10m0 0l-2.5 2.5M12 10l2.5 2.5",
+                ],
+                circles: []
+            )
+        case .flag:
+            return (paths: ["M5 21.5V3", "M5 4h12l-2.75 4.25L17 12.5H5"], circles: [])
+        case .bolt:
+            return (paths: ["M13.5 2.5L5 13.5h6.5l-1 8l8.5-11h-6.5z"], circles: [])
+        case .code:
+            return (paths: ["M8 7l-5 5l5 5m8-10l5 5l-5 5M13.5 4.5l-3 15"], circles: [])
+        case .hierarchy:
+            return (
+                paths: ["M12 7.5V12m-6.5 4.5V14a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v2.5"],
+                circles: [(12, 5, 2.5), (5.5, 19, 2.5), (18.5, 19, 2.5)]
+            )
+        case .users:
+            return (
+                paths: [
+                    "M2.5 20.5c0-3.59 2.91-6 6.5-6s6.5 2.41 6.5 6",
+                    "M15.5 3.75a3.25 3.25 0 0 1 0 6.5m2.5 4.5c2.03.6 3.5 2.6 3.5 5.25",
+                ],
+                circles: [(9, 7, 3.5)]
+            )
+        case .pulse:
+            return (paths: ["M2 12h4l2.5-6l4 12l2.5-6H22"], circles: [])
+        case .restart:
+            return (paths: ["M4.27 11a8 8 0 1 1 2.07 4.66", "M6.84 20.66l-.63-2.86l2.86-.63"], circles: [])
+        case .book:
+            return (
+                paths: [
+                    "M4.5 19.5V5A2.5 2.5 0 0 1 7 2.5h12.5v15H7a2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 7 22.5h12.5",
+                    "M9 7.5h6",
+                ],
+                circles: []
+            )
+        case .command:
+            return (
+                paths: ["M8 8h8v8H8zm8 8.001h3a3 3 0 1 1-3 3zm-7.999 0h-3a3 3 0 1 0 3 3zM16 8h3a3 3 0 1 0-3-3zM8.001 8h-3a3 3 0 1 1 3-3z"],
+                circles: []
+            )
+        case .chevronRight:
+            return (paths: ["m9 5l6 7l-6 7"], circles: [])
         }
     }
 }

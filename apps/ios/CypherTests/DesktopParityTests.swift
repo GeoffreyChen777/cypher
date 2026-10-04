@@ -16,26 +16,13 @@ final class DesktopParityTests: XCTestCase {
         XCTAssertNil(SlashMenu.query(in: "hello /co"))
     }
 
-    func testSlashFilterRanksPrefixBeforeSubstringAndHidesPlumbing() {
-        let commands = ["export-html", "compact", "skill:x", "mcp", "goal", "recompact"].map {
-            SlashCommand(name: $0)
-        }
-        XCTAssertEqual(SlashMenu.filter(commands, query: "").map(\.name),
-                       ["export-html", "compact", "goal", "recompact"])
-        XCTAssertEqual(SlashMenu.filter(commands, query: "COMP").map(\.name), ["compact", "recompact"])
-        XCTAssertEqual(SlashMenu.filter(commands, query: "zzz"), [])
-        for hidden in ["skill:a", "llama-x", "newapi-x", "compact-ui", "mcp", "mcp-add", "pi-mcp-x"] {
-            XCTAssertTrue(SlashMenu.hiddenByDefault(hidden), hidden)
-        }
-        XCTAssertFalse(SlashMenu.hiddenByDefault("compact"))
-        XCTAssertEqual(SlashMenu.accept(SlashCommand(name: "goal")), "/goal ")
-    }
-
     func testSlashCommandDecodesTheWireShape() throws {
-        let json = #"[{"name":"compact","description":"Compact","inputHint":"custom instructions"},{"name":"x"}]"#
+        let json = #"[{"name":"compact","description":"Compact","inputHint":"custom instructions"},{"name":"x"},{"name":"y","inputHint":"path"}]"#
         let decoded = try JSONDecoder().decode([SlashCommand].self, from: Data(json.utf8))
-        XCTAssertEqual(decoded[0].detail, "Compact · custom instructions")
+        XCTAssertEqual(decoded[0].detail, "Compact · <custom instructions>")
         XCTAssertNil(decoded[1].detail)
+        XCTAssertEqual(decoded[2].detail, "<path>")
+        XCTAssertEqual(SlashMenu.accept(SlashCommand(name: "goal")), "/goal ")
     }
 
     func testSlashErrorsReadLikeTheDesktop() {
@@ -171,7 +158,8 @@ final class DesktopParityTests: XCTestCase {
         ]
         let rows = TranscriptRowBuilder.rows(entries: entries, pendingSends: [
             PendingSend(messageId: "p", text: "later", at: 3)], parsers: &parsers, completed: &completed)
-        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .assistant, .user])
+        // "one" and "two" are one prose row: a selection crosses them.
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .user])
     }
 
     // MARK: Side chats

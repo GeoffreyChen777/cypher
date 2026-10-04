@@ -135,7 +135,11 @@ struct HomeView: View {
             ForEach(selected.map { [$0] } ?? groups) { group in
                 Section {
                     ForEach(group.spaces) { space in
-                        NavigationLink(value: Route.space(space.id)) {
+                        // A button rather than a NavigationLink: the card
+                        // opens the project without a disclosure chevron.
+                        Button {
+                            path.append(.space(space.id))
+                        } label: {
                             ProjectRow(space: space)
                         }
                         .groupedRowStyle()
@@ -495,52 +499,132 @@ private struct DeviceTabs: View {
     }
 }
 
-/// Folder glyph, name, and one summary line carrying the project's activity.
+/// The name with the session count across from it; then the project's
+/// activity as colored badges, a state each in the session rows' own marks,
+/// or when it was last active once nothing is happening.
 private struct ProjectRow: View {
     @Environment(AppModel.self) private var model
     let space: Space
 
     var body: some View {
         let chats = model.chats(in: space.id)
-        let indicators = chats.map { model.indicator(for: $0) }
-        HStack(spacing: 12) {
-            LineIconView(space.gitDetected ? .folderWithFiles : .folder, size: 18,
-                         color: Theme.textMuted)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 3) {
+        let counts = ChatIndicator.activityCounts(chats.map { model.indicator(for: $0) })
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(space.displayName)
                     .font(Theme.sans(16, weight: .medium, relativeTo: .body))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
-                Text(summary(count: chats.count, indicators: indicators))
+                Spacer(minLength: 8)
+                if !chats.isEmpty {
+                    Text(chats.count == 1 ? "1 session" : "\(chats.count) sessions")
+                        .font(Theme.sans(12.5, relativeTo: .footnote))
+                        .foregroundStyle(Theme.textFaint)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            if counts.isEmpty {
+                Text(quietLine(chats))
                     .font(Theme.sans(13, relativeTo: .subheadline))
                     .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
+            } else {
+                ActivityBadges(counts: counts)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 
-    private func summary(count: Int, indicators: [ChatIndicator]) -> String {
-        let total = count == 0 ? "No sessions" : count == 1 ? "1 session" : "\(count) sessions"
-        return (ChatIndicator.activitySummary(indicators) + [total]).joined(separator: " · ")
+    /// The second line of a project with nothing going on.
+    private func quietLine(_ chats: [Chat]) -> String {
+        guard let last = chats.map({ $0.lastMessageAt ?? $0.createdAt }).max() else { return "No sessions yet" }
+        let ago = relativeTime(last)
+        return ago == "now" ? "Last active just now" : "Last active \(ago) ago"
+    }
+}
+
+/// One badge per state with sessions in it, attention first: the session
+/// rows' mark and color, the count and the state in words. Where the words
+/// don't fit, the badges keep only their marks and counts.
+struct ActivityBadges: View {
+    let counts: [ChatIndicator.Count]
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            badges(compact: false)
+            badges(compact: true)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ChatIndicator.activitySummary(counts).joined(separator: ", "))
+    }
+
+    private func badges(compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            ForEach(counts, id: \.indicator) { count in
+                ActivityBadge(count: count, compact: compact)
+            }
+        }
+        .fixedSize()
+    }
+}
+
+struct ActivityBadge: View {
+    let count: ChatIndicator.Count
+    var compact = false
+
+    var body: some View {
+        let color = SessionStatusMark.color(count.indicator)
+        HStack(spacing: 5) {
+            SessionStatusMark(indicator: count.indicator, cellSize: 2.2)
+            Text(compact ? "\(count.count)" : count.label)
+                .font(Theme.sans(12, weight: .medium, relativeTo: .footnote))
+                .foregroundStyle(color)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(color.opacity(0.13), in: Capsule())
     }
 }
 
 extension ChatIndicator {
-    /// "1 running · 2 need input · 1 failed · 1 done" parts, attention
-    /// first. Done/failed count unread runs only (the indicator's meaning).
+    /// How many sessions are in one state.
+    struct Count: Hashable {
+        var indicator: ChatIndicator
+        var count: Int
+
+        /// "1 running", "2 need input", "1 failed", "3 done".
+        var label: String {
+            switch indicator {
+            case .awaitingInput: return count == 1 ? "1 needs input" : "\(count) need input"
+            case .errored: return "\(count) failed"
+            case .working: return "\(count) running"
+            case .completed: return "\(count) done"
+            case .idle: return "\(count) idle"
+            }
+        }
+    }
+
+    /// The states with sessions in them, attention first: needs input,
+    /// failed, running, done. Done/failed count unread runs only (the
+    /// indicator's meaning); idle sessions aren't activity.
+    static func activityCounts(_ indicators: [ChatIndicator]) -> [Count] {
+        [ChatIndicator.awaitingInput, .errored, .working, .completed].compactMap { state in
+            let n = indicators.filter { $0 == state }.count
+            return n > 0 ? Count(indicator: state, count: n) : nil
+        }
+    }
+
+    /// "1 needs input · 1 running · 1 done" parts, in the badges' order.
     static func activitySummary(_ indicators: [ChatIndicator]) -> [String] {
-        let running = indicators.filter { $0 == .working }.count
-        let input = indicators.filter { $0 == .awaitingInput }.count
-        let failed = indicators.filter { $0 == .errored }.count
-        let done = indicators.filter { $0 == .completed }.count
-        var parts: [String] = []
-        if running > 0 { parts.append("\(running) running") }
-        if input > 0 { parts.append(input == 1 ? "1 needs input" : "\(input) need input") }
-        if failed > 0 { parts.append("\(failed) failed") }
-        if done > 0 { parts.append("\(done) done") }
-        return parts
+        activitySummary(activityCounts(indicators))
+    }
+
+    static func activitySummary(_ counts: [Count]) -> [String] {
+        counts.map(\.label)
     }
 }
 
@@ -634,12 +718,13 @@ struct ChatRow: View {
 /// spoken, not shown); blank when idle.
 struct SessionStatusMark: View {
     let indicator: ChatIndicator
+    var cellSize: CGFloat = 2.6
 
     var body: some View {
         Group {
             switch indicator {
             case .working:
-                MiniSpinner(cellSize: 2.6)
+                MiniSpinner(cellSize: cellSize)
             case .completed:
                 Image(systemName: "checkmark")
                     .font(.system(size: 10, weight: .bold))
@@ -649,7 +734,7 @@ struct SessionStatusMark: View {
                 Color.clear.frame(width: 8, height: 8)
             }
         }
-        .foregroundStyle(color)
+        .foregroundStyle(Self.color(indicator))
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label ?? "")
@@ -666,7 +751,7 @@ struct SessionStatusMark: View {
         }
     }
 
-    private var color: Color {
+    static func color(_ indicator: ChatIndicator) -> Color {
         switch indicator {
         case .working: return Theme.statusWorking
         case .awaitingInput: return Theme.accent

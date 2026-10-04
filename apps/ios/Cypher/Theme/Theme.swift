@@ -39,6 +39,8 @@ enum Theme {
     static let danger = adaptive(light: oklch(0.577, 0.245, 27.325), dark: oklch(0.704, 0.191, 22.216))
     static let dangerSoft = adaptive(light: oklch(0.505, 0.213, 27.518), dark: oklch(0.808, 0.114, 19.571))
     static let warning = adaptive(light: oklch(0.555, 0.163, 48.998), dark: oklch(0.828, 0.189, 84.429))
+    /// Success — emerald (theme.rs `success`: emerald-600 light, emerald-400 dark).
+    static let success = adaptive(light: oklch(0.596, 0.145, 163.225), dark: oklch(0.765, 0.177, 163.223))
 
     // ---- paint: status dots (shell/spaces.rs status_dot_color) ----
     static let statusWorking = adaptive(light: oklch(0.592, 0.249, 0.584), dark: oklch(0.718, 0.202, 349.761))

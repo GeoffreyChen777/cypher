@@ -165,18 +165,32 @@ final class DemoDataset {
         }
     }
 
-    /// Pi's discovery shape: extension commands, then the synthesized
-    /// built-ins. `skill:` rows are hidden by the default rules.
+    /// Pi's discovery shape (the plugins' own wording): extension commands,
+    /// then the synthesized built-ins. With nothing typed the menu lists only
+    /// the stateful ones; the rest are found by name.
     static let slashCommands: [SlashCommand] = [
-        SlashCommand(name: "goal", description: "Keep working toward a goal until it's met",
-                     inputHint: "goal"),
+        SlashCommand(name: "fast", description: "Toggle GPT Fast mode (service_tier: priority)", inputHint: nil),
+        SlashCommand(name: "scripts",
+                     description: "Let the agent run several tools in one script. Faster, and uses less context.",
+                     inputHint: nil),
+        SlashCommand(name: "goal", description: "Run a goal to completion: /goal [--tokens 100k] <goal_to_complete>",
+                     inputHint: nil),
+        SlashCommand(name: "orchestrate",
+                     description: "Enable/disable adaptive subagent delegation (on|off|status, default off)",
+                     inputHint: nil),
+        SlashCommand(name: "subagents", description: "List available subagents", inputHint: nil),
+        SlashCommand(name: "subagent-status", description: "Show live subagent tasks and current-branch task history",
+                     inputHint: nil),
         SlashCommand(name: "review", description: "Review the working tree's changes", inputHint: nil),
-        SlashCommand(name: "subagents", description: "List the subagent profiles", inputHint: nil),
         SlashCommand(name: "skill:frontend-design", description: "Load the frontend skill", inputHint: nil),
-        SlashCommand(name: "compact", description: "Compact the session's context",
+        SlashCommand(name: "compact", description: "Compact the conversation context (pi built-in)",
                      inputHint: "custom instructions"),
-        SlashCommand(name: "export-html", description: "Export the session as HTML", inputHint: "path"),
+        SlashCommand(name: "export-html", description: "Export the session to an HTML file (pi built-in)",
+                     inputHint: "output path"),
     ]
+
+    /// The demo host's Pi switches: Scripts on (its default), the rest off.
+    static let piSessionModes = PiSessionModes(fast: false, codemode: true, orchestrate: false)
 
     // MARK: Fake filesystem (folder browser demo)
 
@@ -389,6 +403,24 @@ final class DemoDataset {
                     .text(id: "t0", text: "Audit the wrangler config for hibernation hygiene."),
                 ], createdAt: now - 86_500_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
                 MessageEntry(id: "m2", role: .assistant, parts: [
+                    // A Pi codemode script and the calls it made (`{script}/{n}`
+                    // ids), which the transcript nests under it.
+                    .tool(id: "ts1", call: RenderToolCall(tag: "unknown", fields: [
+                        "name": "tool_search", "query": "cloudflare docs"]), isError: false, resolved: true),
+                    .tool(id: "s1", call: RenderToolCall(tag: "unknown", fields: [
+                        "name": "codemode", "code": """
+
+                        const config = await tools.read({ path: "edge/wrangler.jsonc" });
+                        const docs = await tools.mcp__cloudflare_docs__search_cloudflare_documentation({
+                          query: "Durable Objects WebSocket hibernation auto-response",
+                        });
+                        return { bytes: config.length, docs };
+                        """]), isError: false, resolved: true),
+                    .tool(id: "s1/1", call: RenderToolCall(tag: "readFile", fields: ["path": "edge/wrangler.jsonc"]),
+                          isError: false, resolved: true),
+                    .tool(id: "s1/2", call: RenderToolCall(tag: "mcp", fields: [
+                        "server": "cloudflare-docs", "tool": "search_cloudflare_documentation"]),
+                          isError: false, resolved: true),
                     .text(id: "t0", text: "Flush timer now only arms while dirty; ping/pong uses the auto-response path so the DO never wakes for keepalives."),
                 ], createdAt: now - 86_400_000, deviceId: "dev-vps", status: .complete, continuationOf: nil),
             ]
@@ -431,7 +463,32 @@ final class DemoDataset {
         """
         let words = reply.split(separator: " ", omittingEmptySubsequences: false)
 
+        // A script and the call it makes run first, so the live chips' status
+        // icons turn from the spinner to a check before the reply streams.
+        let script = RenderToolCall(tag: "unknown", fields: [
+            "name": "codemode", "code": "return await tools.read({ path: \"crates/ui/src/markdown/veil.rs\" });"])
+        let read = RenderToolCall(tag: "readFile", fields: ["path": "crates/ui/src/markdown/veil.rs"])
+        let toolPhases: [[MessagePart]] = [
+            [.tool(id: "s1", call: script, isError: false, resolved: false)],
+            [.tool(id: "s1", call: script, isError: false, resolved: false),
+             .tool(id: "s1/1", call: read, isError: false, resolved: false)],
+            [.tool(id: "s1", call: script, isError: false, resolved: false),
+             .tool(id: "s1/1", call: read, isError: false, resolved: true)],
+            [.tool(id: "s1", call: script, isError: false, resolved: true),
+             .tool(id: "s1/1", call: read, isError: false, resolved: true)],
+        ]
+
         streamTask = Task { [weak self, weak store] in
+            for parts in toolPhases {
+                if Task.isCancelled { return }
+                guard let store else { return }
+                var current = store.entries
+                guard let last = current.indices.last, current[last].id == liveId else { return }
+                current[last].parts = parts
+                store.setEntries(current)
+                try? await Task.sleep(nanoseconds: 600_000_000)
+            }
+            let tools = toolPhases.last ?? []
             var text = ""
             for (ix, word) in words.enumerated() {
                 if Task.isCancelled { return }
@@ -439,7 +496,7 @@ final class DemoDataset {
                 guard let store else { return }
                 var current = store.entries
                 guard let last = current.indices.last, current[last].id == liveId else { return }
-                current[last].parts = [.text(id: "t0", text: text)]
+                current[last].parts = tools + [.text(id: "t0", text: text)]
                 store.setEntries(current)
                 try? await Task.sleep(nanoseconds: UInt64.random(in: 30_000_000...140_000_000))
             }

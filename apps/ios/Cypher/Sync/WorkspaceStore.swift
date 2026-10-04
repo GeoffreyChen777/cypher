@@ -408,6 +408,13 @@ final class WorkspaceStore {
             .call(method: "ListCommands", params: ["harness": harness], timeoutSeconds: 20)
     }
 
+    /// PiSessionModes — the Pi plugins' switches for one chat (Fast mode,
+    /// Scripts, orchestration, the goal), read from its Pi session file on
+    /// the host. Forwardable, so the host answers directly.
+    func piSessionModes(deviceId: String, chatId: String) async throws -> PiSessionModes {
+        try await relay(for: deviceId).call(method: "PiSessionModes", params: ["chatId": chatId])
+    }
+
     /// SwitchRef — `git checkout` in the given folder on the target device.
     /// Returns git's error message on failure (dirty tree, held ref, …).
     func switchRef(deviceId: String, repoPath: String, refName: String) async -> String? {

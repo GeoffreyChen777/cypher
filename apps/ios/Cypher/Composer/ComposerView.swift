@@ -82,6 +82,9 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    /// The chat's context reading, drawn round the send button; nil draws
+    /// nothing (a new session, a side chat, no reading yet).
+    var contextGauge: ContextGauge? = nil
     @ViewBuilder var chips: Chips
 
     @State private var focus = ComposerFocus()
@@ -183,14 +186,18 @@ struct ComposerShell<Chips: View>: View {
                     // under the attach / send circles.
                     .mask(chipEdgeMask)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    actionButton
+                    gaugedActionButton
                 }
                 .padding(.top, 8)
             } else {
-                actionButton
+                gaugedActionButton
             }
         }
-        .padding(.horizontal, expanded ? 12 : 5)
+        // 12pt right of the send button in both forms, room for the context
+        // arc clear of the button and the edge; the button doesn't slide
+        // sideways as the pill expands.
+        .padding(.leading, expanded ? 12 : 5)
+        .padding(.trailing, 12)
         .padding(.vertical, expanded ? 12 : 5)
         .background(whiteAlpha(0.04), in: surfaceShape)
         // A tall expanded card sits over transcript rows; tint its glass so
@@ -264,6 +271,19 @@ struct ComposerShell<Chips: View>: View {
                                      commentCount: hasComments ? 1 : 0)
     }
 
+    /// The send button with the context arc round it, and its long press
+    /// opening the reading. The menu sits outside the button's own disabled
+    /// state: an empty draft, when the reading matters most, disables send.
+    private var gaugedActionButton: some View {
+        actionButton
+            .overlay {
+                if let contextGauge {
+                    ContextArc(usage: contextGauge.usage, expanded: expanded)
+                }
+            }
+            .modifier(ContextGaugeMenu(gauge: contextGauge))
+    }
+
     private var actionButton: some View {
         Button {
             if showStop, !hasContent {
@@ -318,8 +338,10 @@ struct ComposerView: View {
     let catalog: RemotePiCatalog
     var connectionRetry = 0
     /// A side chat: it runs the parent's model — no model/effort chips, no
-    /// context ring (there's no session row to read or config to write).
+    /// context arc (there's no session row to read or config to write).
     var sideChat = false
+    /// The `/` menu's height cap: what's free above the composer.
+    var slashMenuMaxHeight = SlashMenuView.defaultMaxHeight
 
     @State private var draftState = ComposerDraft()
     private var text: String { draftState.text }
@@ -329,9 +351,9 @@ struct ComposerView: View {
     @State private var uploading = false
     @State private var uploadError: String?
     @State private var showModelPicker = false
-    @State private var showTraitPicker = false
     @State private var catalogRevision = 0
     @State private var commands = RemoteCommandCatalog()
+    @State private var modes = SlashModesCatalog()
 
     private var harness: String { chat.config?.harness ?? "" }
 
@@ -379,6 +401,21 @@ struct ComposerView: View {
         await commands.load(deviceId: chat.deviceId, force: force, fetch: model.listCommands)
     }
 
+    /// The `/` menu's list for the draft, nil while it's closed.
+    private var slashLevel: SlashLevel? {
+        canControl ? SlashMenu.level(in: text, commands: commands.commands) : nil
+    }
+
+    /// What the menu's badges can say about this chat. A side chat has no Pi
+    /// switches, session row or subagents of its own (composer.rs: the main
+    /// transport only).
+    private var slashFacts: SlashFacts {
+        guard !sideChat else { return SlashFacts() }
+        return SlashFacts(modes: modes.chatId == chat.id ? modes.modes : nil,
+                          context: sessionRow?.contextUsage,
+                          runningSubagents: sessionRow?.subagents.filter { $0.status == .running }.count ?? 0)
+    }
+
     private var currentReasoning: String? {
         guard let currentModel else { return nil }
         guard !currentModel.reasoningLevels.isEmpty else { return nil }
@@ -406,12 +443,13 @@ struct ComposerView: View {
             if let commentDrafts {
                 PendingCommentsBar(drafts: commentDrafts)
             }
-            if canControl, let query = SlashMenu.query(in: text) {
-                SlashMenuView(catalog: commands, query: query) { command in
-                    draftState.replace(with: SlashMenu.accept(command))
-                } onRetry: {
-                    Task { await loadCommands(force: true) }
-                }
+            if let slashLevel {
+                SlashMenuView(
+                    catalog: commands, level: slashLevel, facts: slashFacts,
+                    onPickCommand: { draftState.replace(with: SlashMenu.accept($0)) },
+                    onPickChoice: { draftState.replace(with: SlashMenu.accept($0, in: text)) },
+                    onRetry: { Task { await loadCommands(force: true) } },
+                    maxHeight: slashMenuMaxHeight)
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -423,7 +461,7 @@ struct ComposerView: View {
                 showStop: runLive && canControl,
                 busy: uploading,
                 hasComments: !(commentDrafts?.comments.isEmpty ?? true),
-                keepExpanded: showModelPicker || showTraitPicker,
+                keepExpanded: showModelPicker,
                 onSend: send,
                 onStop: {
                     guard canControl else { return }
@@ -432,21 +470,18 @@ struct ComposerView: View {
                 attachments: attachments,
                 onAttach: { showPicker = true },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
-                autoFocus: model.launchFocusComposer
+                autoFocus: model.launchFocusComposer,
+                contextGauge: sideChat ? nil : sessionRow?.contextUsage.map {
+                    ContextGauge(usage: $0, availability: compactAvailability, onCompact: compact)
+                }
             ) {
                 if !sideChat {
-                    if let usage = sessionRow?.contextUsage {
-                        ContextRingChip(usage: usage, availability: compactAvailability, onCompact: compact)
-                    }
-                    ComposerChip(label: currentModel?.label ?? chat.config?.model ?? "Select model") {
+                    ModelChip(model: currentModel,
+                              fallbackLabel: chat.config?.model ?? "Select model",
+                              reasoning: currentReasoning) {
                         showModelPicker = true
                     }
                     .disabled(harness != "pi" || !canControl)
-                    if let currentReasoning {
-                        ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
-                            showTraitPicker = true
-                        }
-                    }
                 }
             }
         }
@@ -457,29 +492,15 @@ struct ComposerView: View {
             stage(items)
         }
         .sheet(isPresented: $showModelPicker) {
+            // One write per pick, model and level together: two writes from
+            // this render's `chat` would let the second undo the first.
             ModelPickerSheet(
-                harness: .constant(harness),
-                modelId: Binding(
-                    get: { currentModel?.id ?? "" },
-                    set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
-                ),
-                reasoning: Binding(
-                    get: { chat.config?.reasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                lockedHarness: true,
-                catalogs: [harness: models],
+                models: models,
+                modelId: currentModel?.id ?? "",
+                reasoning: currentReasoning,
                 loading: catalog.loading,
-                onRefresh: { catalogRevision += 1 }
-            )
-        }
-        .sheet(isPresented: $showTraitPicker) {
-            TraitPickerSheet(
-                reasoning: Binding(
-                    get: { currentReasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                levels: currentModel?.reasoningLevels ?? []
+                onRefresh: { catalogRevision += 1 },
+                onSelect: { writeConfig(model: $0, reasoning: $1) }
             )
         }
         .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)/\(canControl)/\(scenePhase)/\(catalogRevision)/\(connectionRetry)") {
@@ -489,7 +510,14 @@ struct ComposerView: View {
             await catalog.load(deviceId: chat.deviceId, fetch: model.listPiModels)
             await commandList
         }
-        .motionAnimation(Motion.fadeQuick, value: SlashMenu.query(in: text) != nil)
+        .task(id: "\(chat.id)/\(slashLevel != nil)") {
+            // Each opening asks the host afresh: a `/fast` sent since flips
+            // the badge.
+            guard slashLevel != nil, !sideChat else { return }
+            let deviceId = chat.deviceId
+            await modes.load(chatId: chat.id) { try await model.piSessionModes(deviceId: deviceId, chatId: $0) }
+        }
+        .motionAnimation(Motion.fadeQuick, value: slashLevel != nil)
         .onChange(of: showModelPicker) { _, showing in
             if showing { catalogRevision += 1 }
         }

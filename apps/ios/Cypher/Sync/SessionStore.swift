@@ -460,6 +460,13 @@ final class SessionStore {
                     fields[k] = list.map { "\($0.jsonObject)" }
                 }
             }
+            // Pi's codemode script and tool_search query: the one input field
+            // the doc keeps for each (parts.rs sanitize_tool_call).
+            if tag == "unknown", let name = callMap["name"]?.stringValue,
+               let key = RenderToolCall.keptInputField(name),
+               let value = callMap["input"]?.mapValue?[key]?.stringValue {
+                fields[key] = value
+            }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
             var call = RenderToolCall(tag: tag, fields: fields)

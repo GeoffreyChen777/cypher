@@ -17,6 +17,13 @@ final class DesktopParityUITests: XCTestCase {
         return editors.allElementsBoundByIndex.last { $0.isHittable } ?? editors.firstMatch
     }
 
+    private func capture(_ app: XCUIApplication, _ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
     }
@@ -51,18 +58,49 @@ final class DesktopParityUITests: XCTestCase {
         XCTAssertTrue(element(app, "slash-menu").waitForNonExistence(timeout: 3), "arguments close the menu")
     }
 
-    func testContextRingShowsUsageAndOffersCompact() {
+    func testContextArcShowsUsageAndALongPressOffersCompact() {
         let app = launch(["-route", "chat:chat-tabs"])
+        // The collapsed pill carries the reading: no need to open the composer.
+        let send = app.buttons.matching(NSPredicate(format: "label == 'Up Arrow' OR identifier == 'arrow.up'")).firstMatch
+        XCTAssertTrue(send.waitForExistence(timeout: 10))
+        XCTAssertEqual(send.value as? String, "81% context used · 162k / 200k")
+        capture(app, "context-arc-collapsed")
         let input = editor(app)
-        XCTAssertTrue(input.waitForHittable(timeout: 10))
         input.tap()
-        let ring = element(app, "context-ring")
-        XCTAssertTrue(ring.waitForHittable(timeout: 5))
-        XCTAssertEqual(ring.value as? String, "81% context used · 162k / 200k")
-        ring.tap()
+        XCTAssertTrue(element(app, "model-chip").waitForExistence(timeout: 5))
+        XCTAssertFalse(element(app, "context-ring").exists, "no ring chip any more")
+        capture(app, "context-arc-expanded")
+        // An empty draft disables send; its long press still opens the reading.
+        send.press(forDuration: 1.0)
         let compact = app.buttons["Compact context"]
         XCTAssertTrue(compact.waitForExistence(timeout: 3))
         XCTAssertTrue(compact.isEnabled)
+    }
+
+    func testAProjectCardOpensItsProject() {
+        let app = launch([])
+        let card = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'cypher'")).firstMatch
+        XCTAssertTrue(card.waitForHittable(timeout: 10))
+        XCTAssertTrue(card.label.contains("1 needs input"), "the card reads its activity: \(card.label)")
+        card.tap()
+        XCTAssertTrue(text(app, containing: "Tool group header colors").waitForExistence(timeout: 5),
+                      "the project's sessions open")
+    }
+
+    func testTheStatusRowSitsOnCapsulesOverTheTranscript() {
+        for appearance in ["dark", "light"] {
+            let app = launch(["-route", "chat:chat-veil", "-appAppearance", appearance])
+            let subagents = element(app, "subagents-trigger")
+            XCTAssertTrue(subagents.waitForHittable(timeout: 10))
+            // Scroll back so transcript text passes behind the status row.
+            element(app, "chat-transcript").swipeDown(velocity: .slow)
+            Thread.sleep(forTimeInterval: 1)
+            capture(app, "\(appearance)-status-capsules")
+            XCTAssertTrue(subagents.isHittable, "the count stays tappable on its capsule")
+        }
+        let app = XCUIApplication()
+        element(app, "subagents-trigger").tap()
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 5), "the subagents sheet opens")
     }
 
     func testRenameAndDeleteFromTheProjectList() {
