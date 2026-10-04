@@ -38,7 +38,9 @@ jobs:
 
   archive:
     needs: preflight
-    runs-on: macos-15
+    # Archive with the same major Xcode developers build with. macos-15 stopped
+    # at Xcode 26.3, whose compiler rejected code Xcode 27 accepts (build 21).
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
@@ -57,10 +59,13 @@ jobs:
           # floor instead and take the newest install that clears it, so a
           # point release is picked up automatically while an image carrying
           # only an older SDK fails loudly rather than archiving against it.
-          floor=26
+          # Betas are skipped: App Store Connect rejects their builds, and the
+          # xcode-27 image installs them beside the release.
+          floor=27
           best_version=""
           best_dir=""
           for app in /Applications/Xcode*.app; do
+            case "$app" in *[Bb]eta*) continue ;; esac
             dir="$app/Contents/Developer"
             [ -d "$dir" ] || continue
             version="$(DEVELOPER_DIR="$dir" xcodebuild -version 2>/dev/null | awk 'NR==1 {print $2}')"

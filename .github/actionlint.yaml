@@ -1,0 +1,6 @@
+# GitHub-hosted runner labels newer than the pinned actionlint (1.7.12).
+# actionlint only takes extra labels under self-hosted-runner; these are
+# GitHub's own images. Drop each once actionlint knows it.
+self-hosted-runner:
+  labels:
+    - xcode-27
