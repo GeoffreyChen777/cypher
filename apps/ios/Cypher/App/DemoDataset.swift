@@ -194,6 +194,21 @@ final class DemoDataset {
 
     // MARK: Fake filesystem (folder browser demo)
 
+    /// The demo checkout's files for `@` mentions (SearchFiles' answer:
+    /// relative paths, folders marked).
+    static let checkoutFiles: [FileSearchMatch] = [
+        "README.md", "Cargo.toml", "apps/ios/Cypher/Composer/ComposerView.swift",
+        "apps/ios/Cypher/Composer/Mentions.swift", "crates/ui/src/composer.rs",
+        "crates/ui/src/transcript.rs", "crates/engine/src/repos.rs", "docs/chat2-sync.md",
+    ].map { FileSearchMatch(path: $0, isDir: false) }
+        + ["apps/ios", "crates/ui", "docs"].map { FileSearchMatch(path: $0, isDir: true) }
+
+    func searchFiles(_ query: String) -> [FileSearchMatch] {
+        let needle = query.lowercased()
+        guard !needle.isEmpty else { return Array(Self.checkoutFiles.prefix(6)) }
+        return Self.checkoutFiles.filter { $0.path.lowercased().contains(needle) }
+    }
+
     static let fileTree: [String: [String]] = [
         "/Users/dev": ["Documents", "Downloads", "Projects", "scratch"],
         "/Users/dev/Documents": ["notes", "specs"],

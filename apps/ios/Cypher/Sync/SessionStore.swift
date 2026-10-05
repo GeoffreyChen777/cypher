@@ -512,6 +512,16 @@ final class SessionStore {
         return roots
     }
 
+    /// The doc as an `@session` reference reads it (Mentions.swift), decoded
+    /// off the main thread like `project()`.
+    func referenceEntries() async -> [ReferenceEntry] {
+        let doc = self.doc
+        return await Task.detached(priority: .userInitiated) {
+            guard let root = doc.getDeepValue().mapValue else { return [] }
+            return SessionReferences.entries(root: root)
+        }.value
+    }
+
     // MARK: Derived
 
     var lastEntryId: String? { durableEntries.last?.id }

@@ -85,6 +85,8 @@ struct ComposerShell<Chips: View>: View {
     /// The chat's context reading, drawn round the send button; nil draws
     /// nothing (a new session, a side chat, no reading yet).
     var contextGauge: ContextGauge? = nil
+    /// `@` completion; nil leaves mention chips display-only.
+    var mentions: MentionEditor? = nil
     @ViewBuilder var chips: Chips
 
     @State private var focus = ComposerFocus()
@@ -233,7 +235,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var input: some View {
         ComposerTextInput(text: $draft, focus: focus, editorID: editorID, enabled: !busy,
-                          placeholder: placeholder, caretToEnd: caretRequest)
+                          placeholder: placeholder, caretToEnd: caretRequest, mentions: mentions)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
@@ -354,6 +356,8 @@ struct ComposerView: View {
     @State private var catalogRevision = 0
     @State private var commands = RemoteCommandCatalog()
     @State private var modes = SlashModesCatalog()
+    @State private var mentionEditor = MentionEditor()
+    @State private var mentionSearch = MentionSearch()
 
     private var harness: String { chat.config?.harness ?? "" }
 
@@ -406,6 +410,28 @@ struct ComposerView: View {
         canControl ? SlashMenu.level(in: text, commands: commands.commands) : nil
     }
 
+    /// The `@query` under the caret, while the `/` menu isn't up. A side
+    /// chat has no checkout row of its own to search, so it offers none.
+    private var mentionToken: MentionToken? {
+        guard canControl, !sideChat, slashLevel == nil else { return nil }
+        return mentionEditor.token
+    }
+
+    private var mentionScope: MentionScope {
+        MentionScope(currentChat: chat.id, project: chat.spaceId, device: chat.deviceId,
+                     files: MentionScope.Files(deviceId: chat.deviceId, chatId: chat.id))
+    }
+
+    /// A picked session: up to three distinct ones per message.
+    private func pickSession(_ session: MentionSession) {
+        if Mentions.sessionCapReached(existing: Mentions.sessionRefIds(in: text), candidate: session.chatId) {
+            uploadError = "Up to 3 session references per message — remove one first."
+            return
+        }
+        uploadError = nil
+        mentionEditor.accept(link: Mentions.sessionLink(title: session.title, chatId: session.chatId))
+    }
+
     /// What the menu's badges can say about this chat. A side chat has no Pi
     /// switches, session row or subagents of its own (composer.rs: the main
     /// transport only).
@@ -452,6 +478,15 @@ struct ComposerView: View {
                     maxHeight: slashMenuMaxHeight)
                 .padding(.horizontal, 16)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
+            } else if let mentionToken {
+                MentionMenuView(
+                    search: mentionSearch, query: mentionToken.query,
+                    subtitle: model.mentionSubtitle,
+                    onPickSession: pickSession,
+                    onPickFile: { mentionEditor.accept(link: Mentions.fileLink(path: $0.path, isDir: $0.isDir)) },
+                    maxHeight: slashMenuMaxHeight)
+                .padding(.horizontal, 16)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
             ComposerShell(
                 draft: draftState.binding,
@@ -473,7 +508,8 @@ struct ComposerView: View {
                 autoFocus: model.launchFocusComposer,
                 contextGauge: sideChat ? nil : sessionRow?.contextUsage.map {
                     ContextGauge(usage: $0, availability: compactAvailability, onCompact: compact)
-                }
+                },
+                mentions: sideChat ? nil : mentionEditor
             ) {
                 if !sideChat {
                     ModelChip(model: currentModel,
@@ -517,7 +553,14 @@ struct ComposerView: View {
             let deviceId = chat.deviceId
             await modes.load(chatId: chat.id) { try await model.piSessionModes(deviceId: deviceId, chatId: $0) }
         }
+        .task(id: mentionToken.map { "\(chat.id)/\($0.query)" }) {
+            guard let mentionToken else { return }
+            let scope = mentionScope
+            await mentionSearch.run(query: mentionToken.query, scope: scope, chats: model.allChats,
+                                    fetch: model.searchFiles)
+        }
         .motionAnimation(Motion.fadeQuick, value: slashLevel != nil)
+        .motionAnimation(Motion.fadeQuick, value: mentionToken != nil)
         .onChange(of: showModelPicker) { _, showing in
             if showing { catalogRevision += 1 }
         }
@@ -580,18 +623,43 @@ struct ComposerView: View {
             uploadError = "Comments accompany a normal message, not a slash command. Send or remove the comments first."
             return
         }
+        // Referenced sessions are checked before anything uploads; the
+        // draft, attachments and comments stay put on any failure.
+        let refIds = Mentions.sessionRefIds(in: prompt)
+        if !refIds.isEmpty {
+            if prompt.hasPrefix("/") {
+                uploadError = "Session references accompany a normal message, not a slash command."
+                return
+            }
+            if let error = SessionReferences.validationError(refs: refIds, currentChat: chat.id,
+                                                             chats: model.allChats) {
+                uploadError = error
+                return
+            }
+        }
 
-        if staged.isEmpty {
+        if staged.isEmpty, refIds.isEmpty {
             if deliver(content: prompt, paths: [], comments: batch) { clearDraft() }
             return
         }
-        // Upload first, send after: the refs trailer needs the committed
-        // paths, and the doc entry must never point at files that don't
-        // exist. The shell shows the spinner (`busy`) while chunks stream.
+        // Load references, then upload, then send: the refs trailer needs
+        // the committed paths, and the doc entry must never point at files
+        // that don't exist. The shell shows the spinner (`busy`) meanwhile.
         uploading = true
         uploadError = nil
         Task { @MainActor in
             defer { uploading = false }
+            let sessions: [SessionReference]
+            do {
+                sessions = try await model.sessionReferences(refIds)
+            } catch {
+                uploadError = "\(error.localizedDescription) Your draft has been kept."
+                return
+            }
+            if staged.isEmpty {
+                if deliver(content: prompt, paths: [], comments: batch, sessions: sessions) { clearDraft() }
+                return
+            }
             do {
                 var paths: [String] = []
                 for att in staged {
@@ -602,7 +670,8 @@ struct ComposerView: View {
                                                      name: att.name, data: att.data)
                     paths.append(path)
                 }
-                if deliver(content: withAttachments(text: prompt, paths: paths), paths: paths, comments: batch) {
+                if deliver(content: withAttachments(text: prompt, paths: paths), paths: paths,
+                           comments: batch, sessions: sessions) {
                     attachments = []
                     clearDraft()
                 }
@@ -612,7 +681,8 @@ struct ComposerView: View {
         }
     }
 
-    private func deliver(content: String, paths: [String], comments batch: CommentBatch?) -> Bool {
+    private func deliver(content: String, paths: [String], comments batch: CommentBatch?,
+                         sessions: [SessionReference] = []) -> Bool {
         if let batch, commentDrafts?.generation != batch.generation {
             uploadError = "The session changed. The message wasn't sent."
             return false
@@ -623,7 +693,8 @@ struct ComposerView: View {
         }
         let agentPrompt: String?
         do {
-            agentPrompt = try CommentPrompt.agentPrompt(batch?.comments ?? [], visible: content)
+            agentPrompt = try SessionReferences.agentPrompt(sessions: sessions, comments: batch?.comments ?? [],
+                                                            visible: content)
         } catch {
             uploadError = "Couldn't prepare the comments. Your draft has been kept."
             return false

@@ -408,6 +408,12 @@ final class WorkspaceStore {
             .call(method: "ListCommands", params: ["harness": harness], timeoutSeconds: 20)
     }
 
+    /// SearchFiles — `@` mention candidates in a chat's or space's checkout
+    /// (paths only, never contents). Forwardable, so the host answers.
+    func searchFiles(deviceId: String, params: [String: Any]) async throws -> [FileSearchMatch] {
+        try await relay(for: deviceId).call(method: "SearchFiles", params: params, timeoutSeconds: 15)
+    }
+
     /// PiSessionModes — the Pi plugins' switches for one chat (Fast mode,
     /// Scripts, orchestration, the goal), read from its Pi session file on
     /// the host. Forwardable, so the host answers directly.

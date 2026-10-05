@@ -589,6 +589,69 @@ final class AppModel {
         return try await workspace.piSessionModes(deviceId: deviceId, chatId: chatId)
     }
 
+    /// SearchFiles on the device that owns the checkout, for `@` mentions.
+    func searchFiles(_ scope: MentionScope.Files, query: String) async throws -> [FileSearchMatch] {
+        if let demo {
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            return demo.searchFiles(query)
+        }
+        guard let workspace, deviceOnline(scope.deviceId) else { throw RelayError.hostOffline }
+        var params = scope.params
+        params["query"] = query
+        return try await workspace.searchFiles(deviceId: scope.deviceId, params: params)
+    }
+
+    /// The `@session` references' snapshots, in mention order (composer.rs
+    /// send path). Each comes from this phone's synced copy of the session,
+    /// so a sleeping laptop's sessions stay referenceable; a copy that has
+    /// never synced fails the send rather than dropping the reference.
+    func sessionReferences(_ ids: [String]) async throws -> [SessionReference] {
+        var references: [SessionReference] = []
+        for id in ids {
+            guard let chat = chat(id: id) else {
+                throw SessionReferenceError("A referenced session no longer exists — remove the @session reference and try again.")
+            }
+            references.append(SessionReference(title: Mentions.sessionTitle(chat),
+                                               context: try await referenceContext(chat)))
+        }
+        return references
+    }
+
+    /// Quiet window after a cold copy first shows content: backfill lands as
+    /// a checkpoint then its rows (composer.rs SESSION_REPLICA_SETTLE).
+    private static let referenceSettle: TimeInterval = 0.4
+    private static let referenceTimeout: TimeInterval = 8
+
+    private func referenceContext(_ chat: Chat) async throws -> String {
+        if let demo {
+            let entries = SessionReferences.entries(demo.sessionStore(for: chat.id).entries)
+            return SessionReferences.boundedContext(entries) ?? ""
+        }
+        guard let store = warmSessionStore(for: chat) else {
+            throw SessionReferenceError("Couldn't load the referenced session — check your connection and try again.")
+        }
+        // A copy that already has content is current enough (it syncs live);
+        // a cold one waits for its backfill to land and go quiet.
+        if store.entries.isEmpty {
+            let deadline = Date().addingTimeInterval(Self.referenceTimeout)
+            var revision = store.revision
+            var quietSince: Date?
+            while Date() < deadline {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                if store.revision != revision {
+                    revision = store.revision
+                    quietSince = store.entries.isEmpty ? nil : Date()
+                } else if let quietSince, Date().timeIntervalSince(quietSince) >= Self.referenceSettle {
+                    break
+                }
+            }
+            if store.entries.isEmpty, !store.connected {
+                throw SessionReferenceError("This phone has no synced copy of “\(Mentions.sessionTitle(chat))” yet — try again once it loads.")
+            }
+        }
+        return SessionReferences.boundedContext(await store.referenceEntries()) ?? ""
+    }
+
     /// The phone never resolves a local Runtime or substitutes a model list.
     func listPiModels(deviceId: String) async throws -> [ModelInfo] {
         if demo != nil {

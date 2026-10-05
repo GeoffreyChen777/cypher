@@ -840,7 +840,7 @@ struct UserBubble: View {
                 }
                 if !parsed.text.isEmpty {
                     SelectableTranscriptText(attributed: TranscriptTextStyle.inline(
-                        [InlineRun(text: parsed.text, style: .plain)]), hugsContent: true)
+                        Mentions.inlineRuns(parsed.text)), hugsContent: true)
                         .environment(\.commentDrafts, pending ? nil : commentDrafts)
                         .padding(.horizontal, 16)
                         // Optical centering for the native text line box: move

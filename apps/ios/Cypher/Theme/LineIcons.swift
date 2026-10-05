@@ -21,6 +21,9 @@ enum LineIcon {
     case book
     case command
     case chevronRight
+    // The composer `@` menu's rows (composer.rs render_mention_popup).
+    case document
+    case chatRoundLine
 
     /// (paths, circles cx/cy/r) in a 24×24 viewbox.
     var elements: (paths: [String], circles: [(CGFloat, CGFloat, CGFloat)]) {
@@ -99,6 +102,23 @@ enum LineIcon {
             )
         case .chevronRight:
             return (paths: ["m9 5l6 7l-6 7"], circles: [])
+        case .document:
+            return (
+                paths: [
+                    "M3 10c0-3.771 0-5.657 1.172-6.828S7.229 2 11 2h2c3.771 0 5.657 0 6.828 1.172S21 6.229 21 10v4c0 3.771 0 5.657-1.172 6.828S16.771 22 13 22h-2c-3.771 0-5.657 0-6.828-1.172S3 17.771 3 14z",
+                    "M8 10h8m-8 4h5",
+                ],
+                circles: []
+            )
+        case .chatRoundLine:
+            return (
+                paths: [
+                    "M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 13.5997 2.37562 15.1116 3.04346 16.4525C3.22094 16.8088 3.28001 17.2161 3.17712 17.6006L2.58151 19.8267C2.32295 20.793 3.20701 21.677 4.17335 21.4185L6.39939 20.8229C6.78393 20.72 7.19121 20.7791 7.54753 20.9565C8.88837 21.6244 10.4003 22 12 22Z",
+                    "M8 10.5H16",
+                    "M8 14H13.5",
+                ],
+                circles: []
+            )
         }
     }
 }

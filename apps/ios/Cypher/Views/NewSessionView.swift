@@ -37,6 +37,8 @@ struct NewSessionView: View {
     @State private var selectedRef: String?
     @State private var checkoutKind: CheckoutKind = .local
     @State private var busy = false
+    @State private var mentionEditor = MentionEditor()
+    @State private var mentionSearch = MentionSearch()
     @FocusState private var focused: Bool
     /// Basis for the leading header's fixed width (SessionView's pattern —
     /// iOS 26 proposes leading toolbar items almost nothing).
@@ -253,6 +255,15 @@ struct NewSessionView: View {
                     .padding(.horizontal, 24)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let mentionToken {
+                MentionMenuView(
+                    search: mentionSearch, query: mentionToken.query,
+                    subtitle: model.mentionSubtitle,
+                    onPickSession: pickSession,
+                    onPickFile: { mentionEditor.accept(link: Mentions.fileLink(path: $0.path, isDir: $0.isDir)) })
+                .padding(.horizontal, 16)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
             ComposerShell(
                 draft: $draft,
                 placeholder: "Do anything…",
@@ -263,7 +274,8 @@ struct NewSessionView: View {
                 onSend: send,
                 attachments: attachments,
                 onAttach: { showPhotoPicker = true },
-                onRemoveAttachment: { id in attachments.removeAll { $0.id == id } }
+                onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
+                mentions: mentionEditor
             ) {
                 // One chip for the model and its thinking level (it rides
                 // right of the shell's attach button).
@@ -272,6 +284,63 @@ struct NewSessionView: View {
                     showPicker = true
                 }
             }
+        }
+        .task(id: mentionToken.map { "\(spaceId)/\(quickDeviceId ?? "")/\(mentionScope.files?.path ?? "")/\($0.query)" }) {
+            guard let mentionToken else { return }
+            let scope = mentionScope
+            await mentionSearch.run(query: mentionToken.query, scope: scope, chats: model.allChats,
+                                    fetch: model.searchFiles)
+        }
+        .motionAnimation(Motion.fadeQuick, value: mentionToken != nil)
+    }
+
+    // MARK: Mentions
+
+    private var mentionToken: MentionToken? {
+        targetReady ? mentionEditor.token : nil
+    }
+
+    /// Files come from the project's checkout — the existing worktree the
+    /// session will reuse, when one is picked. A quick chat has no folder
+    /// until its first send, so it offers sessions only.
+    private var mentionScope: MentionScope {
+        guard let space else {
+            return MentionScope(currentChat: nil, project: nil, device: quickDeviceId, files: nil)
+        }
+        let worktree = checkoutKind == .local ? selectedRefRow?.worktreePath : nil
+        return MentionScope(currentChat: nil, project: space.id, device: space.deviceId,
+                            files: MentionScope.Files(deviceId: space.deviceId, spaceId: space.id,
+                                                      path: worktree))
+    }
+
+    private func pickSession(_ session: MentionSession) {
+        if Mentions.sessionCapReached(existing: Mentions.sessionRefIds(in: draft), candidate: session.chatId) {
+            attachError = "Up to 3 session references per message — remove one first."
+            return
+        }
+        attachError = nil
+        mentionEditor.accept(link: Mentions.sessionLink(title: session.title, chatId: session.chatId))
+    }
+
+    /// The referenced sessions' snapshots, loaded before the chat is minted
+    /// so a failure leaves nothing behind; nil (with the error shown) when
+    /// one can't be referenced or loaded.
+    private func loadReferences(_ prompt: String) async -> [SessionReference]? {
+        let refIds = Mentions.sessionRefIds(in: prompt)
+        guard !refIds.isEmpty else { return [] }
+        if prompt.hasPrefix("/") {
+            attachError = "Session references accompany a normal message, not a slash command."
+            return nil
+        }
+        if let error = SessionReferences.validationError(refs: refIds, currentChat: nil, chats: model.allChats) {
+            attachError = error
+            return nil
+        }
+        do {
+            return try await model.sessionReferences(refIds)
+        } catch {
+            attachError = "\(error.localizedDescription) Your draft has been kept."
+            return nil
         }
     }
 
@@ -409,6 +478,7 @@ struct NewSessionView: View {
                                 reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
             defer { busy = false }
+            guard let sessions = await loadReferences(prompt) else { return }
             var cwd: String?
             var branch = selectedRef
             switch checkoutKind {
@@ -438,7 +508,7 @@ struct NewSessionView: View {
                 busy = false
                 return
             }
-            await startSession(chatId: chatId, prompt: prompt)
+            await startSession(chatId: chatId, prompt: prompt, sessions: sessions)
         }
     }
 
@@ -453,9 +523,10 @@ struct NewSessionView: View {
                                 reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
             defer { busy = false }
+            guard let sessions = await loadReferences(prompt) else { return }
             do {
                 let chatId = try await model.createQuickChat(deviceId: deviceId, config: config)
-                await startSession(chatId: chatId, prompt: prompt)
+                await startSession(chatId: chatId, prompt: prompt, sessions: sessions)
             } catch {
                 attachError = "Couldn't create the quick chat's folder on \(model.deviceName(deviceId)) — \(error.localizedDescription). Your draft has been kept."
             }
@@ -464,7 +535,7 @@ struct NewSessionView: View {
 
     /// Upload the staged images into the new chat, queue its first run and
     /// swap the canvas for the live session.
-    private func startSession(chatId: String, prompt: String) async {
+    private func startSession(chatId: String, prompt: String, sessions: [SessionReference]) async {
         guard let chat = model.chat(id: chatId),
               let store = model.sessionStore(for: chat) else {
             attachError = "Couldn't create the session. Check your connection and retry."
@@ -486,9 +557,11 @@ struct NewSessionView: View {
                 return
             }
         }
+        let content = paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths)
+        // Without comments the envelope can't fail to build.
+        let agentPrompt = try? SessionReferences.agentPrompt(sessions: sessions, comments: [], visible: content)
         guard targetReady,
-              store.sendRun(prompt: paths.isEmpty ? prompt : withAttachments(text: prompt, paths: paths),
-                            chat: chat, attachments: paths) else {
+              store.sendRun(prompt: content, chat: chat, attachments: paths, agentPrompt: agentPrompt) else {
             attachError = "Couldn't queue the message. Your draft has been kept."
             return
         }

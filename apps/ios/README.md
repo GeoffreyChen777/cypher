@@ -44,6 +44,19 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   awaiting input), answer questions and attach photos. Offline devices remain
   browsable but new sends are disabled; drafts are retained on queue failure.
   A queued command is not proof that the remote run succeeded.
+- **`@` mentions:** typing `@` at the start of a word lists sessions (synced
+  rows from every project and device, nearest and most recent first; never
+  the current chat or side chats, archived ones once something is typed)
+  above files (the host's `SearchFiles` over the chat's checkout, or the
+  project/picked worktree for a new session). A pick becomes an `@name` chip
+  that edits as one unit; the draft holds the desktop's strict
+  `cypher-file:`/`cypher-session:` Markdown, so mentions read the same on
+  both. Up to 3 sessions per message: each one's bounded transcript (the
+  desktop's 8-message/48 KiB window, 96 KiB total) is read from this phone's
+  synced copy and rides only the effective `agentPrompt`; a copy that never
+  synced fails the send and keeps the draft. Files travel as paths only.
+  Quick chats before their first send offer sessions only; side chats offer
+  none. Sent bubbles show chips, not markup.
 - **Quiet reconnect:** the chat's reserved bottom status row shows only a
   spinner while transport/model discovery reconnects. After 15 seconds without
   readiness, or a definite catalog failure, it shows one short notice + Retry;
