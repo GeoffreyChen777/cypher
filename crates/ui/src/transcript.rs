@@ -1856,8 +1856,10 @@ pub fn format_elapsed(secs: i64) -> String {
 const THROUGHPUT_STALE_MS: i64 = 3_000;
 
 /// The working trailer's throughput tail: `↓ 3.4k tokens · 52 tok/s`. The
-/// rate shows only while fresh (a tool running or a stalled stream keeps just
-/// the count); nothing at all before the turn's first output token.
+/// live rate shows only while fresh; otherwise (a tool running, a stalled or
+/// bursty stream, another device's seconds-old copy) the last finished
+/// message's average stands in, and before there is one just the count.
+/// Nothing at all before the turn's first output token.
 pub fn throughput_label(
     throughput: &cypher_proto::Throughput,
     now: chrono::DateTime<chrono::Utc>,
@@ -1866,7 +1868,10 @@ pub fn throughput_label(
         .signed_duration_since(throughput.sampled_at)
         .num_milliseconds()
         <= THROUGHPUT_STALE_MS;
-    let rate = throughput.tokens_per_second.filter(|_| fresh);
+    let rate = throughput
+        .tokens_per_second
+        .filter(|_| fresh)
+        .or(throughput.average_tokens_per_second);
     if throughput.output_tokens == 0 && rate.is_none() {
         return None;
     }
@@ -7917,6 +7922,7 @@ mod tests {
         let now = chrono::Utc::now();
         let reading = |rate, tokens, age_ms| cypher_proto::Throughput {
             tokens_per_second: rate,
+            average_tokens_per_second: None,
             output_tokens: tokens,
             sampled_at: now - chrono::Duration::milliseconds(age_ms),
         };
@@ -7935,6 +7941,31 @@ mod tests {
             Some("↓ 812 tokens")
         );
         assert_eq!(throughput_label(&reading(None, 0, 100), now), None);
+    }
+
+    #[test]
+    fn throughput_label_falls_back_to_the_last_message_average() {
+        let now = chrono::Utc::now();
+        let reading = |rate, average, age_ms| cypher_proto::Throughput {
+            tokens_per_second: rate,
+            average_tokens_per_second: average,
+            output_tokens: 20_400,
+            sampled_at: now - chrono::Duration::milliseconds(age_ms),
+        };
+        // A fresh live rate wins.
+        assert_eq!(
+            throughput_label(&reading(Some(90), Some(60), 400), now).as_deref(),
+            Some("↓ 20k tokens · 90 tok/s")
+        );
+        // Between messages, and on another device whose copy is 20s old.
+        assert_eq!(
+            throughput_label(&reading(None, Some(60), 100), now).as_deref(),
+            Some("↓ 20k tokens · 60 tok/s")
+        );
+        assert_eq!(
+            throughput_label(&reading(Some(90), Some(60), 20_000), now).as_deref(),
+            Some("↓ 20k tokens · 60 tok/s")
+        );
     }
 
     #[test]

@@ -505,10 +505,11 @@ async fn context_usage_mid_turn_rides_the_settle_write() {
 }
 
 /// Throughput (pi `cypher.throughput.v1`) is the working trailer's tok/s:
-/// live on this engine's own `WatchSessions`, never on the registry, never in
-/// the transcript, and gone once the turn settles.
+/// live on this engine's own `WatchSessions`, never in the transcript, on the
+/// registry only when the row is next written for its own reasons, and gone
+/// everywhere once the turn settles.
 #[tokio::test]
-async fn throughput_is_local_and_ends_with_the_turn() {
+async fn throughput_rides_the_next_row_write_and_ends_with_the_turn() {
     let rig = assemble("stream fast");
     rig.core
         .sessions
@@ -524,6 +525,7 @@ async fn throughput_is_local_and_ends_with_the_turn() {
     let before_entries = assistant_entries(&rig.core).len();
     let reading = Throughput {
         tokens_per_second: Some(52),
+        average_tokens_per_second: Some(48),
         output_tokens: 3_400,
         sampled_at: chrono::Utc::now(),
     };
@@ -546,6 +548,28 @@ async fn throughput_is_local_and_ends_with_the_turn() {
     .await;
     assert_eq!(status(&rig.core), Some(SessionStatus::Working));
     assert_eq!(assistant_entries(&rig.core).len(), before_entries);
+    let registry_throughput = || {
+        rig.core
+            .workspace
+            .read_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.chat_id == CHAT)
+            .and_then(|s| s.throughput)
+    };
+    assert_eq!(
+        registry_throughput(),
+        None,
+        "a reading alone writes nothing"
+    );
+
+    // Any write of the row (here a subagent snapshot) carries the latest one.
+    rig.feed.send(running_async()).unwrap();
+    wait_for(
+        || registry_throughput() == Some(reading),
+        "the next row write carries the reading",
+    )
+    .await;
 
     rig.feed
         .send(AgentEvent::Done {
@@ -568,9 +592,7 @@ async fn throughput_is_local_and_ends_with_the_turn() {
         None,
         "a settled turn drops its tok/s"
     );
-    let rows = rig.core.workspace.read_sessions().unwrap();
-    let row = rows.iter().find(|s| s.chat_id == CHAT).expect("row");
-    assert_eq!(row.throughput, None, "never synced");
+    assert_eq!(registry_throughput(), None, "the settle write clears it");
 
     rig.core.sessions.shutdown().await;
 }

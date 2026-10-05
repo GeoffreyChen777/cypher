@@ -1434,11 +1434,13 @@ impl Inner {
     }
 
     /// Live throughput (pi `cypher.throughput.v1`): the working trailer's
-    /// tok/s. Engine-local like the context gauge's in-turn readings, but it
-    /// never reaches the registry at all — a reading every half second of
-    /// streaming is not worth a synced write, and other devices' trailers
-    /// simply go without it. No `updated_at` bump: it is not a liveness
-    /// signal, and a missing row is never created for it.
+    /// tok/s. Like the context gauge's in-turn readings, each one reaches
+    /// only this engine's watchers — a reading every half second of streaming
+    /// is not worth a synced write. Other devices get the latest one when the
+    /// row is next written anyway (the 20s freshness touch, a subagent
+    /// snapshot, a transition), and the settle write clears it. No
+    /// `updated_at` bump: it is not a liveness signal, and a missing row is
+    /// never created for it.
     fn set_throughput(&self, chat_id: &str, throughput: Option<Throughput>) {
         let session = {
             let mut statuses = lock(&self.statuses);

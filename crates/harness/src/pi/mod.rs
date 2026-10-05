@@ -2654,7 +2654,7 @@ async fn run_session(session: Session) {
                             // (toolResult/user messages are internal.)
                             if message_is_assistant(ev.get("message")) {
                                 last_assistant_text.clear();
-                                throughput.start_message();
+                                throughput.start_message(Instant::now());
                                 // The NEXT assistant message after a queued
                                 // steer is the steer's reply: split the doc entry
                                 // here (before its content streams), exactly like

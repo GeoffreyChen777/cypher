@@ -497,6 +497,35 @@ fn session_context_usage_syncs_and_survives_a_readingless_write() {
     assert_eq!(row.context_usage, Some(usage));
 }
 
+/// Throughput rides the host's Working row to its peers, and the settle
+/// write (a row without a reading) clears it everywhere.
+#[test]
+fn session_throughput_syncs_and_clears_with_the_turn() {
+    let reading = cypher_proto::Throughput {
+        tokens_per_second: Some(52),
+        average_tokens_per_second: Some(48),
+        output_tokens: 3_400,
+        sampled_at: ts(3_400),
+    };
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let (mut server, mut seq) = (HashMap::new(), 0);
+    let mut working = session("chat-1", "dev-a", SessionStatus::Working);
+    working.throughput = Some(reading);
+    a.upsert_session(&working).unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    assert_eq!(b.read_sessions().unwrap()[0].throughput, Some(reading));
+
+    a.upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    let mut docs = [&mut a, &mut b];
+    server_round(&mut server, &mut seq, &mut docs);
+    let row = &b.read_sessions().unwrap()[0];
+    assert_eq!(row.status, SessionStatus::Idle);
+    assert_eq!(row.throughput, None);
+}
+
 /// A malformed gauge (another writer's shape) reads as no reading; the
 /// status row itself must survive.
 #[test]
@@ -507,11 +536,13 @@ fn malformed_context_usage_keeps_the_session_row() {
         "status": "idle",
         "updatedAt": 3_500,
         "contextUsage": {"used": "lots"},
+        "throughput": {"outputTokens": "lots"},
     }))
     .unwrap();
     let row = Session::from(raw);
     assert_eq!(row.status, SessionStatus::Idle);
     assert_eq!(row.context_usage, None);
+    assert_eq!(row.throughput, None);
 }
 
 #[test]
