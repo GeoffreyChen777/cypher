@@ -757,6 +757,10 @@ pub(crate) struct RawSession {
     /// instead of dropping the whole status row.
     #[serde(default)]
     context_usage: Option<serde_json::Value>,
+    /// The running turn's latest throughput reading; absent on settled rows,
+    /// old rows, and old writers. Parsed leniently like `context_usage`.
+    #[serde(default)]
+    throughput: Option<serde_json::Value>,
 }
 
 impl From<RawSession> for Session {
@@ -771,7 +775,9 @@ impl From<RawSession> for Session {
             context_usage: raw
                 .context_usage
                 .and_then(|value| serde_json::from_value(value).ok()),
-            throughput: None,
+            throughput: raw
+                .throughput
+                .and_then(|value| serde_json::from_value(value).ok()),
         }
     }
 }

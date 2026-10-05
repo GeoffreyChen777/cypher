@@ -1222,6 +1222,8 @@ impl RegistryDoc {
     /// column). The context gauge rides it too, but is only ever replaced: a
     /// row with no reading (a fresh process that hasn't measured yet) leaves
     /// the stored one in place rather than blanking other devices' rings.
+    /// Throughput is the opposite: it belongs to one turn, so a row without
+    /// it (settled, or a new turn before its first reading) clears it.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
         let subagents = serde_json::to_value(&session.subagents)?;
         let mut set = fields([
@@ -1236,6 +1238,13 @@ impl RegistryDoc {
                     Value::Null
                 } else {
                     subagents
+                },
+            ),
+            (
+                "throughput",
+                match session.throughput {
+                    Some(throughput) => serde_json::to_value(throughput)?,
+                    None => Value::Null,
                 },
             ),
         ]);

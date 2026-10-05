@@ -303,9 +303,10 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<ContextUsage>,
     /// Live output throughput of the running turn (pi `cypher.throughput.v1`
-    /// — the working trailer's tok/s). Host-local run state: only this
-    /// engine's own `WatchSessions` carries it, the registry row never does,
-    /// and a settled or newly started turn drops it.
+    /// — the working trailer's tok/s). The host's own `WatchSessions` sees
+    /// every reading; the registry row gets the latest one on its next write
+    /// (the 20s freshness touch or a transition), so other devices' trailers
+    /// trail the host's. A settled or newly started turn drops it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throughput: Option<Throughput>,
 }
@@ -322,6 +323,14 @@ pub struct Throughput {
     /// not answered yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_second: Option<u32>,
+    /// Average speed of the turn's last finished assistant message: its
+    /// reported output tokens over the time from its start to its last
+    /// streamed delta. Unlike the live rate it never ages out — it is what
+    /// the trailer shows between messages, on other devices (whose copy of
+    /// the reading is seconds old), and for providers that deliver a
+    /// message in one burst (Claude Code after a tool result).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_tokens_per_second: Option<u32>,
     /// Output tokens of the turn so far: reported for finished messages,
     /// estimated for the one still streaming.
     pub output_tokens: u64,
