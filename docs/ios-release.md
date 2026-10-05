@@ -37,6 +37,23 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (23), 2026-10-05
+
+- Covers the one iOS commit since build 22: `9199f53` (@ references
+  sessions and files in the session and new-session composers; up to three
+  referenced sessions ride the prompt as transcript snapshots).
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  Xcode 27.0; `release.py ios-context` accepts the tag.
+- `CypherTests` on an iPhone 17 Pro Max simulator: 260 of 261 passed,
+  including the 22 new `MentionsTests`. The failure was in
+  `WorkspaceDiffWebTests` (the WebKit worker timing out). That suite failed
+  2-3 of its 13 tests per run, a different set each time, both at this
+  commit and at build 22's tag on the same simulator, so it is the machine,
+  not this change; nothing since build 22 touches the diff viewer.
+  CypherUI was not rerun.
+- Upload is left to `.github/workflows/ios.yml` (Xcode 27 runner) via the
+  `cypher-ios-v0.2.0-b23` tag.
+
 ## Release: 0.2.0 (22), 2026-10-04
 
 - Build 21 never reached TestFlight: CI archived with Xcode 26.3, the newest
