@@ -6,6 +6,13 @@ import { test } from "node:test";
 
 import extension, {
   alignmentRequest,
+  askAnswers,
+  askQuestions,
+  askResultText,
+  askTexts,
+  parseAskTranslation,
+  rewriteAsk,
+  withAskTexts,
   alignSites,
   FramePump,
   inputTranslationStatus,
@@ -590,6 +597,7 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
     appendEntry: (type, data) => entries.push({ type, data }),
   });
   const ctx = {
+    hasUI: true,
     model: { provider: "p", id: "coder" },
     sessionManager: { getSessionId: () => "session-1" },
     ui: {
@@ -604,6 +612,10 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
         if (systemPrompt.startsWith("You align")) {
           aligned.push(JSON.parse(source));
           text = align ? align(JSON.parse(source)) : "";
+        } else if (systemPrompt.includes("JSON array of strings")) {
+          const texts = JSON.parse(source);
+          requested.push(...texts);
+          text = JSON.stringify(texts.map((t) => dictionary[t] ?? t));
         } else {
           requested.push(source);
           text = dictionary[source] ?? source;
@@ -623,11 +635,11 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
     CYPHER_ENGINE_SOCKET: "/nonexistent.sock",
     CYPHER_CHAT_ID: "chat-1",
   };
-  const input = async (text) => {
+  const withEnv = async (run) => {
     const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);
     try {
-      return await handlers.input({ text, images: [] }, ctx);
+      return await run();
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
@@ -635,7 +647,11 @@ function harness(dictionary, { align, enabledModels = ["p/coder"] } = {}) {
       }
     }
   };
-  return { input, entries, statuses, requested, aligned };
+  const input = (text) => withEnv(() => handlers.input({ text, images: [] }, ctx));
+  const toolCall = (event) => withEnv(() => handlers.tool_call({ type: "tool_call", ...event }, ctx));
+  const toolResult = (event) =>
+    withEnv(() => handlers.tool_result({ type: "tool_result", isError: false, ...event }, ctx));
+  return { input, toolCall, toolResult, entries, statuses, requested, aligned };
 }
 
 const alignedReply = () =>
@@ -739,4 +755,155 @@ test("a plain prompt is still translated whole and reported", async () => {
     source: "发布新版本",
     text: "Release a new version",
   });
+});
+
+const ASK = {
+  question: "Which database should the service use?",
+  context: "It runs on one machine.",
+  options: [
+    { title: "SQLite", description: "A single file" },
+    "PostgreSQL",
+    { bogus: true },
+  ],
+};
+
+test("an ask_user call's texts are read in order, skipping malformed options", () => {
+  const questions = askQuestions(structuredClone(ASK));
+  assert.deepEqual(askTexts(questions), [
+    "Which database should the service use?",
+    "It runs on one machine.",
+    "SQLite",
+    "A single file",
+    "PostgreSQL",
+  ]);
+  const batch = askQuestions({ questions: [{ question: "A?" }, { question: "B?", options: ["x"] }] });
+  assert.deepEqual(askTexts(batch), ["A?", "B?", "x"]);
+  // A batch pi-ask-user will reject is not translated at all.
+  assert.deepEqual(askQuestions({ questions: [{ question: "A?" }, {}] }), []);
+});
+
+test("only a reply of exactly the asked strings is trusted", () => {
+  assert.deepEqual(parseAskTranslation('```json\n["a","b"]\n```', 2), ["a", "b"]);
+  assert.equal(parseAskTranslation('["a"]', 2), undefined);
+  assert.equal(parseAskTranslation('["a", 1]', 2), undefined);
+  assert.equal(parseAskTranslation("a, b", 2), undefined);
+});
+
+test("a rewritten call shows translated texts and maps titles back", () => {
+  const input = structuredClone(ASK);
+  const original = askQuestions(input);
+  const shown = withAskTexts(original, ["用哪个数据库？", "它运行在一台机器上。", "SQLite", "单个文件", "PostgreSQL 数据库"]);
+  const record = rewriteAsk(input, original, shown);
+  assert.deepEqual(input, {
+    question: "用哪个数据库？",
+    context: "它运行在一台机器上。",
+    options: [
+      { title: "SQLite", description: "单个文件" },
+      { title: "PostgreSQL 数据库" },
+      { bogus: true },
+    ],
+  });
+  assert.equal(record.questions[0].question, ASK.question);
+  assert.equal(record.titles[0].get("PostgreSQL 数据库"), "PostgreSQL");
+});
+
+test("titles that no longer tell options apart keep the originals", () => {
+  const input = { question: "Q?", options: ["Fast", "Quick", "Other"] };
+  const original = askQuestions(input);
+  rewriteAsk(input, original, withAskTexts(original, ["问？", "快", "快", "其他"]));
+  assert.deepEqual(input.options, [{ title: "Fast" }, { title: "Quick" }, { title: "Other" }]);
+  assert.equal(input.question, "问？");
+});
+
+test("a batch whose translated questions collide keeps the asked questions", () => {
+  const input = { questions: [{ question: "Use cache?" }, { question: "Use a cache?" }] };
+  const original = askQuestions(input);
+  rewriteAsk(input, original, withAskTexts(original, ["用缓存？", "用缓存？"]));
+  assert.deepEqual(input.questions.map((q) => q.question), ["Use cache?", "Use a cache?"]);
+});
+
+test("answers are read from the result details", () => {
+  assert.equal(askAnswers({ question: "Q", response: null, cancelled: true }), null);
+  assert.deepEqual(askAnswers({ response: { kind: "freeform", text: "hi" }, cancelled: false }), [
+    { kind: "freeform", text: "hi" },
+  ]);
+  assert.deepEqual(
+    askAnswers({
+      kind: "batch",
+      cancelled: false,
+      answers: [{ status: "skipped" }, { status: "answered", response: { kind: "selection", selections: ["a"] } }],
+    }),
+    [undefined, { kind: "selection", selections: ["a"], comment: undefined }],
+  );
+});
+
+test("the result text matches pi-ask-user's own", () => {
+  const questions = [{ question: "A?", options: [] }, { question: "B?", options: [] }];
+  assert.equal(
+    askResultText(questions.slice(0, 1), [{ kind: "selection", selections: ["x", "y"], comment: "ok" }], false),
+    "User answered: x, y — ok",
+  );
+  assert.equal(
+    askResultText(questions, [undefined, { kind: "freeform", text: "t" }], true),
+    "User answered 1 of 2 questions:\n1. A? → (skipped)\n2. B? → t",
+  );
+});
+
+test("a question is shown translated and answered in the agent's words", async () => {
+  const { toolCall, toolResult, requested } = harness({
+    "Which database should the service use?": "服务应该用哪个数据库？",
+    "It runs on one machine.": "它运行在一台机器上。",
+    "A single file": "单个文件",
+    PostgreSQL: "PostgreSQL 数据库",
+    "选它，因为更稳": "Pick it, it is more stable",
+  });
+  const input = structuredClone(ASK);
+  assert.equal(await toolCall({ toolName: "ask_user", toolCallId: "call-1", input }), undefined);
+  assert.equal(input.question, "服务应该用哪个数据库？");
+  assert.deepEqual(input.options[1], { title: "PostgreSQL 数据库" });
+  assert.equal(requested.length, 5);
+
+  const result = await toolResult({
+    toolName: "ask_user",
+    toolCallId: "call-1",
+    input,
+    content: [{ type: "text", text: "User answered: PostgreSQL 数据库 — 选它，因为更稳" }],
+    details: {
+      question: input.question,
+      options: input.options,
+      response: { kind: "selection", selections: ["PostgreSQL 数据库"], comment: "选它，因为更稳" },
+      cancelled: false,
+    },
+  });
+  assert.deepEqual(result.content, [
+    { type: "text", text: "User answered: PostgreSQL — Pick it, it is more stable" },
+  ]);
+});
+
+test("a cancelled question and other tools are left alone", async () => {
+  const { toolCall, toolResult, requested } = harness({ "Q?": "问？" });
+  const bash = { command: "ls" };
+  await toolCall({ toolName: "bash", toolCallId: "b", input: bash });
+  assert.deepEqual(bash, { command: "ls" });
+  assert.deepEqual(requested, []);
+
+  const input = { question: "Q?" };
+  await toolCall({ toolName: "ask_user", toolCallId: "c", input });
+  assert.equal(input.question, "问？");
+  const result = await toolResult({
+    toolName: "ask_user",
+    toolCallId: "c",
+    input,
+    content: [{ type: "text", text: "User cancelled the question" }],
+    details: { question: "问？", options: [], response: null, cancelled: true },
+  });
+  assert.equal(result, undefined);
+});
+
+test("a question is not translated where the session is not", async () => {
+  const { toolCall, requested } = harness({ "Q?": "问？" }, { enabledModels: [] });
+  const input = { question: "Q?" };
+  await toolCall({ toolName: "ask_user", toolCallId: "d", input });
+  assert.equal(input.question, "Q?");
+  assert.deepEqual(requested, []);
 });

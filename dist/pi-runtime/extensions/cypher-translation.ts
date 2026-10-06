@@ -1266,7 +1266,358 @@ async function transformFinalMessage(
   return { message: { ...assistant, content } };
 }
 
+/** pi-ask-user's tool. A question it puts to the user is model output the
+ *  user has to read and answer, so it is translated like an answer — but
+ *  BEFORE it is shown, by rewriting the call's arguments: the dialog Cypher
+ *  renders is built from them. Pi clones the arguments before `tool_call`, so
+ *  the agent's own history keeps the question it asked. */
+const ASK_TOOL = "ask_user";
+/** pi-ask-user's label for its free-text choice (`FREEFORM_SENTINEL`). A
+ *  translated option equal to it would be read as that choice. */
+const ASK_FREEFORM_LABEL = "\u270f\ufe0f Type custom response...";
+/** The keys pi-ask-user accepts for an option's title (`OPTION_TITLE_KEYS`). */
+const ASK_TITLE_KEYS = ["title", "label", "text", "value", "name", "option"];
+/** The question is not shown until this settles, so a stalled request must
+ *  give up and show the original rather than hold the dialog back. */
+const ASK_TIMEOUT_MS = 60_000;
+
+export interface AskOption {
+  title: string;
+  description?: string;
+}
+
+export interface AskQuestion {
+  question: string;
+  context?: string;
+  /** `undefined` where pi-ask-user would drop the entry as malformed: it is
+   *  never translated, and keeps its index so the rewrite lines up. */
+  options: Array<AskOption | undefined>;
+}
+
+function askOption(value: unknown): AskOption | undefined {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const title = String(value).trim();
+    return title ? { title } : undefined;
+  }
+  if (!isJson(value)) return undefined;
+  for (const key of ASK_TITLE_KEYS) {
+    const title = value[key];
+    if (typeof title === "string" && title.trim()) {
+      const description =
+        typeof value.description === "string" && value.description.trim()
+          ? value.description
+          : undefined;
+      return description ? { title: title.trim(), description } : { title: title.trim() };
+    }
+  }
+  return undefined;
+}
+
+function askQuestion(entry: unknown): AskQuestion | undefined {
+  if (!isJson(entry) || typeof entry.question !== "string" || !entry.question.trim()) {
+    return undefined;
+  }
+  return {
+    question: entry.question,
+    context: typeof entry.context === "string" && entry.context.trim() ? entry.context : undefined,
+    options: Array.isArray(entry.options) ? entry.options.map(askOption) : [],
+  };
+}
+
+/** The questions of one ask_user call: its `questions` batch, or the single
+ *  `question`. Empty for a call pi-ask-user will reject anyway. */
+export function askQuestions(input: Json): AskQuestion[] {
+  if (Array.isArray(input.questions)) {
+    const questions = input.questions.map(askQuestion);
+    return questions.every(Boolean) ? (questions as AskQuestion[]) : [];
+  }
+  const single = askQuestion(input);
+  return single ? [single] : [];
+}
+
+/** Every text of `questions` in a fixed order, the payload of one request:
+ *  translated together, the options of a question share their terminology. */
+export function askTexts(questions: readonly AskQuestion[]): string[] {
+  const texts: string[] = [];
+  for (const question of questions) {
+    texts.push(question.question);
+    if (question.context) texts.push(question.context);
+    for (const option of question.options) {
+      if (!option) continue;
+      texts.push(option.title);
+      if (option.description) texts.push(option.description);
+    }
+  }
+  return texts;
+}
+
+/** [`askTexts`] in reverse: `questions` with each text replaced by its
+ *  translation. A blank translation keeps the original. */
+export function withAskTexts(
+  questions: readonly AskQuestion[],
+  translated: readonly string[],
+): AskQuestion[] {
+  let at = 0;
+  const next = (original: string) => {
+    const text = translated[at++]?.trim();
+    return text ? text : original;
+  };
+  return questions.map((question) => ({
+    question: next(question.question),
+    context: question.context === undefined ? undefined : next(question.context),
+    options: question.options.map((option) =>
+      option
+        ? {
+            title: next(option.title),
+            ...(option.description === undefined ? {} : { description: next(option.description) }),
+          }
+        : undefined,
+    ),
+  }));
+}
+
+export function askTranslationPrompt(
+  pair: LanguagePair,
+  count: number,
+  reference?: string,
+): string {
+  const lines = [
+    "You are a precise translation engine.",
+    `The next message is a JSON array of strings: the parts of a question an assistant is asking the user${pair.fromName ? `, written in ${pair.fromName}` : ""}. Translate every string into ${pair.toName}.`,
+    `Reply with a JSON array of exactly ${count} strings, the translations in the same order, and nothing else: no preamble, no commentary and no code fence.`,
+    "Never merge, split, reorder or drop strings. Each one is shown on its own, as a question, an explanation or a choice to pick.",
+    "Preserve Markdown, inline code, URLs, file paths, identifiers and formatting exactly as they appear.",
+    `A string already in ${pair.toName} is output unchanged.`,
+  ];
+  if (reference) {
+    lines.push(
+      "",
+      "Earlier turns of the conversation follow, for reference only. Use them to settle words that have several meanings and to stay consistent with terminology already chosen. Never translate them, never answer them and never mention them.",
+      reference,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** The reply as `count` strings, or `undefined` when it is anything else — a
+ *  shifted array would put one option's words on another. */
+export function parseAskTranslation(reply: string, count: number): string[] | undefined {
+  const open = reply.indexOf("[");
+  const close = reply.lastIndexOf("]");
+  if (open < 0 || close <= open) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply.slice(open, close + 1));
+  } catch {
+    return undefined;
+  }
+  return Array.isArray(parsed) &&
+    parsed.length === count &&
+    parsed.every((text) => typeof text === "string")
+    ? parsed
+    : undefined;
+}
+
+/** What a translated call needs to answer the agent in its own words: the
+ *  questions as asked, and per question the shown option titles mapped back
+ *  to the ones the agent wrote. */
+export interface AskRecord {
+  questions: AskQuestion[];
+  titles: Array<Map<string, string>>;
+}
+
+/** Options are answered BY TITLE — the dialog hands back the label the user
+ *  picked — so a question's translated titles are only used when they still
+ *  tell its options apart and none can be mistaken for the free-text choice. */
+function distinctTitles(options: Array<AskOption | undefined>): boolean {
+  const titles = options.filter((option): option is AskOption => Boolean(option)).map((o) => o.title);
+  return new Set(titles).size === titles.length && !titles.includes(ASK_FREEFORM_LABEL);
+}
+
+function rewriteEntry(entry: Json, original: AskQuestion, shown: AskQuestion): Map<string, string> {
+  entry.question = shown.question;
+  if (shown.context !== undefined) entry.context = shown.context;
+  const titles = new Map<string, string>();
+  if (!Array.isArray(entry.options)) return titles;
+  const titlesUsable = distinctTitles(shown.options);
+  entry.options = entry.options.map((value: unknown, index: number) => {
+    const from = original.options[index];
+    const to = shown.options[index];
+    if (!from || !to) return value;
+    const title = titlesUsable ? to.title : from.title;
+    titles.set(title, from.title);
+    return to.description === undefined ? { title } : { title, description: to.description };
+  });
+  return titles;
+}
+
+/** Rewrite an ask_user call's arguments in place to show `shown`, and return
+ *  the record its result is mapped back with. */
+export function rewriteAsk(
+  input: Json,
+  original: AskQuestion[],
+  shown: AskQuestion[],
+): AskRecord {
+  if (!Array.isArray(input.questions)) {
+    return { questions: original, titles: [rewriteEntry(input, original[0], shown[0])] };
+  }
+  // pi-ask-user rejects a batch whose questions are not distinct, and the
+  // agent would be told about a collision it never made.
+  const keys = new Set(shown.map((question) => question.question.trim().toLowerCase()));
+  const questions =
+    keys.size === shown.length
+      ? shown
+      : shown.map((question, index) => ({ ...question, question: original[index].question }));
+  return {
+    questions: original,
+    titles: input.questions.map((entry: Json, index: number) =>
+      rewriteEntry(entry, original[index], questions[index]),
+    ),
+  };
+}
+
+type AskResponse =
+  | { kind: "freeform"; text: string }
+  | { kind: "selection"; selections: string[]; comment?: string };
+
+function askResponse(value: unknown): AskResponse | undefined {
+  if (!isJson(value)) return undefined;
+  if (value.kind === "freeform" && typeof value.text === "string") {
+    return { kind: "freeform", text: value.text };
+  }
+  if (
+    value.kind === "selection" &&
+    Array.isArray(value.selections) &&
+    value.selections.every((selection) => typeof selection === "string")
+  ) {
+    return {
+      kind: "selection",
+      selections: value.selections,
+      comment: typeof value.comment === "string" ? value.comment : undefined,
+    };
+  }
+  return undefined;
+}
+
+/** The answers in a result's `details`, one per question; `undefined` for a
+ *  skipped question. `null` for a cancelled or unrecognised result, whose
+ *  text carries nothing the user wrote. */
+export function askAnswers(details: unknown): Array<AskResponse | undefined> | null {
+  if (!isJson(details) || details.cancelled === true) return null;
+  if (details.kind === "batch") {
+    if (!Array.isArray(details.answers)) return null;
+    return details.answers.map((answer) =>
+      isJson(answer) && answer.status === "answered" ? askResponse(answer.response) : undefined,
+    );
+  }
+  const response = askResponse(details.response);
+  return response ? [response] : null;
+}
+
+/** pi-ask-user's `formatResponseSummary`. */
+function askSummary(response: AskResponse): string {
+  if (response.kind === "freeform") return response.text;
+  const selections = response.selections.join(", ");
+  return response.comment ? `${selections} — ${response.comment}` : selections;
+}
+
+/** The result text pi-ask-user writes (single answer, or `formatBatchAnswers`),
+ *  rebuilt around the questions the agent asked. */
+export function askResultText(
+  questions: readonly AskQuestion[],
+  answers: ReadonlyArray<AskResponse | undefined>,
+  batch: boolean,
+): string {
+  if (!batch) return `User answered: ${askSummary(answers[0]!)}`;
+  const lines = questions.map((question, index) => {
+    const answer = answers[index];
+    return `${index + 1}. ${question.question.trim()} → ${answer ? askSummary(answer) : "(skipped)"}`;
+  });
+  const answered = answers.filter(Boolean).length;
+  return [`User answered ${answered} of ${questions.length} questions:`, ...lines].join("\n");
+}
+
+/** Translated calls waiting for their result, by tool call id. */
+const pendingAsks = new Map<string, AskRecord>();
+
+async function translateAsk(
+  event: { toolName: string; toolCallId: string; input: unknown },
+  ctx: ExtensionContext,
+  config: TranslationSettings,
+): Promise<undefined> {
+  const input = event.input;
+  if (event.toolName !== ASK_TOOL || !isJson(input) || !ctx.hasUI) return undefined;
+  if (!enabledForSession(ctx, config) || !config.translateFinalResponses) return undefined;
+  const model = configuredModel(ctx, config.translationModel.trim());
+  const pair = outputPair(config, lastUserLanguage);
+  if (!model || !pair.toName) return undefined;
+  const original = askQuestions(input);
+  const texts = askTexts(original);
+  const source = texts.join("\n");
+  if (!texts.length || source.length > MAX_TRANSLATION_CHARS) return undefined;
+  if (!translationDecision(await detectLanguage(source), pair)) return undefined;
+  const reply = await complete(
+    ctx,
+    model,
+    askTranslationPrompt(pair, texts.length, referenceBlock(historyFor(ctx), "output", pair)),
+    JSON.stringify(texts),
+    ASK_TIMEOUT_MS,
+  );
+  const translated = reply ? parseAskTranslation(reply, texts.length) : undefined;
+  if (!translated) {
+    ctx.ui.notify("Translation skipped: the question could not be translated.", "warning");
+    return undefined;
+  }
+  pendingAsks.set(
+    event.toolCallId,
+    rewriteAsk(input, original, withAskTexts(original, translated)),
+  );
+  return undefined;
+}
+
+/** The agent asked in its own language, so it is answered in it: a picked
+ *  option as the title it wrote, and the user's own words — a typed answer,
+ *  a comment — translated like a message from them. `details` keep what the
+ *  user saw. */
+async function translateAskResult(
+  event: { toolCallId: string; details: unknown; isError: boolean },
+  ctx: ExtensionContext,
+  config: TranslationSettings,
+) {
+  const record = pendingAsks.get(event.toolCallId);
+  if (!record) return undefined;
+  pendingAsks.delete(event.toolCallId);
+  const answers = event.isError ? null : askAnswers(event.details);
+  if (!answers || answers.length !== record.questions.length) return undefined;
+
+  const pair = inputPair(config);
+  const wanted = config.translateUserMessages && Boolean(config.translationModel.trim());
+  const words = async (text: string | undefined) => {
+    if (!text?.trim() || !wanted || !translationDecision(await detectLanguage(text), pair)) {
+      return text;
+    }
+    return (await translate(text, "input", pair, ctx, config)) ?? text;
+  };
+  const mapped = await Promise.all(
+    answers.map(async (answer, index): Promise<AskResponse | undefined> => {
+      if (!answer) return undefined;
+      if (answer.kind === "freeform") return { kind: "freeform", text: (await words(answer.text))! };
+      const titles = record.titles[index];
+      const selections = await Promise.all(
+        answer.selections.map(async (s) => titles.get(s) ?? (await words(s))!),
+      );
+      return { kind: "selection", selections, comment: await words(answer.comment) };
+    }),
+  );
+  const batch = isJson(event.details) && event.details.kind === "batch";
+  return {
+    content: [{ type: "text" as const, text: askResultText(record.questions, mapped, batch) }],
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("input", (event, ctx) => transformInput(pi, event, ctx, settings()));
   pi.on("message_end", (event, ctx) => transformFinalMessage(event, ctx, settings()));
+  pi.on("tool_call", (event, ctx) => translateAsk(event, ctx, settings()));
+  pi.on("tool_result", (event, ctx) => translateAskResult(event, ctx, settings()));
 }
