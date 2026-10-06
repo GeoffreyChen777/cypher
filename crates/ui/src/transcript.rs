@@ -2146,10 +2146,11 @@ pub struct Transcript {
     render_cache: Rc<RefCell<RenderCache>>,
     highlights: HighlightStore,
     show_jump_button: bool,
-    /// Distance from the bottom at the last observation (wheel event or spring
-    /// tick) — restick and escape are direction-aware
-    /// (see [`Transcript::should_restick`]).
-    last_scroll_distance: f32,
+    /// Vertical delta (px, positive = toward older content) of the wheel
+    /// event being dispatched, recorded in the capture phase so the list's
+    /// scroll handler can tell which way the USER moved — escape and restick
+    /// are direction-aware (see [`Transcript::should_restick`]).
+    wheel_dy: Rc<std::cell::Cell<f32>>,
     /// The stick-to-bottom pin. Broken only by user input (wheel/touch up);
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
@@ -2392,7 +2393,7 @@ impl Transcript {
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             highlights: HighlightStore::default(),
             show_jump_button: false,
-            last_scroll_distance: 0.0,
+            wheel_dy: Rc::default(),
             pinned: true,
             own_turn: None,
             own_turn_kick: false,
@@ -2753,8 +2754,30 @@ impl Transcript {
     /// stick band *and* moving toward the bottom. Direction matters — a small
     /// wheel-up notch near the bottom stays inside the band, and re-sticking
     /// on it would snap the view straight back, making the pin unbreakable.
-    pub fn should_restick(distance: f32, previous_distance: f32) -> bool {
-        distance <= STICK_THRESHOLD_PX && distance < previous_distance
+    /// `wheel_dy` is the input's own delta (see [`Self::wheel_dy`]).
+    pub fn should_restick(distance: f32, wheel_dy: f32) -> bool {
+        distance <= STICK_THRESHOLD_PX && wheel_dy < 0.0
+    }
+
+    /// Records each wheel event's vertical delta for [`Self::handle_scroll`]
+    /// (the list's scroll event carries none). Capture phase: it runs before
+    /// the list scrolls, and no row's bubble-phase `stop_propagation` can
+    /// hide the event from it. Hitbox-free, so it never blocks input.
+    fn wheel_observer(&self) -> impl IntoElement {
+        let wheel_dy = self.wheel_dy.clone();
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, _, _| {
+                    if phase == gpui::DispatchPhase::Capture && bounds.contains(&event.position) {
+                        // Same line height the list scrolls lines by.
+                        wheel_dy.set(f32::from(event.delta.pixel_delta(px(20.0)).y));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
@@ -2788,13 +2811,24 @@ impl Transcript {
                 // even release-and-restick within one gesture right after a
                 // send, so under the old rules the prompt never landed at
                 // the top at all.
+                //
+                // Direction comes from the wheel event itself, never from
+                // the bottom distance moving: layout moves the bottom too (a
+                // streaming commit grows the content a frame before the pad
+                // shrinks to match), so a distance baseline went stale and a
+                // wheel-up shorter than the drift read as "toward the
+                // bottom" — the hold re-asserted on every notch and the chat
+                // would not scroll at all (user report, rig-reproduced).
+                let wheel_dy = this.wheel_dy.take();
+                let away = wheel_dy > 0.0;
                 if this.own_turn.is_some() {
                     let distance = this.distance_from_bottom();
-                    let previous = this.last_scroll_distance;
-                    this.last_scroll_distance = distance;
                     let held = this.own_turn.as_ref().is_some_and(|a| a.held);
-                    if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
-                        // Input moving away from the bottom breaks the hold.
+                    if away {
+                        // Input moving away from the bottom breaks the hold —
+                        // any amount: the hard stop below re-asserts per
+                        // event, so a size threshold would swallow a slow
+                        // trackpad drag whole.
                         if let Some(anchor) = this.own_turn.as_mut() {
                             anchor.held = false;
                         }
@@ -2803,7 +2837,7 @@ impl Transcript {
                         this.spring.reset();
                         this.spring_last_tick = None;
                     } else if !held
-                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous))
+                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, wheel_dy))
                     {
                         // Returning to the bottom returns to the RUNWAY: the
                         // glide re-lands the prompt at its inset.
@@ -2829,7 +2863,6 @@ impl Transcript {
                             });
                             this.list.scroll_by(px(-this.own_send_inset(ix)));
                         }
-                        this.last_scroll_distance = this.distance_from_bottom();
                     }
                     let show = distance > SCROLL_BUTTON_THRESHOLD_PX
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
@@ -2840,9 +2873,7 @@ impl Transcript {
                     return;
                 }
                 let distance = this.distance_from_bottom();
-                let previous = this.last_scroll_distance;
-                this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
+                if away && distance > AT_BOTTOM_PX {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
                     // scroll handler (mugen §1e: interrupt from input, not
@@ -2850,7 +2881,7 @@ impl Transcript {
                     this.pinned = false;
                     this.spring.reset();
                     this.spring_last_tick = None;
-                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
+                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, wheel_dy) {
                     // Returning toward the bottom inside the 70px band (or
                     // arriving at it) re-engages the pin with a glide.
                     if !this.pinned {
@@ -2950,13 +2981,6 @@ impl Transcript {
     /// all motion is the ordinary bottom pin (see [`OwnTurnAnchor`]).
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
         self.own_turn_kick = false;
-        // Layout moves the bottom too (pad refinement, streaming growth):
-        // refresh the wheel handler's escape baseline every frame so only a
-        // WHEEL's own delta registers as user intent. Without this, the pad
-        // growing at turn-completion between two wheel events read as
-        // "scrolled away" and silently released the hold — the next wheels
-        // then sank unopposed deep into the runway blank (rig-traced).
-        self.last_scroll_distance = self.distance_from_bottom();
         let Some(anchor_ix) = self.own_turn_anchor_ix() else {
             // The optimistic echo may arrive on the next state notification.
             return;
@@ -3318,7 +3342,6 @@ impl Transcript {
         if next > pos {
             self.list.scroll_by(px(next - pos));
         }
-        self.last_scroll_distance = (target - next).max(0.0);
 
         if target - next <= 0.5 {
             let settled = *self.spring_settled_at.get_or_insert(now);
@@ -6256,6 +6279,7 @@ impl Render for Transcript {
                     .size_full()
                     .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
             )
+            .child(self.wheel_observer())
             .child(rail);
         // The shared Comment pill/editor lives in the SHELL's deferred layer
         // (paints above every clipped surface). The transcript only guards
@@ -6281,6 +6305,10 @@ impl Render for Transcript {
         root
     }
 }
+
+#[cfg(test)]
+#[path = "transcript_scroll_tests.rs"]
+mod scroll_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6468,15 +6496,15 @@ mod tests {
     fn restick_is_direction_aware() {
         // Scrolling away from the bottom never resticks, even inside the band
         // (a 20px wheel notch from the pinned bottom must break the pin).
-        assert!(!Transcript::should_restick(20.0, 0.0));
-        assert!(!Transcript::should_restick(69.0, 30.0));
+        assert!(!Transcript::should_restick(20.0, 20.0));
+        assert!(!Transcript::should_restick(69.0, 0.5));
         // Returning toward the bottom resticks once inside the 70px band…
-        assert!(Transcript::should_restick(69.0, 120.0));
-        assert!(Transcript::should_restick(0.0, 30.0));
+        assert!(Transcript::should_restick(69.0, -20.0));
+        assert!(Transcript::should_restick(0.0, -0.5));
         // …but not while still outside it.
-        assert!(!Transcript::should_restick(200.0, 300.0));
-        // No movement — leave the pin alone.
-        assert!(!Transcript::should_restick(50.0, 50.0));
+        assert!(!Transcript::should_restick(200.0, -20.0));
+        // No vertical movement — leave the pin alone.
+        assert!(!Transcript::should_restick(50.0, 0.0));
     }
 
     #[test]
