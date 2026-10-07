@@ -1,5 +1,7 @@
 //! Integrated regressions for local-first profile privacy and lifecycle boundaries.
 
+mod common;
+
 use std::path::Path;
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -7,8 +9,9 @@ use cypher_engine::{
     AuthState, Engine, EngineConfig, EngineCore, EngineProfile, HarnessId, WorkspaceScope,
     default_registry,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+use common::edge::{query_param, read_request, respond};
 
 fn config(
     data_dir: &Path,
@@ -423,7 +426,7 @@ impl RecordingEdge {
 }
 
 async fn handle_edge_request(mut stream: tokio::net::TcpStream, requests: Arc<Mutex<Vec<String>>>) {
-    let Some((target, _body)) = read_request(&mut stream).await else {
+    let Some((_, target, _body)) = read_request(&mut stream).await else {
         return;
     };
     requests.lock().expect("requests lock").push(target.clone());
@@ -441,84 +444,15 @@ async fn handle_edge_request(mut stream: tokio::net::TcpStream, requests: Arc<Mu
     } else {
         ("404 Not Found", r#"{"error":"unexpected_request"}"#.into())
     };
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, String)> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 1024];
-    let header_end = loop {
-        if let Some(position) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-            break position + 4;
-        }
-        let read = stream.read(&mut chunk).await.ok()?;
-        if read == 0 {
-            return None;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-    };
-    let headers = String::from_utf8_lossy(&buffer[..header_end]);
-    let mut lines = headers.lines();
-    let target = lines.next()?.split_whitespace().nth(1)?.to_string();
-    let content_length = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = buffer[header_end..].to_vec();
-    while body.len() < content_length {
-        let read = stream.read(&mut chunk).await.ok()?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
-    }
-    Some((target, String::from_utf8_lossy(&body).into_owned()))
+    respond(&mut stream, status, &body).await;
 }
 
 fn fake_jwt(org_id: &str) -> String {
-    let claims = serde_json::json!({
+    common::edge::fake_jwt(serde_json::json!({
         "iat": 1_000,
         "exp": 4_600,
         "org_id": org_id,
-    });
-    format!("e30.{}.sig", base64url(claims.to_string().as_bytes()))
-}
-
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut output = String::new();
-    for chunk in bytes.chunks(3) {
-        let bytes = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let value = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
-        output.push(ALPHABET[(value >> 18) as usize & 63] as char);
-        output.push(ALPHABET[(value >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            output.push(ALPHABET[(value >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            output.push(ALPHABET[value as usize & 63] as char);
-        }
-    }
-    output
-}
-
-fn query_param(url: &str, key: &str) -> Option<String> {
-    url.split_once('?')?
-        .1
-        .split('&')
-        .filter_map(|part| part.split_once('='))
-        .find(|(name, _)| *name == key)
-        .map(|(_, value)| value.to_string())
+    }))
 }
 
 #[tokio::test]

@@ -19,18 +19,15 @@
 //!   promoted chat;
 //! - `EngineCore::shutdown` reaps unpromoted chats.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::StreamExt;
-use futures::stream::BoxStream;
 
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_engine::EngineCore;
 use cypher_proto::{
-    AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
+    AgentEvent, ChatConfig, DoneStatus, HarnessId, RunRequest, SandboxLevel, SessionStatus,
 };
 use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
@@ -47,56 +44,25 @@ fn side_context(prompt: &str) -> serde_json::Value {
     serde_json::from_str(json).expect("context JSON parses")
 }
 
-/// One-liner harness that RECORDS every RunRequest (the effective-prompt
-/// assertion) and streams a quick Done.
-struct RecordingHarness {
-    requests: Arc<Mutex<Vec<RunRequest>>>,
-    /// When armed, the next run withholds its Done until the sender fires or
-    /// drops, so a test can observe the run while it is still Working.
-    hold: Hold,
-}
-
 type Hold = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>;
 
-#[async_trait]
-impl Harness for RecordingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Pi
-    }
-    fn display_name(&self) -> &str {
-        "Recording"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.requests.lock().unwrap().push(request);
-        let hold = self.hold.lock().unwrap().take();
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Pi,
-                model: "model-x".into(),
-                tools: vec![],
-                cwd: "/tmp/repo".into(),
-                session_id: "hs-1".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "side answer".into(),
-            }),
+/// One-liner Pi harness that RECORDS every RunRequest (the effective-prompt
+/// assertion) and streams a quick Done. When `hold` is armed, the next run
+/// withholds its Done until the sender fires or drops, so a test can observe
+/// the run while it is still Working.
+fn recording_harness(requests: Arc<Mutex<Vec<RunRequest>>>, hold: Hold) -> common::TestHarness {
+    common::TestHarness::new(HarnessId::Pi, "Recording", move |request, _| {
+        requests.lock().unwrap().push(request);
+        let hold = hold.lock().unwrap().take();
+        let events = vec![
+            Ok(common::session_started(
+                HarnessId::Pi,
+                "model-x",
+                "/tmp/repo",
+                "hs-1",
+                "a-1",
+            )),
+            Ok(common::text("side answer")),
         ];
         let done = futures::stream::once(async move {
             if let Some(hold) = hold {
@@ -110,7 +76,8 @@ impl Harness for RecordingHarness {
             })
         });
         Ok(futures::stream::iter(events).chain(done).boxed())
-    }
+    })
+    .steering()
 }
 
 struct Rig {
@@ -121,16 +88,9 @@ struct Rig {
 }
 
 fn assemble() -> Rig {
-    let registry = HarnessRegistry::new();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let hold = Hold::default();
-    registry.register(Arc::new(RecordingHarness {
-        requests: requests.clone(),
-        hold: hold.clone(),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
-        .expect("engine core assembles");
+    let common::Rig { core, dir } = common::rig(recording_harness(requests.clone(), hold.clone()));
     Rig {
         core,
         requests,
@@ -146,18 +106,10 @@ fn assemble_arc() -> (
     Arc<Mutex<Vec<RunRequest>>>,
     tempfile::TempDir,
 ) {
-    let registry = HarnessRegistry::new();
     let requests = Arc::new(Mutex::new(Vec::new()));
-    registry.register(Arc::new(RecordingHarness {
-        requests: requests.clone(),
-        hold: Hold::default(),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = Arc::new(
-        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None)
-            .expect("engine core assembles"),
-    );
-    (core, requests, dir)
+    let common::Rig { core, dir } =
+        common::rig(recording_harness(requests.clone(), Hold::default()));
+    (Arc::new(core), requests, dir)
 }
 
 async fn rpc(
@@ -169,16 +121,6 @@ async fn rpc(
         RpcReply::Value(value) => Ok(value),
         _ => Err(RpcError::Failed("expected unary reply".into())),
     }
-}
-
-fn wait_for(cond: impl Fn() -> bool, what: &str) {
-    for _ in 0..400 {
-        if cond() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("timed out waiting for {what}");
 }
 
 /// Seed ONLY the parent chat row (no transcript) — for the empty-parent-\
@@ -227,7 +169,7 @@ async fn seed_parent(core: &EngineCore) {
         )
         .await
         .expect("parent dispatch");
-    wait_for(
+    common::wait_blocking(
         || {
             core.sessions
                 .session_status(PARENT)
@@ -310,7 +252,7 @@ async fn start_send_promote_flow() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "side run to reach the harness",
     );
@@ -332,7 +274,7 @@ async fn start_send_promote_flow() {
         "effective prompt ends with the visible user request untouched: {}",
         first.prompt
     );
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -418,7 +360,7 @@ async fn start_send_promote_flow() {
     )
     .await
     .expect("second SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before2 + 1,
         "second side run to reach the harness",
     );
@@ -426,12 +368,12 @@ async fn start_send_promote_flow() {
         rig.requests.lock().unwrap()[before2].prompt,
         "side question two"
     );
-    wait_for(
+    common::wait_blocking(
         || statuses.lock().unwrap().iter().any(|s| s == "working"),
         "status watch to stream Working",
     );
     let _ = release.send(());
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -440,7 +382,7 @@ async fn start_send_promote_flow() {
         },
         "second side run to settle",
     );
-    wait_for(
+    common::wait_blocking(
         || statuses.lock().unwrap().last().is_some_and(|s| s == "idle"),
         "status watch to stream the settled Idle",
     );
@@ -546,7 +488,7 @@ async fn dispose_tears_down_without_remnants() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -619,7 +561,7 @@ async fn shutdown_reaps_unpromoted_side_chats() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || !rig.requests.lock().unwrap().is_empty(),
         "side run to start",
     );
@@ -691,7 +633,7 @@ async fn failed_dispatch_keeps_first_send_context_for_retry() {
     )
     .await
     .expect("retry SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "retry to reach the harness",
     );
@@ -868,7 +810,7 @@ async fn first_send_injects_quote_with_empty_parent_context() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "side run to reach the harness",
     );
@@ -962,7 +904,7 @@ async fn concurrent_promotes_are_idempotent() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || requests.lock().unwrap().len() == before + 1,
         "side run to reach the harness",
     );
@@ -1161,7 +1103,7 @@ async fn promoted_chat_send_dispatches_as_normal_chat() {
     )
     .await
     .expect("post-promote send ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "post-promote run to reach the harness",
     );
@@ -1211,7 +1153,7 @@ async fn first_send_quotes_the_original_of_a_translated_selection() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "side run to reach the harness",
     );
@@ -1251,7 +1193,7 @@ async fn first_send_prompt_frames_context_as_untrusted_reference() {
     )
     .await
     .expect("SendSideChat ok");
-    wait_for(
+    common::wait_blocking(
         || rig.requests.lock().unwrap().len() == before + 1,
         "side run to reach the harness",
     );

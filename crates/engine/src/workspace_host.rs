@@ -1,6 +1,5 @@
 //! WorkspaceHost — owns the per-user workspace **registry** (docs/
-//! registry-sync.md; replaces the Loro workspace doc after the 2026-07/08
-//! wedge incidents): local snapshot persistence, edge room sync
+//! registry-sync.md): local snapshot persistence, edge room sync
 //! (`/registry/{orgId}/ws` → room `reg1/{orgId}/{userId}`, offline-tolerant —
 //! spaces/sessions are private to their owner, never org-visible), the device
 //! registry row for THIS device, and the typed watch channels the
@@ -16,12 +15,6 @@
 //! Liveness: `lastSeenAt` is a row write on boot/shutdown ONLY — the periodic 15s
 //! heartbeat rides the room's presence frames (memory-only on the DO), so staying
 //! online never grows server state.
-//!
-//! Migration: first boot after the update finds no `registry1` snapshot, reads
-//! the legacy `workspace2` Loro snapshot, and seeds the registry from it as
-//! pending upserts (historical HLCs — live writes always win). The overlay
-//! serves the full sidebar before any server contact; the old `ws4` rooms are
-//! simply never joined again. The legacy snapshot is kept for rollback.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -29,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
-use cypher_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
+use cypher_doc::{DeletedDevice, DeletedSpace, REGISTRY_DOC_ID, RegistryDoc};
 use cypher_proto::{
     Chat, ChatConfig, ChildAgentProfile, ChildChat, Device, HarnessId, SandboxLevel, Session,
     Space, SubagentRunMode,
@@ -63,11 +56,6 @@ impl ChildChatOutcome {
     }
 }
 
-/// Legacy Loro workspace snapshot row — now only read once, as the migration
-/// source for the registry seed. Kept on disk for rollback.
-pub const WORKSPACE_DOC_ID: &str = "workspace2";
-/// Legacy (pre-spaces) snapshot row — best-effort deleted on open.
-const LEGACY_WORKSPACE_DOC_ID: &str = "workspace";
 /// Org used when none is configured (matches the edge's dev-mode `user@org` bearers).
 pub const DEFAULT_ORG_ID: &str = "dev-org";
 /// User used when none is configured (dev mode without a bearer).
@@ -284,7 +272,7 @@ impl RegistryTransport for EdgeRegistryTransport {
 /// Quiet-probe cadence for the registry room: fixed at 15 minutes. One room
 /// per engine, so the fixed cadence costs ~100 DO wakes/day total, and the
 /// probe is deadline-checked — a mute room is detected within
-/// probe cadence + 10s instead of hours (2026-08-04 deaf-socket lesson).
+/// probe cadence + 10s instead of hours.
 const REGISTRY_PROBE_QUIET: std::time::Duration = std::time::Duration::from_secs(900);
 /// Deaf-socket escalation: live peer presence dark this long after the
 /// tripwire probe → redial on a fresh socket (see `check_presence_deafness`).
@@ -297,7 +285,7 @@ const PRESENCE_DEAF_REDIAL_MS: i64 = 60_000;
 /// already heartbeats each 15s. The monotonic seen-cache and the relay
 /// status probe deliberately keep devices *fresh-looking* through other
 /// paths; they must never feed this tripwire (they'd mask exactly the
-/// failure it exists to catch — 2026-08-04 deaf-socket incident).
+/// failure it exists to catch).
 #[derive(Default)]
 struct PresenceWatch {
     /// Armed once at least one OTHER device has been seen live via the
@@ -392,58 +380,14 @@ pub struct WorkspaceHost {
 }
 
 impl WorkspaceHost {
-    /// Load (or migrate, or init) the registry, upsert this device's row, start
+    /// Load (or init) the registry, upsert this device's row, start
     /// the change-driven task, and join the edge registry room when configured.
     pub fn open(store: Arc<DocsStore>, config: WorkspaceHostConfig) -> Result<Self, EngineError> {
         let mut doc = match store.load_snapshot(REGISTRY_DOC_ID)? {
             Some(bytes) => RegistryDoc::from_bytes(&bytes, &config.device_id)
                 .map_err(|e| EngineError::Other(format!("registry snapshot load failed: {e}")))?,
-            None => {
-                // MIGRATION (instant, one-time): seed from the legacy Loro
-                // workspace snapshot when one exists. Seeds are pending upserts
-                // with historical HLCs — the overlay serves the full sidebar
-                // immediately, the room converges on first join, and any live
-                // write beats a migrated value. The legacy snapshot stays on
-                // disk for rollback.
-                let mut doc = RegistryDoc::new(&config.device_id);
-                match store.load_snapshot(WORKSPACE_DOC_ID) {
-                    Ok(Some(bytes)) => {
-                        let raw = loro::LoroDoc::new();
-                        match raw.import(&bytes) {
-                            Ok(_) => {
-                                let legacy = WorkspaceDoc::from_doc(raw);
-                                match legacy.read_all() {
-                                    Ok(state) => match doc.seed_from_workspace(&state) {
-                                        Ok(rows) => {
-                                            tracing::info!(
-                                                rows,
-                                                "migrated legacy workspace doc into the registry"
-                                            );
-                                        }
-                                        Err(err) => {
-                                            tracing::warn!(error = %err, "workspace migration seed failed");
-                                        }
-                                    },
-                                    Err(err) => {
-                                        tracing::warn!(error = %err, "legacy workspace read failed; starting empty");
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!(error = %err, "legacy workspace import failed; starting empty");
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(error = %err, "legacy workspace snapshot load failed; starting empty");
-                    }
-                }
-                doc
-            }
+            None => RegistryDoc::new(&config.device_id),
         };
-        // Destructive-break hygiene: the pre-spaces row stays unreachable.
-        store.delete_snapshot(LEGACY_WORKSPACE_DOC_ID).ok();
 
         // Boot: announce our device row immediately when there's no edge (local
         // / tests). Synced runtimes wait for the first authoritative registry
@@ -733,8 +677,7 @@ impl WorkspaceHost {
 
     /// Probe the registry room's liveness NOW (window-focus sweep). Probes are
     /// deadline-checked in the client: an unanswered probe tears the session
-    /// down for a fresh socket, so a deaf-receiving room (2026-08-04 incident)
-    /// heals within seconds of the user looking at the app.
+    /// down for a fresh socket, so a deaf-receiving room heals within seconds of the user looking at the app.
     pub fn probe(&self) {
         // Foreground/manual retry bypasses negative-cache delays. The task
         // consumes this after any in-flight request, so a late false reply
@@ -1055,9 +998,7 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
-                // Born on chat2: a brand-new chat has an empty doc — nothing
-                // to seed, no migration race to lose. Only pre-existing chats
-                // go through the seed+flip path (the host migration sweep).
+                // Born on chat2. Peers (iOS) gate on `roomGen >= 2`.
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
@@ -1223,12 +1164,6 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.upsert_space(space))?)
     }
 
-    /// Flip the chat's sync room generation (docs/chat2-sync.md M2) — the
-    /// host calls this in the same breath as seeding the chat2 checkpoint.
-    pub fn set_chat_room_gen(&self, chat_id: &str, room_gen: u32) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.set_chat_room_gen(chat_id, room_gen))?)
-    }
-
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
@@ -1248,7 +1183,7 @@ impl WorkspaceHost {
 
     /// Sidebar freshness with an explicit timestamp: set the promoted Side
     /// Chat's preview + last-message activity from its transcript's newest
-    /// message (round-21 audit — a promoted chat must not land blank in the
+    /// message (a promoted chat must not land blank in the
     /// sidebar). Best-effort: `false` when the row is missing.
     pub fn set_chat_last_message(
         &self,
@@ -1259,7 +1194,7 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_last_message(chat_id, preview, at))?)
     }
 
-    /// Promote a temporary Side Chat into a normal ROOT chat (round 21): a
+    /// Promote a temporary Side Chat into a normal ROOT chat: a
     /// non-child Chat row with the SAME id, inheriting the parent's device /
     /// space / cwd / branch / config / checkout (deliberately NOT the parent's
     /// harness session — the promoted chat's own session continuity rides the
@@ -2102,580 +2037,4 @@ fn device_name_on_boot(existing_name: Option<&str>, detected_name: &str) -> Stri
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use chrono::{TimeDelta, Utc};
-    use cypher_proto::{Device, Session, SessionStatus};
-    use cypher_sync::DocsStore;
-
-    use super::{
-        RELAY_PROBE_ALIVE_CAP, RELAY_PROBE_INTERVAL_MS, RelayProbeRetry, WorkspaceHost,
-        WorkspaceHostConfig, device_name_on_boot, linked_worktree_root, merge_sessions,
-    };
-
-    fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
-        Session {
-            chat_id: chat_id.into(),
-            device_id: device_id.into(),
-            status,
-            started_at: None,
-            updated_at: Utc::now(),
-            subagents: Vec::new(),
-            context_usage: None,
-            throughput: None,
-        }
-    }
-
-    #[test]
-    fn merged_sessions_restore_local_durable_rows_after_restart() {
-        let durable = vec![
-            session("finished-child", "local-device", SessionStatus::Idle),
-            session("remote-chat", "remote-device", SessionStatus::Working),
-        ];
-
-        let merged = merge_sessions("local-device", &durable, &[]);
-
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].chat_id, "finished-child");
-        assert_eq!(merged[0].status, SessionStatus::Idle);
-        assert_eq!(merged[1].chat_id, "remote-chat");
-    }
-
-    #[test]
-    fn merged_sessions_prefer_own_live_status_over_durable_status() {
-        let durable = vec![session("local-chat", "local-device", SessionStatus::Idle)];
-        let live = vec![session(
-            "local-chat",
-            "local-device",
-            SessionStatus::Working,
-        )];
-
-        let merged = merge_sessions("local-device", &durable, &live);
-
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].status, SessionStatus::Working);
-    }
-
-    #[test]
-    fn boot_repairs_the_legacy_unknown_device_sentinel() {
-        assert_eq!(
-            device_name_on_boot(Some("unknown-device"), "MacBook Pro"),
-            "MacBook Pro"
-        );
-    }
-
-    #[test]
-    fn boot_preserves_a_user_selected_device_name() {
-        assert_eq!(
-            device_name_on_boot(Some("Work laptop"), "MacBook Pro"),
-            "Work laptop"
-        );
-    }
-
-    #[tokio::test]
-    async fn local_device_is_fresh_while_the_host_is_running() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = WorkspaceHost::open(
-            Arc::new(DocsStore::open(dir.path()).unwrap()),
-            WorkspaceHostConfig {
-                device_id: "local-device".into(),
-                device_name: "Local".into(),
-                platform: "linux".into(),
-                org_id: "org".into(),
-                user_id: "user".into(),
-                edge: None,
-                allow_device_rejoin: false,
-            },
-        )
-        .unwrap();
-        let mut devices = vec![Device {
-            id: "local-device".into(),
-            name: "Local".into(),
-            platform: "linux".into(),
-            last_seen_at: Some(Utc::now() - TimeDelta::minutes(10)),
-            created_at: None,
-            version: None,
-        }];
-
-        host.inner.overlay_presence(&mut devices);
-
-        let age = Utc::now()
-            .signed_duration_since(devices[0].last_seen_at.unwrap())
-            .num_seconds();
-        assert!(age <= 1, "local presence should be fresh, age={age}s");
-    }
-
-    fn open_host(dir: &std::path::Path, device_id: &str, allow_rejoin: bool) -> WorkspaceHost {
-        WorkspaceHost::open(
-            Arc::new(DocsStore::open(dir).unwrap()),
-            WorkspaceHostConfig {
-                device_id: device_id.into(),
-                device_name: "Local".into(),
-                platform: "linux".into(),
-                org_id: "org".into(),
-                user_id: "user".into(),
-                edge: None,
-                allow_device_rejoin: allow_rejoin,
-            },
-        )
-        .unwrap()
-    }
-
-    #[cfg(feature = "development")]
-    #[tokio::test]
-    async fn seeded_mock_device_is_a_never_seen_peer_and_cannot_replace_self() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "local-device", false);
-
-        host.seed_device("mock-box", "Studio Linux box", "linux", None)
-            .unwrap();
-        assert!(
-            host.seed_device("local-device", "Impostor", "linux", None)
-                .is_err()
-        );
-
-        let devices = host.read_devices().unwrap();
-        let mock = devices.iter().find(|d| d.id == "mock-box").unwrap();
-        assert_eq!(mock.name, "Studio Linux box");
-        assert_eq!(mock.last_seen_at, None);
-        let local = devices.iter().find(|d| d.id == "local-device").unwrap();
-        assert_eq!(local.name, "Local");
-    }
-
-    fn add_probe_peer(host: &WorkspaceHost) {
-        host.mutate(|doc| {
-            doc.upsert_device(&Device {
-                id: "peer".into(),
-                name: "Peer".into(),
-                platform: "linux".into(),
-                last_seen_at: None,
-                created_at: None,
-                version: None,
-            })
-        })
-        .unwrap();
-    }
-
-    /// An offline peer is polled forever, by every running engine, at the
-    /// backoff cap. The unpaced policy cost 120 Durable Object requests per
-    /// hour per peer; the 5-minute cap cut that to 15, and the 30-minute cap
-    /// to 7 in the first hour and 2 per hour thereafter — the doubling ramp
-    /// still answers quickly for a peer that just dropped.
-    #[tokio::test]
-    async fn relay_probe_negative_results_pace_an_offline_peer_down_to_the_cap() {
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "self", false);
-        add_probe_peer(&host);
-        let start = tokio::time::Instant::now();
-        let mut requests = 0;
-        let mut second_hour = 0;
-        for tick in 0..240 {
-            let now = start + Duration::from_secs(tick * 30);
-            let due = host.inner.relay_probe_candidates(now);
-            assert!(!due.contains(&"self".to_string()));
-            for peer in due {
-                if tick < 120 {
-                    requests += 1;
-                } else {
-                    second_hour += 1;
-                }
-                host.inner.record_relay_probe(&peer, Some(false), now);
-            }
-        }
-        assert_eq!(requests, 7, "first hour, including the doubling ramp");
-        assert_eq!(second_hour, 2, "steady state is one probe per cap window");
-        let backoff = super::lock(&host.inner.relay_probe_backoff);
-        assert_eq!(backoff["peer"].delay, super::RELAY_PROBE_BACKOFF_CAP);
-    }
-
-    #[test]
-    fn relay_probe_treats_an_unhosted_or_foreign_room_as_an_answer_not_an_error() {
-        use reqwest::StatusCode;
-        use serde_json::json;
-        let answer = super::relay_probe_answer;
-        // The body decides only on success.
-        let live = json!({ "hostConnected": true });
-        let away = json!({ "hostConnected": false });
-        assert_eq!(answer(StatusCode::OK, Some(&live)), Some(true));
-        assert_eq!(answer(StatusCode::OK, Some(&away)), Some(false));
-        assert_eq!(answer(StatusCode::OK, Some(&json!({}))), None);
-        assert_eq!(answer(StatusCode::OK, None), None);
-        // A room with no owner has never been hosted, and a foreign room is not
-        // ours: both are authoritative, so they walk the offline backoff
-        // instead of being re-asked every sweep.
-        assert_eq!(answer(StatusCode::NOT_FOUND, None), Some(false));
-        assert_eq!(answer(StatusCode::FORBIDDEN, None), Some(false));
-        // Transient failures say nothing about the peer and must stay
-        // inconclusive, or an Edge hiccup would mark every device offline.
-        for status in [
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::BAD_GATEWAY,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::TOO_MANY_REQUESTS,
-            StatusCode::UNAUTHORIZED,
-        ] {
-            assert_eq!(answer(status, None), None, "{status}");
-        }
-    }
-
-    #[tokio::test]
-    async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "self", false);
-        add_probe_peer(&host);
-        let now = tokio::time::Instant::now();
-        host.inner.record_relay_probe("peer", None, now);
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
-        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
-        host.inner.record_relay_probe("peer", Some(false), now);
-        assert!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(29))
-                .is_empty()
-        );
-        assert_eq!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(30)),
-            vec!["peer"]
-        );
-        host.inner
-            .record_relay_probe("peer", Some(false), now + Duration::from_secs(30));
-        assert!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(89))
-                .is_empty()
-        );
-        assert_eq!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(90)),
-            vec!["peer"]
-        );
-
-        // An "alive" answer keeps an entry rather than clearing it. The probe
-        // refreshes presence itself, and that self-granted freshness lasts only
-        // PRESENCE_FRESH_MS against a 30s sweep — so clearing here is what used
-        // to re-poll a healthy, presence-quiet device about once a minute
-        // forever (71 Durable Object requests/hour in production).
-        assert!(host.inner.record_relay_probe("peer", Some(true), now));
-        assert!(!super::lock(&host.inner.relay_probe_backoff).is_empty());
-        assert!(host.inner.relay_probe_candidates(now).is_empty());
-
-        // Once that self-granted freshness lapses, the backoff still holds.
-        super::lock(&host.inner.presence_seen)
-            .insert("peer".into(), crate::now_ms() - super::PRESENCE_FRESH_MS);
-        assert!(host.inner.relay_probe_candidates(now).is_empty());
-        assert_eq!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(30)),
-            vec!["peer"]
-        );
-
-        // A genuine heartbeat is not the probe's own stamp, so it clears the
-        // backoff at once and the device is verified normally again.
-        super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms() + 5);
-        assert!(host.inner.relay_probe_candidates(now).is_empty());
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
-    }
-
-    #[tokio::test]
-    async fn relay_probe_fresh_presence_wins_a_late_negative_and_deleted_peers_are_pruned() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "self", false);
-        add_probe_peer(&host);
-        let now = tokio::time::Instant::now();
-        host.inner.record_relay_probe("peer", Some(false), now);
-        super::lock(&host.inner.presence_seen).insert("peer".into(), crate::now_ms());
-        let mut devices = host.read_devices().unwrap();
-        host.inner.overlay_presence(&mut devices);
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
-        host.inner.record_relay_probe("peer", Some(false), now);
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
-
-        super::lock(&host.inner.presence_seen).clear();
-        host.inner.record_relay_probe("peer", Some(false), now);
-        host.delete_device("peer").unwrap();
-        assert!(host.inner.relay_probe_candidates(now).is_empty());
-        assert!(super::lock(&host.inner.relay_probe_backoff).is_empty());
-    }
-
-    #[tokio::test]
-    async fn expedited_probe_keeps_the_backoff_ladder() {
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "self", false);
-        add_probe_peer(&host);
-        let now = tokio::time::Instant::now();
-        for _ in 0..8 {
-            host.inner.record_relay_probe("peer", Some(false), now);
-        }
-        assert!(host.inner.relay_probe_candidates(now).is_empty());
-
-        // A reset makes the peer due at once...
-        host.inner.expedite_relay_probes(now);
-        assert_eq!(host.inner.relay_probe_candidates(now), vec!["peer"]);
-        // ...but another "offline" answer resumes at the cap, not at 30s.
-        host.inner.record_relay_probe("peer", Some(false), now);
-        assert!(
-            host.inner
-                .relay_probe_candidates(now + Duration::from_secs(60))
-                .is_empty()
-        );
-        assert_eq!(
-            super::lock(&host.inner.relay_probe_backoff)["peer"].delay,
-            super::RELAY_PROBE_BACKOFF_CAP
-        );
-    }
-
-    #[tokio::test]
-    async fn foreground_probe_wakes_relay_sweep_and_coalesces_repeated_requests() {
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "self", false);
-        // Opening/focusing a window must not add a probe when no extended
-        // offline delay exists yet (in particular during initial join).
-        host.probe();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(10),
-                host.inner.relay_probe_wake.notified()
-            )
-            .await
-            .is_err()
-        );
-        add_probe_peer(&host);
-        host.inner
-            .record_relay_probe("peer", Some(false), tokio::time::Instant::now());
-        host.probe();
-        host.probe();
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            host.inner.relay_probe_wake.notified(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(10),
-                host.inner.relay_probe_wake.notified()
-            )
-            .await
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_device_refuses_self_and_keeps_peer_spaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "local-device", false);
-
-        host.mutate(|doc| {
-            doc.upsert_device(&Device {
-                id: "dev-b".into(),
-                name: "vps".into(),
-                platform: "linux".into(),
-                last_seen_at: None,
-                created_at: Some(Utc::now()),
-                version: None,
-            })
-        })
-        .unwrap();
-        host.create_space("sp-b", "dev-b", "/tmp/b", None, false)
-            .unwrap();
-        host.create_chat("chat-b", Some("sp-b"), None, None, None)
-            .unwrap();
-
-        let err = host.delete_device("local-device").unwrap_err();
-        assert!(
-            err.to_string().contains("cannot delete this device"),
-            "{err}"
-        );
-        assert_eq!(host.read_devices().unwrap().len(), 2);
-
-        let deleted = host.delete_device("dev-b").unwrap();
-        assert!(deleted.existed);
-        let devices = host.read_devices().unwrap();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].id, "local-device");
-        assert_eq!(host.read_spaces().unwrap().len(), 1);
-        assert_eq!(host.read_chats().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn unpaired_device_evicts_instead_of_reannouncing() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "local-device", false);
-        assert!(!*host.watch_evicted().borrow());
-
-        host.mutate(|doc| doc.delete_device("local-device"))
-            .unwrap();
-        host.reconcile_own_device();
-        assert!(*host.watch_evicted().borrow());
-        assert!(
-            !host
-                .read_devices()
-                .unwrap()
-                .iter()
-                .any(|d| d.id == "local-device")
-        );
-    }
-
-    #[tokio::test]
-    async fn fresh_sign_in_may_revive_a_tombstoned_device() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open_host(dir.path(), "local-device", true);
-        host.mutate(|doc| doc.delete_device("local-device"))
-            .unwrap();
-        host.reconcile_own_device();
-        assert!(!*host.watch_evicted().borrow());
-        assert!(
-            host.read_devices()
-                .unwrap()
-                .iter()
-                .any(|d| d.id == "local-device")
-        );
-    }
-
-    #[test]
-    fn linked_worktree_resolves_to_the_checkout_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("proj");
-        let wt = dir.path().join("clever-ember");
-        std::fs::create_dir_all(root.join(".git").join("worktrees").join("clever-ember")).unwrap();
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(
-            wt.join(".git"),
-            format!(
-                "gitdir: {}\n",
-                root.join(".git/worktrees/clever-ember").display()
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            linked_worktree_root(&wt).as_deref(),
-            Some(root.to_str().unwrap())
-        );
-    }
-
-    #[test]
-    fn primary_checkouts_and_plain_folders_resolve_to_none() {
-        let dir = tempfile::tempdir().unwrap();
-        // Primary checkout: `.git` is a directory.
-        let primary = dir.path().join("primary");
-        std::fs::create_dir_all(primary.join(".git")).unwrap();
-        assert_eq!(linked_worktree_root(&primary), None);
-        // Not a repo at all.
-        let plain = dir.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(linked_worktree_root(&plain), None);
-        // A `.git` file pointing somewhere that is not `<root>/.git/worktrees/<name>`.
-        let odd = dir.path().join("odd");
-        std::fs::create_dir_all(&odd).unwrap();
-        std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
-        assert_eq!(linked_worktree_root(&odd), None);
-    }
-
-    /// A device that answers "alive" while its presence beat stays silent used
-    /// to be re-probed every sweep, forever: a successful probe cleared the
-    /// backoff and granted only PRESENCE_FRESH_MS (45s) of freshness against a
-    /// 30s sweep. Measured at 71 Durable Object requests/hour in production.
-    #[test]
-    fn a_live_but_presence_quiet_device_stops_being_polled() {
-        let now = tokio::time::Instant::now();
-
-        // First probe: nothing known yet, so it starts at the sweep interval.
-        let first = RelayProbeRetry::alive(None, now, 1_000);
-        assert_eq!(
-            first.delay,
-            std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS)
-        );
-        assert_eq!(first.verified_at, Some(1_000));
-
-        // Each further "alive" answer doubles the wait, up to the cap.
-        let second = RelayProbeRetry::alive(Some(&first), now, 2_000);
-        assert_eq!(second.delay, first.delay * 2);
-        let mut retry = second;
-        for stamp in 0..10 {
-            retry = RelayProbeRetry::alive(Some(&retry), now, stamp);
-        }
-        assert_eq!(retry.delay, RELAY_PROBE_ALIVE_CAP);
-        assert!(retry.retry_at > now);
-    }
-
-    /// The backoff only holds because the probe's own stamp is not mistaken for
-    /// a heartbeat. A genuine beat still clears it immediately.
-    #[test]
-    fn only_a_genuine_heartbeat_clears_the_alive_backoff() {
-        let now = tokio::time::Instant::now();
-        let probed = RelayProbeRetry::alive(None, now, 5_000);
-
-        // Freshness the probe granted itself: recognised, backoff survives.
-        assert_eq!(probed.verified_at, Some(5_000));
-
-        // A real presence frame carries a different, newer timestamp, so the
-        // candidate filter's `verified_at == seen` test fails and it clears.
-        assert_ne!(probed.verified_at, Some(6_000));
-    }
-
-    /// An offline answer must not inherit an alive entry's delay, or a device
-    /// that just went away would start its offline backoff already near the cap
-    /// and be noticed far too late.
-    #[test]
-    fn going_offline_restarts_the_backoff_from_the_sweep_interval() {
-        let now = tokio::time::Instant::now();
-        let mut alive = RelayProbeRetry::alive(None, now, 1);
-        for _ in 0..6 {
-            alive = RelayProbeRetry::alive(Some(&alive), now, 2);
-        }
-        assert_eq!(alive.delay, RELAY_PROBE_ALIVE_CAP);
-
-        let offline = RelayProbeRetry::offline(Some(&alive), now);
-        assert_eq!(
-            offline.delay,
-            std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS)
-        );
-        assert_eq!(offline.verified_at, None);
-
-        // Repeated offline answers still double as before.
-        let again = RelayProbeRetry::offline(Some(&offline), now);
-        assert_eq!(again.delay, offline.delay * 2);
-    }
-
-    /// Presence beats republish everything every 15s per device. Waking every
-    /// watch stream for an identical snapshot cost a relay frame to each
-    /// subscribed viewport — 1,050 inbound websocket messages/hour on one
-    /// DeviceRoom in production, all redundant.
-    #[test]
-    fn republishing_an_identical_snapshot_wakes_nobody() {
-        let (tx, mut rx) = tokio::sync::watch::channel(Vec::<String>::new());
-
-        super::publish_if_changed(&tx, vec!["a".to_string()]);
-        assert!(rx.has_changed().unwrap());
-        rx.borrow_and_update();
-
-        // The same snapshot again: stored, but no wake-up.
-        super::publish_if_changed(&tx, vec!["a".to_string()]);
-        super::publish_if_changed(&tx, vec!["a".to_string()]);
-        assert!(!rx.has_changed().unwrap());
-
-        // A real change still propagates immediately.
-        super::publish_if_changed(&tx, vec!["a".to_string(), "b".to_string()]);
-        assert!(rx.has_changed().unwrap());
-        assert_eq!(
-            *rx.borrow_and_update(),
-            vec!["a".to_string(), "b".to_string()]
-        );
-    }
-
-    /// The value must be written through even when nobody is listening yet, or
-    /// a stream subscribed later would start from a stale snapshot.
-    #[test]
-    fn the_latest_snapshot_is_stored_for_a_later_subscriber() {
-        let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
-        drop(rx);
-        super::publish_if_changed(&tx, vec!["fresh".to_string()]);
-        assert_eq!(*tx.subscribe().borrow(), vec!["fresh".to_string()]);
-    }
-}
+mod tests;

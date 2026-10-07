@@ -1,43 +1,10 @@
 //! EngineRpc — the engine-side `RpcService`: sessions + docs + the workspace-doc
 //! entity surface.
 //!
-//! Methods (feature-inventory §2):
-//! - `ListHarnesses` → `[HarnessDescriptor]`
-//! - `ListModels {harness}` → `[Model]`
-//! - `QueueCommand {chatId, command}` → `{commandId}` (durable doc command)
-//! - `WatchDocMessages {chatId}` → stream of joined `SessionMessageEntry[]`,
-//!   re-emitted on every doc change
-//! - `WatchChats` / `WatchDevices` → streams of the workspace doc's entity rows
-//! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
-//!   remote devices' workspace session rows
-//! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, deleteDevice, markChatSeen)
-//! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
-//!   and data boundary (never forwarded)
-//! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
-//! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
-//!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
-//!   `SelectOrg {organizationId}`
-//! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
-//!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
-//!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
-//!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
-//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows}` → `TerminalSession`,
-//!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
-//!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
-//!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
-//!   real multi-account auth in M6.
-//! - Agent accounts (§3.7): `ListAgentAccounts {forceUsage?}` →
-//!   `AgentAccountsSnapshot`, `ActivateAgentAccount`/`ForgetAgentAccount`
-//!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
-//!   `{loginId, url, mode}`, `CompleteAgentLogin {loginId, code}` → snapshot,
-//!   `PollAgentLogin {loginId}`, `CancelAgentLogin {loginId}`.
-//! - Uploads (§3.7): `UploadChunk {uploadId, data, seq?}`,
-//!   `UploadCommit {uploadId, fileName}` → `{path}`,
-//!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
-//!   done}` (path-jailed to the uploads dir + workspace-known chat cwds).
+//! The method catalogue is `cypher_rpc::methods`; `EngineRpc`'s
+//! `RpcService::handle` dispatches each one.
 //!
-//! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
+//! ## Device-addressed routing (`targetDeviceId`)
 //!
 //! ControlRpc methods are relay-forwardable: params may carry `targetDeviceId`. When it
 //! names another device, the call is forwarded verbatim over that device's relay DO via
@@ -45,8 +12,7 @@
 //! forward can never loop. Streaming methods are proxied by re-subscribing remotely and
 //! piping items. To make another method device-addressable, nothing per-method is needed
 //! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
-//! handlers stay transport-agnostic. Currently routed: `ListHarnesses`, `ListModels`,
-//! `QueueCommand`, `WatchDocMessages`, and `WatchDocCommands`.
+//! handlers stay transport-agnostic.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -59,8 +25,8 @@ use tokio::sync::watch;
 
 use cypher_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
 use cypher_proto::{
-    ChatConfig, ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest,
-    SideChatSource, SubagentRunMode, ToolCall, WorkspaceScope,
+    ChildAgentProfile, EngineInfo, HarnessId, RunRequest, SessionForkRequest, SideChatSource,
+    ToolCall, WorkspaceScope,
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -77,127 +43,11 @@ use crate::terminals::Terminals;
 use crate::uploads::Uploads;
 use crate::workspace_host::WorkspaceHost;
 
+mod params;
+use params::*;
+
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ChatParams {
-    chat_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListModelsParams {
-    harness: HarnessId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PiSessionModesParams {
-    #[serde(default)]
-    chat_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DetectPiLanguageParams {
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetHarnessEnabledParams {
-    harness: HarnessId,
-    enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PiPackageParams {
-    source: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QueueCommandParams {
-    chat_id: String,
-    command: SessionCommandPayload,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RetryCommandParams {
-    chat_id: String,
-    command_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RepoPathParams {
-    /// `repoPath` per §3.5 (the §2.1 shorthand `repo` is accepted as an alias).
-    #[serde(alias = "repo")]
-    repo_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SwitchRefParams {
-    /// The checkout to switch — a session's cwd (main folder or worktree).
-    repo_path: String,
-    ref_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateWorktreeParams {
-    #[serde(alias = "repo")]
-    repo_path: String,
-    branch: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeleteWorktreeParams {
-    #[serde(alias = "repo")]
-    repo_path: String,
-    #[serde(alias = "path")]
-    worktree_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListFoldersParams {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FileSearchParams {
-    query: String,
-    #[serde(default)]
-    chat_id: Option<String>,
-    #[serde(default)]
-    space_id: Option<String>,
-    /// Existing linked worktree selected for a new chat. The engine accepts it
-    /// only after verifying it against the space repository's worktree list.
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceFileParams {
-    chat_id: String,
-    /// Optimistic context check: never silently read a newly switched checkout.
-    cwd: String,
-    #[serde(default)]
-    path: String,
-    /// `WriteWorkspaceFile` only: the full replacement text.
-    #[serde(default)]
-    text: Option<String>,
-}
 
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
@@ -213,310 +63,6 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
         | ToolCall::Mcp { .. }
         | ToolCall::Unknown { .. } => None,
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenTerminalParams {
-    chat_id: String,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalIdParams {
-    terminal_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubscribeTerminalParams {
-    terminal_id: String,
-    #[serde(default)]
-    after_seq: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WriteTerminalParams {
-    terminal_id: String,
-    /// Base64 input bytes (plain UTF-8 accepted leniently).
-    data: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ResizeTerminalParams {
-    terminal_id: String,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ListAgentAccountsParams {
-    #[serde(default)]
-    force_usage: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentAccountParams {
-    harness: HarnessId,
-    account_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StartAgentLoginParams {
-    harness: HarnessId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginIdParams {
-    login_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CompleteAgentLoginParams {
-    login_id: String,
-    code: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadChunkParams {
-    upload_id: String,
-    /// Base64 payload chunk.
-    data: String,
-    #[serde(default)]
-    seq: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadCommitParams {
-    upload_id: String,
-    file_name: String,
-    /// Chat to seal the committed attachment against (queue-first sends: the
-    /// host records the durable final path so a waiting Run can execute).
-    /// Additive + defaulted — old clients commit without sealing.
-    #[serde(default)]
-    chat_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadAttachmentChunkParams {
-    path: String,
-    #[serde(default)]
-    offset: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FetchToolBlobParams {
-    /// Doc-resident sidecar ref (`{chatId}/{partId}` or `…​.diff`).
-    blob_ref: String,
-}
-
-/// `StartSubagent` params — the Cypher bridge's bounded start request. All
-/// string fields are length-checked at the handler (see the bounds below) so
-/// a misbehaving publisher can never mint an unbounded persisted row.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StartSubagentParams {
-    parent_chat_id: String,
-    /// Parent `cypher.subagents.v1` run id — the idempotence key with
-    /// `parent_chat_id`.
-    run_id: String,
-    agent: String,
-    /// Short task label for the child row (title / Inspector); ≤500 chars.
-    task: String,
-    /// The FULL task text for the initial run when it outgrows `task` (the
-    /// extension accepts tasks up to 64 KiB). Absent: `task` is the prompt.
-    #[serde(default)]
-    prompt: Option<String>,
-    mode: SubagentRunMode,
-    /// Parent tool call id this run answers to (sync/async); persisted on the
-    /// child row as the durable link to the parent's transcript part.
-    #[serde(default)]
-    tool_call_id: Option<String>,
-    /// Optional cwd override; defaults to the parent's cwd.
-    #[serde(default)]
-    cwd: Option<String>,
-    /// Persisted child agent profile (reapplied on later child turns).
-    system_prompt: String,
-    #[serde(default)]
-    tools: Vec<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    thinking: Option<String>,
-    /// Messaging-channel root (the parent extension's `messageRoot`).
-    message_root: String,
-    #[serde(default)]
-    child_index: u32,
-    /// Messaging address of this run when it is not the agent name; host-local
-    /// like the channel it names, so it is never written to the synced row.
-    #[serde(default)]
-    address: Option<String>,
-}
-
-/// `SavePiSubagent` params: the edited profile, plus the name the editor was
-/// opened on so a rename can retire the old file. Absent `originalName` means
-/// "create", which refuses to overwrite an existing profile.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SavePiSubagentParams {
-    #[serde(flatten)]
-    agent: crate::pi_subagents::PiSubagent,
-    #[serde(default)]
-    original_name: Option<String>,
-}
-
-/// `DeletePiSubagent` params.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeletePiSubagentParams {
-    name: String,
-}
-
-/// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "camelCase")]
-enum MutateParams {
-    #[serde(rename_all = "camelCase")]
-    CreateChat {
-        chat_id: String,
-        /// The project the chat is created in — fixes host device + base cwd.
-        /// `None` mints a project-less chat: `deviceId` picks the host and the
-        /// cwd defaults to `~` (expanded on the host at run time).
-        #[serde(default)]
-        space_id: Option<String>,
-        /// Host device for a project-less chat; ignored when `spaceId` is set.
-        #[serde(default)]
-        device_id: Option<String>,
-        #[serde(default)]
-        config: Option<ChatConfig>,
-        /// The picked ref, named on the row from the first frame (the footer
-        /// read "Select ref" until the diff reconciler stamped it).
-        #[serde(default)]
-        branch: Option<String>,
-        /// Cwd override (isolated-worktree path); default = the space's folder.
-        #[serde(default)]
-        cwd: Option<String>,
-    },
-    /// Create a space (device + folder pair). Idempotent by id; a live
-    /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
-    /// picker's FolderEntry — the owning device's SpacesSync re-verifies.
-    #[serde(rename_all = "camelCase")]
-    CreateSpace {
-        space_id: String,
-        device_id: String,
-        path: String,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        git_detected: bool,
-    },
-    /// LWW display-name set; `name: None` clears back to basename(path).
-    #[serde(rename_all = "camelCase")]
-    RenameSpace {
-        space_id: String,
-        #[serde(default)]
-        name: Option<String>,
-    },
-    /// Hard delete: cascades to every chat (and session row) in the space.
-    /// Live runs hosted here are interrupted best-effort.
-    #[serde(rename_all = "camelCase")]
-    DeleteSpace { space_id: String },
-    #[serde(rename_all = "camelCase")]
-    RenameChat { chat_id: String, title: String },
-    /// Set the chat's checkout branch label — the sidebar's
-    /// "project · branch" sub-line.
-    #[serde(rename_all = "camelCase")]
-    SetChatBranch { chat_id: String, branch: String },
-    /// Retarget a chat onto another folder — mid-session switch to an
-    /// EXISTING worktree (the picked ref's checkout). Next run starts a
-    /// fresh harness conversation there (resume is cwd-scoped).
-    #[serde(rename_all = "camelCase")]
-    SetChatCwd { chat_id: String, cwd: String },
-    /// Backdate a chat's activity timestamps (epoch ms) — the sidebar's
-    /// relative-time column. Used by tooling/seeds; the doc fold sets these on
-    /// real message traffic.
-    #[serde(rename_all = "camelCase")]
-    SetChatActivity {
-        chat_id: String,
-        #[serde(default)]
-        last_message_at: Option<i64>,
-        #[serde(default)]
-        created_at: Option<i64>,
-    },
-    /// Re-home a chat to another device (tooling/seeds; device migration later).
-    #[serde(rename_all = "camelCase")]
-    SetChatHost { chat_id: String, device_id: String },
-    #[serde(rename_all = "camelCase")]
-    SetChatArchived { chat_id: String, archived: bool },
-    /// User pins (synced LWW): pinned projects lead the sidebar, pinned
-    /// sessions lead their project's list.
-    #[serde(rename_all = "camelCase")]
-    SetChatPinned { chat_id: String, pinned: bool },
-    #[serde(rename_all = "camelCase")]
-    SetSpacePinned { space_id: String, pinned: bool },
-    /// Sidebar glyph + colour keys for a project (synced LWW; absent/null
-    /// clears to the default).
-    #[serde(rename_all = "camelCase")]
-    SetSpaceAppearance {
-        space_id: String,
-        #[serde(default)]
-        icon: Option<String>,
-        #[serde(default)]
-        color: Option<String>,
-    },
-    /// Full-config replace on the chat row (zeron `SetChatConfig`): the
-    /// composer's mid-session model / reasoning / options changes, LWW-synced
-    /// so they survive restarts and reach every device.
-    #[serde(rename_all = "camelCase")]
-    SetChatConfig { chat_id: String, config: ChatConfig },
-    /// Tombstone: removes the chats-map row; the session doc remains.
-    #[serde(rename_all = "camelCase")]
-    DeleteChat { chat_id: String },
-    #[serde(rename_all = "camelCase")]
-    RenameDevice { device_id: String, name: String },
-    /// Unpair a device: tombstones its registry row so it drops out of sync
-    /// and continues in local-only mode. Refused for THIS device.
-    #[serde(rename_all = "camelCase")]
-    DeleteDevice { device_id: String },
-    /// Synced seen marker (LWW + monotonic guard): clears the "completed"
-    /// badge on every device. `at` is epoch ms; default = now.
-    #[serde(rename_all = "camelCase")]
-    MarkChatSeen {
-        chat_id: String,
-        #[serde(default)]
-        at: Option<i64>,
-    },
-    /// Development builds only: upsert a fake peer device row (mock data for
-    /// judging multi-device / offline-host UI). `lastSeenAt` is epoch ms;
-    /// omitted = never seen, i.e. offline.
-    #[cfg(feature = "development")]
-    #[serde(rename_all = "camelCase")]
-    SeedDevice {
-        device_id: String,
-        name: String,
-        #[serde(default = "seed_device_platform")]
-        platform: String,
-        #[serde(default)]
-        last_seen_at: Option<i64>,
-    },
-}
-
-#[cfg(feature = "development")]
-fn seed_device_platform() -> String {
-    "linux".to_string()
 }
 
 pub struct EngineRpc {
@@ -1369,7 +915,7 @@ impl EngineRpc {
     }
 }
 
-/// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
+/// ControlRpc methods that honor `targetDeviceId`. Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {
@@ -3353,65 +2899,4 @@ impl RpcService for EngineRpc {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
-    /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
-    #[test]
-    fn agent_account_params_accept_ui_shape() {
-        let p: AgentAccountParams = parse_params(serde_json::json!({
-            "id": "acct-1",
-            "accountId": "acct-1",
-            "harness": "claude-code",
-            "targetDeviceId": "dev-2",
-        }))
-        .expect("ui param shape");
-        assert_eq!(p.account_id, "acct-1");
-        assert_eq!(p.harness, HarnessId::ClaudeCode);
-    }
-
-    #[test]
-    fn local_device_is_not_forwardable() {
-        assert!(!forwardable(methods::LOCAL_DEVICE));
-        assert!(!forwardable(methods::ENGINE_INFO));
-        assert!(!forwardable(methods::ENGINE_READY));
-        assert!(forwardable(methods::QUEUE_COMMAND));
-        assert!(forwardable(methods::PI_SESSION_MODES));
-        assert!(forwardable(methods::RETRY_COMMAND));
-        assert!(forwardable(methods::WATCH_DOC_COMMANDS));
-        assert!(is_stream_method(methods::WATCH_DOC_COMMANDS));
-        assert!(forwardable(methods::SEARCH_FILES));
-        assert!(forwardable(methods::SEARCH_GITHUB_ISSUES));
-        assert!(forwardable(methods::GET_GITHUB_ISSUE));
-        assert!(forwardable(methods::START_GITHUB_LOGIN));
-        assert!(forwardable(methods::POLL_GITHUB_LOGIN));
-        assert!(forwardable(methods::SIGN_OUT_GITHUB));
-        assert!(forwardable(methods::LIST_WORKSPACE_FILES));
-        assert!(forwardable(methods::READ_WORKSPACE_FILE));
-        assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
-        assert!(forwardable(methods::GET_TITLE_MODEL_SETTINGS));
-        assert!(forwardable(methods::SET_TITLE_MODEL_SETTINGS));
-        assert!(forwardable(methods::GET_WEB_SEARCH_FALLBACK));
-        assert!(forwardable(methods::SET_WEB_SEARCH_FALLBACK));
-        assert!(forwardable(methods::FETCH_ALL));
-    }
-
-    #[test]
-    fn tool_file_paths_keep_workspace_activity_only() {
-        assert_eq!(
-            tool_file_path(&ToolCall::EditFile {
-                path: "src/main.rs".into(),
-                old_string: None,
-                new_string: None,
-            }),
-            Some("src/main.rs")
-        );
-        assert_eq!(
-            tool_file_path(&ToolCall::Exec {
-                command: "cargo test".into(),
-            }),
-            None
-        );
-    }
-}
+mod tests;

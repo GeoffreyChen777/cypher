@@ -1,115 +1,30 @@
-//! The born-gen2 race (2026-08-11): the composer attaches the transcript
-//! watch — opening the chat doc — BEFORE its own `Mutate createChat` lands,
-//! so `open()` sees no registry row. Defaulting the absent row to gen 1
-//! minted a brand-new legacy s2 room post-cutover: the host ran the whole
-//! session against a room no other device reads (they follow the row's
-//! roomGen 2 to an empty chat2 room), the run's live doc ref blocked the
-//! cutover watcher's drop-and-reopen heal, the stuck handle got retired
-//! (suppressing every snapshot save), and the transcript vanished on the
-//! next restart. An absent row must mean "being born on chat2".
+//! The born-chat2 race: the composer attaches the transcript watch — opening
+//! the chat doc — BEFORE its own `Mutate createChat` lands, so `open()` sees
+//! no registry row. An absent row must mean "being born on chat2": the
+//! transcript written under that open must survive the row's arrival and a
+//! restart.
 
-use std::sync::Arc;
-use std::time::Duration;
+mod common;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
+use cypher_doc::{MessageRole, SessionCommandPayload};
+use cypher_engine::EngineCore;
+use cypher_proto::HarnessId;
 
-use cypher_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
-};
+use common::{complete_assistant_count, entries, run_request, wait_for};
 
 const CHAT: &str = "chat-born-gen2-race";
 
 /// Completes a one-line turn (the transcript payload the test asserts on).
-struct OneLinerHarness;
-
-#[async_trait]
-impl Harness for OneLinerHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "OneLiner"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "sess-race".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "the codeword is PINEAPPLE".into(),
-            }),
-            Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some("sess-race".into()),
-            }),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
-}
-
 fn assemble(dir: &std::path::Path) -> EngineCore {
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(OneLinerHarness));
-    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-}
-
-fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
-}
-
-fn complete_assistant_count(core: &EngineCore) -> usize {
-    entries(core)
-        .iter()
-        .filter(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
-        .count()
+    let harness = common::TestHarness::new(HarnessId::Mock, "OneLiner", |request, _| {
+        common::reply(
+            HarnessId::Mock,
+            &request,
+            "sess-race",
+            "the codeword is PINEAPPLE",
+        )
+    });
+    common::engine_at(dir, harness)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -151,19 +66,9 @@ async fn transcript_survives_open_racing_create_chat() {
             .queue_command(
                 CHAT,
                 SessionCommandPayload::Run {
-                    request: RunRequest {
-                        prompt: "what's the codeword?".into(),
-                        harness: None,
-                        model: None,
-                        reasoning: None,
-                        model_options: Default::default(),
+                    request: cypher_proto::RunRequest {
                         cwd: "~".into(),
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        auto_approve: true,
-                        attachments: Vec::new(),
-                        pending_attachments: Vec::new(),
-                        resume: None,
-                        worktree: None,
+                        ..run_request("what's the codeword?")
                     },
                     message_id: "msg-race-1".into(),
 
@@ -171,11 +76,14 @@ async fn transcript_survives_open_racing_create_chat() {
                 },
             )
             .expect("queue run command");
-        wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
+        wait_for(
+            || complete_assistant_count(&core, CHAT) == 1,
+            "turn to complete",
+        )
+        .await;
 
-        // The row arriving mid-life must not blank the transcript (the old
-        // watcher retired the handle; a reopen then built a fresh empty doc).
-        let mid = entries(&core);
+        // The row arriving mid-life must not blank the transcript.
+        let mid = entries(&core, CHAT);
         assert!(
             mid.iter().any(|e| e.role == MessageRole::User),
             "user message lost after registry row arrived: {mid:?}"
@@ -186,13 +94,11 @@ async fn transcript_survives_open_racing_create_chat() {
     }
     drop(watch_holder);
 
-    // Restart on the same data dir: the transcript must have persisted. The
-    // stuck s2 handle's `retired` flag used to suppress every snapshot save,
-    // so the doc's only copy died with the process.
+    // Restart on the same data dir: the transcript must have persisted.
     let core = assemble(&dir);
-    let after = entries(&core);
+    let after = entries(&core, CHAT);
     assert_eq!(
-        complete_assistant_count(&core),
+        complete_assistant_count(&core, CHAT),
         1,
         "assistant turn lost across restart: {after:?}"
     );

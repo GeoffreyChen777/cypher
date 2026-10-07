@@ -6,139 +6,36 @@
 //! REUSES the checkout instead of minting another. An invalid base ref
 //! Rejects the command and never dispatches the harness.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-
-use cypher_doc::{
-    MessageRole, MessageStatus, SessionCommandPayload, SessionCommandStatus, SessionMessageEntry,
-};
+use cypher_doc::{SessionCommandPayload, SessionCommandStatus};
 use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode, WorktreeSpec,
-};
+use cypher_proto::{HarnessId, RunRequest, WorktreeSpec};
+
+use common::{command_statuses, complete_assistant_count, run_request};
 
 const CHAT: &str = "chat-worktree-run";
 
-/// Completes a one-line turn and records the cwd each run spawned with.
-struct RecordingHarness {
-    cwds: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Harness for RecordingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Recorder"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.cwds.lock().unwrap().push(request.cwd.clone());
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "sess-wt".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: format!("ack: {}", request.prompt),
-            }),
-            Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some("sess-wt".into()),
-            }),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-}
-
-fn complete_assistant_count(core: &EngineCore) -> usize {
-    let entries: Vec<SessionMessageEntry> = core
-        .doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default();
-    entries
-        .iter()
-        .filter(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
-        .count()
-}
-
-fn command_status(core: &EngineCore) -> Vec<(String, SessionCommandStatus, Option<String>)> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_commands().ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| (c.id, c.status, c.resolution))
-        .collect()
+async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
+    common::wait_for_within(predicate, what, Duration::from_secs(20)).await;
 }
 
 fn run_payload(message_id: &str, repo_path: &str, base_ref: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
-            prompt: "isolated please".into(),
-            harness: None,
-            model: None,
-            reasoning: None,
-            model_options: Default::default(),
             // Fallback for hosts that predate the spec: the repo's own folder.
             cwd: repo_path.into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: true,
-            attachments: Vec::new(),
-            pending_attachments: Vec::new(),
-            resume: None,
             worktree: Some(WorktreeSpec {
                 repo_path: repo_path.into(),
                 base_ref: base_ref.into(),
                 name_hint: None,
             }),
+            ..run_request("isolated please")
         },
         message_id: message_id.into(),
         agent_prompt: None,
@@ -180,8 +77,18 @@ async fn assemble_with(cwds: Arc<Mutex<Vec<String>>>) -> (EngineCore, tempfile::
     let tmp = tempfile::tempdir().unwrap();
     let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
+    // Completes a one-line turn and records the cwd each run spawned with.
+    let harness = common::TestHarness::new(HarnessId::Mock, "Recorder", move |request, _| {
+        cwds.lock().unwrap().push(request.cwd.clone());
+        common::reply(
+            HarnessId::Mock,
+            &request,
+            "sess-wt",
+            &format!("ack: {}", request.prompt),
+        )
+    });
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingHarness { cwds: cwds.clone() }));
+    registry.register(Arc::new(harness));
     // Repos captures this value during construction. The two parallel tests
     // used to overwrite each other's roots, then assert against the wrong one.
     let core = {
@@ -240,7 +147,7 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     core.doc_host
         .queue_command(CHAT, run_payload("msg-wt-1", &repo_path, "main"))
         .expect("queue run command");
-    wait_for(|| complete_assistant_count(&core) == 1, "first turn").await;
+    wait_for(|| complete_assistant_count(&core, CHAT) == 1, "first turn").await;
 
     let first_cwd = cwds.lock().unwrap().first().cloned().expect("run recorded");
     assert_ne!(
@@ -280,7 +187,7 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     core.doc_host
         .queue_command(CHAT, run_payload("msg-wt-2", &repo_path, "main"))
         .expect("queue second run command");
-    wait_for(|| complete_assistant_count(&core) == 2, "second turn").await;
+    wait_for(|| complete_assistant_count(&core, CHAT) == 2, "second turn").await;
 
     let recorded: Vec<String> = cwds.lock().unwrap().clone();
     assert_eq!(recorded.len(), 2);
@@ -292,7 +199,7 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
         .expect("worktrees root/repo")
         .count();
     assert_eq!(worktrees, 1, "exactly one worktree for the chat");
-    let statuses = command_status(&core);
+    let statuses = command_statuses(&core, CHAT);
     assert!(
         statuses
             .iter()
@@ -319,7 +226,7 @@ async fn invalid_base_ref_rejects_and_never_dispatches() {
         .expect("queue run command");
     wait_for(
         || {
-            command_status(&core)
+            command_statuses(&core, CHAT)
                 .iter()
                 .any(|(_, s, _)| *s == SessionCommandStatus::Rejected)
         },
@@ -333,7 +240,7 @@ async fn invalid_base_ref_rejects_and_never_dispatches() {
         cwds.lock().unwrap().is_empty(),
         "harness must not execute on an invalid base ref"
     );
-    let statuses = command_status(&core);
+    let statuses = command_statuses(&core, CHAT);
     let (_, _, resolution) = statuses
         .iter()
         .find(|(_, s, _)| *s == SessionCommandStatus::Rejected)

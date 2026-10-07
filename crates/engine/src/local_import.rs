@@ -1,6 +1,6 @@
 //! One-time local→synced profile import.
 //!
-//! A device that worked locally (PR #30's `profiles/local`) and then signs in
+//! A device that worked locally (`profiles/local`) and then signs in
 //! gets its chats, spaces, journals, and command-ledger claims carried into
 //! the synced profile — through the same write paths every live mutation
 //! uses, so nothing here invents a second persistence or sync mechanism:

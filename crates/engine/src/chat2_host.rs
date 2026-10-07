@@ -18,7 +18,7 @@ use futures::future::BoxFuture;
 use crate::doc_host::EdgeConfig;
 
 /// Doc epoch stamped on every chat2-synced snapshot (docs/chat2-sync.md M1:
-/// thin docs are lineage epoch 2; M3 readers discard-and-adopt below it).
+/// thin docs are lineage epoch 2; readers discard-and-adopt below it).
 pub const CHAT2_DOC_EPOCH: u32 = 2;
 
 /// [`ChatDocSink`] over a live [`SessionDoc`] + the cursor-bearing store.

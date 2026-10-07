@@ -12,20 +12,14 @@
 //! are process-global: here the NORMAL window is set far beyond the test
 //! horizon, so a fast park can only have come through the short path.
 
-use std::sync::{Arc, Once};
+mod common;
+
+use std::sync::Once;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-use tokio::sync::{Mutex, mpsc};
+use cypher_proto::{AgentEvent, DoneStatus, HarnessId, SessionStatus};
 
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
-};
+use common::{FeedRig, run_request, status, text, wait_for};
 
 const CHAT: &str = "chat-self-quiesce";
 /// Normal window: far beyond the test horizon — any park inside the test
@@ -46,165 +40,18 @@ fn init_env() {
     });
 }
 
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
-}
-
 fn done(status: DoneStatus) -> AgentEvent {
-    AgentEvent::Done {
-        status,
-        result: None,
-        error: None,
-        session_id: Some("hs-sq".into()),
-    }
+    common::done_with(status, Some("hs-sq"))
 }
 
 fn session_started() -> AgentEvent {
-    AgentEvent::SessionStarted {
-        harness: HarnessId::Mock,
-        model: "mock-1".into(),
-        tools: vec![],
-        cwd: "/tmp".into(),
-        session_id: "hs-sq".into(),
-        assistant_message_id: "a-sq".into(),
-    }
+    common::session_started(HarnessId::Mock, "mock-1", "/tmp", "hs-sq", "a-sq")
 }
 
-fn text(t: &str) -> AgentEvent {
-    AgentEvent::TextDelta { text: t.into() }
-}
-
-/// Feed-by-hand harness (see `turn_quiesce.rs`): the test pushes events
-/// through a channel; accepted steers confirm with a `Steered` boundary.
-struct FeedHarness {
-    main_prompt: String,
-    feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
-}
-
-#[async_trait]
-impl Harness for FeedHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Feed"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        mut controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        if request.prompt != self.main_prompt {
-            let events = vec![Ok(done(DoneStatus::Completed))];
-            return Ok(futures::stream::iter(events).boxed());
-        }
-        let mut feed = self
-            .feed
-            .lock()
-            .await
-            .take()
-            .expect("FeedHarness serves the main dispatch once per test");
-        let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
-        tokio::spawn(async move {
-            let mut steering_open = true;
-            loop {
-                tokio::select! {
-                    biased;
-                    steer = controls.steering.recv(), if steering_open => match steer {
-                        Some(_) => {
-                            let boundary = AgentEvent::Steered {
-                                assistant_message_id: None,
-                                next_assistant_message_id: None,
-                            };
-                            if tx.send(Ok(boundary)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => steering_open = false,
-                    },
-                    event = feed.recv() => match event {
-                        Some(event) => {
-                            if tx.send(Ok(event)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => return,
-                    },
-                }
-            }
-        });
-        Ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        })
-        .boxed())
-    }
-}
-
-struct Rig {
-    core: EngineCore,
-    feed: mpsc::UnboundedSender<AgentEvent>,
-    _dir: tempfile::TempDir,
-}
-
-fn assemble(main_prompt: &str) -> Rig {
+/// Feed-by-hand harness: accepted steers confirm with a `Steered` boundary.
+fn assemble(main_prompt: &str) -> FeedRig {
     init_env();
-    let (feed, rx) = mpsc::unbounded_channel();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(FeedHarness {
-        main_prompt: main_prompt.into(),
-        feed: Mutex::new(Some(rx)),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    Rig {
-        core,
-        feed,
-        _dir: dir,
-    }
-}
-
-fn status(core: &EngineCore) -> Option<SessionStatus> {
-    core.sessions.session_status(CHAT).map(|s| s.status)
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    common::feed_rig(main_prompt, true)
 }
 
 #[tokio::test]
@@ -221,7 +68,7 @@ async fn self_continued_turn_parks_on_the_short_window() {
     rig.feed.send(text("I will watch the build.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -232,7 +79,7 @@ async fn self_continued_turn_parks_on_the_short_window() {
         .send(text("The build is green. Released."))
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "self-continued output resumes Working",
     )
     .await;
@@ -240,7 +87,7 @@ async fn self_continued_turn_parks_on_the_short_window() {
     // The short window parks it well inside the 10s wait_for horizon — the
     // normal window (10 min here) could not have.
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "short quiesce parks the self-continued turn",
     )
     .await;
@@ -266,7 +113,7 @@ async fn steered_turn_keeps_the_normal_window() {
     rig.feed.send(text("Watching.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -275,7 +122,7 @@ async fn steered_turn_keeps_the_normal_window() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.feed.send(text("Build done.")).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "self-continued output resumes Working",
     )
     .await;
@@ -290,14 +137,14 @@ async fn steered_turn_keeps_the_normal_window() {
         .await
         .expect("steer accepted");
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "steered turn is Working",
     )
     .await;
     rig.feed.send(text("Answering the steer.")).unwrap();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
-        status(&rig.core),
+        status(&rig.core, CHAT),
         Some(SessionStatus::Working),
         "a steered (prompt-owned) turn must not park on the short window"
     );
@@ -305,7 +152,7 @@ async fn steered_turn_keeps_the_normal_window() {
     // Clean turn end.
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "steered turn parks at its Done",
     )
     .await;

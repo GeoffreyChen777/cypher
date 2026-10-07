@@ -2,41 +2,22 @@
 //! loopback callback, refresh rotation + revocation, org onboarding) against a stub
 //! edge HTTP server on a plain tokio TcpListener.
 
+mod common;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use cypher_engine::{Auth, AuthConfig, AuthState};
 use cypher_rpc::TokenSource;
 
+use common::edge::{query_param, read_request, respond};
+
 // ---------------------------------------------------------------------------
 // Fake JWTs
 // ---------------------------------------------------------------------------
-
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[n as usize & 63] as char);
-        }
-    }
-    out
-}
 
 /// An unsigned JWT with the claims the engine reads (`exp`/`iat` for TTL, `org_id`).
 fn fake_jwt(ttl_secs: i64, org_id: Option<&str>) -> String {
@@ -44,7 +25,7 @@ fn fake_jwt(ttl_secs: i64, org_id: Option<&str>) -> String {
     if let Some(org) = org_id {
         claims["org_id"] = serde_json::json!(org);
     }
-    format!("e30.{}.sig", base64url(claims.to_string().as_bytes()))
+    common::edge::fake_jwt(claims)
 }
 
 // ---------------------------------------------------------------------------
@@ -100,53 +81,6 @@ impl StubEdge {
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
-}
-
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, String, String)> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 1024];
-    let header_end = loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    };
-    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
-    let mut lines = head.lines();
-    let request_line = lines.next()?.to_string();
-    let mut content_length = 0usize;
-    for line in lines {
-        if let Some((k, v)) = line.split_once(':')
-            && k.eq_ignore_ascii_case("content-length")
-        {
-            content_length = v.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = buf[header_end..].to_vec();
-    while body.len() < content_length {
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let target = parts.next()?.to_string();
-    Some((method, target, String::from_utf8_lossy(&body).into_owned()))
-}
-
-async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
 }
 
 async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
@@ -253,15 +187,6 @@ fn workos_config(edge_url: &str, data_dir: &std::path::Path) -> AuthConfig {
     config.workos_client_id = Some("client_test".into());
     config.workos_api_base = "https://authkit.example".into();
     config
-}
-
-fn query_param(url: &str, key: &str) -> Option<String> {
-    url.split_once('?')?
-        .1
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.to_string())
 }
 
 async fn wait_for<T: Clone + PartialEq>(

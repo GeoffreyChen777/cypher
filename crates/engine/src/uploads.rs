@@ -1,5 +1,5 @@
 //! Uploads — attachment staging on the chat's host device
-//! (feature-inventory §3.7 "Uploads"; port of zeron's `uploads.ts`).
+//! (port of zeron's `uploads.ts`).
 //!
 //! The UI streams a file as base64 chunks (~60KB, sized for the relay when the
 //! target device is remote); chunks stage on disk under `{uploads_root}/tmp/

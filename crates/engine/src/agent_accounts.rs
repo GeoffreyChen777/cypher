@@ -1,5 +1,5 @@
 //! AgentAccounts — the Claude Code / Codex CLI logins on this device
-//! (feature-inventory §3.7 "Agent accounts"; port of zeron's `agent-accounts.ts`).
+//! (port of zeron's `agent-accounts.ts`).
 //!
 //! Each CLI stores exactly one live login:
 //!

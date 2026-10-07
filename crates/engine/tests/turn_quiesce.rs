@@ -17,21 +17,16 @@
 //! stream goes silent after completed output with nothing in flight —
 //! without ending the run, so a false trip costs a status dip, not content.
 
-use std::sync::{Arc, Once};
+mod common;
+
+use std::sync::Once;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-use tokio::sync::{Mutex, mpsc};
+use cypher_doc::{MessagePart, MessageRole, MessageStatus};
+use cypher_engine::{EngineCore, SteerOutcome};
+use cypher_proto::{AgentEvent, DoneStatus, HarnessId, SessionStatus, ToolCall};
 
-use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use cypher_engine::{EngineCore, HarnessRegistry, SteerOutcome};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode, ToolCall,
-};
+use common::{FeedRig, entries, run_request, status, text, wait_for};
 
 const CHAT: &str = "chat-quiesce";
 /// Watchdog window for every test in this file (the process-global env knob
@@ -47,172 +42,23 @@ fn init_quiesce_env() {
     });
 }
 
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
-}
-
 fn done(status: DoneStatus) -> AgentEvent {
-    AgentEvent::Done {
-        status,
-        result: None,
-        error: None,
-        session_id: Some("hs-q".into()),
-    }
+    common::done_with(status, Some("hs-q"))
 }
 
 fn session_started() -> AgentEvent {
-    AgentEvent::SessionStarted {
-        harness: HarnessId::Mock,
-        model: "mock-1".into(),
-        tools: vec![],
-        cwd: "/tmp".into(),
-        session_id: "hs-q".into(),
-        assistant_message_id: "a-q".into(),
-    }
+    common::session_started(HarnessId::Mock, "mock-1", "/tmp", "hs-q", "a-q")
 }
 
-fn text(t: &str) -> AgentEvent {
-    AgentEvent::TextDelta { text: t.into() }
-}
-
-/// Feed-by-hand harness: the test pushes events through a channel, so it can
-/// model turn boundaries, self-continuation, and a LOST turn-end exactly.
-/// Accepted steers are confirmed with a `Steered` boundary, like the ACP
-/// adapters do. The feed is served only to the test's own dispatch (matched
-/// by prompt) — the engine's auto-titler also runs this harness, and gets an
-/// immediately-completed empty stream instead.
-struct FeedHarness {
-    main_prompt: String,
-    feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
-}
-
-#[async_trait]
-impl Harness for FeedHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Feed"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        mut controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        if request.prompt != self.main_prompt {
-            // The auto-titler's side run: complete instantly with nothing.
-            let events = vec![Ok(done(DoneStatus::Completed))];
-            return Ok(futures::stream::iter(events).boxed());
-        }
-        let mut feed = self
-            .feed
-            .lock()
-            .await
-            .take()
-            .expect("FeedHarness serves the main dispatch once per test");
-        let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
-        tokio::spawn(async move {
-            let mut steering_open = true;
-            loop {
-                tokio::select! {
-                    // Steers first: a Steered boundary always precedes feed
-                    // events the test sends after steering (determinism).
-                    biased;
-                    steer = controls.steering.recv(), if steering_open => match steer {
-                        Some(_) => {
-                            let boundary = AgentEvent::Steered {
-                                assistant_message_id: None,
-                                next_assistant_message_id: None,
-                            };
-                            if tx.send(Ok(boundary)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => steering_open = false,
-                    },
-                    event = feed.recv() => match event {
-                        Some(event) => {
-                            if tx.send(Ok(event)).await.is_err() {
-                                return;
-                            }
-                        }
-                        None => return,
-                    },
-                }
-            }
-        });
-        Ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        })
-        .boxed())
-    }
-}
-
-struct Rig {
-    core: EngineCore,
-    feed: mpsc::UnboundedSender<AgentEvent>,
-    _dir: tempfile::TempDir,
-}
-
-fn assemble(main_prompt: &str) -> Rig {
+/// The feed models turn boundaries, self-continuation, and a LOST turn-end
+/// exactly; accepted steers confirm with a `Steered` boundary.
+fn assemble(main_prompt: &str) -> FeedRig {
     init_quiesce_env();
-    let (feed, rx) = mpsc::unbounded_channel();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(FeedHarness {
-        main_prompt: main_prompt.into(),
-        feed: Mutex::new(Some(rx)),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    Rig {
-        core,
-        feed,
-        _dir: dir,
-    }
-}
-
-fn status(core: &EngineCore) -> Option<SessionStatus> {
-    core.sessions.session_status(CHAT).map(|s| s.status)
-}
-
-/// Tolerant read (see e2e.rs): a snapshot mid-segment-write deserializes with
-/// fields missing — treat that instant as "not yet".
-fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
+    common::feed_rig(main_prompt, true)
 }
 
 fn assistant_texts(core: &EngineCore) -> Vec<(String, Option<MessageStatus>)> {
-    entries(core)
+    entries(core, CHAT)
         .into_iter()
         .filter(|e| e.role == MessageRole::Assistant)
         .map(|e| {
@@ -228,20 +74,6 @@ fn assistant_texts(core: &EngineCore) -> Vec<(String, Option<MessageStatus>)> {
             (text, e.status)
         })
         .collect()
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// Steps 1+2 of the incident: a completed turn parks the session; the agent
@@ -268,7 +100,7 @@ async fn parked_self_continuation_folds_and_requiesces() {
     rig.feed.send(text("Still going, and healthy.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -281,14 +113,14 @@ async fn parked_self_continuation_folds_and_requiesces() {
         .send(text("Build finished successfully. Launching Waku."))
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "parked session resumes Working on self-continued output",
     )
     .await;
 
     // No Done will ever come for a self-started turn: the watchdog parks it.
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "watchdog re-parks the self-continued turn",
     )
     .await;
@@ -327,7 +159,7 @@ async fn missing_turn_end_settles_instead_of_working_forever() {
     rig.feed.send(text("Cloned and building.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -342,7 +174,7 @@ async fn missing_turn_end_settles_instead_of_working_forever() {
         .expect("steer");
     assert!(matches!(outcome, SteerOutcome::Accepted));
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "steer boundary re-arms Working",
     )
     .await;
@@ -353,7 +185,7 @@ async fn missing_turn_end_settles_instead_of_working_forever() {
     // Old behavior: Working forever (heartbeat keeps the row fresh; no
     // turn timeout). New behavior: the watchdog settles the turn.
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "watchdog settles the turn whose Done was lost",
     )
     .await;
@@ -396,7 +228,7 @@ async fn open_tool_call_never_quiesces() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "run starts Working",
     )
     .await;
@@ -404,7 +236,7 @@ async fn open_tool_call_never_quiesces() {
     // Several full watchdog windows of silence mid-tool-call.
     tokio::time::sleep(Duration::from_millis(QUIESCE_MS * 4)).await;
     assert_eq!(
-        status(&rig.core),
+        status(&rig.core, CHAT),
         Some(SessionStatus::Working),
         "an unresolved tool call must never quiesce"
     );
@@ -421,7 +253,7 @@ async fn open_tool_call_never_quiesces() {
     rig.feed.send(text("Build done.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "clean turn end",
     )
     .await;
@@ -463,7 +295,7 @@ async fn stale_tool_echo_stays_parked() {
         .unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -484,7 +316,7 @@ async fn stale_tool_echo_stays_parked() {
     // Give the echo ample time to (wrongly) resume the session.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        status(&rig.core),
+        status(&rig.core, CHAT),
         Some(SessionStatus::Idle),
         "a stale tool echo must not resume a parked session"
     );

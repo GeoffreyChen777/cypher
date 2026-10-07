@@ -7,7 +7,7 @@
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
 //! `aborted` and closes the journal with a synthetic `Done`.
 //!
-//! Bounded-window compaction is deferred (whole file kept for now, per M2 scope); a torn
+//! Bounded-window compaction is deferred (whole file kept for now); a torn
 //! trailing line from a crash mid-write is tolerated everywhere.
 
 use std::collections::HashMap;

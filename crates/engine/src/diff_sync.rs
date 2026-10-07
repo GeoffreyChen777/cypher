@@ -1,5 +1,5 @@
-//! CheckoutDiffSync — checkout-scoped working-tree diff production (feature-inventory
-//! §3.5; port of zeron's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
+//! CheckoutDiffSync — checkout-scoped working-tree diff production (port of
+//! zeron's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
 //!
 //! Chats do not own working-tree state: a concrete Git checkout does. This service
 //! groups this device's chats by their canonical checkout identity (`chat.cwd` →
@@ -193,13 +193,6 @@ impl CheckoutDiffSync {
     pub async fn reconcile_now(&self) {
         let chats = self.inner.workspace.watch_chats().borrow().clone();
         reconcile(&self.inner, chats, false).await;
-    }
-
-    #[doc(hidden)]
-    pub async fn repair_now(&self) {
-        let chats = self.inner.workspace.watch_chats().borrow().clone();
-        reconcile(&self.inner, chats, true).await;
-        self.sync_all();
     }
 
     /// Kick an immediate sync of every tracked checkout (repair-tick path).

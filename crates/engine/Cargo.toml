@@ -23,7 +23,6 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -44,6 +43,8 @@ lingua.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+# Inspects the docs store schema after the SIGKILL recovery test.
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.

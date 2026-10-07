@@ -13,23 +13,23 @@
 //! - a steer with no live run after a restart dispatches as a new turn that
 //!   still resumes the prior conversation.
 
+mod common;
+
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::StreamExt;
-use futures::stream::BoxStream;
 
 use cypher_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionDoc, SessionMessageEntry,
 };
-use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
-};
+use cypher_engine::{EngineCore, RunJournal};
+use cypher_harness::HarnessError;
+use cypher_proto::{AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel};
 use cypher_sync::DocsStore;
+
+use common::{complete_assistant_count, entries, message_entry, wait_for, wait_for_within};
 
 const CHAT: &str = "chat-restart";
 
@@ -37,18 +37,8 @@ type RequestLog = Arc<Mutex<Vec<RunRequest>>>;
 
 fn run_request(prompt: &str, cwd: &str) -> RunRequest {
     RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
         cwd: cwd.into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
+        ..common::run_request(prompt)
     }
 }
 
@@ -64,37 +54,16 @@ struct RecordingHarness {
     fail_starts: Arc<Mutex<u32>>,
 }
 
-#[async_trait]
-impl Harness for RecordingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Recording"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.requests
-            .lock()
-            .expect("request log")
-            .push(request.clone());
+fn assemble(dir: &Path, harness: RecordingHarness) -> EngineCore {
+    let RecordingHarness {
+        requests,
+        session_id,
+        fail_starts,
+    } = harness;
+    let harness = common::TestHarness::new(HarnessId::Mock, "Recording", move |request, _| {
+        requests.lock().expect("request log").push(request.clone());
         let fail = {
-            let mut left = self.fail_starts.lock().expect("fail counter");
+            let mut left = fail_starts.lock().expect("fail counter");
             if *left > 0 {
                 *left -= 1;
                 true
@@ -102,43 +71,72 @@ impl Harness for RecordingHarness {
                 false
             }
         };
-        let events: Vec<Result<AgentEvent, HarnessError>> = if fail {
-            vec![Ok(AgentEvent::Done {
+        if fail {
+            return common::script(vec![AgentEvent::Done {
                 status: DoneStatus::Errored,
                 result: None,
                 error: Some("Recording exited unexpectedly (exit code 1): boom".into()),
                 session_id: None,
-            })]
-        } else {
-            vec![
-                Ok(AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
-                    model: "mock-1".into(),
-                    tools: vec![],
-                    cwd: request.cwd.clone(),
-                    session_id: self.session_id.clone(),
-                    assistant_message_id: "a-1".into(),
-                }),
-                Ok(AgentEvent::TextDelta {
-                    text: format!("ack: {}", request.prompt),
-                }),
-                Ok(AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    result: None,
-                    error: None,
-                    session_id: Some(self.session_id.clone()),
-                }),
-            ]
-        };
-        Ok(futures::stream::iter(events).boxed())
-    }
+            }]);
+        }
+        common::reply(
+            HarnessId::Mock,
+            &request,
+            &session_id,
+            &format!("ack: {}", request.prompt),
+        )
+    });
+    common::engine_at(dir, harness)
 }
 
-fn assemble(dir: &std::path::Path, harness: RecordingHarness) -> EngineCore {
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(harness));
-    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+/// Manufacture the on-disk state a kill -9 mid-run leaves behind:
+/// - a chat doc snapshot whose assistant entry is still `streaming`;
+/// - a journal whose last event is NOT `Done` (run died mid-stream), holding
+///   the only copy of the harness session id (the debounced workspace-row
+///   write never landed).
+fn manufacture_crash(dir: &Path, user_at: i64, assistant_at: i64) {
+    let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    doc.push_message(&SessionMessageEntry {
+        created_at: user_at,
+        ..message_entry(
+            "msg-user-1",
+            MessageRole::User,
+            "long task",
+            "dev-crash",
+            Some(MessageStatus::Complete),
+        )
+    })
+    .unwrap();
+    doc.push_message(&SessionMessageEntry {
+        created_at: assistant_at,
+        ..message_entry(
+            "msg-assistant-1",
+            MessageRole::Assistant,
+            "partial…",
+            "dev-crash",
+            Some(MessageStatus::Streaming),
+        )
+    })
+    .unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+
+    let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+    journal
+        .append(
+            CHAT,
+            &common::session_started(
+                HarnessId::Mock,
+                "mock-1",
+                "/tmp",
+                "hs-crash",
+                "msg-assistant-1",
+            ),
+        )
+        .unwrap();
+    journal.append(CHAT, &common::text("partial…")).unwrap();
 }
 
 fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
@@ -153,43 +151,6 @@ fn queue_run(core: &EngineCore, prompt: &str, cwd: &str, message_id: &str) {
             },
         )
         .expect("queue run command");
-}
-
-async fn wait_for<F>(predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    wait_for_within(predicate, what, Duration::from_secs(10)).await;
-}
-
-async fn wait_for_within<F>(mut predicate: F, what: &str, deadline: Duration)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + deadline;
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-}
-
-/// Tolerant read for hot-polling predicates (mirrors e2e.rs `entries_now`).
-fn entries_now(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
-}
-
-fn complete_assistant_count(core: &EngineCore) -> usize {
-    entries_now(core)
-        .iter()
-        .filter(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
-        .count()
 }
 
 fn stored_harness_session(core: &EngineCore) -> Option<(String, Option<String>)> {
@@ -236,7 +197,7 @@ async fn run_one_turn_and_shutdown(dir: &std::path::Path, requests: &RequestLog,
         "msg-user-1",
     );
     wait_for(
-        || complete_assistant_count(&core) == 1,
+        || complete_assistant_count(&core, CHAT) == 1,
         "first turn to complete",
     )
     .await;
@@ -280,7 +241,7 @@ async fn restart_roundtrip_restores_chats_transcript_and_resume() {
     );
 
     // Transcript survived: user + completed assistant entry, texts intact.
-    let entries = entries_now(&core);
+    let entries = entries(&core, CHAT);
     assert_eq!(
         entries.len(),
         2,
@@ -299,7 +260,7 @@ async fn restart_roundtrip_restores_chats_transcript_and_resume() {
     // the stored session id even though the caller sent `resume: None`.
     queue_run(&core, "what was the codeword?", "/tmp", "msg-user-2");
     wait_for(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "second turn to complete",
     )
     .await;
@@ -328,73 +289,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     // Pin the device id so the manufactured streaming entry counts as OURS.
     std::fs::write(dir.join("device-id"), "dev-crash").unwrap();
 
-    // Manufacture the on-disk state a kill -9 mid-run leaves behind:
-    // - a chat doc snapshot whose assistant entry is still `streaming`;
-    // - a journal whose last event is NOT `Done` (run died mid-stream), holding
-    //   the only copy of the harness session id (the debounced workspace-row
-    //   write never landed).
-    {
-        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-user-1".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "long task".into(),
-                agent_text: None,
-            }],
-            created_at: 1,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
-        })
-        .unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-assistant-1".into(),
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "partial…".into(),
-                agent_text: None,
-            }],
-            created_at: 2,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Streaming),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
-        })
-        .unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-
-        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
-                    model: "mock-1".into(),
-                    tools: vec![],
-                    cwd: "/tmp".into(),
-                    session_id: "hs-crash".into(),
-                    assistant_message_id: "msg-assistant-1".into(),
-                },
-            )
-            .unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "partial…".into(),
-                },
-            )
-            .unwrap();
-    }
+    manufacture_crash(&dir, 1, 2);
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(
@@ -407,23 +302,40 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     );
     assert_eq!(core.device_id, "dev-crash");
 
-    // Boot recovery stamped the abandoned streaming entry `aborted` …
-    let entries = entries_now(&core);
+    // Boot recovery stamped the abandoned streaming entry `aborted`, keeping
+    // its partial text …
+    let entries = entries(&core, CHAT);
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].status, Some(MessageStatus::Aborted));
-    // … and closed the stale journal with a synthetic Done.
+    match &entries[1].parts[0] {
+        MessagePart::Text { text, .. } => assert_eq!(text, "partial…"),
+        other => panic!("unexpected part {other:?}"),
+    }
+    // … closed the stale journal with a synthetic Done{interrupted} …
     let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
+    assert!(journal.stale_sessions().unwrap().is_empty());
     assert!(matches!(
         journal.last_event(CHAT).unwrap(),
-        Some((_, AgentEvent::Done { .. }))
+        Some((
+            _,
+            AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            }
+        ))
     ));
+    // … and left the session idle.
+    assert_eq!(
+        common::status(&core, CHAT),
+        Some(cypher_proto::SessionStatus::Idle)
+    );
 
     // The next run resumes the crashed conversation: the session id was
     // recovered from the journal (its only surviving home).
     pre_title(&core);
     queue_run(&core, "keep going", "/tmp", "msg-user-2");
     wait_for(
-        || complete_assistant_count(&core) == 1,
+        || complete_assistant_count(&core, CHAT) == 1,
         "post-crash turn to complete",
     )
     .await;
@@ -435,64 +347,36 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
     core.shutdown().await;
 }
 
-/// A harness whose stream stays OPEN after each turn's Done, serving follow-up
-/// turns from the steering mailbox — the persistent-session shape (codex; and
-/// claude's stream-json stdin). Counts `run()` calls to prove the engine
-/// reuses one child across turns instead of respawning.
-struct PersistentHarness {
-    runs_started: Arc<Mutex<usize>>,
-}
+#[tokio::test]
+async fn persistent_session_serves_multiple_turns_on_one_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
 
-#[async_trait]
-impl Harness for PersistentHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Persistent"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        _request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        *self.runs_started.lock().unwrap() += 1;
+    // A harness whose stream stays OPEN after each turn's Done, serving follow-up
+    // turns from the steering mailbox — the persistent-session shape (codex; and
+    // claude's stream-json stdin). Counts `run()` calls to prove the engine
+    // reuses one child across turns instead of respawning.
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let started = runs_started.clone();
+    let harness = common::TestHarness::new(HarnessId::Mock, "Persistent", move |_, controls| {
+        *started.lock().unwrap() += 1;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(32);
         let mut steering = controls.steering;
         tokio::spawn(async move {
             let turn = |n: usize, prompt: &str| {
                 vec![
-                    AgentEvent::TextDelta {
-                        text: format!("turn {n} ack: {prompt}"),
-                    },
-                    AgentEvent::Done {
-                        status: DoneStatus::Completed,
-                        result: None,
-                        error: None,
-                        session_id: Some("hs-persist".into()),
-                    },
+                    common::text(&format!("turn {n} ack: {prompt}")),
+                    common::done("hs-persist"),
                 ]
             };
-            let first = vec![AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: "/tmp".into(),
-                session_id: "hs-persist".into(),
-                assistant_message_id: "a-1".into(),
-            }];
+            let first = vec![common::session_started(
+                HarnessId::Mock,
+                "mock-1",
+                "/tmp",
+                "hs-persist",
+                "a-1",
+            )];
             for ev in first.into_iter().chain(turn(1, "first")) {
                 if tx.send(Ok(ev)).await.is_err() {
                     return;
@@ -522,27 +406,14 @@ impl Harness for PersistentHarness {
             |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
         )
         .boxed())
-    }
-}
-
-#[tokio::test]
-async fn persistent_session_serves_multiple_turns_on_one_child() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("data");
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let runs_started = Arc::new(Mutex::new(0usize));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(PersistentHarness {
-        runs_started: runs_started.clone(),
-    }));
-    let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    })
+    .steering();
+    let core = common::engine_at(&dir, harness);
     pre_title(&core);
 
     queue_run(&core, "first", "/tmp", "msg-user-1");
     wait_for(
-        || complete_assistant_count(&core) == 1,
+        || complete_assistant_count(&core, CHAT) == 1,
         "first turn to complete",
     )
     .await;
@@ -551,7 +422,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     // the live child instead of spawning a new one.
     queue_run(&core, "second", "/tmp", "msg-user-2");
     wait_for(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "second turn to complete on the same child",
     )
     .await;
@@ -561,7 +432,7 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
         1,
         "one harness child must serve both turns"
     );
-    let entries = entries_now(&core);
+    let entries = entries(&core, CHAT);
     assert_eq!(
         entries
             .iter()
@@ -585,68 +456,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    {
-        let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-user-1".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "long task".into(),
-                agent_text: None,
-            }],
-            created_at: now - 60_000,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
-        })
-        .unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "msg-assistant-1".into(),
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "partial…".into(),
-                agent_text: None,
-            }],
-            created_at: now - 30_000,
-            device_id: "dev-crash".into(),
-            status: Some(MessageStatus::Streaming),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
-        })
-        .unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-
-        let journal = RunJournal::open(dir.join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
-                    model: "mock-1".into(),
-                    tools: vec![],
-                    cwd: "/tmp".into(),
-                    session_id: "hs-crash".into(),
-                    assistant_message_id: "msg-assistant-1".into(),
-                },
-            )
-            .unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "partial…".into(),
-                },
-            )
-            .unwrap();
-    }
+    manufacture_crash(&dir, now - 60_000, now - 30_000);
 
     let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
     let core = assemble(
@@ -661,12 +471,12 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
     // The run is PICKED BACK UP without any user action (zeron: "not just
     // eulogized"): recovery re-dispatches the crashed prompt itself.
     wait_for(
-        || complete_assistant_count(&core) == 1,
+        || complete_assistant_count(&core, CHAT) == 1,
         "auto-resumed turn to complete",
     )
     .await;
 
-    let entries = entries_now(&core);
+    let entries = entries(&core, CHAT);
     // The aborted entry SAYS why it ended — and that the run is resuming.
     let aborted = entries
         .iter()
@@ -728,7 +538,7 @@ async fn resume_is_cwd_scoped() {
         "msg-user-2",
     );
     wait_for(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "cross-cwd turn to complete",
     )
     .await;
@@ -763,7 +573,7 @@ async fn startup_crash_retries_once_with_resume_kept() {
     );
     queue_run(&core, "second turn", "/tmp", "msg-user-2");
     wait_for(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "retried turn to complete",
     )
     .await;
@@ -781,7 +591,7 @@ async fn startup_crash_retries_once_with_resume_kept() {
         assert_eq!(log[2].prompt, "second turn");
     }
     // The retry reused the same user entry — no duplicates, no error turn.
-    let entries = entries_now(&core);
+    let entries = entries(&core, CHAT);
     let users: Vec<_> = entries
         .iter()
         .filter(|e| e.role == MessageRole::User)
@@ -894,7 +704,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         )
         .expect("queue first real run");
     wait_for_within(
-        || complete_assistant_count(&core) == 1,
+        || complete_assistant_count(&core, CHAT) == 1,
         "first real claude turn",
         Duration::from_secs(120),
     )
@@ -922,13 +732,13 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         )
         .expect("queue second real run");
     wait_for_within(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "post-restart real claude turn",
         Duration::from_secs(120),
     )
     .await;
 
-    let entries = entries_now(&core);
+    let entries = entries(&core, CHAT);
     let last_assistant_text: String = entries
         .iter()
         .rev()
@@ -979,7 +789,7 @@ async fn steer_after_restart_dispatches_new_turn_with_resume() {
         )
         .expect("queue steer command");
     wait_for(
-        || complete_assistant_count(&core) == 2,
+        || complete_assistant_count(&core, CHAT) == 2,
         "steer-as-new-turn to complete",
     )
     .await;
