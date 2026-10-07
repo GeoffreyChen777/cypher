@@ -459,14 +459,9 @@ impl SessionsEngine {
         );
     }
 
-    /// Consume (one-shot) a child chat's local channel at first dispatch.
-    pub fn take_child_channel(&self, chat_id: &str) -> Option<LocalChildChannel> {
+    /// Drop a child chat's local channel (delete/rollback teardown), returning it.
+    pub fn remove_child_channel(&self, chat_id: &str) -> Option<LocalChildChannel> {
         lock(&self.inner.child_channels).remove(chat_id)
-    }
-
-    /// Drop a child chat's local channel (delete/rollback teardown).
-    pub fn remove_child_channel(&self, chat_id: &str) {
-        lock(&self.inner.child_channels).remove(chat_id);
     }
 
     /// Owner-death terminalization: the harness run for `chat_id` has truly

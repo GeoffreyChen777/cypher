@@ -6,7 +6,7 @@
 
 use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::pi_runtime::PiRuntimePaths;
@@ -223,16 +223,10 @@ pub fn detect_language(text: &str) -> PiLanguageDetection {
     }
 }
 
-/// Keep the file helper independently testable without requiring a runtime
-/// installation. This is also useful for migration tooling.
-#[allow(dead_code)]
-fn _path_for_agent(agent_dir: &Path) -> PathBuf {
-    agent_dir.join(FILE_NAME)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn paths(root: &Path) -> PiRuntimePaths {
         let current = root.join("current");

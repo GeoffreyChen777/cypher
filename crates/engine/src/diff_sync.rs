@@ -195,13 +195,6 @@ impl CheckoutDiffSync {
         reconcile(&self.inner, chats, false).await;
     }
 
-    #[doc(hidden)]
-    pub async fn repair_now(&self) {
-        let chats = self.inner.workspace.watch_chats().borrow().clone();
-        reconcile(&self.inner, chats, true).await;
-        self.sync_all();
-    }
-
     /// Kick an immediate sync of every tracked checkout (repair-tick path).
     pub fn sync_all(&self) {
         for entry in lock(&self.inner.entries).values() {

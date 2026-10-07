@@ -789,7 +789,7 @@ async fn child_runs_receive_child_env_via_host_context() {
     // The channel is consumed at first dispatch (one-shot for the initial
     // run) — later child turns have no channel.
     assert!(
-        core.sessions.take_child_channel(&child_id).is_none(),
+        core.sessions.remove_child_channel(&child_id).is_none(),
         "the local channel is consumed by the initial run"
     );
     core.shutdown().await;

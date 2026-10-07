@@ -51,33 +51,32 @@ pub mod workspace_host;
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use diff_sync::{
-    CheckoutDiffSync, DiffFileTextPair, DiffSnapshot, TurnSnapshot, capture_commit_diff,
-    capture_diff, capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text,
-    snapshot_tree, working_diff_base,
+    CheckoutDiffSync, capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff,
+    merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
-pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig, attachment_refs_trailer};
+pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use registry::{
     HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
-    default_registry_with_bridge_and_runtime,
 };
-pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
-pub use rpc::EngineRpc;
-pub use run_journal::{JournalError, RunJournal};
+pub use repos::{Repos, worktree_branch_from_title};
+pub use run_journal::RunJournal;
 pub use session_forks::SessionForks;
-pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
-pub use side_chats::SideChats;
+pub use sessions::{SessionsEngine, SteerOutcome};
 pub use side_chats::bounded_transcript_context;
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
-pub use titles::TitleGenerator;
 pub mod title_settings;
 pub mod web_search_fallback;
-pub use uploads::{AttachmentChunk, Uploads};
-pub use workspace_host::{
-    DEFAULT_ORG_ID, DEFAULT_USER_ID, WORKSPACE_DOC_ID, WorkspaceHost, WorkspaceHostConfig,
-};
+pub use uploads::Uploads;
+pub use workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
+
+use registry::default_registry_with_bridge_and_runtime;
+use rpc::EngineRpc;
+use side_chats::SideChats;
+use titles::TitleGenerator;
+use workspace_host::WorkspaceHostConfig;
 
 pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 
@@ -436,7 +435,7 @@ impl EngineCore {
         .clone()
     }
 
-    /// Attach the peer link cache — enables `targetDeviceId` routing and [`Self::dial_device`].
+    /// Attach the peer link cache — enables `targetDeviceId` routing.
     pub fn set_links(&self, links: Arc<cypher_rpc::LinkCache>) {
         *self
             .links
@@ -510,21 +509,6 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-    }
-
-    /// A live RPC client to another device's engine through its relay DO (the router's
-    /// dial seam). Cached per device; invalidated + re-dialed on failure.
-    pub async fn dial_device(
-        &self,
-        device_id: &str,
-    ) -> Result<Arc<cypher_rpc::RpcClient>, EngineError> {
-        let links = self
-            .links()
-            .ok_or_else(|| EngineError::Other("peer links unavailable (offline)".into()))?;
-        links
-            .client(device_id)
-            .await
-            .map_err(|e| EngineError::Other(e.to_string()))
     }
 
     /// Start hosting our device room: serve the full RPC surface to relay clients and
