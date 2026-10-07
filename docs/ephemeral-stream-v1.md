@@ -1,8 +1,10 @@
 # Ephemeral stream v1 — P1 协议切片
 
-状态：**开发服务端、Engine 发送和 Desktop/iOS 展示已接入，默认关闭；本地原生互通通过**。
-三批改动均只做本地验证，尚未部署；正式设备身份、全故障矩阵与云端性能仍由后续阶段验收。
-现有 HELLO、STATE、PUSH、ACK 和 durable 提交频率完全不变。
+状态：**三端 codec、Engine 发送和 Desktop/iOS 展示已实现，默认关闭；服务端 relay 已移除**。
+Edge 的开发 relay（`development-preview.ts`）及其 `dev-locked` 鉴权已随托管开发 Worker
+一并删除；生产 `ChatRoom` 对 `0x20–0x26` 帧回 `bad_frame`。启用本功能需在新服务端
+（`docs/plans/MIGRATION.md` §13 UX-2）上按下文契约重建 relay。正式设备身份、全故障矩阵
+与云端性能仍待验收。现有 HELLO、STATE、PUSH、ACK 和 durable 提交频率完全不变。
 
 ## 协商与权限门禁
 
@@ -14,20 +16,17 @@
   转发方必须以服务端验证的发布连接及 chat/run/segment/epoch 授权记录校验来源。
   下列 header 字段和现有 HELLO.device 均不是身份凭证。
 - 当前 ChatRoom 只有用户所有权认证，HELLO.device 可由客户端自报，**不足以授予
-  preview 作者权限**。第二批在开发环境用独立发布凭据补充连接级授权，具体见下节；
+  preview 作者权限**。relay 须用独立发布凭据补充连接级授权，具体见下节；
   这不是正式设备身份机制。codec 本身仍只校验格式，不授权。
 - DO 唤醒后不能相信丢失的内存协商记录；重新确认授权与能力。允许握手级持久操作，
   禁止每个 delta 写 SQL、serializeAttachment、storage.put 或用永久定时器保活。
 
-### 开发授权与协商（第二批）
+### relay 授权与协商契约（重建时须满足）
 
-- 沿用 `/chat2/:chatId/ws` 和现有 dev Edge，不新增 namespace/端点。正常登录认证及
+- 沿用 `/chat2/:chatId/ws`，不新增 namespace/端点。正常登录认证及
   room owner 校验先执行；路由层已有的 chatId 重写用于绑定房间，不相信客户端自报 device。
-- 只有 `development.ts` 显式注入 relay。须同时满足 `AUTH_MODE=dev-locked`、
-  `DEV_PREVIEW_ENABLED=true`、已有 DEV_ACCESS_TOKEN、独立的 64 位小写十六进制
-  `DEV_PREVIEW_PUBLISH_TOKEN`，否则关闭。dev 部署配置为 **true**，凭据仅通过 Cloudflare
-  secret 注入；生产入口仍不注入。
-  正式入口不注入；即使误设环境变量也不会启用，生产 dry-run bundle 不包含凭据处理代码。
+- relay 必须显式启用并持有独立的发布凭据（原实现为 64 位小写十六进制
+  `DEV_PREVIEW_PUBLISH_TOKEN`），否则关闭；误设环境变量不得在生产入口启用它。
 - 支持端在 WS upgrade 发 `x-cypher-preview-capability: ephemeral-stream-v1`；
   Engine 另发 `x-cypher-preview-publisher: <独立发布凭据>`。观看端不持有此凭据。
   发布凭据不得放 query、HELLO、附件、iOS 登录配置或日志；不得复用现有登录 token。
@@ -153,81 +152,10 @@ echo 清理仍使用 durable entries，而非加了预览的显示数组。
   确认本机成为 host 并启动 Run 后通过同一 ChatClient redial 升级角色，保留待确认队列。
 - iOS `CypherDev` 用 `-dev-stream-preview` 启动；正式构建恒为关闭。独立单元测试可在
   AppConfig 中显式注入开发开关，但同样受构建/地址限制。
-- 服务端仍需 `DEV_PREVIEW_ENABLED=true` 和独立 `DEV_PREVIEW_PUBLISH_TOKEN`，仓库
-  dev 部署已开启并设置独立 secret；客户端仍需开发构建和显式 preview 标志，生产恒关闭。
-- `bash scripts/test-stream-preview.sh`：三端 codec + Rust/Swift 共用状态机向量。
-- `python3 scripts/test-preview-native.py`：两个隔离 EngineCore、mock harness、实际 iOS
-  Simulator SessionStore 与真实本地 workerd。只绑定 loopback，自建临时数据库；为强制
-  验证预览显示而延迟观看端的 durable rows 180ms。只支持聊天测试路径，registry 404
-  是此 fixture 的有意限制，不是云端状态。退出清理自己创建的进程/控制文件。
-
-本地互通首次通过记录：
-`/var/folders/b6/jjn4h7pd57371lysbwq9bdj40000gn/T/cypher-preview-native-vl818bhw/`。
-结果：iOS 发 Run，两端看到预览；最终两份 macOS 文档相同，iOS 最终文本匹配；命令
-恰好一条；持久文档没有显示层的“实时预览”标记。这不是实际 GPUI/SwiftUI 截图验收。
-
-## 第一批验收记录（历史）
-
-`edge/src/fixtures/stream-preview-v1.json` 是 Rust/TypeScript/Swift 共用测试输入。
-它覆盖 wire 布局、Unicode、字段/整数/长度校验；并不证明作者授权、零 SQL 转发、
-跨客户端展示或写入降幅。后三项必须由 P1 后续批次的 workerd/原生集成测试证明。
-
-本地复现：`bash scripts/test-stream-preview.sh`。脚本运行 Rust codec 测试、Edge
-typecheck/向量测试，再直接编译 iOS 使用的 Swift 源文件执行同一份向量，不需要登录。
-另有 `CypherTests/StreamPreviewTests` 在 iOS Simulator 中验证。CI 的 Edge job 会
-运行 TS 向量，macOS job 会运行 Rust 与原生 Swift 向量。
-
-首批验证（2026-09-14）：36 个共享向量；Rust sync 全套 51 通过、2 个 live 测试
-按预期忽略；Edge 137 单元 + 35 workerd 通过；iOS Dev 的新旧帧测试 6 通过；
-发布/工作流辅助测试 28 通过。此记录不是全应用/云端验收。Dev 桌面构建通过，
-保留已有宏的编译警告；未改变 Engine/Edge/UI 的实时同步行为。
-
-验证限制：本批 Rust 文件的 rustfmt 与 `git diff --check` 通过；全仓
-`cargo fmt --all --check` 仍报告刚合入 main 的 MCP 文件存在格式差异（本批未修改
-这些文件），因此不宣称全仓 CI 已通过。现有 dev Engine 在本批启动前已持续收到
-开发 Edge 的 HTTP 429；本批不扩大开发额度、不调用云端联调，也不把本地通过
-当作 dev Edge 互通成功。
-
-## 第二批验证范围
-
-本地真实 workerd WebSocket + SQLite：1/3 观看端均收到原始预览字节，稳态 Snapshot/
-Delta/Receipt/Resume 路径观测 **0 次 SQL exec、0 rowsWritten**；原有 durable PUSH
-仍写入并返回 ACK。握手/建表不包含在此计数内。另验证观看 token 不能发布、同 device ID
-不能冒充作者、模拟应用实例重建后旧连接失去权限、真实 reset 关闭连接和生产入口不启用。
-纯逻辑测试补充 legacy 加入、迟到 epoch/close、限速、慢端额度跨 epoch 保留、超长文本等。
-
-第二批验证：48 个三端共享向量；Edge 166 单元 + 41 workerd 通过；Rust sync 51 通过、
-2 个 live 测试按预期忽略；iOS Dev 新旧帧测试 6 通过；工作流辅助测试 28 通过。
-生产/开发 Worker dry-run 均通过，无部署。重放 P0 纯文本 fixture（SHA256 与原基线
-一致），1/3 观看端仍各为 243 个 durable batch / 1,593 rowsWritten，旧持久路径未改变。
-本地证据：`/tmp/cypher-p1b-{edge-tests,sync-tests,ios-tests,protocol}.log`、
-`/tmp/cypher-p1b-baseline/report.json`。macOS Dev 构建通过，仍有既有宏/工具链警告。
-
-这不是整个 dev Edge 的零写入承诺：现有 DevelopmentGuard 仍对每次操作写入准入/结算
-计数，上述测量有意不经过 Guard。未扩大预算、未部署；暂未测实际云端 CPU/duration/
-显示延迟。不能将该批结果当作账户用量已下降；当时尚无原生客户端预览互通结果。
-
-## 第三批验收记录
-
-- 最新完整原生互通证据：
-  `/var/folders/b6/jjn4h7pd57371lysbwq9bdj40000gn/T/cypher-preview-native-7n8qjkbj/`。
-  `cypher-preview-native.ios.json`/`cypher-preview-native.desktop.json` 收据验证两端看到预览、iOS 预览早于对应 durable entry、
-  command basedOn 不使用 preview-only entry、最终文档/文本一致、只有一条 Run。
-  此次还覆盖先打开 doc 后创建 chat 的发布角色升级路径。
-- Rust doc/sync/engine（development + mock-server）489 通过、0 失败、6 忽略。
-  iOS 全套 177 项，176 通过、1 个原生互通测试按预期跳过；该项已由上述脚本单独执行通过。
-  Edge 166 单元 + 41 workerd 通过，工作流辅助 28 项和生产 profile 静态门禁通过。
-- 共享 48 个 wire 向量、13 个 Rust/Swift 状态转换；覆盖提交的逐增量导入测试验证 marker
-  不早于对应文本、final status 一致；checkpoint 重建保留 marker。默认关闭的 P0 重放
-  fixture SHA256 不变，1/3 观看端仍各 243 batch / 1,593 rowsWritten。
-- 日志：`/tmp/cypher-p1c-full-rust-final.log`、`/tmp/cypher-p1c-ios-all-final.log`、
-  `/tmp/cypher-p1c-edge-final.log`、`/tmp/cypher-p1c-goldens-final.log`、
-  `/tmp/cypher-p1c-native-verified.log`、`/tmp/cypher-p1c-baseline/report.json`。
-- 云端只做只读 budget 查询：开发 Guard 日操作计数 1,000/1,000，Guard SQL 统计 2,290，
-  并非新的正式 DO 100,000 写入超限。未修改预算、未部署、未配置真实发布凭据。
-  原 dev Engine 有 6 个未确认 batch；P0 已证明没有持久 outbox，因此不重启该引擎，
-  只重建/重启开发 UI，等原队列安全排空后再切换引擎。
-
-剩余边界：尚无云端 dev Edge 新预览联调、真机/真实模型、正式发布、全故障矩阵或
-云端 p95/CPU/duration 验收。P1 只完成默认关闭的本地原生预览链路；P2 才处理 outbox
-及低频累计持久提交，不能现在声称账户写入量已下降。
+- 服务端 relay 已移除（见上方状态），客户端开关在重建前不会产生预览。
+- 共享向量：`edge/src/fixtures/stream-preview-v1.json`（wire，48 例）与
+  `preview-reducer-v1.json`（状态机，13 例）。CI 的 Edge job 运行 TS 向量
+  （`edge/src/stream-preview.test.ts`）；macOS job 的 "Preview protocol" 步骤运行
+  `cargo test -p cypher-sync --lib preview`，并直接编译 iOS 的 Swift 源文件执行同一份
+  向量（`scripts/tests/stream-preview-vectors.swift`）。iOS Simulator 另有
+  `CypherTests/StreamPreviewTests`、`PreviewProjectionTests`。

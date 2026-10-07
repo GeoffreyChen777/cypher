@@ -9,27 +9,15 @@ remains local-only unless you explicitly connect an account.
 
 ## Set up a Linux device
 
-Guided setup requires the next client release, **0.3.3 or newer**.
-
 ```bash
 curl -fsSL https://edge.letscypher.app/install.sh | sh
 ```
 
 The installer opens one setup wizard: connect your account, install Pi Runtime,
 start a **systemd user service**, and verify the device connection. Choose
-local-only mode to skip account connection. If persistent startup needs
-administrator permission, setup asks before invoking sudo.
-Without a usable user service, setup offers foreground operation and clearly
-states that it stops when the terminal closes.
-
-In a non-interactive shell, only the binary is installed; run
-`~/.local/bin/cypher setup` later in an SSH terminal. No login prompt hangs on
-the installation pipe. See [Linux setup](docs/linux-setup.md).
-
-Official Linux binaries support glibc-based x86_64 and aarch64 systems with
-glibc 2.31 or newer (for example Ubuntu 20.04 or Debian 11 and newer).
-Alpine/musl is not currently an official target.
-This is a headless engine, not a terminal chat UI or Linux desktop application.
+local-only mode to skip account connection. Official Linux binaries support
+glibc-based x86_64 and aarch64 systems with glibc 2.31 or newer. This is a
+headless engine, not a terminal chat UI or Linux desktop application.
 
 Day-to-day:
 
@@ -41,69 +29,16 @@ cypher logs        # recent engine logs; --follow streams them
 cypher update      # newest release + Pi Runtime; restarts the service
 ```
 
-`cypher --version` prints the installed binary's version. `cypher update --check`
-exits 1 when a newer release or Runtime is available; download/network errors
-also fail, so check the diagnostic output. `cypher update` works after any Linux
-installation: a binary outside the managed `~/.cypher/app/<version>` layout is
-moved into it, `~/.local/bin/cypher` is linked there, and a service that ran the
-old path is repointed. Only a source checkout stays report-only. The service is
-not restarted while runs are active unless you pass `--force`.
-
-Linux services apply releases **automatically** in an idle window (no live runs
-or open terminals) and restart themselves; the engine also keeps the Runtime
-current. Set `CYPHER_AUTO_UPDATE=0` before `cypher daemon install`, or in
-`~/.cypher/env`, to make updates manual. `cypher status` shows which applies.
+Linux services apply releases **automatically** in an idle window. SSH and
+non-interactive installs, updates, Pi configuration, data directories and
+installation integrity: [Linux setup](docs/linux-setup.md).
 
 Any desktop can also update the whole fleet: Settings → Devices checks every
 online device for a newer release and offers **Update** per device or **Update
 all**. Each device applies its own release and restarts itself (a Linux service
 restarts; a Mac swaps its app bundle and relaunches). A device with active runs
 or open terminals refuses until idle, or until you choose **Update anyway**.
-iOS updates through TestFlight and is not part of this. Remote Mac updates need
-the target Mac to already run a build that includes this feature. `cypher status --verbose` includes the original account,
-data-directory and IPC diagnostics. Status does not refresh credentials.
-Advanced `cypher daemon start|stop|restart|status` commands remain available.
-
-### Pi and configuration
-
-System Pi and `~/.pi` are not used. Pi Runtime (Node, Pi and curated plugins) is a
-separate download, with per-device configuration under
-`$CYPHER_DATA_DIR/pi-runtime/agent` (default `~/.cypher/pi-runtime/agent`).
-The Linux setup wizard installs Runtime automatically. Sign the desktop into
-the same account, select the Linux device in Settings, and configure Providers
-and MCP there. Account login is not provider login.
-
-The low-level `cypher headless` command remains non-interactive and does not
-perform first-use setup. Dedicated terminal-only Provider/MCP management
-subcommands are not available yet.
-
-Use the same `CYPHER_DATA_DIR` for CLI commands and the service. Local IPC uses
-a private per-user, per-data-directory Unix socket; there is no port to choose.
-`CYPHER_IPC_PORT` is no longer supported. `cypher daemon install` captures data-directory and other supported `CYPHER_*`
-overrides, resolving a relative data directory to an absolute path.
-The optional `~/.cypher/env` is a **systemd EnvironmentFile**, not a shell script;
-it overrides captured service values and is **not** automatically loaded by
-one-shot CLI commands. Set matching shell variables when using it, especially
-for account/data-directory settings. Do not put provider API keys there.
-
-When a development UI uses a separate preferences directory, set
-`CYPHER_ENGINE_DATA_DIR` to the headless engine's data directory. This setting
-is UI-only; CLI commands use `CYPHER_DATA_DIR`. See [Unix IPC](docs/unix-ipc.md)
-for ownership, permissions and multi-instance service behavior.
-
-### Installation integrity and release compatibility
-
-The online installer requires an adjacent `<artifact>.sha256` containing the
-64-character digest. It verifies downloads, validates archive members, probes
-the executable and only then replaces the `current` link. Missing/mismatched
-checksums stop installation; existing versions and user data remain unchanged.
-An existing conflicting version directory is not overwritten automatically.
-The new installer must be deployed after a release containing both these
-checksum files and the guided `setup` command (>= 0.3.3). Older incompatible
-downloads are refused. SHA-256 is an integrity check, **not** a release signature.
-
-The tarball's own `install.sh` is a manual, unmanaged installation to
-`~/.local/bin`; use the online installer for managed self-updates.
+iOS updates through TestFlight and is not part of this.
 
 ## Optional multi-device sync
 
@@ -130,7 +65,7 @@ On macOS: use the desktop release, or build `cypher` from source and run `cypher
 
 ---
 
-Developing or curious how it works? [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeronsh/comet) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
+Developing or curious how it works? See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 CI, deployment prerequisites and release recovery: [CI/CD operations](docs/ci-cd.md).
 

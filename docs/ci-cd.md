@@ -286,11 +286,13 @@ bash scripts/ci/actionlint.sh
 python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
 python3 scripts/test-linux-cli.py
 node scripts/ci/pi-runtime-smoke.mjs /path/to/extracted/runtime
-python3 scripts/ci/release.py validate \
-  --dist /path/to/artifacts --version 0.2.3 --out /tmp/release-plan
+python3 scripts/ci/release.py validate-platform --platform linux \
+  --dist /path/to/artifacts --version 0.3.41 --build 1 --out /tmp/release-plan
+python3 scripts/ci/release.py validate-runtime \
+  --dist /path/to/artifacts --version 1.0.1.3 --out /tmp/runtime-plan
 python3 scripts/ci/release.py check-deploy
 ```
 
-Only the `publish` subcommand performs remote writes. It requires the tagged
-push Actions context and explicit credentials; local validation/readiness
-checks are read-only.
+Only `publish-platform`, `publish-runtime` and `prune-releases --apply` perform
+remote writes. The publish actions require the tagged push Actions context and
+explicit credentials; local validation/readiness checks are read-only.

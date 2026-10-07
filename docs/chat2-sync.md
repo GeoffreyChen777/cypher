@@ -1,6 +1,6 @@
 # chat2: dumb-relay session sync + thin docs
 
-Status: PLANNED · Author: 2026-08-09 investigation (whale-doc dissection + t3code comparison)
+Status: CURRENT — in production since cypher 0.1.4 (ChatRoom DO, `edge/src/chat-room.ts`). Origin: 2026-08-09 investigation (whale-doc dissection + t3code comparison).
 Prior art: `docs/registry-sync.md` (the same argument, applied to the workspace index).
 
 ## Why
@@ -71,8 +71,8 @@ Estimate: 2–3 days. Ships in the next release; immediately cuts new-session gr
 
 New DO class `ChatRoom`, room name `chat2/{chatId}`, modeled line-for-line on
 `RegistryRoom` (registry-room.ts, 425 LOC), not on SessionRoom. **No loro-wasm import
-anywhere in the class.** With this, `edge/src/session-doc/` (the TS schema mirror) and
-the wasm bundling alias eventually die with s2.
+anywhere in the class.** The TS schema mirror (`edge/src/session-doc/`) and the wasm
+bundling alias have since been removed with the s2 routes.
 
 **Storage** (DO SQLite):
 - `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` —

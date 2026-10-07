@@ -97,14 +97,12 @@ Server→client:
 - Local-only rows on a full resync re-seed the same way; unpushed writes always live in
   the pending queue and replay over whatever the server returns.
 
-## Migration (instant, on first boot after update)
+## Migration
 
-`WorkspaceHost::open`: if no `registry1` snapshot exists, read the legacy `workspace2`
-Loro snapshot, convert every row into pending upsert ops (HLCs derived from the rows' own
-timestamps, so genuinely-newer live writes beat migrated values), and save. The UI reads
-the overlay immediately — zero visible gap. Each device seeds the same converged values
-idempotently; the old `ws4` rooms are simply never joined again (hibernated, ~zero cost).
-The legacy snapshot is retained for rollback.
+The first-boot seed from the legacy `workspace2` Loro snapshot was removed after 0.3.41.
+An install older than the registry cutover must first update through a 0.3.x release up
+to 0.3.41, which converts its workspace into the `registry1` snapshot; newer releases
+start from `registry1` only. The old `ws4` rooms are no longer routed by the edge.
 
 ## Parity notes
 
@@ -114,4 +112,3 @@ The legacy snapshot is retained for rollback.
   the only per-device surface that made the 2026-08-05 incident debuggable.
 - Nightly R2 backup of the row table (seq-monotonic guard), `/registry/:orgId/rows` repair
   read, `POST /registry/:orgId/reset` operator wipe (fleet re-seeds automatically).
-- Legacy `/workspace/*` routes remain for older engine builds; nothing new joins them.
