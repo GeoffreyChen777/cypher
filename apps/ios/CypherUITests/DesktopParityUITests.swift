@@ -180,13 +180,3 @@ final class DesktopParityUITests: XCTestCase {
                       "the promoted chat opens, carrying the side chat's conversation")
     }
 }
-
-private extension XCUIElement {
-    func waitForEnabled(timeout: TimeInterval) -> Bool {
-        let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "enabled == true"), object: self)
-        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
-    }
-}
-
-

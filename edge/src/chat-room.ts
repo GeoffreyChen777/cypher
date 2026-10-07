@@ -1,8 +1,7 @@
 /**
  * ChatRoom — one Durable Object per chat session (`chat2/{chatId}`), the
- * dumb authenticated log relay replacing SessionRoom's loro-aware s2 rooms
- * (docs/chat2-sync.md workstream B). Modeled line-for-line on RegistryRoom,
- * NOT on SessionRoom: no loro-wasm import anywhere in this class.
+ * dumb authenticated log relay (docs/chat2-sync.md workstream B). Modeled
+ * line-for-line on RegistryRoom: no loro-wasm import anywhere in this class.
  *
  * The DO's entire job: append opaque update blobs to a seq-ordered log,
  * relay them to live sockets, store one client-built checkpoint blob, and
@@ -33,7 +32,6 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
-import type { DevelopmentPreviewRelay } from "./development-preview";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -89,7 +87,7 @@ export class ChatRoom implements DurableObject {
    * "set 1 to 1" for every push after the first. */
   private backupDirty?: boolean;
 
-  constructor(ctx: DurableObjectState, env: Env, private readonly preview?: DevelopmentPreviewRelay) {
+  constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
     ensureChatLog(ctx.storage.sql);
@@ -114,15 +112,12 @@ export class ChatRoom implements DurableObject {
       // discipline: chat ids are client-minted, the first authed user to
       // dial one owns it).
       if (owner && owner !== userId) return json({ error: "forbidden" }, 403);
-      const admission = this.preview?.admit(request);
-      if (admission instanceof Response) return admission;
       if (!owner) setMeta(sql, "owner", userId);
       const device = url.searchParams.get("device") ?? "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device };
       pair[1].serializeAttachment(state);
-      if (admission) this.preview!.joined(pair[1], admission);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
@@ -312,8 +307,7 @@ export class ChatRoom implements DurableObject {
         ...logStats(sql),
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
-        // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes). Served from
+        // The ONLY per-device attribution surface. Served from
         // memory: the table holds everything flushed so far, the map holds
         // that plus this instance's unflushed delta.
         pushOutcomes: Object.fromEntries(this.loadOutcomes()) as Record<string, PushOutcome>,
@@ -334,7 +328,6 @@ export class ChatRoom implements DurableObject {
       this.outcomes = new Map();
       this.outcomesDirty = false;
       this.backupDirty = false;
-      this.preview?.reset();
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -359,7 +352,6 @@ export class ChatRoom implements DurableObject {
       ws.close(1009, "frame too large");
       return;
     }
-    if (this.preview?.message(ws, new Uint8Array(message))) return;
     const frame = decodeFrame(new Uint8Array(message));
     const state = ws.deserializeAttachment() as SocketState;
     if (!frame) {
@@ -369,7 +361,6 @@ export class ChatRoom implements DurableObject {
     switch (frame.type) {
       case FRAME.hello:
         this.handleHello(ws, state, frame.header);
-        this.preview?.hello(ws);
         return;
       case FRAME.rowsReq:
         this.handleRowsReq(ws, state, frame.header);
@@ -388,15 +379,13 @@ export class ChatRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket): Promise<void> {
-    this.preview?.left(ws);
+  async webSocketClose(_ws: WebSocket): Promise<void> {
     // Rows are written synchronously on push; only the attribution counters
     // are buffered, and this is their convergence point.
     this.flushOutcomes();
   }
 
-  async webSocketError(ws: WebSocket): Promise<void> {
-    this.preview?.left(ws);
+  async webSocketError(_ws: WebSocket): Promise<void> {
     this.flushOutcomes();
   }
 

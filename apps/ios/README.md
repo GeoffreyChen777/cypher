@@ -16,7 +16,7 @@ on the phone.** TLS relay transport is used; this is not end-to-end encryption.
   resolved and the workspace has its on-device cache or a live room (3s cap).
   "LOADING" appears only if it's still waiting after the decode. Foregrounding
   never shows it; Reduce Motion gets a static mark and a plain fade. Rigs
-  (`-demo`, `-e2e`, `-bench`, XCTest) skip it; `-splash` forces it.
+  (`-demo`, XCTest) skip it; `-splash` forces it.
 - **Project-first:** Home lists projects with their owning device;
   open a project to create or resume its sessions, or access its archive.
   `Space`/`spaceId` remain the shared wire-schema names — no schema migration.

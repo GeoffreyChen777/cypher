@@ -1,5 +1,5 @@
 {
-  // Cypher edge: per-session + per-workspace Loro sync DOs, per-device
+  // Cypher edge: per-chat log-relay DOs, per-user registry DOs, per-device
   // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
   // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
   // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
@@ -8,8 +8,8 @@
   // worker identity (`cypher-edge`) must never be renamed without a data
   // migration — that would orphan every session/registry/chat room.
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Deployed by .github/workflows/deploy.yml on pushes to main that touch
-  // edge/ (CLOUDFLARE_API_TOKEN repo secret).
+  // Deployed by .github/workflows/deploy.yml on every push to main
+  // (CLOUDFLARE_API_TOKEN repo secret).
   "name": "cypher-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
@@ -24,13 +24,11 @@
   "routes": [{ "pattern": "edge.letscypher.app", "custom_domain": true }],
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
-  // loro-crdt's default entry loads its WASM via URL fetch, which workerd
-  // cannot do at runtime; the base64 entry inlines the module instead.
-  "alias": {
-    "loro-crdt": "loro-crdt/base64"
-  },
   "durable_objects": {
     "bindings": [
+      // Retired: src/session-room.ts is a 410 stub kept bound so the stored
+      // legacy rooms are not deleted. Removing it needs a deleted_classes
+      // migration.
       { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },

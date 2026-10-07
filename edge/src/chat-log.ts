@@ -13,8 +13,7 @@ import type { BlobStore } from "./blobs";
 
 /** Per-row byte cap, rejected at the frame header. Post-strip updates are
  * KB-scale; a full checkpoint travels over HTTP, never as a row. Well under
- * the ~2MB SQL value cap, so rows are never chunked (unlike s2's update-log,
- * whose silent SQLITE_TOOBIG overflow was the 2026-08-05 whale freeze). */
+ * the ~2MB SQL value cap (SQLITE_TOOBIG), so rows are never chunked. */
 export const MAX_ROW_BYTES = 1024 * 1024;
 
 /** Blob-store names for the checkpoint payload and its frontier. */

@@ -1,21 +1,18 @@
 export interface Env {
-  SESSION_ROOMS: DurableObjectNamespace;
   DEVICE_ROOMS: DurableObjectNamespace;
   /** Per-user workspace registries (`reg1/{orgId}/{userId}`) — the row-table
    * replacement for the Loro workspace doc (docs/registry-sync.md). */
   REGISTRY_ROOMS: DurableObjectNamespace;
   /** chat2 session rooms (`chat2/{chatId}`) — dumb authenticated log relays
-   * replacing SessionRoom's loro-aware s2 rooms (docs/chat2-sync.md). */
+   * (docs/chat2-sync.md). */
   CHAT_ROOMS: DurableObjectNamespace;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
   WORKOS_CLIENT_ID: string;
-  /** "workos" (JWT), "dev" (local tests only), or "dev-locked" (secret development bearer). */
+  /** "workos" (JWT) or "dev" (local tests only). */
   AUTH_MODE: string;
-  /** Required bearer for the data-isolated development deployment. */
-  DEV_ACCESS_TOKEN?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;
@@ -36,9 +33,3 @@ export interface Env {
  * the caller's JWT. DOs trust it blindly — they are only reachable through
  * the Worker (design §2: "DO never sees an unauthenticated frame"). */
 export const AUTH_USER_HEADER = "x-cypher-auth-user";
-
-/** Header the Worker stamps on requests forwarded into workspace-doc rooms
- * (`ws/{orgId}`). Membership (JWT org claim == orgId) is enforced at the
- * Worker; the SessionRoom DO sees this and skips its per-chat
- * claim-on-first-join ownership discipline for the room. */
-export const ROOM_KIND_HEADER = "x-cypher-room-kind";

@@ -112,22 +112,6 @@ final class AppModel {
         // ASWebAuthenticationSession flow can't be driven headlessly).
         override("-setaccess") { Keychain.save($0, key: "accessToken") }
         override("-setrefresh") { Keychain.save($0, key: "refreshToken") }
-        if args.contains("-bench") {
-            Task { await BenchRunner.run() }
-            return
-        }
-        if args.contains("-e2e") {
-            Task { await E2ERunner.run(model: self) }
-            return
-        }
-        if args.contains("-e2e-live") {
-            // Reuse the signed-in session, then probe the live relay paths.
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                await E2ERunner.runLive(model: self)
-            }
-            // fall through to the normal restore below
-        }
         if args.contains("-demo") {
             enterDemoMode()
             if args.contains("-demo-many") { demo?.addManyProjects() }
@@ -294,16 +278,6 @@ final class AppModel {
         storedOrgId = org.organizationId
         connect(url: url, mode: .workos, userId: storedUserId, orgId: org.organizationId,
                 tokens: scoped, devBearer: nil)
-    }
-
-    /// Dev-mode edge (AUTH_MODE=dev): bearer = "userId@orgId".
-    func signInDev(edgeURL: URL, userId: String, orgId: String) {
-        edgeURLString = edgeURL.absoluteString
-        authModeRaw = AppConfig.Mode.dev.rawValue
-        storedUserId = userId
-        storedOrgId = orgId
-        connect(url: edgeURL, mode: .dev, userId: userId, orgId: orgId,
-                tokens: nil, devBearer: devBearer(userId: userId, orgId: orgId))
     }
 
     func enterDemoMode() {
@@ -694,42 +668,6 @@ final class AppModel {
                                          repoPath: space.path, refName: refName)
     }
 
-    /// Mid-session ref switch (desktop switch_session_ref): retarget onto the
-    /// ref's existing worktree (row writes, no git), else checkout in the
-    /// session's own cwd on the host. Returns an error message or nil.
-    func switchSessionRef(chat: Chat, ref: RepoRef) async -> String? {
-        guard let cwd = chat.cwd else { return "Session has no working folder" }
-        if let worktree = ref.worktreePath {
-            if worktree == cwd { return nil }  // already here
-            if let demo {
-                if let ix = demo.chats.firstIndex(where: { $0.id == chat.id }) {
-                    demo.chats[ix].cwd = worktree
-                    demo.chats[ix].branch = ref.name
-                }
-                return nil
-            }
-            workspace?.setChatCheckout(chatId: chat.id, cwd: worktree, branch: ref.name)
-            return nil
-        }
-        if let demo {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            demo.switchRef(path: cwd, refName: ref.name)
-            if let ix = demo.chats.firstIndex(where: { $0.id == chat.id }) {
-                demo.chats[ix].branch = ref.name
-            }
-            return nil
-        }
-        guard let workspace else { return "Not connected" }
-        let error = await workspace.switchRef(deviceId: chat.deviceId,
-                                              repoPath: cwd, refName: ref.name)
-        if error == nil {
-            // The host's HEAD watcher reconciles chat.branch eventually;
-            // stamp it optimistically so the UI answers immediately.
-            workspace.setChatCheckout(chatId: chat.id, cwd: cwd, branch: ref.name)
-        }
-        return error
-    }
-
     /// CreateWorktree off the base ref; returns the new worktree's path.
     func createWorktree(space: Space, base: String) async -> String? {
         if let demo {
@@ -880,9 +818,6 @@ final class AppModel {
         monitor.start(queue: DispatchQueue(label: "cypher.path-monitor"))
         pathMonitor = monitor
     }
-
-    /// Diagnostics access (live e2e probe).
-    var diagnosticsConfig: AppConfig? { config }
 
     // MARK: Session stores
 

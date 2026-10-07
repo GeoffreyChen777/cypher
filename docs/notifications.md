@@ -1,18 +1,20 @@
 # Session-targeted mobile notifications
 
-## Implementation and rollout status
+## Implementation and status
 
 The implementation lives in the existing Cloudflare Worker, desktop app and iOS
 client. There is **no separate APNs sender service**. Native Workers `fetch()`
-calls APNs; `jose` signs ES256 provider tokens using Workers Web Crypto.
-See [the cloud transport validation](apns-workers-validation.md).
+calls APNs; `jose` signs ES256 provider tokens using Workers Web Crypto. Workers
+have no functional `node:http2`, but that does not matter: a Worker's `fetch()`
+reaches the APNs provider API (Apple answers with its own `apns-id` and
+authentication errors such as `MissingProviderToken` / `InvalidProviderToken`),
+and Web Crypto produces valid ES256 signatures.
 
-Production is enabled for the current real-device validation by
-`NOTIFICATIONS_ENABLED = "true"`.
-Source entitlements are not Apple Developer portal configuration. No real APNs
-key has been configured by this implementation, and neither authenticated APNs
-acceptance nor physical-device delivery has been verified. The already uploaded
-TestFlight 0.1.3 (1) does not contain these changes.
+Production sends are enabled by `NOTIFICATIONS_ENABLED = "true"` in
+`edge/wrangler.jsonc`, which also carries `APNS_KEY_ID` and `APNS_TEAM_ID`; the
+APNs provider key is the `APNS_PRIVATE_KEY` Worker secret. Release iOS builds
+carry the production push entitlement (checked by `scripts/ci/ios-verify.py`).
+Source entitlements are not Apple Developer portal configuration.
 
 ## Behavior
 

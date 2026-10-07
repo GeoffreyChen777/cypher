@@ -1,8 +1,9 @@
 # Guided Linux setup
 
-This flow requires **Cypher 0.3.3 or newer**. The deployment gate prevents
-the new installer from going live while the public client channel is still
-0.3.2, which has no `setup` command.
+This flow requires **Cypher 0.3.3 or newer**. Official Linux binaries support
+glibc-based x86_64 and aarch64 systems with glibc 2.31 or newer (for example
+Ubuntu 20.04 or Debian 11 and newer). Alpine/musl is not currently an official
+target.
 
 ## Normal path
 
@@ -53,15 +54,48 @@ cypher update             # newest release + Runtime, service restart
 cypher update --check     # report only; exits 1 when something is newer
 ```
 
-`cypher update` adopts any non-checkout Linux binary into the managed
-`~/.cypher/app` layout, so it works regardless of how Cypher was first
-installed. Services apply releases automatically when idle unless
-`CYPHER_AUTO_UPDATE=0` is set for the service.
+`cypher --version` prints the installed binary's version. `cypher update --check`
+exits 1 when a newer release or Runtime is available; download/network errors
+also fail, so check the diagnostic output. `cypher update` works after any Linux
+installation: a binary outside the managed `~/.cypher/app/<version>` layout is
+moved into it, `~/.local/bin/cypher` is linked there, and a service that ran the
+old path is repointed. Only a source checkout stays report-only. The service is
+not restarted while runs are active unless you pass `--force`.
+
+Linux services apply releases **automatically** in an idle window (no live runs
+or open terminals) and restart themselves; the engine also keeps the Runtime
+current. Set `CYPHER_AUTO_UPDATE=0` before `cypher daemon install`, or in
+`~/.cypher/env`, to make updates manual. `cypher status` shows which applies.
 
 The low-level `headless`, `login`, `logout`, `sync` and `daemon` commands remain.
 The guided flow handles stopping and restarting its own idle service around
 authentication; users do not need to chain `daemon stop; login; daemon start`.
 It will not silently switch an already connected device back to local-only.
+
+## Pi and configuration
+
+System Pi and `~/.pi` are not used. Pi Runtime (Node, Pi and curated plugins) is a
+separate download, with per-device configuration under
+`$CYPHER_DATA_DIR/pi-runtime/agent` (default `~/.cypher/pi-runtime/agent`).
+The setup wizard installs Runtime automatically. Sign the desktop into the same
+account, select the Linux device in Settings, and configure Providers and MCP
+there. Account login is not provider login.
+
+The low-level `cypher headless` command remains non-interactive and does not
+perform first-use setup. Dedicated terminal-only Provider/MCP management
+subcommands are not available yet.
+
+Use the same `CYPHER_DATA_DIR` for CLI commands and the service.
+`cypher daemon install` captures data-directory and other supported `CYPHER_*`
+overrides, resolving a relative data directory to an absolute path.
+The optional `~/.cypher/env` is a **systemd EnvironmentFile**, not a shell script;
+it overrides captured service values and is **not** automatically loaded by
+one-shot CLI commands. Set matching shell variables when using it, especially
+for account/data-directory settings. Do not put provider API keys there.
+
+When a development UI uses a separate preferences directory, set
+`CYPHER_ENGINE_DATA_DIR` to the headless engine's data directory. This setting
+is UI-only; CLI commands use `CYPHER_DATA_DIR`.
 
 ## SSH, automation and non-systemd environments
 
@@ -115,6 +149,20 @@ non-default data directories also get distinct user-service names. See
   are checked. A pending connection is reported as incomplete, not success.
 - Setup does not automatically install system packages, run arbitrary repair
   commands as root, or overwrite immutable release directories.
+
+## Installation integrity
+
+The online installer requires an adjacent `<artifact>.sha256` containing the
+64-character digest. It verifies downloads, validates archive members, probes
+the executable and only then replaces the `current` link. Missing/mismatched
+checksums stop installation; existing versions and user data remain unchanged.
+An existing conflicting version directory is not overwritten automatically.
+Releases older than 0.3.3, which lack these checksum files and the guided
+`setup` command, are refused. SHA-256 is an integrity check, **not** a release
+signature.
+
+The tarball's own `install.sh` is a manual, unmanaged installation to
+`~/.local/bin`; use the online installer for managed self-updates.
 
 ## Validation
 

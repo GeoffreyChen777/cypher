@@ -4,7 +4,7 @@
  * token as `?token=` (WS clients cannot always set headers); plain requests
  * use `Authorization: Bearer`.
  *
- * Workspace rooms (`ws/{orgId}`) authorize on the token's WorkOS organization
+ * Registry rooms (`reg1/{orgId}/{userId}`) authorize on the token's WorkOS organization
  * claim (`org_id`, present when the session was refreshed scoped to an org):
  * membership = claim equals the room's orgId.
  */
@@ -37,14 +37,10 @@ export const bearerFromRequest = (request: Request): string | undefined => {
 };
 
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
-  if (env.AUTH_MODE === "dev-locked") {
-    if (!env.DEV_ACCESS_TOKEN || token !== env.DEV_ACCESS_TOKEN) return undefined;
-    return { userId: "dev-user", orgId: "dev-org" };
-  }
   if (env.AUTH_MODE === "dev") {
     // Dev mode mirrors the old apps/server: the bearer string IS the user id.
     // `userId@orgId` additionally carries a fake org claim so workspace-room
-    // membership is exercisable locally (smoke tests).
+    // membership is exercisable locally.
     if (!token) return undefined;
     const at = token.indexOf("@");
     if (at > 0) return { userId: token.slice(0, at), orgId: token.slice(at + 1) };

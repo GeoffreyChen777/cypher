@@ -44,7 +44,6 @@ final class BootSplashTests: XCTestCase {
     func testRigsSkipTheSplash() {
         XCTAssertTrue(BootSplash.enabled(arguments: ["Cypher"], environment: [:]))
         XCTAssertFalse(BootSplash.enabled(arguments: ["Cypher", "-demo"], environment: [:]))
-        XCTAssertFalse(BootSplash.enabled(arguments: ["Cypher", "-e2e"], environment: [:]))
         XCTAssertFalse(BootSplash.enabled(arguments: ["Cypher"], environment: ["XCTestConfigurationFilePath": "x"]))
         XCTAssertTrue(BootSplash.enabled(arguments: ["Cypher", "-demo", "-splash"], environment: [:]))
     }

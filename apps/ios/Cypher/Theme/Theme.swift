@@ -43,7 +43,6 @@ enum Theme {
 
     // ---- paint: accents ----
     static let accent = adaptive(light: oklch(0.511, 0.262, 276.966), dark: oklch(0.673, 0.182, 276.935))
-    static let accentStrong = adaptive(light: oklch(0.511, 0.262, 276.966), dark: oklch(0.585, 0.233, 277.117))
     static let danger = adaptive(light: oklch(0.577, 0.245, 27.325), dark: oklch(0.704, 0.191, 22.216))
     static let dangerSoft = adaptive(light: oklch(0.505, 0.213, 27.518), dark: oklch(0.808, 0.114, 19.571))
     static let warning = adaptive(light: oklch(0.555, 0.163, 48.998), dark: oklch(0.828, 0.189, 84.429))
@@ -80,17 +79,11 @@ enum Theme {
     // ---- numbers drive layout (pt) ----
     static let bubbleRadius: CGFloat = 16
     static let panelRadius: CGFloat = 10
-    static let controlRadius: CGFloat = 6
-    static let spaceXS: CGFloat = 4
-    static let spaceSM: CGFloat = 8
-    static let spaceMD: CGFloat = 12
-    static let spaceLG: CGFloat = 16
 }
 
 // MARK: - Fonts
 
 extension Theme {
-    static let fontSansName = "Geist"
     static let fontMonoName = "GeistMono-Regular"
 
     /// `relativeTo` scales with Dynamic Type from `size` at the default setting.

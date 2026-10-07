@@ -13,7 +13,7 @@
 > 本文 §12 的协议冻结清单与 §12.3 的事故加固行为，是**任何**优化（包括循环里的）
 > 都不得破坏的边界。
 >
-> 前置阅读：`HANDOFF-SELF-HOST-SYNC.md`（流量/账单观察，无结论）、`ARCHITECTURE.md` §1/§2/§6、`docs/chat2-sync.md`、`docs/registry-sync.md`、`docs/ephemeral-stream-v1.md`。
+> 前置阅读：`ARCHITECTURE.md` §1/§2/§6、`docs/chat2-sync.md`、`docs/registry-sync.md`、`docs/ephemeral-stream-v1.md`。
 >
 > 全文用三种标注区分事实与判断：
 > - **【现状】** 代码今天的行为，均附 `文件:行号`；
@@ -47,7 +47,7 @@
 | 预计工期 | **约 29–38 个工作日（6–7.5 周，一人）**；关键路径是 WP1 → WP3（Registry + 通知 + 推送）→ WP6（差分测试）→ WP9 → WP11；除切换本身外全部工作包可在窗口前完成并演练（§10）。 |
 | 切换后 | UX-1：客户端 2 秒合并窗口降到约 0（自托管后 rows 免费），感知延迟降为 120 ms 提交节拍 + RTT；UX-2：把已建成但默认关闭的 `ephemeral-stream-v1` 上生产，前提是设计设备绑定的发布者身份（§13）。 |
 
-一句话理由：服务端全部协议语义定义在约 4,000 行 TypeScript 里，且 Rust/Swift 客户端已通过共享或镜像的测试向量与之字节级对齐（`edge/src/chat-frames.ts:11-13`、`edge/src/registry-core.ts:1-6`、`crates/rpc/src/device_room.rs:6-14`）；本设计接受"第三份服务端实现"的重写风险，换取一个没有私有运行时层、与客户端同语言、天然多线程的长期形态，并把重写风险收敛到 §12 的可枚举清单和差分测试上。当前负载（月约 131 万次 DO 调用，HANDOFF §2.3，折合约 0.5 次/秒）余量两个数量级以上，"用满 100 核"不是选型依据；选 Postgres 的理由是**可用性路径**（流复制热备 + PITR）与单一备份口径，不是吞吐。
+一句话理由：服务端全部协议语义定义在约 4,000 行 TypeScript 里，且 Rust/Swift 客户端已通过共享或镜像的测试向量与之字节级对齐（`edge/src/chat-frames.ts:11-13`、`edge/src/registry-core.ts:1-6`、`crates/rpc/src/device_room.rs:6-14`）；本设计接受"第三份服务端实现"的重写风险，换取一个没有私有运行时层、与客户端同语言、天然多线程的长期形态，并把重写风险收敛到 §12 的可枚举清单和差分测试上。当前负载（月约 131 万次 DO 调用，折合约 0.5 次/秒）余量两个数量级以上，"用满 100 核"不是选型依据；选 Postgres 的理由是**可用性路径**（流复制热备 + PITR）与单一备份口径，不是吞吐。
 
 ---
 
@@ -63,12 +63,12 @@
 | DeviceRoom（`d2/{deviceId}`） | `device-room.ts` | DO SQLite、带 tag 的 `acceptWebSocket`/`getWebSockets(tag)`、`getWebSocketAutoResponseTimestamp`（`device-room.ts:135`） |
 | PushDevice（`apns/{env}/{token}`） | `push-device.ts` | **KV 型** `ctx.storage.get/put/list/delete/transaction`（`push-device.ts:29-119`），`blockConcurrencyWhile`（`:20`），service binding `APNS_SENDER`（`:102`） |
 | APNs 发送 | `apns.ts`、`apns-sender.ts` | `cloudflare:workers` `WorkerEntrypoint`（`apns-sender.ts:1,6`）；Workers `fetch` 对 Apple 走 HTTP/2 |
-| SessionRoom（遗留 `s2/`、`ws4/`） | `session-room.ts`（1,441 行） | loro-wasm、DO 全套；`ARCHITECTURE.md` §1 声明"no current client dials it" |
+| SessionRoom（遗留 `s2/`、`ws4/`） | `session-room.ts`（已退役为 410 存根，类仍绑定以保留存储） | 路由已删除；无客户端 |
 | 附件与备份 | `index.ts:406-441`，各 room 的 `alarm()` | R2 bucket `cypher-blobs` |
 | 发布产物 + 安装脚本 | `index.ts:130-165`、`install.sh` | R2 bucket `cypher-releases`；`scripts/ci/release.py:385-398` 通过 Cloudflare R2 REST API 写入 |
 | 部署 | `.github/workflows/deploy.yml:83` | `wrangler deploy` 三个 Worker（edge、landing、www-redirect） |
 | 域名与证书 | `edge/wrangler.jsonc:24` | Worker custom domain 自动签发 DNS + TLS；`letscypher.app` zone 托管在 Cloudflare |
-| 开发环境 | `docs/local-edge.md`、`scripts/edge-billing-local.mjs` | **无云端依赖**。托管开发 Worker `cypher-edge-development` 及其 6 个 DO namespace、2 个 R2 bucket 已于 2026-09-22 删除；开发环境改为本地 `wrangler dev`。预览 relay 的实现（`development-preview.ts`）保留，但其 Worker 入口已随 `development.ts` 一并移除，生产化时需重新接线（§13 UX-2） |
+| 开发环境 | `docs/local-edge.md`、`scripts/edge-billing-local.mjs` | **无云端依赖**。托管开发 Worker `cypher-edge-development` 及其 6 个 DO namespace、2 个 R2 bucket 已于 2026-09-22 删除；开发环境改为本地 `wrangler dev`。预览 relay 的实现（`development-preview.ts`）及 `dev-locked` 鉴权已删除，生产化时需在新服务端重建（§13 UX-2） |
 
 ### 1.2 客户端对服务端的硬耦合【现状】
 
@@ -80,7 +80,7 @@
 4. **WS 鉴权走查询串**：`edge/src/auth.ts:36` 接受 `?token=`；桌面 `crates/engine/src/doc_host.rs:151-153`（拼 `?token=&device=`）、`crates/rpc/src/device_room.rs:168-179`、iOS `App/AppConfig.swift:175-188`。HTTP 请求用 `Authorization: Bearer`。→ 新入口的访问日志必须脱敏 `token` 参数。
 5. **TLS 信任根**：Rust 侧 `Cargo.toml:80`（`tokio-tungstenite` `rustls-tls-webpki-roots`）、`:110`（`reqwest` `rustls-tls`）—— 只信 webpki 根集，Let's Encrypt（ISRG Root X1）在内；iOS 用系统信任。
 6. **发布/更新/运行时下载**：`crates/update/src/lib.rs:195-215`（`/releases/{channel}/manifest.json`、`manifest.json`）、`crates/engine/src/pi_runtime.rs:550-551`（`/releases/runtimes/pi`）、`edge/src/install.sh:15`（`CYPHER_BASE_URL` 默认同主机名）、`scripts/ci/release.py:692`（`--base-url` 默认值）。
-7. **遗留路由仍有写入者**：`crates/engine/src/diff_sync.rs:625` 仍向 `POST {edge}/diff/{chatId}`（SessionRoom `s2/` 路由，`index.ts:217`）发布 diff sidecar；`session-room.ts:319-326` 只写 blob，不触碰 loro。Rust/Swift 中没有 `GET /diff/{chatId}` 的读取者。`/session/*/ws`、`/workspace/*`、`/snapshot`、`/append` 在 `crates`、`apps/ios` 中无调用点。
+7. **遗留路由已删除**：桌面自 `3830a0f` 起不再 `POST {edge}/diff/{chatId}`；Edge 已删除 `/session/*`、`/workspace/*` 及顶层 `/tail`、`/stats`、`/diff`、`/snapshot`、`/append` 路由（SessionRoom 类仍作为 410 存根绑定）。`crates`、`apps/ios` 中无调用点。
 
 ### 1.3 DO 运行时语义的实际使用面（Rust 必须再现的清单）【现状】
 
@@ -113,12 +113,12 @@
 
 ### 1.5 流量量级与初步测量
 
-**【现状，引用 HANDOFF】** `HANDOFF-SELF-HOST-SYNC.md` §2：单个重度用户 30 天外推约 131 万次 DO Analytics 调用、131 万 rows written；Registry 与 ChatRoom 合计约 97% 的 rows。折合约 0.5 次调用/秒。HANDOFF §2.4 已声明这些数字不能直接换算成账单，本文只把它当作**容量量级**。
+**【现状】** 流量观察：单个重度用户 30 天外推约 131 万次 DO Analytics 调用、131 万 rows written；Registry 与 ChatRoom 合计约 97% 的 rows。折合约 0.5 次调用/秒。这些数字不能直接换算成账单，本文只把它当作**容量量级**。
 
 **【假设：初步测量在 macOS 笔记本、Node 24 上进行，方向可信，绝对值待真实服务器重测】**
 
-- 服务端处理时间只占同步预算的很小一部分：一次 push 的服务端处理 0.6–2 ms，而端到端同步预算约 2,100 ms，由客户端 **2 秒合并窗口**（`crates/sync/src/chat_client.rs:730,752`）和 **120 ms 提交节拍**（`crates/doc/src/constants.rs:15` `STREAM_COMMIT_MS`，`crates/engine/src/sessions.rs:1805-1806`）决定。2 秒窗口的存在理由是压低 Cloudflare rows written（HANDOFF §1.3 fixture：1,593 → 225 rows）；自托管后该理由消失（§13 UX-1）。
-- 单个重度用户约 **0.5 条入站消息/秒、约 0.1 次持久 push/秒**（HANDOFF §2 的 rows ÷ 每 push 约 5.2 rows）。
+- 服务端处理时间只占同步预算的很小一部分：一次 push 的服务端处理 0.6–2 ms，而端到端同步预算约 2,100 ms，由客户端 **2 秒合并窗口**（`crates/sync/src/chat_client.rs:730,752`）和 **120 ms 提交节拍**（`crates/doc/src/constants.rs:15` `STREAM_COMMIT_MS`，`crates/engine/src/sessions.rs:1805-1806`）决定。2 秒窗口的存在理由是压低 Cloudflare rows written（同一回放 fixture：1,593 → 225 rows）；自托管后该理由消失（§13 UX-1）。
+- 单个重度用户约 **0.5 条入站消息/秒、约 0.1 次持久 push/秒**（上述 rows ÷ 每 push 约 5.2 rows）。
 - 一个真实 profile：30 个 chat，文档状态合计 6.8 MB（中位 64 KB，p90 598 KB，最大 1.9 MB），增长约 13 MB/月，附件 340 KB。
 - 每设备 socket 数 ≤ 14：`WARM_DOC_CAP=12`（`crates/engine/src/doc_host.rs:47`）个 chat2 房间 + 1 个 registry + 1 个 device room；活跃用户典型约 10 个。
 - 单机瓶颈顺序：**上行带宽**（DeviceRoom 字节中继，终端/RPC 流量，未测）→ socket 数 → 之后很长时间内没有别的。CPU 与数据库在单机上永远不是瓶颈。
@@ -146,8 +146,8 @@
 接受的风险：
 
 - **协议耦合：差**（服务端语义的又一份实现）。下列行为都是事故后加的、今天只存在于 TS 里：重复 batchId 先于配额判定（`chat-room.ts:444-452`、`:249-251`）、注册表 rows 先于 ack 广播（`registry-room.ts:401-408`）、host 存活按最新 pong 选取（`device-room.ts:127-140,328-339`）、nudge 队列 256 上限（`:87,224-230`）、通知状态机对乱序/重放/前台阅读的全部分支（`notifications.ts:110-208,255-322,348-431`）。**缓解**：这些行为可枚举（§12.2），每一条要么已有跨语言向量，要么先从 TS 导出 golden 测试；再加差分回放（§12.4）。
-- **测试复用：间接**。166 个单元 + 41 个 workerd 测试（`docs/handoff-rows-written-optimization.md:113`）不能直接跑在 Rust 上，但它们是 golden 测试的**输入与期望来源**；三端共享/镜像向量（§12.1）原样复用；Rust 客户端的 mock-server 测试（`crates/sync`，含 `plan_catch_up` 决策表 `chat_client.rs:187-214`）是服务端行为的第二份规格。
-- **通知模块无真机基线**：通知模块尚未完成真机验收（`docs/notifications.md:3-15`，"neither authenticated APNs acceptance nor physical-device delivery has been verified"），在没有基线的情况下重写它等于同时改两件事——这是本设计最大的单点风险，§10 WP3 单列。
+- **测试复用：间接**。edge 的单元与 workerd 测试不能直接跑在 Rust 上，但它们是 golden 测试的**输入与期望来源**；三端共享/镜像向量（§12.1）原样复用；Rust 客户端的 mock-server 测试（`crates/sync`，含 `plan_catch_up` 决策表 `chat_client.rs:187-214`）是服务端行为的第二份规格。
+- **通知模块无真机基线**：通知模块尚未完成真机验收（`docs/notifications.md`），在没有基线的情况下重写它等于同时改两件事——这是本设计最大的单点风险，§10 WP3 单列。
 
 ### 2.2 存储：Postgres，不用 Redis
 
@@ -158,7 +158,7 @@
 
 1. 安全网不是"同一份代码"，而是 §12：线上行为清单 → 向量覆盖矩阵 → 缺口 golden 测试 → 差分回放。**差分回放 0 差异是 WP 测试阶段的退出条件**，排在 §6 的 Gate A 之前。
 2. TS Worker 在切换后 14 天内保持冻结部署（§6 步骤 14）；仓库中的 `edge/` 目录在差分 harness 退役前作为**参考实现**保留（只读），之后归档到分支（§11）。
-3. `PLAN.md`/`docs/rows-written-baseline.md` 追求的"减少 rows written"失去成本动机；2 秒合并窗口按 §13 UX-1 处理。
+3. 此前"减少 rows written"的优化失去成本动机；2 秒合并窗口按 §13 UX-1 处理。
 
 ### 2.4 身份提供方：保留 WorkOS
 
@@ -178,7 +178,7 @@
 
 - **对象存储用自托管 MinIO**：Rust 进程通过 S3 API 读写；`release.py:385-398` 的 `R2` 类只用到 `get/digest/put` 三个方法，直接换成指向 MinIO 的 S3 客户端（同一套凭据模型），不需要自建上传 API。选择同机 MinIO 的理由：**S3 作为边界**（换后端只改配置）、多盘时的**纠删码盘级冗余**、将来第二台机器/地域的 **bucket 复制只是配置**、bucket 版本化给附件免费的误删恢复；数据不离开自己的机器。代价：多一个守护进程与它的升级/备份口径；带宽不变（仍在同一上行链路后面）。备选 Garage / SeaweedFS（同为 S3 API，§11）。
 - **保留 room 命名前缀**：`chat2/`、`reg1/`、`d2/`、`apns/` 是历史上按"代"废弃旧 room 的产物（`index.ts:197-201,377`；`docs/chat2-sync.md:157`；`docs/registry-sync.md:3,106`）。`chat2` 在客户端 URL 里，`reg1` 的派生 id 被 iOS 持久化为推送 `scope`（§1.4）。迁移中**原样导入、不新增、不改名**；有了 Postgres 之后，身份类变更走 SQL 迁移而不是换前缀，前缀只保留给真正的协议不兼容升级。
-- **遗留 SessionRoom 不迁入线上服务**：只做冷归档导出（§5）。`POST /diff/:chatId` 以兼容路由形式保留并落到 chat2 room 的 `sidecar-diff` 槽（§4.1）。
+- **遗留 SessionRoom 不迁入线上服务**：只做冷归档导出（§5）。
 - **codec 共享**：服务端 crate 直接依赖 `cypher-sync`（chat 帧、预览帧）、`cypher-doc`（注册表合并核心）、`cypher-rpc`（设备帧）中的纯函数，而不是复制；Rust 客户端与 Rust 服务端字节级一致由此免费获得，TS/Swift 一致性继续由 §12.1 的向量保证。【建议】后续可把这些纯 codec 抽成 `cypher-wire` 小 crate 以缩小服务端依赖面（不改行为，不是切换前提）。
 
 ---
@@ -388,7 +388,7 @@ Cloudflare 之前吸收：L3/L4 洪水、L7 洪水、TLS 握手放大、机器�
 | `POST /auth/exchange` `POST /auth/verify-email` `POST /auth/refresh` `GET|POST /auth/orgs` `GET /auth/cli/callback` `GET /auth/ios/callback`（`auth-routes.ts`） | WorkOS 转发；错误信封 `{error, code, retryable}`（`auth-routes.ts:46-62`） | `auth.rs:807,882,1000,649-667`；iOS `Auth/AuthClient.swift:125-148`、`SignInView.swift:29` | 保留；**变更**：日志中的 `cf-connecting-ip`（`auth-routes.ts:151`）改读 `X-Forwarded-For` |
 | `POST /notifications/revoke`（:172） | 无鉴权撤销能力，转 PushDevice `/unregister` | iOS `NotificationController.swift:303` | 保留；`bindingId` 走 `rooms.id_hex` 全局索引 |
 | `GET /session/:id/ws` `GET /tail/:id` `GET /stats/:id` `GET /snapshot/:id` `POST /append/:id`（:193-226） | SessionRoom `s2/` | 无（`ARCHITECTURE.md` §1；grep 无命中） | **删除**（410 Gone）；数据冷归档 |
-| `GET|POST /diff/:chatId`（:217） | SessionRoom `s2/` 的 blob 槽（`session-room.ts:311-326`） | **桌面仍 POST**：`diff_sync.rs:625`；GET 无读者 | **变更**：兼容路由，POST 落到对应 chat2 room 的 `sidecar-diff`（等价 `PUT /chat2/:id/diff`，`chat-room.ts:272-282`，content-type `application/json`），响应 `{ok:true}`；GET 从同一槽返回。客户端后续改为 `PUT /chat2/{id}/diff`（非切换前提） |
+| `GET|POST /diff/:chatId` | 已删除（原 SessionRoom `s2/` 的 blob 槽） | 无（桌面自 `3830a0f` 起不再 POST） | **删除** |
 | `/workspace/:orgId/*`（:268-327） | SessionRoom `ws4/` | 无 | **删除**（410） |
 | `GET /chat2/:id/ws`（:233-245） | 二进制帧协议 | `doc_host.rs:1307`；iOS `AppConfig.swift:186` | 保留（帧、`state` 载荷为 frontier 字节、`hello_first`、关闭码 1003/1009/4410） |
 | `GET /chat2/:id/checkpoint`（`chat-room.ts:136-165`） | 200/206/416，`accept-ranges`、`content-range`、`x-chat2-checkpoint-seq`，只接受 `bytes=N-`（`:605-610`） | `chat2_host.rs:177-274`（续传 + seq 校验 `:233-247`）；iOS `AppConfig.swift:196` | 保留 |
@@ -430,7 +430,7 @@ Cloudflare 之前吸收：L3/L4 洪水、L7 洪水、TLS 握手放大、机器�
 | DeviceRoom 角色管道、`from/to` 标记、`" relay"`、4409、nudge 队列 | `device-room.ts:75-87,161-181,253-306` | `device_room.rs:33-46,172-179`；iOS `DeviceRelayClient.swift:5-10,32,211` | 保留 |
 | text `ping`→`pong` 不惊动 room | 三个 room 的 `setWebSocketAutoResponse` | 三个客户端 pump 的 `SILENCE_LEASE` | 保留（连接任务层实现） |
 | 通知 `scope`/`bindingId`/`lease` 语义 | `notifications.ts:50,223-236`、`push-device.ts` | iOS `NotificationController.swift` | 保留 + id 沿用 |
-| 预览帧类型 `0x20–0x26` 保留段 | `development-preview.ts`（仅开发） | `chat_client.rs:1581` 忽略 | 生产不出现；保留空间（§13 UX-2 启用） |
+| 预览帧类型 `0x20–0x26` 保留段 | 无（开发 relay 已删除；`ChatRoom` 回 `bad_frame`） | `chat_client.rs:1581` 忽略 | 生产不出现；保留空间（§13 UX-2 启用） |
 | **新差异**：慢消费者出站队列满 | DO 无限缓冲 | 客户端对任何关闭都按 cursor 重连 | Rust 关闭 1011（§3.2） |
 
 ### 4.3 客户端代码
@@ -678,7 +678,7 @@ DO 存储没有官方 dump API。做法：
 | chat2 帧封装 `[type u8][len u32 LE][header][payload]`、拒绝畸形/超长 header | `edge/src/chat-frames.test.ts`（5 例） | `crates/sync/src/chat_frames.rs:151-209`（3 例） | `apps/ios/CypherTests/ChatFramesTests.swift`（4 例，头注释声明三端镜像） | 镜像 |
 | 注册表合并核心（HLC 序、字段 LWW、tombstone/revive、guard tombstone、re-seed 保留时钟、任意到达序收敛、`validateOp`、`maxClock`） | `edge/src/registry-core.test.ts`（13 例） | `crates/doc/src/registry/tests.rs`（31 例，`:1-2` 声明镜像） | `apps/ios/CypherTests/RegistryCoreTests.swift`（16 例，`:1-4` 声明三端向量） | 镜像 |
 | 设备帧 `uleb128(len) ‖ JSON ‖ payload`、relay 错误载荷 | `edge/src/device-frame.test.ts`（2 例） | `crates/rpc/src/device_room.rs:973-1088`（7 例，含 `byte_parity_with_ts_encoder`） | **无独立测试文件**（`DeviceRelayClient.swift:5-10` 只有注释） | 镜像（Swift 缺） |
-| 预览帧 wire + 状态机 | `edge/src/stream-preview.test.ts` 读 `fixtures/stream-preview-v1.json`（48 例） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；`scripts/test-stream-preview.sh` 独立编译 Swift 跑同一 JSON | **共享 JSON** |
+| 预览帧 wire + 状态机 | `edge/src/stream-preview.test.ts` 读 `fixtures/stream-preview-v1.json`（48 例） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
 
 Rust 服务端复用 `cypher-sync`/`cypher-doc`/`cypher-rpc` 的这些 codec/核心后，上表自动覆盖服务端；需要补的是 Swift 设备帧向量（不阻塞切换，客户端已在线上验证）。
 
@@ -732,7 +732,7 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 - **两个被测端**：TS Worker 以 `wrangler dev --var AUTH_MODE:dev`（`scripts/e2e-smoke.sh:80` 已有启动方式）；Rust 服务端以 `AUTH_MODE=dev` + 一次性 Postgres 数据库。两端每个场景前重置状态。
 - **驱动**：一个 Rust 二进制（复用客户端 codec）读取场景文件（JSON/YAML）：步骤 = HTTP 请求（方法、路径、头、体）或 WS 动作（open/send/expect/close）；对两端执行相同序列，记录全部响应与帧。
 - **比较**：HTTP 状态码 + 允许列表内的头 + 体；JSON 体做**结构**比较；二进制帧按类型字节 + header JSON 结构 + payload 字节比较；忽略名单：`at`、`receivedAt`、`lastOkAt`、`checkpointAt`、`connectedSockets`、`etag`、随机 id（uuid/lease 按位置对应）。任何不在忽略名单内的差异 = 失败。
-- **场景来源**：(a) rows-written 基线的 P0 回放 fixture（243 个 durable batch，`docs/rows-written-baseline.md:36-37`、`scripts/rows-written-baseline.sh`），一份真实转录流；(b) `scripts/e2e-smoke.sh` 的两引擎流程分别对两端跑（不比较字节，只比较最终状态）；(c) 按 §4.1 每条路由 × §4.2 每条行为手写场景；(d) fuzz：按 codec 语法生成合法/非法帧，比较错误码与关闭码。
+- **场景来源**：(a) 一份真实转录流的回放 fixture（原 rows-written 基线工具 `crates/doc/examples/rows_written_fixture.rs` 已删除，可从 git 历史取回）；(b) `scripts/e2e-smoke.sh` 的两引擎流程分别对两端跑（不比较字节，只比较最终状态）；(c) 按 §4.1 每条路由 × §4.2 每条行为手写场景；(d) fuzz：按 codec 语法生成合法/非法帧，比较错误码与关闭码。
 - **边界（诚实）**：`wrangler dev` 的 TS 端不能注入时钟，所以配额窗口、presence TTL、通知延迟、墓碑 GC 等时间分支**不在差分覆盖内**，由 §12.2 的 golden 测试（Rust 侧可注入时钟）负责；差分覆盖时间无关路径。
 - **落地**：CI job `edge-diff`（需要 Node + Postgres service），WP6 交付；切换后保留到 T+14 天，随 `edge/` 归档一起退役。
 
@@ -751,19 +751,19 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 
 ### 13.1 阶段 UX-1：撤掉客户端 2 秒合并窗口
 
-- **现状**：桌面 Engine 把 2 秒内的 Loro 更新合并成一个 batch（`crates/sync/src/chat_client.rs:725-753`，两处 `Duration::from_secs(2)`），存在理由是压低 Cloudflare rows written（HANDOFF §1.3：同一 fixture 1,593 → 225 rows）；iOS 客户端无此窗口（`ChatRoomClient.swift` 无同类常量）。
+- **现状**：桌面 Engine 把 2 秒内的 Loro 更新合并成一个 batch（`crates/sync/src/chat_client.rs:725-753`，两处 `Duration::from_secs(2)`），存在理由是压低 Cloudflare rows written（同一回放 fixture：1,593 → 225 rows）；iOS 客户端无此窗口（`ChatRoomClient.swift` 无同类常量）。
 - **改动**：把窗口降到约 0（或 100 ms 以合并同一 tick 内的多次提交），并配合 §14 的服务端 per-push 开销修正。
 - **预期**：跨设备感知延迟从"最多 2 秒 + 120 ms + RTT"降到"120 ms + RTT"（`STREAM_COMMIT_MS`，`crates/doc/src/constants.rs:15`）；服务端每重度用户约 0.1 → 0.7 次 push/秒【假设：按 fixture 的 7 倍外推】，Postgres 上无感；`chat_rows` 死元组按比例增加，§3.4 的 autovacuum 配置已按此预留。
 - **发布**：桌面 Engine 一次发版；服务端无改动；可在切换后一周内做。
 
 ### 13.2 阶段 UX-2：`ephemeral-stream-v1` 上生产
 
-- **现状**（`docs/ephemeral-stream-v1.md`）：帧类型 `0x20–0x26`、协商、流控、reducer 已在 TS/Rust/Swift 三端实现并通过本地原生互通；48 个 wire 向量 + 13 个状态向量共享（§12.1）；默认关闭。服务端 relay 的实现（`development-preview.ts`）保留，但其 Worker 入口已随托管开发 Worker 一并删除（2026-09-22，`docs/local-edge.md`），因此**生产化时需要重新接线**；生产 `ChatRoom` 构造时 `preview` 仍为 `undefined`（`chat-room.ts:82`）。**四道开发门**：服务端 `AUTH_MODE=dev-locked` + `DEV_PREVIEW_ENABLED=true` + 64-hex `DEV_PREVIEW_PUBLISH_TOKEN`（`development-preview.ts:40-45`）；桌面 `CYPHER_DEV_STREAM_PREVIEW=1`（`crates/engine/src/lib.rs:886`）；发布凭据 `CYPHER_DEV_PREVIEW_PUBLISH_TOKEN`（`lib.rs:898`）；iOS `-dev-stream-preview` 启动参数（`apps/ios/Cypher/App/AppConfig.swift:24`）。
+- **现状**（`docs/ephemeral-stream-v1.md`）：帧类型 `0x20–0x26`、协商、流控、reducer 已在 TS/Rust/Swift 三端实现并通过本地原生互通；48 个 wire 向量 + 13 个状态向量共享（§12.1）；默认关闭。服务端开发 relay（原 `development-preview.ts`）及 `dev-locked` 鉴权已删除（可从 git 历史取回），因此**生产化时需要在新服务端重建 relay**；`ChatRoom` 对预览帧回 `bad_frame`。原**四道开发门**：服务端 `AUTH_MODE=dev-locked` + `DEV_PREVIEW_ENABLED=true` + 64-hex `DEV_PREVIEW_PUBLISH_TOKEN`；桌面 `CYPHER_DEV_STREAM_PREVIEW=1`（`crates/engine/src/lib.rs:886`）；发布凭据 `CYPHER_DEV_PREVIEW_PUBLISH_TOKEN`（`lib.rs:898`）；iOS `-dev-stream-preview` 启动参数（`apps/ios/Cypher/App/AppConfig.swift:24`）。
 - **唯一真正的阻塞项：发布者授权**。`HELLO.device` 是客户端自报（`chat-room.ts:388-391` 直接采用 header 值），ChatRoom 只有用户级所有权校验；文档明确"HELLO.device 不足以授予 preview 作者权限"。开发环境用一把共享发布 token 区分"能发布 vs 只能看"，不提供设备级隔离。
 - **【建议】设备绑定的发布者身份，在 ingress 准入时判定**，两个候选（§11 第 24 项选一）：
   - **(a) WorkOS 会话绑定**：JWT 的 `sid`（`auth.ts:14-20` 已提取）由服务端验证；某个 `(userId, sid)` 以 `role=host` 成功占有 `d2/{deviceId}`（`device-room.ts:151-158` 的 owner claim）即证明该会话控制该设备；chat2 WS 准入时，ingress 向 DeviceRoomActor 查询"`(userId, sid, device)` 是否为当前存活 host"，是则该 socket 获发布者资格。零新密钥、零客户端改动（chat2 socket 已带 `device`，token 已带 `sid`）；代价：桌面 UI 与 Engine 共享会话不影响（发布者是 Engine），但同一用户在两台设备上各自的 `sid` 不同，隔离成立。需确认 WorkOS refresh 后 `sid` 稳定【假设】。
-  - **(b) 服务端签发设备发布密钥**：host 占有 DeviceRoom 时服务端签发一把随机密钥并通过已鉴权的 host socket 下发，Engine 在 chat2 upgrade 时以 `x-cypher-preview-publisher` 头（`development-preview.ts:13`，已存在）出示；服务端按 `(deviceId → 当前密钥)` 校验。需要 Engine 一处改动（收密钥、带头）；隔离更强（不依赖 IdP 的 `sid` 语义）。
-- 其余：去掉四道 dev 门（服务端默认注入 relay；客户端按能力协商，不再看环境变量）；文本 only、60 KiB 段上限（`stream-preview.ts:9-10`）、`PREVIEW_LIMITS`（`development-preview.ts:14-15`）按生产重新评估；`baseSeq` 不推进 cursor、Finished 不是 ACK 等接收契约不变。
+  - **(b) 服务端签发设备发布密钥**：host 占有 DeviceRoom 时服务端签发一把随机密钥并通过已鉴权的 host socket 下发，Engine 在 chat2 upgrade 时以 `x-cypher-preview-publisher` 头（原开发 relay 已使用此头名）出示；服务端按 `(deviceId → 当前密钥)` 校验。需要 Engine 一处改动（收密钥、带头）；隔离更强（不依赖 IdP 的 `sid` 语义）。
+- 其余：去掉四道 dev 门（服务端默认注入 relay；客户端按能力协商，不再看环境变量）；文本 only、60 KiB 段上限（`stream-preview.ts:9-10`）、原开发 relay 的 `PREVIEW_LIMITS`（见 `docs/ephemeral-stream-v1.md` 的上限）按生产重新评估；`baseSeq` 不推进 cursor、Finished 不是 ACK 等接收契约不变。
 - **对计费请求是增加，不是减少【实测推算】**：预览 delta 是入站 WS 消息，按 20:1 计费。若 delta 与 120 ms 提交节拍同频，一个 5 分钟轮次约 2,500 条消息 = 125 个计费请求，而今天 2 秒窗口下的约 150 次 durable push 只折合约 7.5 个——chat 路径的计费请求约 **×16**。按 2026-09-18 的 chat WS 量推算，全量启用后 chat 计费请求从每天约 1,400 涨到约 22,000。仍远在额度内，但**方向是增加**：UX-2 是用请求数换延迟，不是省钱，排期时不要和降本项混在一起算收益。
 - **发布**：服务端 + 桌面 + iOS 各一次发版；iOS 走 TestFlight，故排在 UX-1 之后。
 
@@ -778,7 +778,7 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 这些修正不改变线上协议，可在切换前后任意时间独立发布；对 Postgres 的直接收益是更少的行版本（更少 vacuum 工作）。
 
 1. **注册表客户端无合并窗口**【现状】：`crates/engine/src/workspace_host.rs:700-707` `mutate()` 每次变更都 `room.nudge()`；`crates/sync/src/registry.rs:443-449` `nudge()` → `:890-903` 主循环立即 `push_pending`。`sessions.rs:1239-1278` `set_status` 每次都写 `updated_at = now`（`:1264`），经 `publish_session`（`:1154-1177`）→ `record_session`（`workspace_host.rs:928-932`）→ `upsert_session`（`crates/doc/src/registry.rs:1202-1209` 把 `updatedAt` 写进字段）→ 每次状态翻转一次立即 push。**【建议】** 在 `RegistryClient` 加 500 ms–1 s 的合并窗口（同一 batch 内多次 op 合并；断线/终止状态 `Idle|Errored|AwaitingInput`、删除类 op 立即 flush）；`set_status` 在状态未变时不改 `updated_at`（freshness 由已节流的 `touch_session` 负责，`sessions.rs:1178-1184` 注释）。桌面 Engine 一次发版。
-2. **ChatRoom 每次 push 的附加写**【现状】：`recordPush`（`chat-room.ts:528-544`）每次 push 读-改-写 `pushOutcomes` JSON；`markBackupDirty`（`:546-547`）每次 push 无条件写 `backupDirty=1`。HANDOFF §1.4 把它们列为"每 push 五行"之外的附加类别。**【建议】**（在 WP2 的 Rust 实现里直接采用）：`pushOutcomes` 在 actor 内存累计，按采样（每 N 次或每 60 秒）或在 alarm/空闲退出时落表，`/stats` 读内存 + 表；`backupDirty` 在内存中做 0→1 守卫，只在翻转时写。若切换前 TS 侧也想省 rows，同样两处改动各一行，但没有必要。
+2. **ChatRoom 每次 push 的附加写**【现状】：`recordPush`（`chat-room.ts:528-544`）每次 push 读-改-写 `pushOutcomes` JSON；`markBackupDirty`（`:546-547`）每次 push 无条件写 `backupDirty=1`。它们是"每 push 五行"之外的附加写。**【建议】**（在 WP2 的 Rust 实现里直接采用）：`pushOutcomes` 在 actor 内存累计，按采样（每 N 次或每 60 秒）或在 alarm/空闲退出时落表，`/stats` 读内存 + 表；`backupDirty` 在内存中做 0→1 守卫，只在翻转时写。若切换前 TS 侧也想省 rows，同样两处改动各一行，但没有必要。
 
 ---
 
@@ -796,7 +796,7 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 | `device-room.ts` codec | `cypher_rpc::device_room::{encode_device_frame, decode_device_frame, relay_error_code}` | ✅ 复用 |
 | `device-room.ts` 其余 | `rooms/device.rs` | — |
 | `push-device.ts`、`apns.ts`、`apns-sender.ts` | `rooms/push.rs`、`apns.rs`（reqwest h2 + `jsonwebtoken` ES256） | — |
-| `stream-preview.ts`、`development-preview.ts` | `cypher_sync::stream_preview` + `rooms/preview.rs`（UX-2 时生产化） | ✅ codec 复用 |
+| `stream-preview.ts` | `cypher_sync::stream_preview` + `rooms/preview.rs`（UX-2 时新建 relay） | ✅ codec 复用 |
 | `development.ts`、`development-budget.ts` | 无（预算门随 Cloudflare 退役） | — |
 | `session-room.ts`、`update-log.ts`、`session-doc/` | 无（410；数据冷归档） | — |
 | `install.sh` | 原文件以 `include_str!` 嵌入 | ✅ 原样 |
@@ -805,9 +805,8 @@ room actor 随时可能被逐出并重建（Cloudflare 的 hibernation，Rust �
 
 ## 附录 B：与现有文档的关系
 
-- `HANDOFF-SELF-HOST-SYNC.md`：其 §6 列出的待测项中，与 Cloudflare 计费相关的（rows/read/write 分类、WS 计费折算、duration）在迁移后不再需要；与网络相关的（各地区到服务器的延迟与断线率）转为 §11 第 1 项；"单用户 rows"数字在 §1.5 折算为 push/秒。
-- `docs/rows-written-baseline.md`、`PLAN.md`、`docs/handoff-rows-written-optimization.md`：成本动机消失；2 秒窗口按 §13 UX-1 撤掉；durable outbox 作为可靠性改进保留；P0 回放 fixture 转用作 §12.4 的差分场景。
+- rows-written 优化（已完成，相关计划文档已删除）：成本动机消失；2 秒窗口按 §13 UX-1 撤掉；durable outbox 作为可靠性改进保留。
 - `docs/research/durable-objects-language.md`：2026-07 的"DO 留在 TypeScript"决定，其论据（loro-wasm 与 workers-rs 限制）在 chat2/registry 去 wasm 后已失效；`ARCHITECTURE.md` 顶部 "Durable Objects stay TypeScript" 一句随 WP10 作废，本文 §2.1 是新的决定记录。
 - `docs/ephemeral-stream-v1.md`：其"正式设备身份"与"生产启用"的遗留边界由 §13.2 接手。
-- `docs/notifications.md`：其 "Real-device rollout must separately verify" 清单（`:206-215`）在 WP3/WP9 中执行，同时作为 golden 测试的验收对照。
+- `docs/notifications.md`：其 "Real-device rollout must separately verify" 清单在 WP3/WP9 中执行，同时作为 golden 测试的验收对照。
 - `docs/local-edge.md`、`docs/ci-cd.md`、`ARCHITECTURE.md` §1/§6：切换后需更新（WP10）。

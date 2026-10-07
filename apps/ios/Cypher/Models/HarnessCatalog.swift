@@ -46,10 +46,6 @@ enum HarnessCatalog {
         }
     }
 
-    static func modelLabel(harness: String, modelId: String?) -> String {
-        modelId ?? "Select model"
-    }
-
     // MARK: Providers (the desktop picker's rail, ported)
 
     /// One provider group of the catalog, in first-appearance order.

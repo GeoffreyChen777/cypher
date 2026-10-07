@@ -13,6 +13,7 @@ import {
   rowsAfter,
   seqFloor
 } from "../../src/chat-log";
+import { bytesOf, sameBytes } from "../../src/testing/bytes";
 
 /** chat2 log model (docs/chat2-sync.md B) against real DO SQLite — the same
  * runtime whose ~2MB value cap sank s2's unchunked whale rows. chat2 rows are
@@ -24,18 +25,6 @@ const inRoom = <T>(name: string, fn: (sql: SqlStorage) => T): Promise<T> => {
     ensureChatLog(state.storage.sql);
     return fn(state.storage.sql);
   });
-};
-
-const bytesOf = (len: number, seed: number): Uint8Array => {
-  const out = new Uint8Array(len);
-  for (let i = 0; i < len; i++) out[i] = (seed + i * 31) & 0xff;
-  return out;
-};
-
-const sameBytes = (a: Uint8Array | undefined, b: Uint8Array): boolean => {
-  if (a === undefined || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
 };
 
 describe("chat2 log on real DO SQLite", () => {

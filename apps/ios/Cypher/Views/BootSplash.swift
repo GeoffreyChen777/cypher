@@ -89,7 +89,7 @@ enum BootSplash {
                         environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         if arguments.contains("-splash") { return true }
         if environment["XCTestConfigurationFilePath"] != nil { return false }
-        return !arguments.contains { ["-demo", "-e2e", "-bench"].contains($0) }
+        return !arguments.contains("-demo")
     }
 
     /// Something real is underneath: sign-in resolved, and a signed-in

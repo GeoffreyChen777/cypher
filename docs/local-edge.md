@@ -1,18 +1,8 @@
 # Local Edge development
 
-The hosted development Worker (`cypher-edge-development`) was **retired on
-2026-09-22**, together with its six Durable Object namespaces and the
-`cypher-development-blobs` / `cypher-development-releases` buckets. It is gone,
-not paused. Three reasons:
-
-- it drew on the **same account allowance** as production (~33k Durable Object
-  requests in the 10 days before removal);
-- its `DevelopmentGuard` spent requests and rows of its own on every operation,
-  so it distorted exactly the billing numbers it was used to measure;
-- its room allowlist was capped at 16 for the lifetime of the guard data and had
-  filled permanently, so it could no longer accept a new chat.
-
-Local `wrangler dev` replaces it for every purpose, and is strictly better for
+There is no hosted development Worker; the former `cypher-edge-development`
+deployment, its Durable Object namespaces and buckets were deleted. Local
+`wrangler dev` replaces it for every purpose, and is strictly better for
 measurement: no guard, no quota, no cost, and exact per-invocation telemetry.
 
 ## Running an Edge locally
@@ -22,10 +12,9 @@ cd edge && npm run dev            # wrangler dev on 127.0.0.1:27640, AUTH_MODE=d
 ```
 
 `AUTH_MODE=dev` accepts `bearer == userId`, and only a `user@org` bearer carries
-an org claim. That matters: `/registry/:orgId/*` and `/workspace/:orgId/*`
-compare the claim against the URL and answer 403 without it, so a bare token —
-including the private 64-hex development secret, which the retired dev-locked
-Worker accepted on its own — cannot reach a registry route locally. Room
+an org claim. That matters: `/registry/:orgId/*` compares the claim against the
+URL and answers 403 without it, so a bare token — including the private 64-hex
+development secret — cannot reach a registry route locally. Room
 ownership is still claim-on-first-join per user, exactly as in production.
 
 ## Pointing a client at it
@@ -34,13 +23,16 @@ A development-profile engine defaults to `http://127.0.0.1:27640` — the port
 above — so no configuration is needed for the common case:
 
 ```sh
-scripts/dev-engine.sh dev
+scripts/dev-engine.sh dev     # builds and execs the development engine
+scripts/dev-app.sh dev        # in another terminal: a UI attached to it over IPC
 ```
+
+`dev-app.sh` refuses to start unless the matching `dev-engine.sh` engine is
+already listening, so it never embeds a second engine.
 
 When that resolved endpoint is loopback, the script sends `dev-user@dev-org`
 rather than the private secret: it is the `user@org` form `AUTH_MODE=dev`
-needs, and it is the very identity the dev-locked Worker used to return, so it
-maps to the `orgs/dev-org/dev-user` data directory that already exists. The
+needs, and it maps to the existing `orgs/dev-org/dev-user` data directory. The
 private secret is still what goes to a remote staging endpoint.
 
 The credential guard (`apps/cypher/src/main.rs`,
@@ -127,136 +119,51 @@ accumulation, so it is never extrapolated to the end of the cycle.
 
 ## What the meters cost, and why
 
-Measured on production. Two regimes dominate, and they look completely
-different, so a short sample will mislead you:
+Production traffic has two regimes, so a short sample misleads: while chats
+stream, chat2 traffic dominates; while idle, the per-device presence and
+notification-activity beats do. Rules that keep both cheap:
 
-- **Active**: `PUT /chat2/{id}/tail` dominated at 62.5% of DO-bound HTTP. The
-  tail rode the 1s snapshot-quiesce tick, so a streaming chat published once a
-  second. A 10s floor first cut that to 9 publishes where the old code sent
-  ~171 -- and it was still 18% of the bill, because the real finding came
-  later: nothing reads it. The tail was an iOS fallback made obsolete by native
-  chat2 support; no iOS build, no desktop build back to 0.3.18, and no request
-  in a 30-minute production capture (209 uploads, zero reads) ever fetched it.
-  Hosts no longer publish it. The Edge still serves `GET`/`PUT /chat2/{id}/tail`
-  so older hosts keep working and a future reader can bring it back.
-- **Idle**: `POST /notifications/activity` dominated at 75%. Both clients
-  heartbeat every 15s. A repeat only refreshes state the Worker reads while the
-  viewport is foreground **and** on a chat — `active()` requires foreground,
-  `iosViewingChat` requires a matching chatId, and `target:{chatId}` is written
-  only when both hold. Repeats outside that are now suppressed on desktop
-  (`notification_activity.rs`) and iOS (`NotificationController.swift`), which
-  removes background and list-view heartbeats outright.
-
-Notification *events* are not a target: `notification_events.rs` dedupes on a
-signature of status/startedAt/children, so only real transitions send. A
-150-second production sample contained none.
-
-## Where the requests actually went
-
-A `wrangler tail` event carries an `entrypoint` field naming the Durable Object
-class, which is the only way to attribute traffic — the `durableObjectId` alone
-tells you nothing. Classifying a 305s production sample that way:
-
-| source | rate | billable/h | share |
-| --- | --- | --- | --- |
-| `POST /notifications/activity` (RegistryRoom) | 378/h | 378 | 56.3% |
-| RegistryRoom inbound websocket | 1830/h | 91.5 | 13.6% |
-| DeviceRoom inbound websocket | 1133/h | 56.7 | 8.4% |
-| `GET /device/{id}/status` (DeviceRoom) | 71/h | 71 | 10.6% |
-| ChatRoom inbound websocket | 94/h | 4.7 | 0.7% |
-| everything else (rows, ws, nudge, event, tail, checkpoint) | 70/h | 70 | 10.4% |
-| **total** | | **672** | |
-
-Two facts shape every decision here:
-
-1. **Inbound websocket messages bill 20:1, HTTP bills 1:1.** Moving a message
-   from HTTP onto a socket that is already open is a 20x saving, and moving it
-   onto a frame that is *already being sent* is free.
+1. **Inbound WebSocket messages bill 20:1, HTTP bills 1:1.** Moving a message
+   from HTTP onto an open socket is a 20x saving; riding a frame that is
+   already being sent is free.
 2. **`ping` costs nothing.** All four rooms call `setWebSocketAutoResponse`, so
-   the runtime answers keepalives without waking the object. Verified directly:
-   20 pings produced 0 spans. Keepalives are never the problem; do not go
-   looking for them.
+   the runtime answers keepalives without waking the object (20 pings produced
+   0 spans). Keepalives are never the problem.
+3. **Hosts do not publish the chat2 tail.** Nothing reads it; the Edge still
+   serves `GET`/`PUT /chat2/{id}/tail` so older hosts keep working.
+4. **Viewport activity rides the presence beat.** The 15s "which chat is on
+   screen" refresh travels in the presence frame (`viewport_activity.rs`,
+   `Notifications.applyActivity`); only transitions spend an HTTP
+   `POST /notifications/activity`, because only they need the reply carrying
+   `readEventIds` and the badge. Repeats outside a foreground chat are
+   suppressed on desktop (`notification_activity.rs`) and iOS
+   (`NotificationController.swift`). `activity-presence.workerd.test.ts`
+   proves both transports store identical state.
+5. **Notification events send only on real transitions**:
+   `notification_events.rs` dedupes on a signature of
+   status/startedAt/children.
+6. **Status probes back off.** `relay_probe_task` re-verifies a device whose
+   presence went stale. A successful answer backs off too
+   (`RelayProbeRetry::alive`, capped at 300s); `verified_at` keeps the probe's
+   own `presence_seen` stamp from being mistaken for a heartbeat. 404 (never
+   hosted) and 403 (not your room) are authoritative "not live" and walk the
+   offline backoff to its 1800s cap; network errors, 5xx, 429 and 401 stay
+   inconclusive. A genuine presence beat clears the backoff instantly.
+7. **Presence republishes only changes.** `publish_if_changed` writes the value
+   through for late subscribers but wakes nobody when the snapshot is
+   identical.
 
-### The activity heartbeat now rides the presence beat
+What remains is mostly the presence beat itself (a 15s beat per connection).
+Slowing it lengthens how long a vanished device keeps showing "online" (a 30s
+beat halves the cost and doubles worst-case offline detection from 45s to 90s),
+so that is a product decision, not a fix. Signed-in development engines beat
+into the same room as the real client, so count them before paying that price.
 
-The viewport reports which chat is on screen so the edge can suppress a push
-for a chat you are already looking at. That report is a 15s heartbeat, and over
-HTTP it was the single largest line on the bill.
-
-A presence beat already goes to the *same* object on the *same* cadence over an
-open socket. The refresh now rides it (`viewport_activity.rs`, the `activity`
-field on the presence frame, `Notifications.applyActivity`). Transitions still
-spend an HTTP request, because only they need the reply carrying `readEventIds`
-and the badge.
-
-Measured with `scripts/activity-transport-bench.mjs` against a local edge:
-**1.050 → 0.050 billable requests per beat, a 21x reduction on that path.**
-`edge/test/workerd/activity-presence.workerd.test.ts` proves the two transports
-store identical state, so the saving is not bought with behaviour.
-
-### A successful status probe now backs off
-
-`relay_probe_task` re-verifies a device whose presence has gone stale. A probe
-that answered `hostConnected=true` used to clear the backoff entirely and grant
-only `PRESENCE_FRESH_MS` (45s) of freshness — against a 30s sweep. A device
-that was alive but whose presence beat never arrived was therefore re-probed
-about once a minute, forever.
-
-Successful answers now back off too (`RelayProbeRetry::alive`, capped at 300s).
-The subtlety worth keeping: a probe refreshes `presence_seen` itself, so the
-candidate filter would read back its own stamp, mistake it for a heartbeat and
-drop the backoff it had just set. `verified_at` distinguishes the two. A
-genuine beat still clears it instantly, so a returning device never waits.
-
-### A room that was never hosted is an answer, not an error
-
-Measured after the changes above shipped, `GET /device/{id}/status` was the
-largest line on the bill at ~360/hour, and 95% of those probes returned 404.
-The DeviceRoom answers 404 when it has no owner, i.e. no host has ever joined
-it; the engine treated every non-2xx as inconclusive and skipped the backoff,
-so three engines each re-asked every 30s sweep, forever.
-
-`relay_probe_answer` now treats 404 (never hosted) and 403 (not your room) as
-authoritative "not live", so they walk the ordinary offline backoff to its
-1800s cap. Network errors, 5xx, 429 and 401 stay inconclusive: they say nothing
-about the peer, and counting them would let one Edge hiccup mark every device
-offline. A device that later starts hosting is not delayed, because its first
-presence beat clears the backoff.
-
-That measurement came from `scripts/edge-billing-prod.py`, the production
-counterpart to `edge-billing-local.mjs`: it samples `wrangler tail` and
-attributes each event by its `entrypoint`. Two traps it handles: one client
-call produces both a Worker-level event and a Durable Object event, and only
-the latter is a DO request. And tail redacts id path segments, so it cannot tell
-you *which* device a probe targets, only how often and with what status.
-
-### Presence no longer republishes everything
-
-Every inbound presence beat called `publish()`, which `send_replace`d four
-watch channels whether or not anything had changed. Each wake-up becomes a
-relay frame to every subscribed viewport — this is what the DeviceRoom's
-1,133 messages/hour were: peers being re-sent data they already had.
-`publish_if_changed` still writes the value through (a late subscriber must not
-start stale) but wakes nobody when the snapshot is identical.
-
-### What is left, and why it is hard
-
-After the three changes above, roughly 191 billable requests/hour remain, and
-**about half of that is the presence beat itself**: 1,830 messages/hour across
-the registry rooms. The signature is unmistakable — no gap between messages
-ever exceeds 15.1s, which is what a periodic beat looks like and what bursty
-row pushes never do. Dividing by the 240/h a single client sends implies about
-7.6 beating connections.
-
-Cutting that further means slowing the beat, which directly lengthens how long
-a device keeps showing "online" after it disappears. That is a user-visible
-trade, not a free win, so it is a decision rather than a fix. For reference: a
-30s beat halves the cost and doubles worst-case offline detection from 45s to
-90s.
-
-Worth checking before paying that price: every signed-in development engine
-beats presence into the same room as the real client. Some of those 7.6
-connections are likely development instances, not users.
+To attribute production traffic, `scripts/edge-billing-prod.py` samples
+`wrangler tail` and classifies each event by its `entrypoint` (the Durable
+Object class — the `durableObjectId` alone tells you nothing). It counts only
+the Durable Object event of each call, not the Worker-level one, and cannot tell
+*which* device a request targets because tail redacts id path segments.
 
 ## Release artifacts
 
@@ -279,10 +186,10 @@ already promoted, and housekeeping must not fail it.
 
 ## Related
 
-- `docs/rows-written-baseline.md` — the deterministic fixture for rows written,
-  replayed against real workerd + real Durable Object SQLite.
+- `edge/test/workerd/rows-optimization.workerd.test.ts` — the deferred-write
+  optimizations pinned against real workerd + real Durable Object SQLite.
 - `scripts/e2e-smoke.sh` — two headless engines and a local Edge, proving the
   cross-device command path end to end with the mock harness.
-- `MIGRATION.md` §12.3 / §12.3b — the incident-hardened behaviours and the
+- [`docs/plans/MIGRATION.md`](plans/MIGRATION.md) §12.3 / §12.3b — the incident-hardened behaviours and the
   in-memory rebuild rule that **no** optimization may break, whichever backend
   it targets.

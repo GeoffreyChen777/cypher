@@ -7,12 +7,9 @@ enum Motion {
     // Signature entrance: 500ms cubic-bezier(0.16, 1, 0.3, 1), translateY 4→0.
     static let fadeIn = Animation.timingCurve(0.16, 1, 0.3, 1, duration: 0.5)
     static let fadeQuick = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.15)
-    static let menuIn = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.14)
-    static let dialogIn = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.18)
     static let resize = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.2)
     static let collapse = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.18)
     static let resort = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.26)
-    static let hoverFade = Animation.timingCurve(0.4, 0, 0.2, 1, duration: 0.15)
 
     // WorkingIndicator wave period (GRADIENT_SPIN) and loader pulse.
     static let gradientSpinPeriod: Double = 0.75
