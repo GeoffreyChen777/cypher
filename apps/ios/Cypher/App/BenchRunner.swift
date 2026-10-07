@@ -1,112 +1,11 @@
-// Transcript load benchmark — launch with `-bench`. Builds a synthetic session
-// doc the size of a long agent transcript and times the three stages that run
-// between "cached bytes on disk" and "rows on screen":
-//
-//   decode   SessionStore.decodeEntries — getDeepValue + whole-doc walk
-//   cold     row build with empty caches — what EVERY rebuild used to cost
-//   warm     row build with the completed-parse memo primed — cost per doc update
-//   cached   TranscriptBuilderCache at an unchanged revision — cost per scroll frame
-//
-// cold is the pre-change number for both warm and cached, so the same run gives
-// the before/after. Results append to Documents/bench.log for simctl to read.
+// Synthetic transcript for the `-demo` stress routes (`-big`, `-turns`,
+// `-huge`): a session doc the size of a long agent transcript.
 
 import Foundation
 import Loro
 
 @MainActor
 enum BenchRunner {
-    static var logURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("bench.log")
-    }
-
-    static func log(_ line: String) {
-        print("BENCH: \(line)")
-        if let handle = try? FileHandle(forWritingTo: logURL) {
-            handle.seekToEndOfFile()
-            handle.write(Data("\(line)\n".utf8))
-            try? handle.close()
-        } else {
-            try? Data("\(line)\n".utf8).write(to: logURL)
-        }
-    }
-
-    static func run() async {
-        try? FileManager.default.removeItem(at: logURL)
-        for turns in [50, 200, 500] {
-            measure(turns: turns)
-        }
-        log("done")
-    }
-
-    // MARK: Measurement
-
-    private static func measure(turns: Int) {
-        let doc = buildDoc(turns: turns)
-        let snapshot = (try? doc.export(mode: .snapshot)) ?? Data()
-        let bytes = snapshot.count
-
-        // Stage 0 — the disk hydration import (DocDisk.load). STILL on the main
-        // thread: it has to finish before the room join for the backfill to be
-        // incremental, so it was left alone. Measured to size that trade.
-        let importMs = best(3) {
-            _ = try? LoroDoc().importWith(bytes: snapshot, origin: "disk")
-        }
-
-        // Stage 1 — projection. Unchanged in cost; the fix moved it off the
-        // main thread, so this is the main-thread stall that used to happen.
-        var entries: [MessageEntry] = []
-        let decode = time { entries = SessionStore.decodeEntries(from: doc) ?? [] }
-
-        // Stage 2 — cold row build (empty caches). The OLD per-rebuild cost.
-        var rowCount = 0
-        let cold = best(3) {
-            var parsers: [String: IncrementalMarkdownParser] = [:]
-            var memo: [String: CompletedParse] = [:]
-            let rows = TranscriptRowBuilder.rows(entries: entries, pendingSends: [],
-                                                 parsers: &parsers, completed: &memo)
-            rowCount = rows.count
-        }
-
-        // Stage 3 — warm rebuild: memo primed, as after any doc update.
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var memo: [String: CompletedParse] = [:]
-        _ = TranscriptRowBuilder.rows(entries: entries, pendingSends: [],
-                                      parsers: &parsers, completed: &memo)
-        let warm = best(5) {
-            _ = TranscriptRowBuilder.rows(entries: entries, pendingSends: [],
-                                          parsers: &parsers, completed: &memo)
-        }
-
-        // Stage 4 — revision-gated cache: the scroll-frame path.
-        let cache = TranscriptBuilderCache()
-        _ = cache.rows(revision: 1, entries: entries, pendingSends: [], openToggles: [])
-        let cached = best(5) {
-            _ = cache.rows(revision: 1, entries: entries, pendingSends: [], openToggles: [])
-        }
-
-        log("--- \(turns) turns · \(entries.count) entries · \(rowCount) rows · \(bytes / 1024) KB snapshot")
-        log(String(format: "disk import (ON MAIN)   %8.2f ms", importMs))
-        log(String(format: "decode (now off-main)   %8.2f ms", decode))
-        log(String(format: "row build cold  [was]   %8.2f ms", cold))
-        log(String(format: "row build warm  [now]   %8.2f ms   %.0fx", warm, cold / max(warm, 0.0001)))
-        log(String(format: "scroll frame    [now]   %8.4f ms   %.0fx", cached, cold / max(cached, 0.0001)))
-    }
-
-    private static func time(_ body: () -> Void) -> Double {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        body()
-        return (CFAbsoluteTimeGetCurrent() - t0) * 1000
-    }
-
-    /// Best-of-n: the floor is the honest number for cache behaviour (noise
-    /// only ever adds).
-    private static func best(_ n: Int, _ body: () -> Void) -> Double {
-        var lowest = Double.greatestFiniteMagnitude
-        for _ in 0..<n { lowest = min(lowest, time(body)) }
-        return lowest
-    }
-
     /// A big synthetic transcript for the `-big` demo route — stresses the
     /// scroll-settle path with far more lazy rows than the demo dataset has.
     static func syntheticEntries(turns: Int) -> [MessageEntry] {

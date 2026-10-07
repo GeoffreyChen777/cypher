@@ -112,22 +112,6 @@ final class AppModel {
         // ASWebAuthenticationSession flow can't be driven headlessly).
         override("-setaccess") { Keychain.save($0, key: "accessToken") }
         override("-setrefresh") { Keychain.save($0, key: "refreshToken") }
-        if args.contains("-bench") {
-            Task { await BenchRunner.run() }
-            return
-        }
-        if args.contains("-e2e") {
-            Task { await E2ERunner.run(model: self) }
-            return
-        }
-        if args.contains("-e2e-live") {
-            // Reuse the signed-in session, then probe the live relay paths.
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                await E2ERunner.runLive(model: self)
-            }
-            // fall through to the normal restore below
-        }
         if args.contains("-demo") {
             enterDemoMode()
             if args.contains("-demo-many") { demo?.addManyProjects() }
@@ -294,16 +278,6 @@ final class AppModel {
         storedOrgId = org.organizationId
         connect(url: url, mode: .workos, userId: storedUserId, orgId: org.organizationId,
                 tokens: scoped, devBearer: nil)
-    }
-
-    /// Dev-mode edge (AUTH_MODE=dev): bearer = "userId@orgId".
-    func signInDev(edgeURL: URL, userId: String, orgId: String) {
-        edgeURLString = edgeURL.absoluteString
-        authModeRaw = AppConfig.Mode.dev.rawValue
-        storedUserId = userId
-        storedOrgId = orgId
-        connect(url: edgeURL, mode: .dev, userId: userId, orgId: orgId,
-                tokens: nil, devBearer: devBearer(userId: userId, orgId: orgId))
     }
 
     func enterDemoMode() {
@@ -844,9 +818,6 @@ final class AppModel {
         monitor.start(queue: DispatchQueue(label: "cypher.path-monitor"))
         pathMonitor = monitor
     }
-
-    /// Diagnostics access (live e2e probe).
-    var diagnosticsConfig: AppConfig? { config }
 
     // MARK: Session stores
 
