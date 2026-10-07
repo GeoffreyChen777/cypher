@@ -1,19 +1,21 @@
 //! PiHarness integration tests against the fake pi in
 //! `tests/fixtures/fake-pi.sh` (no real `pi` binary involved).
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
+use common::{dones, run_to_end};
 use cypher_harness::pi::PiHarness;
 use cypher_harness::{
     CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
-    ToolCall, UserInputAnswer,
+    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SteeringMode, ToolCall,
 };
 
 /// The session file the fake pi reports by default: it now derives its
@@ -29,16 +31,7 @@ fn fixture_session_file() -> String {
 }
 
 fn fixture_path() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("fake-pi.sh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-    }
-    path
+    common::fixture("fake-pi.sh")
 }
 
 fn harness() -> PiHarness {
@@ -125,67 +118,14 @@ async fn mcp_login_cancellation_reaps_the_waiting_command() {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        // provider/id convention — the harness splits on the first `/`.
-        model: Some("anthropic/claude-sonnet-4-20250514".into()),
         reasoning: Some(ReasoningLevel::Medium),
-        model_options: serde_json::Map::new(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
+        // provider/id convention — the harness splits on the first `/`.
+        ..common::request(prompt, Some("anthropic/claude-sonnet-4-20250514"))
     }
 }
 
 fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let token = CancellationToken::new();
-    let controls = RunControls {
-        request_input: Box::new(move |questions| {
-            let (tx, rx) = oneshot::channel();
-            let answers: Vec<UserInputAnswer> = questions
-                .iter()
-                .map(|q| UserInputAnswer {
-                    question_id: q.id.clone(),
-                    labels: vec!["tokio".into()],
-                })
-                .collect();
-            let _ = tx.send(answers);
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-        host: RunHostContext::default(),
-    };
-    (controls, steer_tx, token)
-}
-
-async fn run_to_end(
-    harness: &PiHarness,
-    req: RunRequest,
-    controls: RunControls,
-) -> Vec<AgentEvent> {
-    let stream = harness.run(req, controls).await.expect("run starts");
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
-    )
-    .await
-    .expect("run finished in time")
-}
-
-fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
-    events
-        .iter()
-        .filter_map(|e| match e {
-            AgentEvent::Done { status, error, .. } => Some((*status, error.clone())),
-            _ => None,
-        })
-        .collect()
+    common::controls_answering("tokio")
 }
 
 /// The engine bridge (`CYPHER_ENGINE_SOCKET`) must be injected into every pi

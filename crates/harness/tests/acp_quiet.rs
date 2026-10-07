@@ -4,82 +4,24 @@
 //! agent gets. Own test binary: the env knob is process-global, and every
 //! test here shares the one value.
 
-use std::path::PathBuf;
-use std::sync::Once;
+mod common;
+
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-use cypher_harness::{
-    AcpHarness, CancellationToken, Harness, RunControls, RunHostContext, SteerMessage,
-};
-use cypher_proto::{
-    AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
-};
+use cypher_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use cypher_proto::{AgentEvent, DoneStatus};
 
 const QUIET_MS: u64 = 1200;
 
 fn init_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: set before any harness runs in this test process; all
-        // tests in this binary share the one value.
-        unsafe { std::env::set_var("CYPHER_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
-    });
-}
-
-fn fixture_path() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("fake-acp.sh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-    }
-    path
-}
-
-fn request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: Some("grok-4.5".into()),
-        reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
+    common::init_quiet_settle(QUIET_MS);
 }
 
 fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let token = CancellationToken::new();
-    let controls = RunControls {
-        request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
-            let (tx, rx) = oneshot::channel();
-            let answers: Vec<UserInputAnswer> = questions
-                .iter()
-                .map(|q| UserInputAnswer {
-                    question_id: q.id.clone(),
-                    labels: vec!["Yes".into()],
-                })
-                .collect();
-            let _ = tx.send(answers);
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-        host: RunHostContext::default(),
-    };
-    (controls, steer_tx, token)
+    common::controls_answering("Yes")
 }
 
 async fn run_and_collect(
@@ -88,9 +30,9 @@ async fn run_and_collect(
     timeout: Duration,
 ) -> Vec<(std::time::Instant, AgentEvent)> {
     let (controls, _steer, _token) = controls();
-    let harness = harness.with_executable(fixture_path());
+    let harness = harness.with_executable(common::fixture("fake-acp.sh"));
     let stream = harness
-        .run(request(prompt), controls)
+        .run(common::request(prompt, Some("grok-4.5")), controls)
         .await
         .expect("run starts");
     tokio::time::timeout(timeout, async move {
