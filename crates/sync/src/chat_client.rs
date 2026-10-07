@@ -9,9 +9,9 @@
 //! the binary chat2 codec ([`crate::chat_frames`]), byte-compatible with
 //! `edge/src/chat-frames.ts`.
 //!
-//! Liveness discipline is inherited from `registry.rs` and its incidents:
-//! transport pings prove nothing about the DO; room health is judged only by
-//! protocol frames with probe deadlines.
+//! Liveness discipline matches `registry.rs`: transport pings prove nothing
+//! about the DO; room health is judged only by protocol frames with probe
+//! deadlines.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -203,8 +203,7 @@ pub fn plan_catch_up(
     // Presence test is the SIZE, not the seq: a freshly SEEDED room's
     // checkpoint legitimately covers seq 0 (M1 seeds before any rows
     // exist), and seq==0 misread as "no checkpoint" made every adopted
-    // reader skip the seed and render an empty transcript (caught by the
-    // 2026-08-10 cutover gauntlet).
+    // reader skip the seed and render an empty transcript.
     if state.checkpoint_size == 0 {
         return CatchUpPlan::RowsOnly { after: cursor };
     }
@@ -478,7 +477,7 @@ impl Shared {
 /// in [`ChatClient::enqueue_update`], which takes `shared` itself. Holding
 /// the lock across that call was a self-deadlock, and because Loro parks
 /// every other thread committing to the same doc behind the running hook,
-/// it froze the agent run too and then the whole runtime (2026-09-18). The
+/// it froze the agent run too and then the whole runtime. The
 /// final phase re-derives against the live state: a row may have advanced
 /// the cursor while the sink ran, and the cursor only ever moves forward.
 fn acknowledge_durable(

@@ -1519,7 +1519,7 @@ async fn extension_select_before_prompt_ack_does_not_deadlock() {
 
 #[tokio::test]
 async fn status_furniture_before_ack_does_not_end_the_turn_early() {
-    // Regression (2026-09-20): the goal/MCP/subagents extensions push
+    // Regression guard: the goal/MCP/subagents extensions push
     // `setStatus` before the prompt is acknowledged, and the translation
     // extension delays the ACK. Counting that furniture as "UI happened"
     // collapsed the no-activity grace to zero, so the harness emitted Done

@@ -2190,7 +2190,7 @@ async fn run_session(session: Session) {
     let mut done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
-    // Starved-turn recovery (2026-08-12 stuck-Working incident): a
+    // Starved-turn recovery: a
     // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
     // background-task re-invocation no prompt started) starves —
     // claude-agent-acp does not track turns it did not start, so the merged
@@ -2233,8 +2233,8 @@ async fn run_session(session: Session) {
     // no thinking traffic, so a long silent reasoning stretch in exactly
     // the "looks finished" state (content streamed, every tool resolved)
     // is indistinguishable from a dropped reply — 30s of quiet falsely
-    // settled live turns mid-thought (2026-08-13), producing both a
-    // premature Done and the stuck-Working orphan above. Claude's
+    // settles live turns mid-thought, producing both a premature Done and
+    // the stuck-Working orphan above. Claude's
     // genuinely dropped replies already settle deterministically (the
     // cost-frame hint above, `noRunningTurn` steering evidence); the
     // engine watchdog backstops anything left.
@@ -2470,10 +2470,10 @@ async fn run_session(session: Session) {
                         // `_`-prefixed like `_session/steering`): a turn the
                         // agent started on its own — a background-task wake —
                         // has no `session/prompt` to settle, so its SDK-side
-                        // turn-end previously vanished at the adapter and the
-                        // engine's quiesce watchdog was the only settle path
-                        // (≤2min of phantom Working per notification, user
-                        // report 2026-08-13). Gated to BETWEEN prompts: a
+                        // turn-end would otherwise vanish at the adapter and
+                        // leave the engine's quiesce watchdog as the only
+                        // settle path (≤2min of phantom Working per
+                        // notification). Gated to BETWEEN prompts: a
                         // live turn settles through its own response.
                         if turn.is_none()
                             && !interrupted

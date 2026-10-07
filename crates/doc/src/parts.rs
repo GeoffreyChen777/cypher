@@ -28,9 +28,9 @@ pub const CODEMODE_SCRIPT_MAX_CHARS: usize = 8_000;
 /// Char cap for a Pi `tool_search` query kept in the doc.
 pub const TOOL_SEARCH_QUERY_MAX_CHARS: usize = 500;
 
-/// The doc-resident form of a tool output (docs/chat2-sync.md A1; the R2
-/// sidecar is PARKED as of 2026-08-10, so this IS the whole record in the
-/// doc — the full text survives only in the host's local run journal):
+/// The doc-resident form of a tool output (docs/chat2-sync.md A1). There is no
+/// sidecar, so this IS the whole record in the doc — the full text survives
+/// only in the host's local run journal:
 ///
 /// - Markdown code fences are stripped first — ACP harnesses fence every
 ///   output, so the fence is transport wrapping, never content (pre-fix,

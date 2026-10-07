@@ -299,7 +299,7 @@ async fn real_cursor_todos_and_tools_reach_the_stream() {
     assert_eq!(dones(&events)[0].0, DoneStatus::Completed, "{events:?}");
 }
 
-/// Full-stack verification of the 2026-08-12 starve fix against the REAL
+/// Full-stack verification of the starve fix against the REAL
 /// adapter + CLI: prompt#1 backgrounds a task and ends; the CLI
 /// self-continues on its notification and runs a 20s foreground command; a
 /// steer lands mid-way. With prevention in place the harness cancels the

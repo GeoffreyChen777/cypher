@@ -39,8 +39,7 @@ impl UrlProvider for StaticUrl {
 }
 
 /// Live sync introspection for one room — the data behind the engine's
-/// `SyncStatus` RPC and `cypher sync`. Every 2026-08 incident was debugged
-/// blind because none of this was observable at runtime.
+/// `SyncStatus` RPC and `cypher sync`.
 #[derive(Debug, Clone, Default)]
 pub struct RoomStatsSnapshot {
     /// A join is currently established.

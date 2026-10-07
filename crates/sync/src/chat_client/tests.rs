@@ -965,7 +965,7 @@ async fn https_pull_applies_only_contiguous_rows() {
 
 /// Answer hello with `state`, then serve the rows request with `rows`.
 /// Returns the observed `after` from the rows request. `expect_exclude`
-/// pins the F1 rule: the process's FIRST backfill must redownload own rows
+/// pins the rule: the process's FIRST backfill must redownload own rows
 /// (false), same-process reconnects skip them (true).
 async fn serve_join(
     end: &mut ServerEnd,
@@ -1287,7 +1287,7 @@ async fn unacked_pushes_survive_reconnect_and_acks_retire_them() {
     client.shutdown().await;
 }
 
-// ── 2026-08-10 review fixes (F1–F4) ─────────────────────────────────────────
+// ── rejection, oversize, hung-fetch and row-gap edge cases ──────────────────
 
 struct PendingFetcher;
 impl CheckpointFetcher for PendingFetcher {
@@ -1296,7 +1296,7 @@ impl CheckpointFetcher for PendingFetcher {
     }
 }
 
-/// F2: a permanent server verdict (`too_large`) retires the batch from the
+/// A permanent server verdict (`too_large`) retires the batch from the
 /// replay queue; a transient one (`quota`) keeps it and re-pushes on the
 /// retry clock without waiting for a new enqueue.
 #[tokio::test(start_paused = true)]
@@ -1377,7 +1377,7 @@ async fn permanent_rejection_retires_transient_keeps_and_retries() {
     client.shutdown().await;
 }
 
-/// F2: batches over the row cap never enter the replay queue.
+/// Batches over the row cap never enter the replay queue.
 #[tokio::test(start_paused = true)]
 async fn oversized_enqueue_is_refused_at_the_door() {
     let (pipe, mut end) = pipe_pair();
@@ -1412,7 +1412,7 @@ async fn oversized_enqueue_is_refused_at_the_door() {
     client.shutdown().await;
 }
 
-/// F4 (second half): `shutdown()` must complete promptly even while the
+/// `shutdown()` must complete promptly even while the
 /// actor is parked inside a hung checkpoint fetch.
 #[tokio::test(start_paused = true)]
 async fn shutdown_interrupts_a_hung_checkpoint_fetch() {
@@ -1460,7 +1460,7 @@ async fn shutdown_interrupts_a_hung_checkpoint_fetch() {
         .expect("shutdown must not hang on a stuck fetch");
 }
 
-/// F3: a server whose headSeq fell behind our cursor (reset/wiped room) is
+/// A server whose headSeq fell behind our cursor (reset/wiped room) is
 /// SURFACED — counted in stats, honest head_seq — not silently absorbed.
 #[tokio::test(start_paused = true)]
 async fn server_reset_is_counted_and_head_seq_stays_honest() {
@@ -1503,7 +1503,7 @@ async fn server_reset_is_counted_and_head_seq_stays_honest() {
     client.shutdown().await;
 }
 
-/// F4: a checkpoint fetch that never resolves fails the first join within
+/// A checkpoint fetch that never resolves fails the first join within
 /// the deadline instead of hanging the actor (and shutdown) forever.
 #[tokio::test(start_paused = true)]
 async fn hung_checkpoint_fetch_fails_the_join_within_deadline() {
@@ -1537,9 +1537,8 @@ async fn hung_checkpoint_fetch_fails_the_join_within_deadline() {
 
 /// M1 seed shape: checkpointSeq 0 with a real blob. BOTH presence tests
 /// (plan_catch_up AND run_session's frontier short-circuit) must key on
-/// SIZE — the 2026-08-10 gauntlet caught seq==0 short-circuits in each,
-/// which would have made every adopted reader skip the seed and render an
-/// EMPTY transcript.
+/// SIZE — a seq==0 short-circuit in either makes every adopted reader skip
+/// the seed and render an EMPTY transcript.
 #[tokio::test(start_paused = true)]
 async fn seeded_at_zero_room_fetches_the_checkpoint() {
     let (pipe, mut end) = pipe_pair();

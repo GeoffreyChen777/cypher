@@ -2409,7 +2409,7 @@ async fn run_session(session: Session) {
     // the goal, MCP and subagents extensions push status updates at startup
     // and mid-turn, and treating those as "UI happened" collapsed the grace
     // to zero on ordinary prompts, so the harness Done'd the turn before the
-    // agent's first event (2026-09-20: every turn of a chat "ended early").
+    // agent's first event.
     let mut had_ui = false;
     // The zero-grace shortcut is for extension slash commands only: a plain
     // prompt always starts an agent turn, so it keeps the full grace even if

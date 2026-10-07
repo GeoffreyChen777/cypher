@@ -123,7 +123,7 @@ async fn open_tool_call_holds_the_quiet_settle_off() {
     );
 }
 
-/// The 2026-08-13 regression: Claude thinking silently in exactly the
+/// Regression guard: Claude thinking silently in exactly the
 /// settle's "looks finished" state — content streamed, every tool resolved,
 /// wire quiet far past the window. claude-agent-acp forwards no thinking
 /// traffic, so this is routine mid-turn silence, not a dropped reply; a

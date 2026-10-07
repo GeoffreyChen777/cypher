@@ -667,7 +667,7 @@ fn hermes_descriptor_surface_matches_registry_expectations() {
     assert!(hermes.reasoning_levels().is_empty());
 }
 
-/// The 2026-08-12 stuck-Working wedge, end to end: a prompt whose turn was
+/// The stuck-Working wedge, end to end: a prompt whose turn was
 /// consumed by CLI-side self-continuation never gets its response. A steer's
 /// `noRunningTurn` steering outcome is the protocol evidence the pending
 /// prompt can never settle; after the grace the harness closes the dead turn

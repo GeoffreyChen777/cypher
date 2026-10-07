@@ -358,8 +358,7 @@ impl SessionDoc {
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state
     /// (an entry map imported before the update that fills its fields) or a
     /// peer on a newer schema must degrade to a missing row, never blank the
-    /// whole transcript — one bad entry took down every publish for the chat
-    /// (2026-07-31, "missing field `id`" during a multi-update import).
+    /// whole transcript.
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
@@ -907,11 +906,9 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             completed_at: raw.completed_at,
             comments: raw.comments,
         }),
-        // 2026-08-10 incident rule: a missing field must cost AT MOST what
-        // the field carried — never the entry, never the transcript. Rooms
-        // merge writes from every device and app version; one bad writer
-        // (or one mangled export) blanking whole sessions for every reader
-        // is exactly what tonight looked like.
+        // A missing field must cost AT MOST what the field carried — never
+        // the entry, never the transcript. Rooms merge writes from every
+        // device and app version.
         Err(strict_err) => salvage_entry(v, strict_err),
     }
 }
@@ -2155,7 +2152,7 @@ mod tests {
         assert_eq!(restored.sealed_attachments().unwrap().len(), 2);
     }
 
-    /// 2026-08-10 incident: entries/parts missing strict fields must salvage
+    /// Regression guard: entries/parts missing strict fields must salvage
     /// field-by-field — a fresh reader importing a room's merged doc must
     /// never render a BLANK transcript because some writer (old app version,
     /// other-platform client, mangled export) omitted metadata.

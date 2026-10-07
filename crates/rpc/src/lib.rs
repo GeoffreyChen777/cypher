@@ -238,7 +238,7 @@ pub mod methods {
     /// for a chat (journal replay after `afterSeq`, then live) — the parent
     /// extension observes the child's terminal `Done`/result through this.
     pub const WATCH_AGENT_EVENTS: &str = "WatchAgentEvents";
-    // Selected-text Side Chats (round 21): temporary engine-hosted chats
+    // Selected-text Side Chats: temporary engine-hosted chats
     // opened from a settled selection. All are relay-forwardable — the parent
     // chat's host device owns the side chat, so every call carries
     // `targetDeviceId` (see the engine `side_chats` module).
