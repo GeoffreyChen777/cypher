@@ -85,12 +85,6 @@ pub struct PushHeader<'a> {
     pub batch_id: &'a str,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PresenceOutHeader {
-    pub at: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateHeader {
@@ -129,22 +123,8 @@ pub struct AckHeader {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PresenceInHeader {
-    pub device: String,
-    pub at: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProbeOkHeader {
     pub head_seq: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ErrorHeader {
-    pub code: String,
-    #[serde(default)]
-    pub message: String,
 }
 
 #[cfg(test)]

@@ -7,14 +7,12 @@ publish.workspace = true
 
 [dependencies]
 cypher-env.workspace = true
-cypher-proto.workspace = true
 cypher-sync.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true

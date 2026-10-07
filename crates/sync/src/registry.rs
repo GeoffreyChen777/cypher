@@ -7,11 +7,10 @@
 //! [`cypher_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
 //! byte-compatible with `edge/src/registry-room.ts`.
 //!
-//! Liveness discipline is inherited from `room.rs` and its incidents: the
-//! transport-level text ping elicits a runtime auto-pong that proves NOTHING
-//! about the DO (2026-07-30), so room-level health is judged only by protocol
-//! frames — a probe that goes unanswered past its deadline tears the session
-//! down for a fresh dial.
+//! Liveness discipline: the transport-level text ping elicits a runtime
+//! auto-pong that proves NOTHING about the DO, so room-level health is judged
+//! only by protocol frames — a probe that goes unanswered past its deadline
+//! tears the session down for a fresh dial.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

@@ -1,4 +1,4 @@
-//! Selected-text Side Chat wire types (round 21).
+//! Selected-text Side Chat wire types.
 //!
 //! A Side Chat is a TEMPORARY engine-hosted chat opened from a settled
 //! selection (transcript / git diff / terminal). Until promoted it lives only

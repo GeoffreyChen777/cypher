@@ -1,4 +1,4 @@
-//! Device-room relay transport (ARCHITECTURE §1, feature-inventory §3.7): the byte-frame
+//! Device-room relay transport (ARCHITECTURE §1): the byte-frame
 //! codec spoken by the edge `DeviceRoom` DO, the **host relay** (this device serving its
 //! full RPC surface through the relay), and the **client link** (dialing another device's
 //! relay and speaking ordinary [`RpcClient`] RPC over it).

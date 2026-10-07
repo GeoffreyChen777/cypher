@@ -227,13 +227,6 @@ impl Chat {
 }
 
 impl Chat {
-    /// True when this chat syncs over the chat2 dumb relay.
-    pub fn on_chat2(&self) -> bool {
-        self.room_gen.unwrap_or(1) >= 2
-    }
-}
-
-impl Chat {
     /// True when the chat has activity the user hasn't seen on any device.
     pub fn unseen(&self) -> bool {
         match (self.last_message_at, self.last_seen_at) {

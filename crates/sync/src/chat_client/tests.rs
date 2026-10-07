@@ -77,102 +77,33 @@ fn must_finish_within(secs: u64, scenario: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// A sink that re-locks the client state from inside `acknowledge_outbox`,
-/// standing in for the engine's export-on-ack whose Loro commit hook
-/// re-enters `enqueue_update`.
-#[derive(Default)]
-struct RelockingSink {
-    inner: RecordingSink,
-    shared: Mutex<Option<Arc<Mutex<Shared>>>>,
-    relocked: AtomicUsize,
-}
-
-impl ChatDocSink for RelockingSink {
-    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        self.inner.load_outbox()
-    }
-    fn enqueue_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
-        self.inner.enqueue_outbox(id, bytes)
-    }
-    fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
-        let shared = lock(&self.shared).clone();
-        if let Some(shared) = shared {
-            let _probe = lock(&shared);
-            self.relocked.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.acknowledge_outbox(id, cursor)
-    }
-    fn apply_row(&self, bytes: &[u8], cursor: u64) {
-        self.inner.apply_row(bytes, cursor)
-    }
-    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
-        self.inner.apply_checkpoint(bytes, cursor)
-    }
-    fn contains_frontier(&self, frontier: &[u8]) -> bool {
-        self.inner.contains_frontier(frontier)
-    }
-    fn advance_cursor(&self, cursor: u64) {
-        self.inner.advance_cursor(cursor)
-    }
-}
-
 #[test]
 fn acknowledge_runs_the_sink_with_the_client_state_unlocked() {
     must_finish_within(10, || {
-        let sink = RelockingSink::default();
+        // The ACK hook re-locks the client state, standing in for the
+        // engine's export-on-ack whose Loro commit hook re-enters
+        // `enqueue_update`.
+        let sink = RecordingSink::default();
         let shared = Arc::new(Mutex::new(Shared::default()));
-        *lock(&sink.shared) = Some(shared.clone());
+        let relocked = Arc::new(AtomicUsize::new(0));
+        sink.on_ack({
+            let shared = shared.clone();
+            let relocked = relocked.clone();
+            move || {
+                let _probe = lock(&shared);
+                relocked.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let mut batch = queued("b", true);
         batch.sent = true;
         sink.enqueue_outbox("b", b"b").unwrap();
         lock(&shared).pending.push_back(batch);
         acknowledge_durable(&shared, &sink, "b", 1).unwrap();
-        assert_eq!(sink.relocked.load(Ordering::SeqCst), 1);
+        assert_eq!(relocked.load(Ordering::SeqCst), 1);
         assert_eq!(lock(&shared).cursor, 1);
         assert!(lock(&shared).pending.is_empty());
         assert!(sink.load_outbox().unwrap().is_empty());
     });
-}
-
-/// A sink whose `acknowledge_outbox` enqueues a NEW update on the same
-/// client — exactly what the engine's Loro local-update hook does when the
-/// ack-time export commits a concurrent writer's pending ops.
-#[derive(Default)]
-struct ReenteringSink {
-    inner: RecordingSink,
-    client: Mutex<Option<Arc<ChatClient>>>,
-    reentered: AtomicUsize,
-}
-
-impl ChatDocSink for ReenteringSink {
-    fn load_outbox(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        self.inner.load_outbox()
-    }
-    fn enqueue_outbox(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
-        self.inner.enqueue_outbox(id, bytes)
-    }
-    fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
-        let client = lock(&self.client).clone();
-        if let Some(client) = client
-            && self.reentered.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            client.enqueue_update(b"reentrant".to_vec());
-            client.flush_pending();
-        }
-        self.inner.acknowledge_outbox(id, cursor)
-    }
-    fn apply_row(&self, bytes: &[u8], cursor: u64) {
-        self.inner.apply_row(bytes, cursor)
-    }
-    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
-        self.inner.apply_checkpoint(bytes, cursor)
-    }
-    fn contains_frontier(&self, frontier: &[u8]) -> bool {
-        self.inner.contains_frontier(frontier)
-    }
-    fn advance_cursor(&self, cursor: u64) {
-        self.inner.advance_cursor(cursor)
-    }
 }
 
 #[test]
@@ -184,7 +115,7 @@ fn websocket_ack_survives_a_sink_that_reenters_the_client() {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let sink = Arc::new(ReenteringSink::default());
+            let sink = Arc::new(RecordingSink::default());
             let (pipe, mut end) = pipe_pair();
             let (fetch, _) = fetcher(b"");
             let server = tokio::spawn(async move {
@@ -222,7 +153,20 @@ fn websocket_ack_survives_a_sink_that_reenters_the_client() {
                 .await
                 .unwrap(),
             );
-            *lock(&sink.client) = Some(client.clone());
+            // The ACK hook enqueues a NEW update on the same client — exactly
+            // what the engine's Loro local-update hook does when the ack-time
+            // export commits a concurrent writer's pending ops.
+            let reentered = Arc::new(AtomicUsize::new(0));
+            sink.on_ack({
+                let client = client.clone();
+                let reentered = reentered.clone();
+                move || {
+                    if reentered.fetch_add(1, Ordering::SeqCst) == 0 {
+                        client.enqueue_update(b"reentrant".to_vec());
+                        client.flush_pending();
+                    }
+                }
+            });
             client.enqueue_update(b"first".to_vec());
             client.flush_pending();
             server.await.unwrap();
@@ -233,7 +177,7 @@ fn websocket_ack_survives_a_sink_that_reenters_the_client() {
                 assert!(tokio::time::Instant::now() < deadline, "second batch never retired");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            assert_eq!(sink.reentered.load(Ordering::SeqCst), 2);
+            assert_eq!(reentered.load(Ordering::SeqCst), 2);
         });
         runtime.shutdown_background();
     });
@@ -743,6 +687,17 @@ struct RecordingSink {
     /// Stand-in for the engine's live doc: when set, coalescing re-exports
     /// from it like `EngineChatSink` does.
     doc: Option<loro::LoroDoc>,
+    /// Runs inside `acknowledge_outbox` before the ACK is recorded — the seam
+    /// the sink lock-contract regressions re-enter the client through.
+    ack_hook: Mutex<Option<AckHook>>,
+}
+
+type AckHook = Arc<dyn Fn() + Send + Sync>;
+
+impl RecordingSink {
+    fn on_ack(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.ack_hook) = Some(Arc::new(hook));
+    }
 }
 
 impl ChatDocSink for RecordingSink {
@@ -780,6 +735,11 @@ impl ChatDocSink for RecordingSink {
         }
     }
     fn acknowledge_outbox(&self, id: &str, cursor: u64) -> Result<(), String> {
+        // Clone the hook out so it runs without this sink's lock held.
+        let hook = lock(&self.ack_hook).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         if self.ack_fails.load(Ordering::SeqCst) {
             return Err("injected ACK persistence failure".into());
         }
@@ -1005,7 +965,7 @@ async fn https_pull_applies_only_contiguous_rows() {
 
 /// Answer hello with `state`, then serve the rows request with `rows`.
 /// Returns the observed `after` from the rows request. `expect_exclude`
-/// pins the F1 rule: the process's FIRST backfill must redownload own rows
+/// pins the rule: the process's FIRST backfill must redownload own rows
 /// (false), same-process reconnects skip them (true).
 async fn serve_join(
     end: &mut ServerEnd,
@@ -1327,7 +1287,7 @@ async fn unacked_pushes_survive_reconnect_and_acks_retire_them() {
     client.shutdown().await;
 }
 
-// ── 2026-08-10 review fixes (F1–F4) ─────────────────────────────────────────
+// ── rejection, oversize, hung-fetch and row-gap edge cases ──────────────────
 
 struct PendingFetcher;
 impl CheckpointFetcher for PendingFetcher {
@@ -1336,7 +1296,7 @@ impl CheckpointFetcher for PendingFetcher {
     }
 }
 
-/// F2: a permanent server verdict (`too_large`) retires the batch from the
+/// A permanent server verdict (`too_large`) retires the batch from the
 /// replay queue; a transient one (`quota`) keeps it and re-pushes on the
 /// retry clock without waiting for a new enqueue.
 #[tokio::test(start_paused = true)]
@@ -1417,7 +1377,7 @@ async fn permanent_rejection_retires_transient_keeps_and_retries() {
     client.shutdown().await;
 }
 
-/// F2: batches over the row cap never enter the replay queue.
+/// Batches over the row cap never enter the replay queue.
 #[tokio::test(start_paused = true)]
 async fn oversized_enqueue_is_refused_at_the_door() {
     let (pipe, mut end) = pipe_pair();
@@ -1452,7 +1412,7 @@ async fn oversized_enqueue_is_refused_at_the_door() {
     client.shutdown().await;
 }
 
-/// F4 (second half): `shutdown()` must complete promptly even while the
+/// `shutdown()` must complete promptly even while the
 /// actor is parked inside a hung checkpoint fetch.
 #[tokio::test(start_paused = true)]
 async fn shutdown_interrupts_a_hung_checkpoint_fetch() {
@@ -1500,7 +1460,7 @@ async fn shutdown_interrupts_a_hung_checkpoint_fetch() {
         .expect("shutdown must not hang on a stuck fetch");
 }
 
-/// F3: a server whose headSeq fell behind our cursor (reset/wiped room) is
+/// A server whose headSeq fell behind our cursor (reset/wiped room) is
 /// SURFACED — counted in stats, honest head_seq — not silently absorbed.
 #[tokio::test(start_paused = true)]
 async fn server_reset_is_counted_and_head_seq_stays_honest() {
@@ -1543,7 +1503,7 @@ async fn server_reset_is_counted_and_head_seq_stays_honest() {
     client.shutdown().await;
 }
 
-/// F4: a checkpoint fetch that never resolves fails the first join within
+/// A checkpoint fetch that never resolves fails the first join within
 /// the deadline instead of hanging the actor (and shutdown) forever.
 #[tokio::test(start_paused = true)]
 async fn hung_checkpoint_fetch_fails_the_join_within_deadline() {
@@ -1577,9 +1537,8 @@ async fn hung_checkpoint_fetch_fails_the_join_within_deadline() {
 
 /// M1 seed shape: checkpointSeq 0 with a real blob. BOTH presence tests
 /// (plan_catch_up AND run_session's frontier short-circuit) must key on
-/// SIZE — the 2026-08-10 gauntlet caught seq==0 short-circuits in each,
-/// which would have made every adopted reader skip the seed and render an
-/// EMPTY transcript.
+/// SIZE — a seq==0 short-circuit in either makes every adopted reader skip
+/// the seed and render an EMPTY transcript.
 #[tokio::test(start_paused = true)]
 async fn seeded_at_zero_room_fetches_the_checkpoint() {
     let (pipe, mut end) = pipe_pair();

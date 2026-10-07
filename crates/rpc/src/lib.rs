@@ -33,7 +33,6 @@ pub use local::{LocalListener, connect_local, probe_local};
 pub use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
-/// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     /// Flip a harness's enablement on the target device (Settings → Agents);
@@ -122,7 +121,7 @@ pub mod methods {
     pub const WATCH_SESSIONS: &str = "WatchSessions";
     /// Spaces registry (device+folder pairs) from the workspace doc.
     pub const WATCH_SPACES: &str = "WatchSpaces";
-    /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
+    /// Entity mutations against the workspace doc.
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|deleteDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
@@ -139,7 +138,7 @@ pub mod methods {
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
-    // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
+    // Auth mutations (IPC-only).
     pub const SIGN_IN: &str = "SignIn";
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
     pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
@@ -239,7 +238,7 @@ pub mod methods {
     /// for a chat (journal replay after `afterSeq`, then live) — the parent
     /// extension observes the child's terminal `Done`/result through this.
     pub const WATCH_AGENT_EVENTS: &str = "WatchAgentEvents";
-    // Selected-text Side Chats (round 21): temporary engine-hosted chats
+    // Selected-text Side Chats: temporary engine-hosted chats
     // opened from a settled selection. All are relay-forwardable — the parent
     // chat's host device owns the side chat, so every call carries
     // `targetDeviceId` (see the engine `side_chats` module).

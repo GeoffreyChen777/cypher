@@ -576,3 +576,206 @@ fn versions_another_process_runs_from_are_never_pruned() {
     child.wait().unwrap();
     assert_eq!(dir_names(&root), ["0.3.1"]);
 }
+
+#[test]
+fn version_compare() {
+    assert!(version_newer("0.1.1", "0.1.0"));
+    assert!(version_newer("0.2.0", "0.1.9"));
+    assert!(version_newer("0.1.10", "0.1.9"));
+    assert!(version_newer("v0.1.1", "0.1.0"));
+    assert!(version_newer("0.1.0.1", "0.1.0"));
+    assert!(!version_newer("0.1.0", "0.1.0"));
+    assert!(!version_newer("0.1.0", "0.1.1"));
+    // Garbage never counts as newer.
+    assert!(!version_newer("", "0.1.0"));
+    assert!(!version_newer("nightly", "0.1.0"));
+}
+
+#[test]
+fn install_kind_detection() {
+    // Cypher install layout.
+    assert_eq!(
+        detect_install_from(
+            Path::new("/home/u/.cypher/app/0.1.1/cypher"),
+            Some(Path::new("/home/u")),
+        ),
+        InstallKind::Managed {
+            app_root: PathBuf::from("/home/u/.cypher/app")
+        }
+    );
+    assert_eq!(
+        detect_install_from(
+            Path::new("/Applications/Cypher.app/Contents/MacOS/cypher"),
+            Some(Path::new("/Users/u")),
+        ),
+        InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Cypher.app")
+        }
+    );
+    // A path merely containing `.app` without the bundle layout is not a bundle.
+    assert_eq!(
+        detect_install_from(Path::new("/tmp/foo.app/cypher"), None),
+        InstallKind::Unmanaged
+    );
+    assert_eq!(
+        detect_install_from(
+            Path::new("/src/target/release/cypher"),
+            Some(Path::new("/home/u"))
+        ),
+        InstallKind::Unmanaged
+    );
+}
+
+#[test]
+fn artifact_names_match_packaging() {
+    let (os, arch) = platform_key();
+    assert!(headless_artifact("0.2.0").starts_with("cypher-0.2.0-"));
+    assert_eq!(
+        headless_artifact("0.2.0"),
+        format!("cypher-0.2.0-{os}-{arch}.tar.gz")
+    );
+    assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+}
+
+#[test]
+fn manifest_parses_with_and_without_files() {
+    let full: Manifest = serde_json::from_str(
+        r#"{"version":"0.1.1","files":{"cypher-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(full.version, "0.1.1");
+    assert_eq!(
+        full.files["cypher-0.1.1-linux-x86_64.tar.gz"]
+            .sha256
+            .as_deref(),
+        Some("abc")
+    );
+    let bare: Manifest = serde_json::from_str(r#"{"version":"0.1.1"}"#).unwrap();
+    assert!(bare.files.is_empty());
+}
+
+#[tokio::test]
+async fn immediate_shutdown_cannot_miss_the_loop_receiver() {
+    let updater = Updater::spawn(
+        "http://127.0.0.1:1".into(),
+        None,
+        std::env::temp_dir().join("cypher-update-test"),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), updater.shutdown())
+        .await
+        .expect("immediate updater shutdown must not hang");
+}
+
+#[test]
+fn auto_update_defaults_on_for_linux_only_and_honours_explicit_values() {
+    for value in ["1", "true", "YES", " on "] {
+        assert!(auto_update_setting(Some(value)), "{value}");
+    }
+    for value in ["0", "false", "no", "off", "maybe"] {
+        assert!(!auto_update_setting(Some(value)), "{value}");
+    }
+    assert_eq!(auto_update_setting(None), cfg!(target_os = "linux"));
+}
+
+#[test]
+fn exec_start_rewrite_targets_only_the_matching_line() {
+    let text =
+        "[Service]\nEnvironment=\"A=1\"\nExecStart=:\"/opt/cypher\" headless\nRestart=on-failure\n";
+    assert_eq!(
+        exec_line_binary("ExecStart=:\"/opt/cypher\" headless").as_deref(),
+        Some("/opt/cypher")
+    );
+    assert_eq!(
+        exec_line_binary("ExecStart=:\"/home/u/bin %% \\\" q/cypher\" headless").as_deref(),
+        Some("/home/u/bin % \" q/cypher")
+    );
+    // Round-trips the daemon installer's quoting, including `%`.
+    let odd = "/home/u/dir % \" x/cypher";
+    assert_eq!(
+        exec_line_binary(&format!("ExecStart=:{} headless", systemd_quote(odd))).as_deref(),
+        Some(odd)
+    );
+    assert_eq!(systemd_quote("a%b"), "\"a%%b\"");
+    let rewritten = rewrite_exec_start(text, |line| {
+        exec_line_binary(line).as_deref() == Some("/opt/cypher")
+    })
+    .unwrap();
+    assert!(rewritten.contains(CURRENT_EXEC_LINE));
+    assert!(rewritten.contains("Environment=\"A=1\""));
+    assert!(rewrite_exec_start(text, |line| line.contains("elsewhere")).is_none());
+    assert!(
+        rewrite_exec_start(&format!("{CURRENT_EXEC_LINE}\n"), |line| {
+            line.starts_with("ExecStart=:\"%h/.cypher/app/") && line != CURRENT_EXEC_LINE
+        })
+        .is_none(),
+        "an already-migrated unit is left alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn layout_detection_and_command_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("elsewhere").join("app");
+    let versioned = root.join("0.3.16");
+    std::fs::create_dir_all(&versioned).unwrap();
+    let exe = versioned.join("cypher");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+    // No `current` link yet: not managed by shape.
+    assert!(managed_by_layout(&exe).is_none());
+    std::os::unix::fs::symlink(&versioned, root.join("current")).unwrap();
+    assert_eq!(managed_by_layout(&exe).as_deref(), Some(root.as_path()));
+    // A `current` that points elsewhere does not claim this binary.
+    let other = root.join("0.3.17");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::remove_file(root.join("current")).unwrap();
+    std::os::unix::fs::symlink(&other, root.join("current")).unwrap();
+    assert!(managed_by_layout(&exe).is_none());
+
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    std::fs::write(checkout.join("Cargo.toml"), "[package]").unwrap();
+    assert!(is_source_build(&checkout.join("target/debug/cypher")));
+    assert!(!is_source_build(&exe));
+
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::fs::write(home.join(".local/bin/cypher"), "hand-copied").unwrap();
+    let command = link_command(&home, &root).unwrap();
+    assert_eq!(
+        std::fs::read_link(&command).unwrap(),
+        root.join("current/cypher")
+    );
+    // Idempotent, and never replaces a directory.
+    link_command(&home, &root).unwrap();
+    std::fs::remove_file(&command).unwrap();
+    std::fs::create_dir(&command).unwrap();
+    assert!(link_command(&home, &root).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn headless_symlink_swap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_root = tmp.path().join("app");
+    for ver in ["0.1.0", "0.1.1"] {
+        std::fs::create_dir_all(app_root.join(ver)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let binary = app_root.join(ver).join("cypher");
+        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    apply_headless(&app_root, "0.1.0").unwrap();
+    assert_eq!(
+        std::fs::read_link(app_root.join("current")).unwrap(),
+        app_root.join("0.1.0")
+    );
+    // Swap over an existing symlink.
+    apply_headless(&app_root, "0.1.1").unwrap();
+    assert_eq!(
+        std::fs::read_link(app_root.join("current")).unwrap(),
+        app_root.join("0.1.1")
+    );
+    // Unstaged version refuses.
+    assert!(apply_headless(&app_root, "0.2.0").is_err());
+}
