@@ -500,11 +500,6 @@ impl Workspace {
         out
     }
 
-    /// Child-index path from the root to `group`'s leaf.
-    pub fn path_to(&self, group: GroupId) -> Option<Vec<usize>> {
-        self.root.path_to(group)
-    }
-
     /// Every group's rectangle in unit space, reading order.
     pub fn group_rects(&self) -> Vec<(GroupId, Rect)> {
         let mut out = Vec::with_capacity(self.groups.len());

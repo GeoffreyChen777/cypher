@@ -169,29 +169,9 @@ impl ChatAppearance {
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        use std::io::Write;
-        std::fs::create_dir_all(dir)?;
-        let temp = dir.join(format!(".chat-appearance-{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            let bytes = serde_json::to_vec_pretty(&self.clone().sanitized())
-                .map_err(std::io::Error::other)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temp, dir.join(FILE_NAME))
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temp);
-        }
-        result
+        let bytes =
+            serde_json::to_vec_pretty(&self.clone().sanitized()).map_err(std::io::Error::other)?;
+        crate::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
     }
 }
 

@@ -152,7 +152,7 @@ pub fn layout_action(preset: crate::workspace::Preset) -> Box<dyn gpui::Action> 
 }
 
 // ---------------------------------------------------------------------------
-// Traffic-light-aware titlebar layout (feature-inventory §1.1)
+// Traffic-light-aware titlebar layout
 // ---------------------------------------------------------------------------
 
 /// Where the top-left window-control cluster starts, in px from the window's
@@ -161,16 +161,6 @@ pub fn layout_action(preset: crate::workspace::Preset) -> Box<dyn gpui::Action> 
 /// fullscreen hides them and the cluster reclaims the inset.
 pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
     if fullscreen { 12.0 } else { 88.0 }
-}
-
-/// Width of the spacer ahead of the control cluster for a strip that already
-/// carries `container_pad` px of its own left padding. macOS only — on
-/// Linux/Windows there are no traffic lights and the cluster hugs the edge.
-pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
-    if !is_macos {
-        return 0.0;
-    }
-    (titlebar_cluster_start(fullscreen) - container_pad).max(0.0)
 }
 
 /// Width of the persistent top-left button cluster itself (sidebar toggle +
@@ -191,16 +181,9 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
     }
 }
 
-/// Left clearance a full-bleed header (collapsed sidebar) needs so its content
-/// starts past the overlay cluster, given the header's own `container_pad`.
-pub fn cluster_clearance(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
-    (cluster_buttons_start(is_macos, fullscreen) + CLUSTER_BUTTONS_WIDTH + 8.0 - container_pad)
-        .max(0.0)
-}
-
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
-/// map, then binds the customizable shortcuts from `keymap` (feature-inventory
-/// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// map, then binds the customizable shortcuts from `keymap`. Invalid persisted
+/// combos fall back to that shortcut's default.
 pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
@@ -295,7 +278,7 @@ fn copy_surface_selection(cx: &mut App) -> bool {
     true
 }
 
-/// The settings sections (feature-inventory §1.5 routes).
+/// The settings sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Devices,
@@ -336,6 +319,7 @@ impl SettingsSection {
         ("Workspace", &Self::WORKSPACE_SETTINGS),
     ];
 
+    #[cfg(test)]
     pub const ALL: [SettingsSection; 11] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
@@ -462,7 +446,7 @@ impl NavHistory {
     }
 }
 
-/// Sidebar resort glide (feature-inventory §1.6): 260ms
+/// Sidebar resort glide: 260ms
 /// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
 /// equivalent.
 pub const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
@@ -1190,7 +1174,7 @@ pub struct Shell {
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
-    /// Shared floating Comment pill/editor (round 20): rendered above every
+    /// Shared floating Comment pill/editor: rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
     comment_popup: Entity<crate::comments::CommentPopup>,
@@ -1367,7 +1351,7 @@ impl Shell {
                     selected_text,
                     origin,
                 } => {
-                    // Round 21: open a temporary Side Chat from the settled
+                    // Open a temporary Side Chat from the settled
                     // selection (the shell owns the StartSideChat call and
                     // the dock tab). The selected quote rides along so the
                     // engine validates + injects it on the first send.
@@ -3140,7 +3124,7 @@ impl Shell {
     /// Evaluate a width tween at "now" (manual drive — see [`WidthTween`]).
     /// Mid-flight: eased 200ms lerp, and `motion_active` is flagged so render
     /// schedules the next animation frame. Finished, stale, absent, or under
-    /// reduced motion: exactly `target`. Honors `CYPHER_MOTION_SCALE`.
+    /// reduced motion: exactly `target`.
     fn eval_tween(&self, tween: Option<WidthTween>, target: f32) -> f32 {
         let Some(WidthTween { from, to, started }) = tween else {
             return target;
@@ -3148,7 +3132,7 @@ impl Shell {
         if self.reduced_motion {
             return target;
         }
-        let total = RESIZE.total().mul_f32(motion::speed_scale());
+        let total = RESIZE.total();
         let raw = started.elapsed().as_secs_f32() / total.as_secs_f32();
         if raw >= 1.0 {
             return target;
@@ -6562,24 +6546,11 @@ mod tests {
 
     fn test_chat(id: &str, archived: bool) -> cypher_proto::Chat {
         cypher_proto::Chat {
-            pinned: false,
             id: id.into(),
-            device_id: "dev".into(),
             title: Some(format!("Chat {id}")),
             archived,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
-            child: None,
+            ..crate::test_fixtures::chat()
         }
     }
 
@@ -7247,24 +7218,11 @@ mod tests {
         )));
         // A definitive reply (Created / typed Unavailable) drops the mapping.
         let chat = cypher_proto::Chat {
-            pinned: false,
             id: "fork-x".into(),
-            device_id: "dev".into(),
             title: Some("Fork".into()),
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: chrono::Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
             room_gen: Some(2),
-            child: None,
+            ..crate::test_fixtures::chat()
         };
         assert!(!Shell::fork_request_id_retained(&Ok(
             cypher_proto::SessionForkResponse::Created(cypher_proto::SessionForkCreated {
@@ -7921,42 +7879,20 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_spacer_selects_per_platform_and_fullscreen() {
-        // macOS, lights visible: spacer fills up to the 88px cluster start.
-        assert_eq!(titlebar_spacer_width(true, false, 10.0), 78.0);
-        assert_eq!(titlebar_spacer_width(true, false, 12.0), 76.0);
-        assert_eq!(titlebar_spacer_width(true, false, 26.0), 62.0);
-        // macOS fullscreen: the inset animates away (clamped at zero when the
-        // strip's own padding already exceeds the 12px cluster start).
-        assert_eq!(titlebar_spacer_width(true, true, 10.0), 2.0);
-        assert_eq!(titlebar_spacer_width(true, true, 26.0), 0.0);
-        // Linux / Windows: never any inset.
-        assert_eq!(titlebar_spacer_width(false, false, 10.0), 0.0);
-        assert_eq!(titlebar_spacer_width(false, true, 10.0), 0.0);
-    }
-
-    #[test]
     fn windows_caption_controls_reserve_titlebar_space() {
         assert_eq!(titlebar_right_padding(true, 16.0), 124.0);
         assert_eq!(titlebar_right_padding(false, 16.0), 16.0);
     }
 
     #[test]
-    fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..86; a 16px-padded header needs 78 more px to
-        // put content at 86 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 16.0), 78.0);
-        assert_eq!(cluster_clearance(false, false, 10.0), 84.0);
-        // macOS: buttons start at the 88px traffic-light cluster start.
-        assert_eq!(
-            cluster_clearance(true, false, 16.0),
-            88.0 + 76.0 + 8.0 - 16.0
-        );
-        // macOS fullscreen: cluster reclaims the inset (starts at 12).
-        assert_eq!(
-            cluster_clearance(true, true, 16.0),
-            12.0 + 76.0 + 8.0 - 16.0
-        );
+    fn cluster_buttons_start_per_platform() {
+        // Linux: buttons at 10..86.
+        assert_eq!(cluster_buttons_start(false, false), 10.0);
+        assert_eq!(CLUSTER_BUTTONS_WIDTH, 76.0);
+        // macOS: buttons start at the 88px traffic-light cluster start…
+        assert_eq!(cluster_buttons_start(true, false), 88.0);
+        // …and reclaim the inset in fullscreen (starts at 12).
+        assert_eq!(cluster_buttons_start(true, true), 12.0);
     }
 
     // ---- sidebar resort FLIP diff (§1.6) ----

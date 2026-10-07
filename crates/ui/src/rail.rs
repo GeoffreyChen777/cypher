@@ -1,4 +1,4 @@
-//! MessageRail (feature-inventory §1.8): a left vertical minimap of the user's
+//! MessageRail: a left vertical minimap of the user's
 //! prompts. The active tick brightens, hover grows the tick and shows a preview
 //! card (prompt + reply opening), click smooth-scrolls the transcript to that
 //! row. Hidden below a 48rem container width.
@@ -245,14 +245,6 @@ impl GlideTimeline {
     }
 }
 
-/// `CYPHER_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
-/// the smoothness measurement knob (same family as `CYPHER_FRAME_STATS`).
-fn scroll_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| cypher_env::var("SCROLL_TRACE").is_some_and(|v| !v.is_empty() && v != "0"))
-}
-
 // ---------------------------------------------------------------------------
 // Rendering + smooth scroll (Transcript extension)
 // ---------------------------------------------------------------------------
@@ -305,10 +297,9 @@ impl Transcript {
         }
         self.set_scroll_task(cx.spawn(async move |this, cx| {
             let started = Instant::now();
-            let total = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
+            let total = motion::SCROLL_GLIDE.total();
             let mut timeline = GlideTimeline::new();
             let mut height_ema: Option<f32> = None;
-            let trace = scroll_trace_enabled();
             let frames = (total.as_millis() / 16) as usize + 90;
             for _ in 0..frames {
                 cx.background_executor()
@@ -370,16 +361,6 @@ impl Transcript {
                         + top_height
                             .map(|h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0))
                             .unwrap_or(0.0);
-                    if trace {
-                        tracing::warn!(
-                            ms = started.elapsed().as_millis() as u64,
-                            eased,
-                            here,
-                            dist = t.distance_from_bottom(),
-                            "scroll-glide"
-                        );
-                    }
-
                     if target < top.item_ix {
                         // Above the viewport (unmeasured): progressive
                         // item-space anchoring within the eased timeline.
@@ -616,12 +597,9 @@ mod tests {
                 text: text.into(),
                 agent_text: None,
             }],
-            created_at: 0,
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         }
     }
 

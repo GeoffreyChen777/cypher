@@ -1,4 +1,4 @@
-//! Temporary Side Chats (round 21) — the right-pane panel.
+//! Temporary Side Chats — the right-pane panel.
 //!
 //! A Side Chat is an engine-hosted temporary chat opened from a settled
 //! selection (transcript / git diff / terminal). It lives in the right pane
@@ -6,9 +6,8 @@
 //! surface) and Close (dispose). Until promoted the engine keeps it in host
 //! memory only — no sidebar row, no public session.
 //!
-//! ROUND 21 REFACTOR: the bespoke compact transcript/composer is gone. The
-//! panel is now a THIN container that mounts the EXISTING [`crate::transcript::Transcript`]
-//! and [`crate::composer::Composer`] against a forked [`AppState`] (see
+//! The panel is a THIN container that mounts the EXISTING
+//! [`crate::transcript::Transcript`] and [`crate::composer::Composer`] against a forked [`AppState`] (see
 //! [`AppState::new_side_chat_fork`]) — the same render path and UX as the main
 //! chat, with the Composer's RPC transport branched to the engine's private
 //! side-chat methods (`SendSideChat` / `InterruptSideChat` /
@@ -39,8 +38,6 @@ pub enum SideChatEvent {
         chat_id: String,
         side_chat_id: String,
     },
-    /// The user asked to close the tab — the shell disposes and removes it.
-    Close { side_chat_id: String },
 }
 
 impl gpui::EventEmitter<SideChatEvent> for SideChatPanel {}
@@ -57,30 +54,6 @@ pub fn side_chat_quote_preview(selected_text: &str) -> String {
         out
     } else {
         single
-    }
-}
-
-/// The compact header preview for an offering surface (pure — testable
-/// without a panel): the source label plus its selection detail.
-pub fn side_chat_source_preview(source: &SideChatSource) -> String {
-    match source {
-        // The anchor is useful to the engine when it gathers bounded parent
-        // context, but an internal message id is developer noise in the UI.
-        SideChatSource::Transcript { .. } => "Transcript selection".to_string(),
-        SideChatSource::GitDiff { scope, file_path } => {
-            let mut parts = vec!["Diff selection".to_string()];
-            if let Some(scope) = scope {
-                parts.push(format!("· {scope}"));
-            }
-            if let Some(file_path) = file_path {
-                parts.push(format!("· {file_path}"));
-            }
-            parts.join(" ")
-        }
-        SideChatSource::Terminal { title } => match title {
-            Some(title) => format!("Terminal selection · {title}"),
-            None => "Terminal selection".to_string(),
-        },
     }
 }
 
@@ -196,19 +169,10 @@ impl SideChatPanel {
         &self.parent_chat_id
     }
 
-    /// Source preview retained for tab/diagnostic consumers.
-    pub fn source_preview(&self) -> String {
-        side_chat_source_preview(&self.source)
-    }
-
     /// Compact truncated preview of the imported selection (header — the user
     /// sees the content that will be injected on the first send).
     pub fn quote_preview(&self) -> String {
         side_chat_quote_preview(&self.selected_text)
-    }
-
-    pub fn source(&self) -> &SideChatSource {
-        &self.source
     }
 
     /// The forked state (promotion handoff: the shell seeds the main state
@@ -221,11 +185,6 @@ impl SideChatPanel {
     /// ride into the main composer).
     pub fn composer(&self) -> Entity<Composer> {
         self.composer.clone()
-    }
-
-    /// The reused Transcript (promotion handoff / testing).
-    pub fn transcript(&self) -> Entity<Transcript> {
-        self.transcript.clone()
     }
 
     /// The config the side chat runs with: the fork row starts on the
@@ -449,36 +408,6 @@ impl gpui::Render for SideChatPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn source_preview_labels_the_offering_surface() {
-        // The panel header shows what the side chat was opened from.
-        assert_eq!(
-            side_chat_source_preview(&SideChatSource::Transcript {
-                anchor_message_id: Some("msg-abcdef123456".into()),
-            }),
-            "Transcript selection"
-        );
-        assert_eq!(
-            side_chat_source_preview(&SideChatSource::Transcript {
-                anchor_message_id: None,
-            }),
-            "Transcript selection"
-        );
-        assert_eq!(
-            side_chat_source_preview(&SideChatSource::GitDiff {
-                scope: Some("Working tree".into()),
-                file_path: Some("src/lib.rs".into()),
-            }),
-            "Diff selection · Working tree · src/lib.rs"
-        );
-        assert_eq!(
-            side_chat_source_preview(&SideChatSource::Terminal {
-                title: Some("dev server".into()),
-            }),
-            "Terminal selection · dev server"
-        );
-    }
 
     #[test]
     fn quote_preview_truncates_compactly() {

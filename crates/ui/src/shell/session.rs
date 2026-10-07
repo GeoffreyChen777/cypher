@@ -129,7 +129,7 @@ pub(super) struct SessionSlot {
     /// chat's checkout.
     pub(super) files: std::collections::HashMap<u64, Entity<FilesPanel>>,
     pub(super) files_seq: u64,
-    /// Temporary Side Chat tabs (round 21): one [`SideChatPanel`] per open
+    /// Temporary Side Chat tabs: one [`SideChatPanel`] per open
     /// side chat, keyed by a slot-minted sequence id. Owned here so the
     /// shell can promote/close/dispose them and re-render their tabs.
     ///
@@ -710,7 +710,7 @@ impl Shell {
             .into_any_element()
     }
 
-    // ---- temporary Side Chats (round 21) ----
+    // ---- temporary Side Chats ----
 
     /// User-facing notice text for a failed `StartSideChat` RPC.
     ///
@@ -1326,9 +1326,6 @@ impl Shell {
             } => {
                 this.promote_side_chat(sid, chat_id.clone(), side_chat_id.clone(), cx);
             }
-            crate::side_chats::SideChatEvent::Close { side_chat_id } => {
-                this.close_side_chat_tab(sid, side_chat_id.clone(), cx);
-            }
         });
         slot.side_chats.insert(id, panel);
         slot.side_chat_subs.insert(id, sub);
@@ -1532,7 +1529,7 @@ impl Shell {
         }
     }
 
-    /// Cmd/Ctrl+J and the header button (feature-inventory §1.10). Height
+    /// Cmd/Ctrl+J and the header button. Height
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per session tile (zeron `sessionPanels`).
     pub(super) fn toggle_terminal(
@@ -1579,7 +1576,7 @@ impl Shell {
         }
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
+                .timer(RESIZE.total() + Duration::from_millis(30))
                 .await;
             this.update(cx, |shell, cx| {
                 if let Some(slot) = shell.slots.get_mut(&sid) {

@@ -1167,10 +1167,7 @@ mod tests {
             parts,
             created_at: ms(1000),
             device_id: "d".into(),
-            status: None,
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         }
     }
 
@@ -2004,24 +2001,10 @@ mod tests {
 
     fn chat_row(id: &str, child: Option<cypher_proto::ChildChat>) -> cypher_proto::Chat {
         cypher_proto::Chat {
-            pinned: false,
             id: id.into(),
-            device_id: "dev".into(),
-            title: None,
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
             child,
+            ..crate::test_fixtures::chat()
         }
     }
 
@@ -2066,23 +2049,16 @@ mod tests {
                 s.apply_sessions(vec![
                     cypher_proto::Session {
                         chat_id: "parent".into(),
-                        device_id: "dev".into(),
                         status: SessionStatus::Working,
-                        started_at: None,
                         updated_at: now,
                         subagents: vec![r],
-                        context_usage: None,
-                        throughput: None,
+                        ..crate::test_fixtures::session()
                     },
                     cypher_proto::Session {
                         chat_id: "child-1".into(),
-                        device_id: "dev".into(),
                         status: SessionStatus::Working,
-                        started_at: None,
                         updated_at: now,
-                        subagents: vec![],
-                        context_usage: None,
-                        throughput: None,
+                        ..crate::test_fixtures::session()
                     },
                 ]);
                 s.selected_chat = Some("parent".into());

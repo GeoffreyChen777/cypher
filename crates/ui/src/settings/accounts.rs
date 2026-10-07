@@ -1,4 +1,4 @@
-//! Settings → Agents / accounts (feature-inventory §1.9): provider cards
+//! Settings → Agents / accounts: provider cards
 //! (Claude Code, Codex) with account rows — email, plan badge, Active, usage
 //! meters (indigo → amber ≥80% → red ≥95%, reset time), Switch / Forget — plus
 //! the add-account dialogs (paste-code and browser-poll flows) and

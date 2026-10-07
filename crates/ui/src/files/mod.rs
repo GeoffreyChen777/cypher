@@ -280,12 +280,6 @@ impl FilesPanel {
         }
     }
 
-    /// True when any open file has unsaved edits (the shell asks before
-    /// closing the tab).
-    pub fn has_unsaved(&self) -> bool {
-        self.open_files.values().any(|f| f.dirty)
-    }
-
     /// Idempotent: bind to the selected chat and load the root listing.
     pub fn ensure_content(&mut self, cx: &mut Context<Self>) {
         self.sync(cx);
@@ -1331,24 +1325,12 @@ mod tests {
         let mut state = AppState::new();
         assert!(context_for(&state).is_err());
         let mut chat = cypher_proto::Chat {
-            pinned: false,
             id: "c1".into(),
             device_id: "dev-2".into(),
-            title: None,
-            archived: false,
             cwd: Some("/work/repo".into()),
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: chrono::Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
             space_id: Some("s1".into()),
-            last_seen_at: None,
-            room_gen: None,
-            child: None,
+            ..crate::test_fixtures::chat()
         };
         state.chats.push(chat.clone());
         state.selected_chat = Some("c1".into());

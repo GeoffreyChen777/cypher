@@ -172,7 +172,6 @@ pub struct Emulator {
     parser: Processor,
     capture: EventCapture,
     title: Option<String>,
-    bell: bool,
 }
 
 impl Emulator {
@@ -188,7 +187,6 @@ impl Emulator {
             parser: Processor::new(),
             capture,
             title: None,
-            bell: false,
         }
     }
 
@@ -202,7 +200,6 @@ impl Emulator {
                 Event::PtyWrite(text) => responses.extend_from_slice(text.as_bytes()),
                 Event::Title(title) => self.title = Some(title),
                 Event::ResetTitle => self.title = None,
-                Event::Bell => self.bell = true,
                 _ => {}
             }
         }
@@ -226,11 +223,6 @@ impl Emulator {
         self.title.as_deref()
     }
 
-    /// True once a BEL arrived; reading clears it.
-    pub fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell)
-    }
-
     /// Arrow keys should send SS3 (`ESC O A`) instead of CSI.
     pub fn app_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
@@ -247,6 +239,7 @@ impl Emulator {
     }
 
     /// Lines available above the viewport.
+    #[cfg(test)]
     pub fn history_lines(&self) -> usize {
         self.term.grid().history_size()
     }
@@ -319,6 +312,7 @@ impl Emulator {
     }
 
     /// Snapshot one viewport row (0 = top) honoring the scrollback offset.
+    #[cfg(test)]
     pub fn line(&self, viewport_row: usize) -> Vec<CellSnapshot> {
         self.line_inner(viewport_row, self.selection_range())
     }
@@ -384,8 +378,9 @@ impl Emulator {
         })
     }
 
-    /// Test/diagnostic helper: a viewport row as trimmed text (wide-char
-    /// spacers skipped).
+    /// Test helper: a viewport row as trimmed text (wide-char spacers
+    /// skipped).
+    #[cfg(test)]
     pub fn row_text(&self, viewport_row: usize) -> String {
         let mut text: String = self
             .line(viewport_row)
@@ -565,15 +560,11 @@ mod tests {
     }
 
     #[test]
-    fn osc_title_and_bell() {
+    fn osc_title() {
         let mut e = emu(20, 2);
         assert_eq!(e.title(), None);
         e.feed(b"\x1b]0;my title\x07");
         assert_eq!(e.title(), Some("my title"));
-        assert!(!e.take_bell());
-        e.feed(b"\x07");
-        assert!(e.take_bell());
-        assert!(!e.take_bell(), "bell reads clear it");
     }
 
     #[test]

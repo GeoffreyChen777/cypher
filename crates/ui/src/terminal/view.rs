@@ -1,6 +1,6 @@
 //! Terminal paint + input encoding.
 //!
-//! - the ANSI palette on the terminal background (feature-inventory §1.10) —
+//! - the ANSI palette on the terminal background —
 //!   `#191919` dark, `#fafafa` light — and the 256-color cube/grayscale
 //!   resolution, both resolved per [`Appearance`];
 //! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
@@ -18,7 +18,7 @@ use gpui::{
     SharedString, Style, TextRun, Window, fill, outline, point, px, relative, size,
 };
 
-use crate::theme::{Appearance, Theme, current_appearance, rgb_to_hsl};
+use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
 use super::emulator::{CellColor, CellSnapshot, Side};
 use super::panel::TerminalPanel;
@@ -52,12 +52,6 @@ pub fn terminal_bg_for(appearance: Appearance) -> Hsla {
         Appearance::Dark => rgb8(0x19, 0x19, 0x19),
         Appearance::Light => rgb8(0xfa, 0xfa, 0xfa),
     }
-}
-
-/// Terminal background in the appearance currently installed — the
-/// context-free form, same shape as [`crate::theme::ink`].
-pub fn terminal_bg() -> Hsla {
-    terminal_bg_for(current_appearance())
 }
 
 pub fn background(theme: &Theme) -> Hsla {

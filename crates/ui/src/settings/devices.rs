@@ -1,4 +1,4 @@
-//! Settings → Devices (feature-inventory §1.5): the device registry — name,
+//! Settings → Devices: the device registry — name,
 //! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
 //! a Rename dialog (Mutate renameDevice), and in synced workspaces a Remove
 //! action that unpairs another machine (Mutate deleteDevice): that machine

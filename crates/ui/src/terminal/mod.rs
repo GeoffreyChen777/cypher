@@ -1,4 +1,4 @@
-//! Terminal panel (feature-inventory §1.10): an `alacritty_terminal`-backed
+//! Terminal panel: an `alacritty_terminal`-backed
 //! emulator fed by the engine's PTY stream over the generic RPC client.
 //!
 //! - [`emulator`] — pure Term + vte state machine (bytes in, grid out);
@@ -9,7 +9,7 @@
 //!
 //! Method names come from `cypher_rpc::methods` and wire types from
 //! `cypher_proto` (`TerminalSession`, `TerminalEvent`) — the same contract the
-//! engine serves (feature-inventory §2.1).
+//! engine serves.
 
 pub mod emulator;
 pub mod panel;

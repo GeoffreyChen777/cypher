@@ -13,12 +13,8 @@ fn entry(id: &str, role: MessageRole, text: &str, status: MessageStatus) -> Sess
             text: text.into(),
             agent_text: None,
         }],
-        created_at: 0,
-        device_id: "dev".into(),
         status: Some(status),
-        continuation_of: None,
-        completed_at: None,
-        comments: Vec::new(),
+        ..crate::test_fixtures::entry()
     }
 }
 

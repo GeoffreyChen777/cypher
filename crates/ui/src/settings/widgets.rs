@@ -204,16 +204,6 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
     )
 }
 
-/// Identity tile for an unknown package: the same frame, with a letter instead
-/// of a glyph so third-party extensions stay distinct without fake semantics.
-pub fn row_tile_letter(theme: &Theme, letter: impl Into<SharedString>) -> gpui::Div {
-    row_tile_frame(theme)
-        .text_size(px(13.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(theme.text_muted)
-        .child(letter.into())
-}
-
 /// Row title: `text-[13.5px] font-medium leading-tight`.
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
     div()

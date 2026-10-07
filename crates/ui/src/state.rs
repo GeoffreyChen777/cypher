@@ -482,9 +482,8 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 // and with their own test suite. Re-exported here because every call site in
 // this crate reads them as `state::…`.
 pub use cypher_proto::view::{
-    ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
-    chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
+    ConnectionStatus, GatePhase, Indicator, chat_location, display_status, effective_indicator,
+    format_time_ago, gate_phase, parse_auth_state, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
 // ---------------------------------------------------------------------------
@@ -632,10 +631,8 @@ pub fn command_send_status(
 #[derive(Debug, Clone)]
 pub struct FailedCommand {
     pub command_id: String,
-    pub message_id: String,
     pub prompt: String,
     pub resolution: Option<String>,
-    pub sent_at: Option<i64>,
 }
 
 /// The retry-able failures in the ledger, in doc order, skipping messages
@@ -667,10 +664,8 @@ pub fn failed_commands(commands: &[SessionCommandEntry]) -> Vec<FailedCommand> {
         };
         out.push(FailedCommand {
             command_id: command.id.clone(),
-            message_id: message_id.to_string(),
             prompt,
             resolution: command.resolution.clone(),
-            sent_at: command.sent_at,
         });
     }
     out
@@ -918,31 +913,6 @@ fn merge_scratch_groups(groups: &mut Vec<SidebarGroup<'_>>) {
         .map(|(_, c)| c.created_at)
         .max()
         .unwrap_or(card.created_at);
-}
-
-/// A temporary Side Chat's forked state (round 21 refactor): a SECONDARY
-/// [`AppState`] entity per panel that shares the main state's [`EngineHandle`]
-/// but never mutates the main selection. It owns a synthetic selected `Chat`
-/// row inheriting the parent's device/space/cwd/branch/checkout/config, a
-/// targeted `WatchDocMessages` transcript watch, and the private
-/// `WatchSideChatStatus` projected into its `sessions` — so the EXISTING
-/// `Transcript` / `Composer` components (which read `selected_chat`,
-/// `transcript`, `pending_echoes` and `sessions`) work unchanged.
-///
-/// No normal `WatchChats`/`WatchSessions`/`WatchSpaces`/`WatchDevices` watches
-/// run in the fork — they would replace the synthetic row/list state. The
-/// remote `targetDeviceId` stays authoritative on the two watches and on every
-/// side-chat RPC.
-pub struct SideChatContext {
-    pub state: Entity<AppState>,
-    /// The chat the side chat was opened from — its host device owns the
-    /// side chat and the promoted row inherits its working context.
-    pub parent_chat_id: String,
-    /// The engine-hosted temporary chat id (== the promoted row's id).
-    pub side_chat_id: String,
-    /// The device hosting the side chat — every side-chat RPC carries this
-    /// as `targetDeviceId` when it differs from the connected engine's.
-    pub target_device_id: String,
 }
 
 impl AppState {
@@ -1334,7 +1304,14 @@ impl AppState {
     /// device/space/cwd/branch/checkout/config, plus the targeted
     /// `WatchDocMessages` (transcript) and private `WatchSideChatStatus`
     /// watches — and nothing else. The main state's selection is untouched;
-    /// the shared [`EngineHandle`] is cloned, never restarted.
+    /// the shared [`EngineHandle`] is cloned, never restarted. The EXISTING
+    /// `Transcript` / `Composer` components (which read `selected_chat`,
+    /// `transcript`, `pending_echoes` and `sessions`) work unchanged on it.
+    ///
+    /// No normal `WatchChats`/`WatchSessions`/`WatchSpaces`/`WatchDevices`
+    /// watches run in the fork — they would replace the synthetic row/list
+    /// state. The remote `targetDeviceId` stays authoritative on the two
+    /// watches and on every side-chat RPC.
     ///
     /// The parent chat is read from `main`; when the parent row is missing
     /// (should not happen — the shell's StartSideChat race guard disposes
@@ -1403,7 +1380,7 @@ impl AppState {
         fork
     }
 
-    /// Optimistic insert for a promoted Side Chat (round 21): the engine has
+    /// Optimistic insert for a promoted Side Chat: the engine has
     /// already created the row (PromoteSideChat is synchronous engine-side),
     /// so this local copy makes the promotion seamless — the sidebar renders
     /// and the chat is selectable immediately, before the next chats frame
@@ -1531,6 +1508,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn apply_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
         // Doc frames supersede optimistic echoes carrying the same id.
         if let Some(chat_id) = self.selected_chat.as_deref()
@@ -1955,6 +1933,7 @@ impl AppState {
     /// spaces are appended deterministically by display name / device / path
     /// / id. Status changes never reorder. Archived and child chats stay
     /// excluded. Pure — see the tests in [`mod tests`] for the exact rules.
+    #[cfg(test)]
     pub fn sidebar_groups(&self, now: DateTime<Utc>) -> Vec<SidebarGroup<'_>> {
         self.sidebar_groups_with(now, &SidebarView::default())
     }
@@ -2336,6 +2315,7 @@ impl AppState {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub fn transcript_watches(&self) -> bool {
         self.transcript_watches
     }
@@ -3113,6 +3093,7 @@ mod tests {
     use cypher_engine::{EngineCore, default_registry};
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `cypher_proto::view`.
+    use cypher_proto::view::{group_chats, project_label};
     use cypher_proto::{SessionStatus, UserProfile};
 
     struct LegacyIdentityRpc;
@@ -3646,24 +3627,10 @@ mod tests {
             .unwrap()
             .to_utc();
         Chat {
-            pinned: false,
             id: id.into(),
-            device_id: "dev".into(),
-            title: None,
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
             created_at: base + TimeDelta::minutes(created_min),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
-            child: None,
+            ..crate::test_fixtures::chat()
         }
     }
 
@@ -3672,17 +3639,11 @@ mod tests {
             .unwrap()
             .to_utc();
         Space {
-            icon: None,
-            color: None,
-            pinned: false,
             id: id.into(),
             device_id: device_id.into(),
             path: path.into(),
-            name: None,
-            git_detected: false,
-            git_checked_at: None,
-            checkout_id: None,
             created_at: base + TimeDelta::minutes(created_min),
+            ..crate::test_fixtures::space()
         }
     }
 
@@ -3694,13 +3655,9 @@ mod tests {
     ) -> Session {
         Session {
             chat_id: chat_id.into(),
-            device_id: "dev".into(),
             status,
-            started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
-            subagents: Vec::new(),
-            context_usage: None,
-            throughput: None,
+            ..crate::test_fixtures::session()
         }
     }
 
@@ -3708,13 +3665,7 @@ mod tests {
         SessionMessageEntry {
             id: id.into(),
             role: cypher_doc::MessageRole::User,
-            parts: Vec::new(),
-            created_at: 0,
-            device_id: "dev".into(),
-            status: None,
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         }
     }
 
@@ -4824,7 +4775,7 @@ mod tests {
 
     #[test]
     fn insert_chat_optimistic_inserts_sorts_and_is_idempotent() {
-        // Round 21: a promoted Side Chat lands optimistically before the next
+        // A promoted Side Chat lands optimistically before the next
         // chats frame — inserted (sorted), never duplicated, and never
         // clobbering an authoritative row that already arrived.
         let mut state = AppState::new();
@@ -4887,7 +4838,7 @@ mod tests {
         );
     }
 
-    // ---- temporary Side Chat fork (round 21 refactor) ----
+    // ---- temporary Side Chat fork ----
 
     #[test]
     fn side_chat_synthetic_row_inherits_parent_context() {
@@ -5034,13 +4985,8 @@ mod tests {
         let echo = SessionMessageEntry {
             id: "m1".into(),
             role: cypher_doc::MessageRole::User,
-            parts: vec![],
-            created_at: 0,
             device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.
@@ -5158,38 +5104,6 @@ mod tests {
         });
         assert_eq!(state.workspace_scope, Some(WorkspaceScope::Local));
         assert_eq!(state.watch_tasks.len(), 1);
-    }
-
-    #[test]
-    fn auth_frames_parse_both_wire_shapes() {
-        // Proto shape.
-        let proto = serde_json::json!({ "state": "signedOut" });
-        assert_eq!(parse_auth_state(&proto), Some(AuthState::SignedOut));
-        // Engine shape (`_tag`, PascalCase, orgId).
-        let engine = serde_json::json!({
-            "_tag": "SignedIn",
-            "user": { "id": "u1", "email": "w@example.com" },
-            "orgId": "org-1",
-        });
-        let Some(AuthState::SignedIn { user, org_id }) = parse_auth_state(&engine) else {
-            panic!("expected SignedIn");
-        };
-        assert_eq!(user.email, "w@example.com");
-        assert_eq!(org_id.as_deref(), Some("org-1"));
-        let needs = serde_json::json!({
-            "_tag": "NeedsOrganization",
-            "user": { "id": "u1", "email": "w@example.com", "name": "W" },
-        });
-        assert!(matches!(
-            parse_auth_state(&needs),
-            Some(AuthState::NeedsOrganization { .. })
-        ));
-        // Garbage → None (frame dropped, not a crash).
-        assert_eq!(
-            parse_auth_state(&serde_json::json!({ "_tag": "Wat" })),
-            None
-        );
-        assert_eq!(parse_auth_state(&serde_json::json!(42)), None);
     }
 
     fn chat_with_cwd(id: &str, created_min: i64, cwd: Option<&str>) -> Chat {
@@ -5393,9 +5307,7 @@ mod tests {
         // m1: the retry is in flight (skip); m3 applied (skip); m2: expired.
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].command_id, "c4");
-        assert_eq!(failed[0].message_id, "m2");
         assert_eq!(failed[0].resolution.as_deref(), Some("nope"));
-        assert_eq!(failed[0].sent_at, Some(4));
 
         // After the retry fails again, the LATEST failed attempt is the target.
         let commands = vec![

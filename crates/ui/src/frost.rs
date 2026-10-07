@@ -16,7 +16,7 @@ use gpui::{
 use crate::theme::Theme;
 
 /// Backdrop-blur sigma for floating menu/dialog glass — the reference zeron
-/// `.glass-surface` runs `blur(44px)` (feature-inventory §1.12), and the
+/// `.glass-surface` runs `blur(44px)`, and the
 /// [`Theme::glass_overlay`] tint is thin enough that a 16px blur left
 /// backdrop detail ghosting through menu rows. The composer pill keeps its
 /// own lighter 16 (`chat-composer-glass` blurs 12–16 in the reference).

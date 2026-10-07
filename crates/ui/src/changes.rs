@@ -1,4 +1,4 @@
-//! The right-pane "Changes" content (feature-inventory §1.11): switchable
+//! The right-pane "Changes" content: switchable
 //! unified/split diff views over `WatchCheckoutDiffs`.
 //!
 //! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows,
@@ -892,6 +892,7 @@ pub fn body_rows(file_ix: u32, file: &FileDiff) -> Vec<DiffRow> {
 /// Flatten all files into rows + each file's row span (header at
 /// `range.start`, body rows after it). `collapsed(ix)` folds a file to just
 /// its header.
+#[cfg(test)]
 pub fn flatten_rows(
     files: &[FileDiff],
     mut collapsed: impl FnMut(usize) -> bool,
@@ -1507,7 +1508,7 @@ impl Changes {
         gpui::SharedString::from(self.scope.label())
     }
 
-    // ---- diff text selection + comments (round 20) ----
+    // ---- diff text selection + comments ----
 
     /// Selection lifecycle callbacks for the diff's code text elements: a
     /// settle shows the shared Comment pill at the selection endpoint, a new
@@ -1562,7 +1563,7 @@ impl Changes {
                         entity.update(cx, |_, cx| cx.notify()).ok();
                     })
                 };
-                // Side Chat source (round 21): the diff pane's scope label
+                // Side Chat source: the diff pane's scope label
                 // labels the engine's context block. Split selections name
                 // their version; a path is attached only when all selected
                 // source lines belong to one file.
@@ -4154,24 +4155,12 @@ rename to new_name.rs
 
     fn chat(checkout: Option<&str>, device: &str, cwd: Option<&str>) -> Chat {
         Chat {
-            pinned: false,
             id: "c1".into(),
             device_id: device.into(),
-            title: None,
-            archived: false,
             cwd: cwd.map(Into::into),
-            branch: None,
             checkout_id: checkout.map(Into::into),
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
-            child: None,
+            ..crate::test_fixtures::chat()
         }
     }
 

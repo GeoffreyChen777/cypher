@@ -31,9 +31,7 @@ pub const MD_BLOCK_GAP: f32 = 12.0;
 /// Body text size / line height (zeron: 14px / 22px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
 pub const MD_LINE_HEIGHT: f32 = 22.0;
-/// Code block metrics — height is `lines × CODE_LINE_HEIGHT + padding + header`.
-pub const CODE_TEXT_SIZE: f32 = 12.5;
-pub const CODE_LINE_HEIGHT: f32 = 18.0;
+/// Code block padding.
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
 
@@ -56,11 +54,6 @@ pub const TABLE_MIN_COLUMN_CONTENT: f32 = 48.0;
 /// `table.minColumnWidth`). Naturally narrower columns keep their content
 /// width; wider ones wrap down to this floor, then the table scrolls.
 pub const TABLE_MIN_COLUMN_WIDTH: f32 = 96.0;
-/// Hairline tone (zeron md theme `table.borderColor`: rgba(255,255,255,0.1)).
-pub fn table_hairline() -> Hsla {
-    crate::theme::hairline(0.10)
-}
-
 /// Options for one rendered tree (a transcript row or a whole live message).
 pub struct RenderOptions {
     /// Stable row key — prefixes element ids (scroll state, animations).
@@ -76,10 +69,10 @@ pub struct RenderOptions {
     pub cache: Option<Rc<RefCell<RenderCache>>>,
     /// Frame timestamp driving veil opacities (one clock per render pass).
     pub now: Instant,
-    /// Code-block copy-button plumbing (round 9): `None` renders no button
+    /// Code-block copy-button plumbing: `None` renders no button
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
-    /// Text-selection lifecycle callbacks (round 19): the surface wires
+    /// Text-selection lifecycle callbacks: the surface wires
     /// these to show/clear the Comment pill. `None` renders inert (previews).
     pub selection: Option<SelectionUi>,
     /// Which surface scope this tree belongs to — scopes the selection
@@ -626,21 +619,9 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
     }
 }
 
-/// Flatten inline runs into shaped-text inputs. Pure given a theme.
-pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
-    flatten_runs_weighted(
-        runs,
-        theme,
-        if bold_default {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        },
-    )
-}
-
-/// [`flatten_runs`] with an explicit base weight (table headers are 700 per
-/// zeron's `table.headerWeight`; strong runs never drop below semibold).
+/// Flatten inline runs into shaped-text inputs with an explicit base weight
+/// (table headers are 700 per zeron's `table.headerWeight`; strong runs never
+/// drop below semibold). Pure given a theme.
 fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
@@ -804,7 +785,7 @@ fn flat_text_element(
     // BEFORE the text (earlier sibling ⇒ underneath), reading glyph geometry
     // from the text's own layout handle. Pure paint — never in layout. The
     // same paint pass re-registers the frame-scoped window mouse listeners
-    // that drive text selection (round 18; see markdown/selection.rs).
+    // that drive text selection (see markdown/selection.rs).
     let sel_key: std::sync::Arc<str> = format!("{}-t{ix}", opts.row_key).into();
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat.text.clone();
@@ -1417,7 +1398,7 @@ fn render_code_block(
     // This also applies the streaming veil without changing text or layout.
     let text = flat_text_element(&cached.flat, ix, opts, &code_theme);
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
-    // Copy affordance (round 9; no source counterpart — the original block is
+    // Copy affordance (no source counterpart — the original block is
     // header + body only): a small ghost button in the block's top-right,
     // absolutely overlaid so clicking / the "Copied" flash never shifts
     // layout. Sits centered in the header when there is one, floats over the
@@ -1508,7 +1489,7 @@ fn render_code_block(
         .into_any_element()
 }
 
-/// Paint color for a token class — the soft syntax palette (round 9: the
+/// Paint color for a token class — the soft syntax palette (the
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
 pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
@@ -1579,6 +1560,20 @@ pub fn runs_for_syntax_line_with_plain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Flatten inline runs into shaped-text inputs. Pure given a theme.
+    fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
+        flatten_runs_weighted(
+            runs,
+            theme,
+            if bold_default {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            },
+        )
+    }
+
     use crate::markdown::parser::InlineStyle;
 
     #[test]
@@ -2155,7 +2150,7 @@ mod tests {
 
     #[test]
     fn code_palette_is_colored_and_shared() {
-        // Round 9: transcript code blocks paint the soft hues (rose keyword,
+        // Transcript code blocks paint the soft hues (rose keyword,
         // green string, amber number); comments stay faint neutral.
         let theme = Theme::dark();
         assert_ne!(token_color(HighlightKind::Keyword, &theme), theme.text);

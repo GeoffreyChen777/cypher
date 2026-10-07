@@ -1,4 +1,4 @@
-//! Attachments (feature-inventory §1.7/§1.8): the composer's staged images,
+//! Attachments: the composer's staged images,
 //! the chunked upload to the chat's host device, the plain-text attachment-ref
 //! transport that rides the prompt, the transcript read-back cache, and the
 //! full-size preview lightbox.

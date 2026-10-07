@@ -1,4 +1,4 @@
-//! Text selection for rendered markdown (round 18).
+//! Text selection for rendered markdown.
 //!
 //! gpui has no built-in selection for plain text elements. Zed's markdown
 //! selects continuously because its whole document is ONE element over one
@@ -573,7 +573,7 @@ pub(crate) mod tests {
 
     #[test]
     fn next_side_chat_scope_allocates_unique_ids() {
-        // Round 21 refactor: each temporary Side Chat transcript gets a fresh
+        // Each temporary Side Chat transcript gets a fresh
         // scope so it never collides with the main transcript or another
         // simultaneously-visible panel.
         let a = next_side_chat_scope();

@@ -38,6 +38,8 @@ pub struct InlineRun {
 }
 
 /// A markdown block. Containers nest.
+// Variant names follow the CommonMark block kinds (code block, block quote).
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Paragraph {
@@ -91,6 +93,7 @@ pub struct BlockTree {
 }
 
 impl BlockTree {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
@@ -572,10 +575,6 @@ pub struct IncrementalParser {
 }
 
 impl IncrementalParser {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -736,7 +735,7 @@ mod tests {
     use super::*;
 
     fn stream(chunks: usize, text: &str) -> IncrementalParser {
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         let bytes = text.as_bytes();
         let mut start = 0;
         while start < bytes.len() {
@@ -789,7 +788,7 @@ mod tests {
         // as-is across appends — same index, same value — so row/element keys
         // never re-mount and earlier blocks can never visibly reflow.
         for corpus in CORPORA {
-            let mut p = IncrementalParser::new();
+            let mut p = IncrementalParser::default();
             let mut prev = p.tree().clone();
             let bytes = corpus.as_bytes();
             let mut start = 0;
@@ -837,7 +836,7 @@ mod tests {
 
     #[test]
     fn set_text_appends_or_resets() {
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text("hello");
         p.set_text("hello world");
         assert_eq!(p.tree(), &parse_full("hello world"));
@@ -1027,7 +1026,7 @@ mod tests {
 
     #[test]
     fn display_tree_styles_hanging_bold_immediately() {
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text("intro **bo");
         let display = p.display_tree();
         let Block::Paragraph { runs } = &display.blocks[0].block else {
@@ -1044,7 +1043,7 @@ mod tests {
     #[test]
     fn display_tree_converges_to_canonical_when_balanced() {
         let corpus = "a **b** *c* `d` [e](https://x.dev) ~~f~~";
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text(corpus);
         assert_eq!(p.display_tree(), *p.tree());
         assert_eq!(p.tree(), &parse_full(corpus));
@@ -1053,7 +1052,7 @@ mod tests {
     #[test]
     fn display_tree_never_leaks_streaming_urls() {
         let full = "read [docs](https://example.com/long/path) now";
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         for i in 1..=full.len() {
             if !full.is_char_boundary(i) {
                 continue;
@@ -1063,7 +1062,7 @@ mod tests {
             assert!(!text.contains("http"), "url leaked at {i}: {text:?}");
         }
         // Mid-URL the link text carries the pending sentinel destination.
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text("read [docs](https://exa");
         let Block::Paragraph { runs } = &p.display_tree().blocks[0].block else {
             panic!("expected paragraph");
@@ -1081,7 +1080,7 @@ mod tests {
 
     #[test]
     fn display_tree_leaves_code_blocks_alone() {
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text("intro\n\n```\nunclosed **fence");
         assert_eq!(p.display_tree(), *p.tree());
     }
@@ -1090,7 +1089,7 @@ mod tests {
     fn display_tree_suppresses_setext_flicker() {
         // "para" + "\n-" parses as an H2 for exactly one chunk before the
         // list item's text arrives; the display tree keeps it a paragraph.
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text("para\n-");
         let display = p.display_tree();
         assert!(
@@ -1108,7 +1107,7 @@ mod tests {
         // byte-identical to the canonical tree so render caches and row keys
         // survive.
         for corpus in CORPORA {
-            let mut p = IncrementalParser::new();
+            let mut p = IncrementalParser::default();
             let bytes = corpus.as_bytes();
             let mut start = 0;
             while start < bytes.len() {
@@ -1135,7 +1134,7 @@ mod tests {
     fn empty_and_whitespace_sources() {
         assert!(parse_full("").is_empty());
         assert!(parse_full("\n\n  \n").is_empty());
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.append("");
         assert!(p.tree().is_empty());
     }
@@ -1162,7 +1161,7 @@ mod closing_quote_blocks {
     fn streamed_boundary_at_quote_adds_no_block() {
         // Stream with a commit boundary exactly between `powerless.` and `"`.
         let split = STORY.len() - 1;
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         p.set_text(&STORY[..split]);
         p.set_text(STORY);
         let tree = p.tree();
@@ -1175,7 +1174,7 @@ mod closing_quote_blocks {
 
     #[test]
     fn streamed_small_chunks_match_full_parse() {
-        let mut p = IncrementalParser::new();
+        let mut p = IncrementalParser::default();
         let mut fed = String::new();
         for chunk in STORY.as_bytes().chunks(7) {
             fed.push_str(std::str::from_utf8(chunk).unwrap());

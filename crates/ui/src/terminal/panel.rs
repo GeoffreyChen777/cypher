@@ -152,16 +152,6 @@ pub fn exit_message(code: i32) -> Vec<u8> {
     format!("\r\n\x1b[90m[process exited {code}]\x1b[0m\r\n").into_bytes()
 }
 
-/// Tab title from the session's shell path ("/bin/zsh" → "zsh").
-pub fn shell_title(shell: &str) -> String {
-    let name = shell.rsplit(['/', '\\']).next().unwrap_or(shell).trim();
-    if name.is_empty() {
-        "terminal".to_string()
-    } else {
-        name.to_string()
-    }
-}
-
 fn decode_base64(data: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(data)
@@ -423,8 +413,7 @@ impl TerminalPanel {
     }
 
     /// The chat's host device when it differs from the connected engine's own —
-    /// the PTY lives on the chat's device (feature-inventory §2.1 "terminals
-    /// live on the chat's host device"), so every terminal RPC for a remote
+    /// the PTY lives on the chat's host device, so every terminal RPC for a remote
     /// chat needs the `targetDeviceId` passthrough. Without it the local
     /// engine checks the chat's cwd against its OWN filesystem and fails with
     /// "Session working directory is unavailable" (user report).
@@ -1050,7 +1039,7 @@ impl TerminalPanel {
         // pill (native `Emulator::selection_text()` — the emulator keeps the
         // selection, so Cmd+C still copies exactly what was dragged). The
         // Side Chat action carries the tab's display title as its source
-        // metadata (round 21).
+        // metadata.
         if let Some(text) = self
             .with_active_emulator(cx, |emu| emu.selection_text())
             .flatten()
@@ -1751,15 +1740,6 @@ mod tests {
         assert!(text.contains("[process exited 137]"));
         assert!(text.starts_with("\r\n"));
         assert!(text.ends_with("\r\n"));
-    }
-
-    #[test]
-    fn shell_titles() {
-        assert_eq!(shell_title("/bin/zsh"), "zsh");
-        assert_eq!(shell_title("/usr/local/bin/fish"), "fish");
-        assert_eq!(shell_title("C:\\Windows\\System32\\cmd.exe"), "cmd.exe");
-        assert_eq!(shell_title("bash"), "bash");
-        assert_eq!(shell_title(""), "terminal");
     }
 
     #[test]

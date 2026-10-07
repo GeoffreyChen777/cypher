@@ -1,4 +1,4 @@
-//! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
+//! Composer pickers: RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
 //! worktree toggle), HarnessModelPicker (provider rail + model list, Pi
 //! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
@@ -517,10 +517,6 @@ pub struct Pickers {
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
     focus: FocusHandle,
-    /// `CYPHER_OPEN_PICKER` boot: keep claiming focus until it sticks, so
-    /// keyboard nav drives the data-side-opened popover (headless rigs have
-    /// no synthetic pointer, but synthetic keys do arrive).
-    boot_focus_pending: bool,
     load_task: Option<Task<()>>,
     /// Own slot: the refs load runs concurrently with the eager
     /// harness/model loads — sharing `load_task` would abort one mid-flight.
@@ -613,22 +609,6 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
-        // Dev/testing knob: `CYPHER_OPEN_PICKER=model|traits|repo|branch` boots
-        // with that popover open — synthetic input can't reach the app on
-        // headless compositors, so captures need a data-side path.
-        let boot_open = match cypher_env::var("OPEN_PICKER").as_deref() {
-            Some("model") => Some(PickerKind::HarnessModel),
-            Some("traits") => Some(PickerKind::HarnessModel),
-            Some("branch") => Some(PickerKind::Branch),
-            Some("checkout") => Some(PickerKind::Checkout),
-            Some("project") => Some(PickerKind::Space),
-            Some("device") => Some(PickerKind::Device),
-            _ => None,
-        };
-        let mut open = popover::Popup::default();
-        if let Some(kind) = boot_open {
-            open.open(kind);
-        }
         // Sticky last-used picks: loaded synchronously so the very first frame
         // shows the remembered harness/model/reasoning, never a placeholder.
         let data_dir = state.read(cx).data_dir.clone();
@@ -664,7 +644,7 @@ impl Pickers {
             defaults,
             data_dir,
             draft_owner,
-            open,
+            open: popover::Popup::default(),
             model_rail: ModelRail::default(),
             selected_provider: None,
             harnesses: Loadable::Idle,
@@ -679,7 +659,6 @@ impl Pickers {
             search,
             search_reset_muted: false,
             focus: cx.focus_handle(),
-            boot_focus_pending: boot_open.is_some(),
             load_task: None,
             refs_task: None,
             switching: None,
@@ -710,10 +689,6 @@ impl Pickers {
         self.defaults = merged;
     }
 
-    pub fn draft(&self) -> &DraftConfig {
-        &self.config
-    }
-
     /// Bind the pickers to a temporary Side Chat's fork: only the model and
     /// traits popovers open, and their picks stay on the fork's synthetic row
     /// ([`Self::update_chat_config`]).
@@ -721,7 +696,7 @@ impl Pickers {
         self.side_chat = true;
     }
 
-    /// Harness is locked once the chat exists (feature-inventory §1.7).
+    /// Harness is locked once the chat exists.
     fn harness_locked(&self, cx: &App) -> bool {
         self.state.read(cx).selected_chat.is_some()
     }
@@ -4036,10 +4011,6 @@ fn mock_harness_enabled() -> bool {
 /// Production currently supports only Pi. Keep Mock available for the
 /// explicit e2e/dev rig, but never surface the other harnesses in user-facing
 /// pickers.
-pub fn visible_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
-    visible_harnesses_impl(list, mock_harness_enabled())
-}
-
 fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
     list.iter()
         .filter(|d| d.id == HarnessId::Pi || (allow_mock && d.id == HarnessId::Mock))
@@ -4047,7 +4018,7 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
         .collect()
 }
 
-/// What the composer actually offers: [`visible_harnesses`] narrowed to the
+/// What the composer actually offers: [`visible_harnesses_impl`] narrowed to the
 /// catalog device's enabled set (Settings → Agents — per-device state, so a
 /// space on another device follows THAT device's toggles). The dev-rig mock
 /// opt-in survives the filter, and a catalog where nothing is enabled (or
@@ -4123,42 +4094,15 @@ fn attach_overlay_end(
 }
 
 impl Render for Pickers {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // A CYPHER_OPEN_PICKER popover never went through `toggle`, so claim
-        // its keyboard focus here (re-claim until it sticks — the shell's
-        // first-paint fallback focuses the composer after our first render).
-        if self.boot_focus_pending {
-            match self.open_kind() {
-                Some(PickerKind::Branch) => {
-                    self.search.update(cx, |input, cx| {
-                        input.set_placeholder("Search refs…", cx);
-                    });
-                    let handle = self.search.read(cx).focus_handle(cx);
-                    if handle.is_focused(window) {
-                        self.boot_focus_pending = false;
-                    } else {
-                        window.focus(&handle, cx);
-                    }
-                }
-                Some(_) => {
-                    if self.focus.is_focused(window) {
-                        self.boot_focus_pending = false;
-                    } else {
-                        window.focus(&self.focus, cx);
-                    }
-                }
-                None => self.boot_focus_pending = false,
-            }
-        }
-
         // Eager-load the harness catalog + every offered harness's models so
         // the chip reads "Fable 5" (a concrete pick) before any popover
         // opens, and rail switches inside the picker are instant.
         self.ensure_harnesses(false, cx);
         self.prefetch_models(cx);
-        // A popover opened data-side (CYPHER_OPEN_PICKER) never went through
-        // `toggle`, so kick its loads here (all ensure_* are idempotent).
+        // A popover opened without going through `toggle` still gets its
+        // loads kicked here (all ensure_* are idempotent).
         if matches!(
             self.open_kind(),
             Some(PickerKind::Branch) | Some(PickerKind::Checkout)

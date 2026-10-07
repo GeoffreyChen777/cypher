@@ -1,85 +1,20 @@
-//! Loaders: the cypher pulse loader, the gradient matrix spinner, and the boot
-//! splash content. All motion routes through `crate::motion` pure helpers, so
-//! the math is unit-tested and these elements are testable-by-compile.
+//! Loaders: the gradient matrix spinner and the boot splash content. All
+//! motion routes through `crate::motion` pure helpers, so the math is
+//! unit-tested and these elements are testable-by-compile.
 //!
-//! Rendering pattern: each cell is its own `with_animation` repeating element
-//! sharing one period; per-cell offsets come from [`motion::staggered_phase`],
-//! so all cells stay phase-locked (they start on the same frame) without a
-//! shared clock. Cells animate inside fixed-size slots — opacity and inner size
-//! are paint-local and never move surrounding layout. Reduced motion snaps every
-//! cell to its rest state automatically (gpui `reduce_motion`).
+//! Rendering pattern: every cell reads the one shared pulse clock
+//! ([`motion::pulse_delta`]) and derives its own phase from it, so all cells
+//! stay phase-locked. Cells animate inside fixed-size slots — opacity and
+//! inner size are paint-local and never move surrounding layout.
 
 use gpui::{AnyElement, App, EntityId, IntoElement, ParentElement, SharedString, Styled, div, px};
 
-use crate::icons::cypher_app_icon;
-use crate::motion::{self, CYPHER_PULSE, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT};
+use crate::motion::{self, GRADIENT_SPIN, SPLASH_OUT};
 use crate::theme::{MonoStyled, Theme};
 
 // Shared with the terminal viewport (`cypher_proto::motion`) so both animate the
 // same loaders from the same numbers.
-pub use cypher_proto::motion::{CYPHER_CELLS, MATRIX_SIDE};
-
-/// The official Cypher app icon with a quiet brand pulse. The fixed square
-/// keeps surrounding layout stable while the image breathes inside it.
-pub fn cypher_mark_loader(
-    _id: &'static str,
-    _theme: &Theme,
-    height_px: f32,
-    view: EntityId,
-    cx: &mut App,
-) -> impl IntoElement {
-    let delta = motion::pulse_delta(&CYPHER_PULSE, view, cx);
-    let wave = motion::pulse_wave(delta);
-    let icon_size = height_px * (0.97 + 0.03 * wave);
-    div()
-        .size(px(height_px))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            cypher_app_icon()
-                .size(px(icon_size))
-                .opacity(0.82 + 0.18 * wave),
-        )
-}
-
-/// The cypher wave loader: a row of cells pulsing opacity 0.08→1 / scale 0.9→1
-/// over 2.4s with a 0.15s stagger per cell.
-///
-/// `id` scopes the per-cell animation state — give each loader instance a
-/// distinct id.
-pub fn cypher_loader(
-    _id: &'static str,
-    theme: &Theme,
-    cell_px: f32,
-    view: EntityId,
-    cx: &mut App,
-) -> impl IntoElement {
-    let color = theme.text;
-    let slot = cell_px;
-    let delta = motion::pulse_delta(&CYPHER_PULSE, view, cx);
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(slot / 2.0))
-        .children((0..CYPHER_CELLS).map(move |i| {
-            // Fixed slot; the animated cell breathes inside it.
-            div()
-                .size(px(slot))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child({
-                    let phase = motion::staggered_phase(delta, i, PULSE_STAGGER);
-                    div()
-                        .rounded(px(slot / 4.0))
-                        .bg(color)
-                        .opacity(motion::pulse_opacity(phase))
-                        .size(px(slot * motion::pulse_scale(phase)))
-                })
-        }))
-}
+pub use cypher_proto::motion::MATRIX_SIDE;
 
 pub use cypher_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 
@@ -231,6 +166,5 @@ pub fn loading_word(theme: &Theme) -> impl IntoElement {
 // Compile-time proof the specs referenced here stay wired to the catalog.
 const _: () = {
     assert!(SPLASH_OUT.delay_ms == 150);
-    assert!(CYPHER_PULSE.duration_ms == 2400);
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };

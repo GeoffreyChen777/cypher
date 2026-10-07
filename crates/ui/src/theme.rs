@@ -50,10 +50,6 @@ impl Appearance {
         matches!(self, Self::Dark)
     }
 
-    pub fn is_light(self) -> bool {
-        matches!(self, Self::Light)
-    }
-
     /// Map a gpui window appearance onto ours (both vibrant variants are just
     /// the blurred flavour of the same tone).
     pub fn from_window(appearance: gpui::WindowAppearance) -> Self {
@@ -386,10 +382,8 @@ pub struct Theme {
     /// Accent — indigo. Text/icon weight: indigo-400 on dark, indigo-600 on light
     /// (the 400 fails AA on white).
     pub accent: Hsla,
-    /// Stronger accent for fills that carry [`Self::on_accent`] text.
+    /// Stronger accent for filled accent plates.
     pub accent_strong: Hsla,
-    /// Label color on top of [`Self::accent_strong`].
-    pub on_accent: Hsla,
     /// Danger — red (errors, stop button).
     pub danger: Hsla,
     /// Softer danger for secondary/inline error copy.
@@ -410,9 +404,6 @@ pub struct Theme {
     /// dark mode, never swap it for a translucent wash (that made pills go
     /// see-through — user-reported); in light mode it darkens instead, same idea.
     pub surface_raised_hover: Hsla,
-    /// Recessed band behind a palette/picker header or footer strip. Translucent
-    /// so the glass still reads through.
-    pub band: Hsla,
     /// The composer pill and other input plates.
     ///
     /// Its own token because "lifted" inverts between appearances. On dark, a
@@ -429,7 +420,7 @@ pub struct Theme {
     /// Composer text caret. A blue distinct from `accent` — sampled from the
     /// original composer, not derived, so it keeps its own token.
     pub caret: Hsla,
-    /// Destructive-action button fill (danger plate, carries [`Self::on_accent`]).
+    /// Destructive-action button fill (danger plate).
     pub danger_strong: Hsla,
 
     // ---- paint: code & diff ----
@@ -447,14 +438,10 @@ pub struct Theme {
     pub diff_hunk_bg: Hsla,
 
     // ---- fonts ----
-    /// UI font family (bundling of Geist lands with asset work; until then the
-    /// text system falls back to the system sans when the family is missing).
+    /// UI font family (the bundled Geist).
     pub font_sans: SharedString,
     /// Monospace family for code/terminal.
     pub font_mono: SharedString,
-    /// Explicit system fallbacks, for callers that want to skip the lookup.
-    pub font_sans_fallback: SharedString,
-    pub font_mono_fallback: SharedString,
 }
 
 /// Font features for every monospace run: coding ligatures OFF.
@@ -525,8 +512,6 @@ impl Theme {
     /// see [`Self::glass_overlay`], where light coverage steps up to keep menu
     /// text legible over an unknown backdrop.
     pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
-    /// Main-panel header height (zeron `h-11`) — in-card headers (changes pane).
-    pub const HEADER_HEIGHT: f32 = 44.0;
     /// The unified window titlebar (traffic lights + cluster + tabs). Content
     /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
     /// matches the perceived gap to the inset card below (border + card body).
@@ -544,12 +529,9 @@ impl Theme {
     pub const TRANSCRIPT_FADE_BAND: f32 = 24.0;
     /// Message bubble corner radius.
     pub const BUBBLE_RADIUS: f32 = 16.0;
-    /// Panel / card corner radius.
-    pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
     /// Base spacing steps.
-    pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;
     pub const SPACE_MD: f32 = 12.0;
     pub const SPACE_LG: f32 = 16.0;
@@ -756,16 +738,14 @@ impl Theme {
             on_solid: grey(0x0e),                        // near-black label
             accent: oklch(0.673, 0.182, 276.935),        // indigo-400
             accent_strong: oklch(0.585, 0.233, 277.117), // indigo-500
-            on_accent: neutral(0.985),
-            danger: oklch(0.704, 0.191, 22.216),       // red-400
-            danger_muted: oklch(0.808, 0.114, 19.571), // red-300
-            warning: oklch(0.828, 0.189, 84.429),      // amber-400
-            warning_muted: oklch(0.924, 0.12, 95.746), // amber-200
-            success: oklch(0.765, 0.177, 163.223),     // emerald-400
-            busy: oklch(0.718, 0.202, 349.761),        // pink-400
+            danger: oklch(0.704, 0.191, 22.216),         // red-400
+            danger_muted: oklch(0.808, 0.114, 19.571),   // red-300
+            warning: oklch(0.828, 0.189, 84.429),        // amber-400
+            warning_muted: oklch(0.924, 0.12, 95.746),   // amber-200
+            success: oklch(0.765, 0.177, 163.223),       // emerald-400
+            busy: oklch(0.718, 0.202, 349.761),          // pink-400
             success_muted: oklch(0.845, 0.143, 164.978), // emerald-300
             surface_raised_hover: grey(0x4a),
-            band: band_for(Appearance::Dark),
             input_bg: hsla(0.0, 0.0, 1.0, 0.05),
             selection: hsla(0.66, 0.6, 0.55, 0.35),
             cursor: hsla(0.0, 0.0, 1.0, 0.35),
@@ -779,8 +759,6 @@ impl Theme {
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
-            font_sans_fallback: system_sans().into(),
-            font_mono_fallback: system_mono().into(),
         }
     }
 
@@ -837,20 +815,18 @@ impl Theme {
             on_solid: neutral(0.985), // near-white label
             accent: oklch(0.511, 0.262, 276.966), // indigo-600
             accent_strong: oklch(0.511, 0.262, 276.966), // indigo-600 fill
-            on_accent: neutral(0.985),
-            danger: oklch(0.577, 0.245, 27.325),        // red-600
-            danger_muted: oklch(0.505, 0.213, 27.518),  // red-700
-            warning: oklch(0.555, 0.163, 48.998),       // amber-700 — carries 12px text
+            danger: oklch(0.577, 0.245, 27.325), // red-600
+            danger_muted: oklch(0.505, 0.213, 27.518), // red-700
+            warning: oklch(0.555, 0.163, 48.998), // amber-700 — carries 12px text
             warning_muted: oklch(0.473, 0.137, 46.201), // amber-800
-            success: oklch(0.596, 0.145, 163.225),      // emerald-600
-            busy: oklch(0.592, 0.249, 0.584),           // pink-600
+            success: oklch(0.596, 0.145, 163.225), // emerald-600
+            busy: oklch(0.592, 0.249, 0.584), // pink-600
             success_muted: oklch(0.508, 0.118, 165.612), // emerald-700
             // Opaque pills darken on hover here rather than brighten — same
             // "brighten the plate, don't wash it out" rule, read the other way.
             surface_raised_hover: neutral(0.900),
             // A recessed strip on white needs far less ink than on near-black;
             // the dark 16% would read as a bruise.
-            band: band_for(Appearance::Light),
             input_bg: grey(0xff),
             selection: hsla(0.66, 0.75, 0.62, 0.28),
             cursor: hsla(0.0, 0.0, 0.0, 0.55),
@@ -864,8 +840,6 @@ impl Theme {
             diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
-            font_sans_fallback: system_sans().into(),
-            font_mono_fallback: system_mono().into(),
         }
     }
 
@@ -922,26 +896,6 @@ impl Default for Theme {
 }
 
 impl Global for Theme {}
-
-fn system_sans() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Helvetica"
-    } else if cfg!(target_os = "windows") {
-        "Segoe UI"
-    } else {
-        "DejaVu Sans"
-    }
-}
-
-fn system_mono() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "DejaVu Sans Mono"
-    }
-}
 
 /// A neutral (chroma 0) oklch tone as Hsla. Chroma 0 means r == g == b exactly,
 /// so this goes straight to an achromatic Hsla (skipping the hue math avoids
@@ -1025,10 +979,8 @@ fn scrim_for(appearance: Appearance, alpha_dark: f32) -> Hsla {
     }
 }
 
-/// Recessed band behind a palette/picker header or footer strip.
-///
-/// A free function as well as a [`Theme`] field because the picker chrome that
-/// paints it is built from context-free helpers; both resolve to the same value.
+/// Recessed band behind a palette/picker header or footer strip. Translucent
+/// so the glass still reads through.
 pub fn band() -> Hsla {
     band_for(current_appearance())
 }
@@ -1039,21 +991,6 @@ fn band_for(appearance: Appearance) -> Hsla {
         // A recessed strip on white needs far less ink than on near-black; the
         // dark 16% would read as a bruise.
         Appearance::Light => hsla(0.0, 0.0, 0.0, 0.045),
-    }
-}
-
-/// Selected-state glass treatment (tabs, session rows, space rows): a
-/// TRANSLUCENT wash the vibrancy reads through — heavier flat washes blocked
-/// the glass (user request). Dark: the 11% [`wash`]. Light: the tone-flipped
-/// wash at 6% — 11% black read too dark over the bright frost (user report;
-/// light also previously ran a near-opaque white chip, rejected the same
-/// way). Same fill as [`Theme::glass_hover`] — the ring in
-/// [`glass_selected_shadows`] is what distinguishes selection. Selection
-/// *inside floating cards* is different — see [`card_selected_bg`].
-pub fn glass_selected_bg() -> Hsla {
-    match current_appearance() {
-        Appearance::Dark => wash(0.11),
-        Appearance::Light => wash(0.06),
     }
 }
 
@@ -1069,37 +1006,16 @@ pub fn card_selected_bg() -> Hsla {
     }
 }
 
-/// The selected chip's bright outline, as an INSET shadow: gpui paints inset
-/// shadows ON TOP of the background, edges only — a border with zero layout
-/// cost. Drop shadows are filled rects painted BEHIND the element, and behind
-/// a 5% fill they showed straight through as an opaque dark plate with a
-/// greyed ring (user report) — nothing may paint behind a glass chip.
-///
-/// Light pins the ring at a flat 7% black rather than the scaled hairline:
-/// heavier rings (the [`INK_HAIRLINE_SCALE`]d value, then 12%) outlined every
-/// selected chip in a dark box (user reports) — the ring should define the
-/// chip the way dark's 9% white ring does, not frame it.
-///
-/// There is deliberately NO drop-shadow seat under the light chip. Three
-/// recipes were tried (a tight 10% layer, a 6% contact + 5% ambient pair, a
-/// lone 4% whisper) and every one failed on sight: layers sum into a grey rim
-/// exactly where the chip meets the frost, gpui's small-radius blur reads
-/// coarse on a bright field, and the tab strip is a scroll container that
-/// clips its children vertically — any shadow escaping the chip gets cut off
-/// mid-fade. The near-opaque fill plus the ring carry selection, exactly as
-/// dark's wash plus ring does; the two appearances share one recipe now.
-pub fn glass_selected_shadows() -> Vec<gpui::BoxShadow> {
-    card_selected_shadows()
-}
-
 /// Selection outline for rows and chips INSIDE a floating card (menu rows,
 /// the picker rail, segmented chips): the inset ring alone, in both
 /// appearances. Card rows fill with a translucent wash
 /// ([`card_selected_bg`]), and a drop shadow — a filled rect painted BEHIND
-/// the element — shows straight through a translucent fill as a grey plate
-/// (the same lesson [`glass_selected_shadows`] records for dark glass). The
-/// card already carries the elevation shadow; selection inside it only needs
-/// the edge.
+/// the element — shows straight through a translucent fill as a grey plate,
+/// and gpui paints inset shadows ON TOP of the background, edges only — a
+/// border with zero layout cost. The card already carries the elevation
+/// shadow; selection inside it only needs the edge. Light pins the ring at a
+/// flat 7% black rather than the scaled hairline: heavier rings outlined every
+/// selected chip in a dark box — the ring should define the chip, not frame it.
 pub fn card_selected_shadows() -> Vec<gpui::BoxShadow> {
     let color = match current_appearance() {
         Appearance::Dark => hairline(0.09),
@@ -1232,6 +1148,7 @@ pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
 
 /// Composite `fg` (which may be translucent) over an opaque `bg`, returning the
 /// opaque result — the color the eye actually receives.
+#[cfg(test)]
 pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     let a = fg.a.clamp(0.0, 1.0);
     let [fr, fg_, fb] = hsl_to_rgb(fg.h, fg.s, fg.l);
@@ -1242,20 +1159,6 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
         fb * a + bb * (1.0 - a),
     );
     hsla(h, s, l, 1.0)
-}
-
-/// Linear per-component mix of two colors (paint helper for the gradient spinner).
-pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
-    let t = t.clamp(0.0, 1.0);
-    let lerp = |x: f32, y: f32| x + (y - x) * t;
-    // Mix through hue naively — both spinner endpoints sit close enough on the
-    // wheel that shortest-arc handling isn't needed for our palette.
-    hsla(
-        lerp(a.h, b.h),
-        lerp(a.s, b.s),
-        lerp(a.l, b.l),
-        lerp(a.a, b.a),
-    )
 }
 
 #[cfg(test)]
@@ -1516,19 +1419,11 @@ mod tests {
     }
 
     /// Solid (primary button) plates must carry their label at AA in both modes.
-    ///
-    /// The accent plate is held to 4.0 rather than 4.5: dark mode's indigo-500
-    /// fill — inherited unchanged from the original palette — measures 4.38:1
-    /// under white, which clears WCAG AA for the medium-weight 14px labels these
-    /// buttons use (large-text AA is 3:1) but not body copy. Light mode's
-    /// indigo-600 clears the stricter bar with room to spare.
     #[test]
     fn solid_button_is_legible_in_both_appearances() {
         for t in [Theme::dark(), Theme::light()] {
             let r = contrast_ratio(t.on_solid, t.solid);
             assert!(r >= 7.0, "{:?} solid button {r:.2}:1", t.appearance);
-            let a = contrast_ratio(t.on_accent, t.accent_strong);
-            assert!(a >= 4.0, "{:?} accent button {a:.2}:1", t.appearance);
         }
     }
 
@@ -1793,32 +1688,15 @@ mod tests {
         let _guard = lock_appearance();
         for appearance in [Appearance::Dark, Appearance::Light] {
             set_current_appearance(appearance);
-            for shadow in card_selected_shadows() {
+            let shadows = card_selected_shadows();
+            for shadow in &shadows {
                 assert!(
                     shadow.inset,
                     "{appearance:?}: card selection may only paint inset edges"
                 );
             }
-        }
-        set_current_appearance(Appearance::Dark);
-    }
-
-    /// Glass selection is edge-only in BOTH appearances — no drop-shadow seat.
-    /// Every light seat tried (10% tight, 6%+5% pair, lone 4%) read as a grey
-    /// rim or a coarse smudge, and the tab strip clips escaping shadows
-    /// vertically (user reports). The ring must also stay subtle enough to
-    /// define the chip rather than frame it.
-    #[test]
-    fn glass_selection_is_edge_only_and_subtle() {
-        let _guard = lock_appearance();
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            set_current_appearance(appearance);
-            let shadows = glass_selected_shadows();
-            assert!(
-                shadows.iter().all(|s| s.inset),
-                "{appearance:?}: glass selection may only paint inset edges"
-            );
-            let ring = shadows.iter().find(|s| s.inset).expect("selection ring");
+            // The ring stays subtle enough to define the chip, not frame it.
+            let ring = shadows.first().expect("selection ring");
             assert!(
                 ring.color.a <= 0.09,
                 "{appearance:?}: ring at {:.2} alpha frames the chip instead of defining it",
@@ -1855,20 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn mix_endpoints_and_midpoint() {
-        let a = hsla(0.0, 0.0, 0.0, 1.0);
-        let b = hsla(0.5, 1.0, 1.0, 0.0);
-        assert_eq!(mix(a, b, 0.0), a);
-        assert_eq!(mix(a, b, 1.0), b);
-        let mid = mix(a, b, 0.5);
-        assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
-        // Out-of-range t clamps.
-        assert_eq!(mix(a, b, 2.0), b);
-    }
-
-    #[test]
     fn layout_numbers_match_zeron() {
-        assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);
     }

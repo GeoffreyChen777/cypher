@@ -1,7 +1,7 @@
 //! The conversation view: virtualized transcript with block-granularity rows,
 //! stick-to-bottom, tool-group folding, and streaming markdown.
 //!
-//! Row model (docs/research/mugen-pretext.md §3):
+//! Row model:
 //! - one row per BLOCK: user message = one bubble row; assistant messages split
 //!   into one row per markdown top-level block, plus consecutive-tool groups and
 //!   input/error chips;
@@ -80,7 +80,8 @@ pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 /// deletes messages permanently, so the confirming click has to be deliberate
 /// — and a button left hot forever would make the next stray click destructive.
 pub const REWIND_ARM_MS: u64 = 4000;
-/// Vertical gap opening a new turn (new message entry).
+/// Vertical gap opening a new turn (new message entry) in the default style.
+#[cfg(test)]
 pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
 pub const GAP_BLOCK: f32 = 8.0;
@@ -1609,50 +1610,6 @@ pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet
     *rows = folded;
 }
 
-/// `CYPHER_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
-/// over rolling windows of [`FRAME_STATS_WINDOW`] samples) at `warn` level —
-/// the smoothness measurement knob. Off by default; zero cost when off.
-fn frame_stats_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| cypher_env::var("FRAME_STATS").is_some_and(|v| !v.is_empty() && v != "0"))
-}
-
-const FRAME_STATS_WINDOW: usize = 240;
-
-/// `CYPHER_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
-/// A/B knob for the frame-cost measurement above.
-fn render_cache_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        cypher_env::var("NO_RENDER_CACHE").is_some_and(|v| !v.is_empty() && v != "0")
-    })
-}
-
-fn record_live_frame_us(us: u64) {
-    thread_local! {
-        static SAMPLES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    }
-    SAMPLES.with(|s| {
-        let mut s = s.borrow_mut();
-        s.push(us);
-        if s.len() >= FRAME_STATS_WINDOW {
-            s.sort_unstable();
-            let p50 = s[s.len() / 2];
-            let p95 = s[s.len() * 95 / 100];
-            let max = *s.last().unwrap();
-            tracing::warn!(
-                n = s.len(),
-                p50_us = p50,
-                p95_us = p95,
-                max_us = max,
-                "live-row render cost"
-            );
-            s.clear();
-        }
-    });
-}
-
 /// How [`parse_for_row`] produced its tree — carries the incremental parser's
 /// work counters so callers (and tests) can see that per-append parse work is
 /// bounded by the reparsed tail, never the whole accumulated reply.
@@ -1729,6 +1686,7 @@ fn part_prefix(id: &str) -> &str {
 /// the markdown block gap between sibling block rows split from the same text
 /// part — matching the live row's internal spacing exactly, so the
 /// live→split handoff cannot shift a pixel; the block gap otherwise.
+#[cfg(test)]
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     top_gap_for_style(prev, row, GAP_TURN, render::MD_BLOCK_GAP)
 }
@@ -2243,7 +2201,7 @@ pub struct Transcript {
     /// not the attach-time sync — selection clears the transcript and the
     /// replay lands async, so capturing at attach seeded nothing and the
     /// still-streaming reply faded in whole on every session switch (user
-    /// report, round 2).
+    /// report).
     veil_attach_pending: bool,
     /// Cross-frame flatten/shape-input cache (see [`RenderCache`]): fade
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
@@ -2348,7 +2306,7 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
-    /// The shared shell-level Comment pill/editor (round 20). Weak: the
+    /// The shared shell-level Comment pill/editor. Weak: the
     /// shell owns it; the transcript only ever drives and reads it.
     comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
     /// In-flight Session Forks, keyed `(chat id, anchor message id)`: while
@@ -2439,7 +2397,7 @@ impl Transcript {
         )
     }
 
-    /// A temporary Side Chat transcript (round 21 refactor): the EXISTING
+    /// A temporary Side Chat transcript: the EXISTING
     /// renderer against a Side Chat fork state, with a fresh selection scope
     /// (never colliding with the main transcript or another panel), the rail
     /// disabled, narrow-panel gutters, and NO annotation actions — selection
@@ -2852,7 +2810,7 @@ impl Transcript {
         if self.attachment_preview.is_some() {
             return;
         }
-        let glide = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
+        let glide = motion::SCROLL_GLIDE.total();
         let in_flight = self
             .prompt_nav
             .filter(|(_, started)| started.elapsed() < glide)
@@ -3406,6 +3364,7 @@ impl Transcript {
     }
 
     /// Whether the transcript is currently pinned to the bottom.
+    #[cfg(test)]
     pub fn is_pinned(&self) -> bool {
         self.pinned
     }
@@ -4941,7 +4900,7 @@ impl Transcript {
         render::CopyUi { handler, copied_ix }
     }
 
-    // ---- transcript comments (round 20: shared CommentPopup) ----
+    // ---- transcript comments (shared CommentPopup) ----
 
     /// Selection lifecycle callbacks for one row's text elements: a settle
     /// shows the shared [`crate::comments::CommentPopup`] pill at the
@@ -5000,7 +4959,7 @@ impl Transcript {
                         entity.update(cx, |_, cx| cx.notify()).ok();
                     })
                 };
-                // Side Chat source (round 21): the message whose text the
+                // Side Chat source: the message whose text the
                 // selection settles in — resolved from the head row (the row
                 // ids encode the entry; a row a doc commit replaced falls
                 // back to `None`, and the engine then labels the context
@@ -5077,7 +5036,7 @@ impl Transcript {
         self.rows.iter().any(|r| r.id.as_ref() == row_id)
     }
 
-    /// The message entry a row belongs to (round 21 Side Chat anchor): rows
+    /// The message entry a row belongs to (Side Chat anchor): rows
     /// encode their entry in `Row::entry_id`, but only the transcript can
     /// resolve a row id to it. `None` when the row is gone (replaced by a
     /// doc commit).
@@ -5213,7 +5172,7 @@ impl Transcript {
         let opts = RenderOptions {
             row_key: row_id.clone(),
             veil: veil.clone(),
-            cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+            cache: Some(self.render_cache.clone()),
             now: Instant::now(),
             copy: Some(self.copy_ui_for(row_id, cx)),
             selection: Some(self.selection_ui_for(row_id, cx)),
@@ -5223,7 +5182,6 @@ impl Transcript {
         let Some(top) = tree.blocks.get(block_ix) else {
             return gpui::Empty.into_any_element();
         };
-        let timer = (live && frame_stats_enabled()).then(Instant::now);
         let el = render::render_block(
             &top.block,
             block_ix,
@@ -5236,9 +5194,6 @@ impl Transcript {
                 .and_then(|o| o.as_deref())
                 .map(|document| document.lines.as_slice()),
         );
-        if let Some(start) = timer {
-            record_live_frame_us(start.elapsed().as_micros() as u64);
-        }
         // The attach pass for this row is done (every element rendered
         // above seeded its baseline synchronously): elements appearing
         // from the NEXT pass on are newly streamed and fade normally.
@@ -6494,7 +6449,7 @@ mod tests {
     use super::*;
     use cypher_doc::MessagePart;
 
-    // ---- transcript comments (round 20) ----
+    // ---- transcript comments ----
     // Quote normalization / preview moved to the shared `crate::comments`
     // module (they are exercised there); the transcript only wires the
     // shared popup.
@@ -6729,12 +6684,8 @@ mod tests {
             id: id.into(),
             role: MessageRole::Assistant,
             parts,
-            created_at: 0,
-            device_id: "dev".into(),
             status: Some(status),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         }
     }
 
@@ -8157,11 +8108,7 @@ mod tests {
             role: MessageRole::User,
             parts: vec![text_part("p1", "hi")],
             created_at: ms,
-            device_id: "dev".into(),
-            status: None,
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -8320,14 +8267,9 @@ mod tests {
 
     fn pi_chat(child: bool, non_pi: bool) -> Chat {
         Chat {
-            pinned: false,
             id: "chat-1".into(),
             device_id: "dev-1".into(),
             title: Some("My chat".into()),
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
             config: Some(cypher_proto::ChatConfig {
                 harness: if non_pi {
                     HarnessId::ClaudeCode
@@ -8339,14 +8281,7 @@ mod tests {
                 model_options: Default::default(),
                 sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
             }),
-            last_message_preview: None,
-            last_message_at: None,
             created_at: chrono::Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: None,
-            last_seen_at: None,
-            room_gen: None,
             child: child.then(|| cypher_proto::ChildChat {
                 parent_chat_id: "p".into(),
                 parent_run_id: "r".into(),
@@ -8361,6 +8296,7 @@ mod tests {
                     thinking: None,
                 },
             }),
+            ..crate::test_fixtures::chat()
         }
     }
 
@@ -8582,12 +8518,8 @@ mod tests {
                 id: id.into(),
                 role,
                 parts: vec![text_part("t0", "content")],
-                created_at: 0,
-                device_id: "dev".into(),
                 status: Some(MessageStatus::Complete),
-                continuation_of: None,
-                completed_at: None,
-                comments: Vec::new(),
+                ..crate::test_fixtures::entry()
             };
             let rows = rows_for_entry(&entry, false, &mut parse);
             assert!(!rows.is_empty(), "{id} renders a row");
@@ -8602,12 +8534,8 @@ mod tests {
             id: "a2".into(),
             role: MessageRole::Assistant,
             parts: vec![tool_part("t1", "cargo test")],
-            created_at: 0,
-            device_id: "dev".into(),
             status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         };
         let rows = rows_for_entry(&tool_entry, false, &mut parse);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
