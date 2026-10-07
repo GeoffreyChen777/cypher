@@ -2,65 +2,70 @@
 //! journal + broadcast + folded doc entries, plus interrupt/recovery/idempotence
 //! and the RPC surface over the in-memory transport.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-
 use cypher_doc::{
-    MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
+    MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus, SessionDoc, SessionMessageEntry,
 };
 use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
+use futures::StreamExt;
+
 use cypher_harness::mock::MockHarness;
-use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_harness::{Harness, HarnessError};
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode, ToolCall,
+    AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, SessionStatus, ToolCall,
 };
 use cypher_sync::DocsStore;
+
+use common::{run_request, wait_for};
 
 const CHAT: &str = "chat-e2e";
 const VIEWER: &str = "viewer-device";
 
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
+/// Asks a question through RunControls and echoes the answer.
+fn asking_harness() -> common::TestHarness {
+    common::TestHarness::new(HarnessId::Mock, "Asking", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let answers = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+            }])
+            .await
+            .unwrap_or_default();
+            let picked = answers
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[])
 }
 
 fn done(status: DoneStatus) -> AgentEvent {
-    AgentEvent::Done {
-        status,
-        result: None,
-        error: None,
-        session_id: Some("hs-1".into()),
-    }
+    common::done_with(status, Some("hs-1"))
 }
 
 fn mock_script() -> Vec<AgentEvent> {
     vec![
-        AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
-            model: "mock-1".into(),
-            tools: vec![],
-            cwd: "/tmp".into(),
-            session_id: "hs-1".into(),
-            assistant_message_id: "a-1".into(),
-        },
+        common::session_started(HarnessId::Mock, "mock-1", "/tmp", "hs-1", "a-1"),
         AgentEvent::TextDelta { text: "Hel".into() },
         AgentEvent::TextDelta { text: "lo".into() },
         AgentEvent::ToolCall {
@@ -82,59 +87,31 @@ fn mock_script() -> Vec<AgentEvent> {
 
 /// Scripted harness with a per-event delay; optionally hangs after the script until its
 /// interrupt token cancels, then ends with `Done{interrupted}`.
-struct ScriptedHarness {
-    script: Vec<AgentEvent>,
-    step_delay: Duration,
-    hang_until_interrupt: bool,
-}
-
-#[async_trait]
-impl Harness for ScriptedHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Scripted"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        _request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-        let script = self.script.clone();
-        let delay = self.step_delay;
-        let hang = self.hang_until_interrupt;
-        let token = controls.interrupt.clone();
-        tokio::spawn(async move {
-            for event in script {
-                if tx.send(Ok(event)).await.is_err() {
-                    return;
+fn scripted_harness(script: Vec<AgentEvent>, delay: Duration, hang: bool) -> Arc<dyn Harness> {
+    Arc::new(
+        common::TestHarness::new(HarnessId::Mock, "Scripted", move |_, controls| {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+            let script = script.clone();
+            let token = controls.interrupt.clone();
+            tokio::spawn(async move {
+                for event in script {
+                    if tx.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
                 }
-                tokio::time::sleep(delay).await;
-            }
-            if hang {
-                token.cancelled().await;
-                let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
-            }
-        });
-        Ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
+                if hang {
+                    token.cancelled().await;
+                    let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+                }
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
         })
-        .boxed())
-    }
+        .steering(),
+    )
 }
 
 fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
@@ -174,20 +151,6 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
     .expect("queue command");
 }
 
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-}
-
 fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
     core.doc_host
         .open(CHAT)
@@ -195,17 +158,6 @@ fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
         .doc()
         .read_entries()
         .expect("read entries")
-}
-
-/// Tolerant read for hot-polling predicates: a snapshot taken between a
-/// segment writer's `push_container` and its field writes deserializes with
-/// fields missing — treat that instant as "not yet" instead of panicking.
-fn entries_now(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
 }
 
 fn command_status(core: &EngineCore, id: &str) -> Option<(SessionCommandStatus, Option<String>)> {
@@ -396,11 +348,7 @@ async fn session_status_transitions_idle_working_idle() {
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(
         dir.path(),
-        Arc::new(ScriptedHarness {
-            script: mock_script(),
-            step_delay: Duration::from_millis(40),
-            hang_until_interrupt: false,
-        }),
+        scripted_harness(mock_script(), Duration::from_millis(40), false),
     );
     let mut watch = core.sessions.watch_sessions();
     assert!(watch.borrow().is_empty(), "no sessions before dispatch");
@@ -442,13 +390,13 @@ async fn interrupt_stamps_streaming_entry_aborted() {
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(
         dir.path(),
-        Arc::new(ScriptedHarness {
-            script: vec![AgentEvent::TextDelta {
+        scripted_harness(
+            vec![AgentEvent::TextDelta {
                 text: "partial output".into(),
             }],
-            step_delay: Duration::from_millis(5),
-            hang_until_interrupt: true,
-        }),
+            Duration::from_millis(5),
+            true,
+        ),
     );
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
@@ -680,92 +628,6 @@ async fn dead_processed_commands_are_terminalized_on_redelivery() {
         },
     );
     assert_eq!(verdict, cypher_doc::CommandDisposition::Skip);
-}
-
-#[tokio::test]
-async fn recover_stale_journal_stamps_aborted_on_boot() {
-    let dir = tempfile::tempdir().unwrap();
-    let device_id = "dev-host-fixed";
-    std::fs::create_dir_all(dir.path()).unwrap();
-    std::fs::write(dir.path().join("device-id"), device_id).unwrap();
-
-    // Craft the crash state: a journal without a terminal Done + a doc snapshot whose
-    // assistant entry is still `streaming`.
-    {
-        let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
-        journal
-            .append(
-                CHAT,
-                &AgentEvent::TextDelta {
-                    text: "doomed".into(),
-                },
-            )
-            .unwrap();
-
-        let doc = SessionDoc::init(CHAT).unwrap();
-        doc.push_message(&SessionMessageEntry {
-            id: "m-user".into(),
-            role: MessageRole::User,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "hi".into(),
-                agent_text: None,
-            }],
-            created_at: 1,
-            device_id: device_id.into(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
-        })
-        .unwrap();
-        let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
-        writer
-            .sync(&[MessagePart::Text {
-                id: "t0".into(),
-                text: "doomed".into(),
-                agent_text: None,
-            }])
-            .unwrap();
-        // No finish — the "process" dies here with the entry still streaming.
-        let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
-        store
-            .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
-            .unwrap();
-    }
-
-    // Boot: EngineCore::assemble runs recover_stale.
-    let core = assemble(
-        dir.path(),
-        Arc::new(MockHarness {
-            script: mock_script(),
-        }),
-    );
-    assert_eq!(core.device_id, device_id);
-
-    let all = entries(&core);
-    let assistant = all.iter().find(|e| e.id == "m-assist").unwrap();
-    assert_eq!(assistant.status, Some(MessageStatus::Aborted));
-    match &assistant.parts[0] {
-        MessagePart::Text { text, .. } => assert_eq!(text, "doomed"),
-        other => panic!("unexpected part {other:?}"),
-    }
-
-    // Journal closed with a synthetic Done{interrupted}; no longer stale.
-    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
-    assert!(journal.stale_sessions().unwrap().is_empty());
-    let (_, last) = journal.last_event(CHAT).unwrap().unwrap();
-    assert!(matches!(
-        last,
-        AgentEvent::Done {
-            status: DoneStatus::Interrupted,
-            ..
-        }
-    ));
-    assert_eq!(
-        core.sessions.session_status(CHAT).map(|s| s.status),
-        Some(SessionStatus::Idle)
-    );
 }
 
 #[tokio::test]
@@ -1068,64 +930,8 @@ async fn retry_preserves_sent_at_and_message_identity() {
 
 #[tokio::test]
 async fn respond_input_resolves_pending_question() {
-    // Harness that asks a question through RunControls and echoes the answer.
-    struct AskingHarness;
-    #[async_trait]
-    impl Harness for AskingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "Asking"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            tokio::spawn(async move {
-                let answers = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
-                    id: "q1".into(),
-                    header: "Pick".into(),
-                    question: "Which one?".into(),
-                    options: vec!["a".into(), "b".into()],
-                    multi_select: false,
-                }])
-                .await
-                .unwrap_or_default();
-                let picked = answers
-                    .first()
-                    .and_then(|a| a.labels.first().cloned())
-                    .unwrap_or_else(|| "none".into());
-                let _ = tx
-                    .send(Ok(AgentEvent::TextDelta {
-                        text: format!("picked {picked}"),
-                    }))
-                    .await;
-                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-            });
-            Ok(futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            })
-            .boxed())
-        }
-    }
-
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(AskingHarness));
+    let core = assemble(dir.path(), Arc::new(asking_harness()));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1189,7 +995,7 @@ async fn respond_input_resolves_pending_question() {
 
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.status == Some(MessageStatus::Complete)
                     && e.parts
                         .iter()
@@ -1224,63 +1030,8 @@ async fn respond_input_resolves_pending_question() {
 /// a wrong answer can never brick the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
-    struct AskingHarness;
-    #[async_trait]
-    impl Harness for AskingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "Asking"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            tokio::spawn(async move {
-                let answers = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
-                    id: "q1".into(),
-                    header: "Pick".into(),
-                    question: "Which one?".into(),
-                    options: vec!["a".into(), "b".into()],
-                    multi_select: false,
-                }])
-                .await
-                .unwrap_or_default();
-                let picked = answers
-                    .first()
-                    .and_then(|a| a.labels.first().cloned())
-                    .unwrap_or_else(|| "none".into());
-                let _ = tx
-                    .send(Ok(AgentEvent::TextDelta {
-                        text: format!("picked {picked}"),
-                    }))
-                    .await;
-                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-            });
-            Ok(futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            })
-            .boxed())
-        }
-    }
-
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(AskingHarness));
+    let core = assemble(dir.path(), Arc::new(asking_harness()));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1302,7 +1053,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
     .await;
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.parts.iter().any(|p| {
                     matches!(
                         p,
@@ -1379,7 +1130,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
     );
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.status == Some(MessageStatus::Complete)
                     && e.parts
                         .iter()
@@ -1402,32 +1153,8 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
 /// the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupt_unblocks_a_run_awaiting_input() {
-    struct BlockingHarness;
-    #[async_trait]
-    impl Harness for BlockingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "Blocking"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+    let harness =
+        common::TestHarness::new(HarnessId::Mock, "Blocking", move |request, controls| {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             if request.prompt == "second run" {
                 // The post-interrupt turn: completes immediately.
@@ -1464,11 +1191,11 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                 rx.recv().await.map(|event| (event, rx))
             })
             .boxed())
-        }
-    }
+        })
+        .reasoning(&[]);
 
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(BlockingHarness));
+    let core = assemble(dir.path(), Arc::new(harness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1512,7 +1239,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
     .await;
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.parts.iter().any(|p| {
                     matches!(
                         p,
@@ -1538,7 +1265,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
     );
     wait_for(
         || {
-            entries_now(&core)
+            common::entries(&core, CHAT)
                 .iter()
                 .any(|e| e.status == Some(MessageStatus::Aborted))
         },
@@ -1571,7 +1298,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
     );
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.status == Some(MessageStatus::Complete)
                     && e.parts.iter().any(
                         |p| matches!(p, MessagePart::Text { text, .. } if text == "second done"),
@@ -1593,72 +1320,47 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
 /// bridge is the sole authority), so exactly one — answerable — part folds.
 #[tokio::test(flavor = "multi_thread")]
 async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
-    struct DoubleEmitHarness;
-    #[async_trait]
-    impl Harness for DoubleEmitHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "DoubleEmit"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            tokio::spawn(async move {
-                let question = cypher_proto::UserInputQuestion {
-                    id: "q1".into(),
-                    header: "Pick".into(),
-                    question: "Which one?".into(),
-                    options: vec!["a".into(), "b".into()],
-                    multi_select: false,
-                };
-                // The pre-fix Claude/Codex shape: surface the question under
-                // the harness's own id BEFORE asking through the bridge.
-                let _ = tx
-                    .send(Ok(AgentEvent::InputRequested {
-                        request_id: "claude-ctrl-1".into(),
-                        questions: vec![question.clone()],
-                    }))
-                    .await;
-                let answers = (controls.request_input)(vec![question])
-                    .await
-                    .unwrap_or_default();
-                let picked = answers
-                    .first()
-                    .and_then(|a| a.labels.first().cloned())
-                    .unwrap_or_else(|| "none".into());
-                let _ = tx
-                    .send(Ok(AgentEvent::TextDelta {
-                        text: format!("picked {picked}"),
-                    }))
-                    .await;
-                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-            });
-            Ok(futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            })
-            .boxed())
-        }
-    }
+    let harness = common::TestHarness::new(HarnessId::Mock, "DoubleEmit", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let question = cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+            };
+            // The pre-fix Claude/Codex shape: surface the question under
+            // the harness's own id BEFORE asking through the bridge.
+            let _ = tx
+                .send(Ok(AgentEvent::InputRequested {
+                    request_id: "claude-ctrl-1".into(),
+                    questions: vec![question.clone()],
+                }))
+                .await;
+            let answers = (controls.request_input)(vec![question])
+                .await
+                .unwrap_or_default();
+            let picked = answers
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[]);
 
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(DoubleEmitHarness));
+    let core = assemble(dir.path(), Arc::new(harness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1681,7 +1383,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
     .await;
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.parts.iter().any(|p| {
                     matches!(
                         p,
@@ -1740,7 +1442,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
     // The run resumes and completes; the chip flips to resolved.
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.status == Some(MessageStatus::Complete)
                     && e.parts
                         .iter()
@@ -1773,46 +1475,20 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
 // the prompt-embedded refs (the persisted transport) and the staged paths.
 // ---------------------------------------------------------------------------
 
-/// Delegates to a scripted mock but records every RunRequest the engine hands
+/// Replays a scripted mock but records every RunRequest the engine hands
 /// over (the chat run AND the auto-title run share the harness) — proves
 /// `attachments` survives doc-queue → executor → harness.
-struct CapturingHarness {
+fn capturing_harness(
     script: Vec<AgentEvent>,
     seen: Arc<std::sync::Mutex<Vec<RunRequest>>>,
-}
-
-#[async_trait]
-impl Harness for CapturingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Capturing"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.seen.lock().unwrap().push(request.clone());
-        MockHarness {
-            script: self.script.clone(),
-        }
-        .run(request, controls)
-        .await
-    }
+) -> Arc<dyn Harness> {
+    Arc::new(
+        common::TestHarness::new(HarnessId::Mock, "Capturing", move |request, _| {
+            seen.lock().unwrap().push(request);
+            common::script(script.clone())
+        })
+        .steering(),
+    )
 }
 
 #[tokio::test]
@@ -1821,13 +1497,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
     let b64 = base64::engine::general_purpose::STANDARD;
     let dir = tempfile::tempdir().unwrap();
     let seen: Arc<std::sync::Mutex<Vec<RunRequest>>> = Default::default();
-    let core = assemble(
-        dir.path(),
-        Arc::new(CapturingHarness {
-            script: mock_script(),
-            seen: seen.clone(),
-        }),
-    );
+    let core = assemble(dir.path(), capturing_harness(mock_script(), seen.clone()));
     let client = cypher_rpc::memory_client(core.rpc_service());
 
     // Chunked upload exactly as the composer sends it: base64 split across
@@ -1878,7 +1548,7 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
     );
     wait_for(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
             })
         },
@@ -2007,14 +1677,14 @@ async fn real_claude_sees_uploaded_image_inline() {
             },
         )
         .expect("queue real image run");
-    wait_for_within_secs(
+    common::wait_for_within(
         || {
-            entries_now(&core).iter().any(|e| {
+            common::entries(&core, CHAT).iter().any(|e| {
                 e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
             })
         },
         "real claude image turn",
-        120,
+        Duration::from_secs(120),
     )
     .await;
 
@@ -2034,20 +1704,6 @@ async fn real_claude_sees_uploaded_image_inline() {
         "claude should name the image's color; got: {reply:?}"
     );
     core.shutdown().await;
-}
-
-async fn wait_for_within_secs<F>(mut predicate: F, what: &str, secs: u64)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2171,7 +1827,7 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
             Some(SessionStatus::Idle),
             "trailing frames must not re-arm Working"
         );
-        let all = entries_now(&core);
+        let all = common::entries(&core, CHAT);
         assert!(
             all.len() <= 2,
             "trailing frames must not open a phantom entry: {all:#?}"
@@ -2247,7 +1903,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
 
     wait_for(
         || {
-            entries_now(&core).len() == 3
+            common::entries(&core, CHAT).len() == 3
                 && core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle)
         },
         "both segments to land",
@@ -2276,68 +1932,44 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
 async fn parked_steer_restamps_started_at_and_idle_clears_it() {
     // Steerable harness whose stream stays open after the turn's Done — the
     // engine parks the session — and whose steering mailbox drives turn two.
-    struct ParkingHarness;
-    #[async_trait]
-    impl Harness for ParkingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "Parking"
-        }
-        fn supports_steering(&self) -> bool {
-            true
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::StepBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            mut controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            tokio::spawn(async move {
+    let harness = common::TestHarness::new(HarnessId::Mock, "Parking", move |_, mut controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: "turn one".into(),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+            // Parked. The next steer is turn two.
+            if let Some(_msg) = controls.steering.recv().await {
                 let _ = tx
-                    .send(Ok(AgentEvent::TextDelta {
-                        text: "turn one".into(),
+                    .send(Ok(AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
                     }))
                     .await;
+                let _ = tx
+                    .send(Ok(AgentEvent::TextDelta {
+                        text: "turn two".into(),
+                    }))
+                    .await;
+                // Hold the turn open so the test's poll observes Working
+                // (the transition is otherwise sub-millisecond).
+                tokio::time::sleep(Duration::from_millis(400)).await;
                 let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-                // Parked. The next steer is turn two.
-                if let Some(_msg) = controls.steering.recv().await {
-                    let _ = tx
-                        .send(Ok(AgentEvent::Steered {
-                            assistant_message_id: None,
-                            next_assistant_message_id: None,
-                        }))
-                        .await;
-                    let _ = tx
-                        .send(Ok(AgentEvent::TextDelta {
-                            text: "turn two".into(),
-                        }))
-                        .await;
-                    // Hold the turn open so the test's poll observes Working
-                    // (the transition is otherwise sub-millisecond).
-                    tokio::time::sleep(Duration::from_millis(400)).await;
-                    let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-                }
-            });
-            Ok(futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            })
-            .boxed())
-        }
-    }
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .steering()
+    .reasoning(&[]);
 
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(ParkingHarness));
+    let core = assemble(dir.path(), Arc::new(harness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),

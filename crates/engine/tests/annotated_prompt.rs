@@ -4,155 +4,33 @@
 //! the visible prompt (behavior unchanged), and the retry re-delivers the
 //! same override.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+mod common;
 
-use async_trait::async_trait;
+use std::sync::{Arc, Mutex};
+
 use futures::StreamExt;
-use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole};
-use cypher_engine::{EngineCore, HarnessRegistry, SteerOutcome};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
-};
+use cypher_engine::{EngineCore, SteerOutcome};
+use cypher_proto::{AgentEvent, HarnessId, SessionStatus};
+
+use common::{entries, run_request, status, text, wait_for};
 
 const CHAT: &str = "chat-annotated";
 
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
-}
-
 fn session_started() -> AgentEvent {
-    AgentEvent::SessionStarted {
-        harness: HarnessId::Mock,
-        model: "mock-1".into(),
-        tools: vec![],
-        cwd: "/tmp".into(),
-        session_id: "hs-annotated".into(),
-        assistant_message_id: "a-annotated".into(),
-    }
-}
-
-fn text(s: &str) -> AgentEvent {
-    AgentEvent::TextDelta { text: s.into() }
+    common::session_started(
+        HarnessId::Mock,
+        "mock-1",
+        "/tmp",
+        "hs-annotated",
+        "a-annotated",
+    )
 }
 
 fn done() -> AgentEvent {
-    AgentEvent::Done {
-        status: DoneStatus::Completed,
-        result: None,
-        error: None,
-        session_id: Some("hs-annotated".into()),
-    }
-}
-
-/// Records every prompt the harness received — the main run's request AND
-/// every mailbox steer (pi's parked path consumes a steer immediately and
-/// confirms it with a `Steered` boundary, so the recording covers accepted
-/// steers end-to-end).
-struct RecordingHarness {
-    prompts: Arc<Mutex<Vec<String>>>,
-    feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
-}
-
-#[async_trait]
-impl Harness for RecordingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "RecordingHarness"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        // The auto-titler's throwaway run (its template prompt) is not a user
-        // turn — never recorded.
-        if request.prompt.contains("concise 3-5 word title") {
-            let events = vec![Ok(done())];
-            return Ok(futures::stream::iter(events).boxed());
-        }
-        self.prompts.lock().unwrap().push(request.prompt.clone());
-        let feed = self
-            .feed
-            .lock()
-            .unwrap()
-            .take()
-            .expect("RecordingHarness serves the main dispatch once per test");
-        let (tx, rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let prompts = self.prompts.clone();
-        let interrupt = controls.interrupt.clone();
-        let mut steering = controls.steering;
-        tokio::spawn(async move {
-            let mut feed = futures::stream::unfold(feed, |mut feed| async move {
-                feed.recv().await.map(|event| (event, feed))
-            })
-            .boxed();
-            loop {
-                tokio::select! {
-                    event = feed.next(), if !interrupt.is_cancelled() => match event {
-                        Some(event) => {
-                            if tx.send(event).is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    },
-                    steer = steering.recv(), if !interrupt.is_cancelled() => match steer {
-                        Some(msg) => {
-                            prompts.lock().unwrap().push(msg.prompt.clone());
-                            if tx
-                                .send(AgentEvent::Steered {
-                                    assistant_message_id: Some("prev-annotated".into()),
-                                    next_assistant_message_id: Some("next-annotated".into()),
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        None => break,
-                    },
-                    _ = interrupt.cancelled() => break,
-                }
-            }
-        });
-        Ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (Ok(event), rx))
-        })
-        .boxed())
-    }
+    common::done("hs-annotated")
 }
 
 struct Rig {
@@ -162,17 +40,73 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
+/// Records every prompt the harness received — the main run's request AND
+/// every mailbox steer (pi's parked path consumes a steer immediately and
+/// confirms it with a `Steered` boundary, so the recording covers accepted
+/// steers end-to-end).
 fn assemble() -> Rig {
     let (feed, rx) = mpsc::unbounded_channel();
-    let registry = HarnessRegistry::new();
+    let feed_rx = Mutex::new(Some(rx));
     let prompts = Arc::new(Mutex::new(Vec::new()));
-    registry.register(Arc::new(RecordingHarness {
-        prompts: prompts.clone(),
-        feed: Mutex::new(Some(rx)),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    let log = prompts.clone();
+    let harness = common::TestHarness::new(
+        HarnessId::Mock,
+        "RecordingHarness",
+        move |request, controls| {
+            // The auto-titler's throwaway run (its template prompt) is not a user
+            // turn — never recorded.
+            if request.prompt.contains("concise 3-5 word title") {
+                return common::script(vec![done()]);
+            }
+            log.lock().unwrap().push(request.prompt.clone());
+            let feed = feed_rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("RecordingHarness serves the main dispatch once per test");
+            let (tx, rx) = mpsc::unbounded_channel::<AgentEvent>();
+            let prompts = log.clone();
+            let interrupt = controls.interrupt.clone();
+            let mut steering = controls.steering;
+            tokio::spawn(async move {
+                let mut feed = futures::stream::unfold(feed, |mut feed| async move {
+                    feed.recv().await.map(|event| (event, feed))
+                })
+                .boxed();
+                loop {
+                    tokio::select! {
+                        event = feed.next(), if !interrupt.is_cancelled() => match event {
+                            Some(event) => {
+                                if tx.send(event).is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        },
+                        steer = steering.recv(), if !interrupt.is_cancelled() => match steer {
+                            Some(msg) => {
+                                prompts.lock().unwrap().push(msg.prompt.clone());
+                                if tx
+                                    .send(AgentEvent::Steered {
+                                        assistant_message_id: Some("prev-annotated".into()),
+                                        next_assistant_message_id: Some("next-annotated".into()),
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        },
+                        _ = interrupt.cancelled() => break,
+                    }
+                }
+            });
+            Ok(common::channel_stream(rx))
+        },
+    )
+    .steering();
+    let common::Rig { core, dir } = common::rig(harness);
     Rig {
         core,
         feed,
@@ -181,22 +115,8 @@ fn assemble() -> Rig {
     }
 }
 
-fn status(core: &EngineCore) -> Option<SessionStatus> {
-    core.sessions.session_status(CHAT).map(|s| s.status)
-}
-
-/// Tolerant read (see e2e.rs): a snapshot mid-segment-write deserializes with
-/// fields missing — treat that instant as "not yet".
-fn entries(core: &EngineCore) -> Vec<cypher_doc::SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
-}
-
 fn user_texts(core: &EngineCore) -> Vec<String> {
-    entries(core)
+    entries(core, CHAT)
         .into_iter()
         .filter(|e| e.role == MessageRole::User)
         .filter_map(|e| {
@@ -209,20 +129,6 @@ fn user_texts(core: &EngineCore) -> Vec<String> {
                 .next()
         })
         .collect()
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// A Run carrying `agent_prompt`: the harness receives the AUGMENTED prompt
@@ -248,7 +154,7 @@ async fn run_delivers_agent_prompt_but_keeps_visible_entry() {
     rig.feed.send(text("Watching.")).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -292,7 +198,7 @@ async fn comment_only_run_delivers_annotations_without_visible_filler() {
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -319,7 +225,7 @@ async fn run_without_agent_prompt_delivers_visible_prompt() {
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -346,7 +252,7 @@ async fn accepted_steer_delivers_agent_prompt_but_keeps_visible_entry() {
     rig.feed.send(text("Watching.")).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -367,7 +273,7 @@ async fn accepted_steer_delivers_agent_prompt_but_keeps_visible_entry() {
         .expect("steer");
     assert_eq!(outcome, SteerOutcome::Accepted);
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "Steered boundary re-arms Working",
     )
     .await;
@@ -412,7 +318,7 @@ fn commented_prompt(request: &str) -> String {
 }
 
 fn user_comments(core: &EngineCore) -> Vec<Vec<MessageComment>> {
-    entries(core)
+    entries(core, CHAT)
         .into_iter()
         .filter(|e| e.role == MessageRole::User)
         .map(|e| e.comments)
@@ -453,7 +359,7 @@ async fn run_records_its_comments_on_the_user_entry() {
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -480,7 +386,7 @@ async fn accepted_steer_records_its_comments_and_strips_alignment() {
     rig.feed.send(session_started()).unwrap();
     rig.feed.send(done()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;

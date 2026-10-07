@@ -14,9 +14,10 @@
 //!   missing-host / boundary cases;
 //! - `EngineCore` shutdown stays clean.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -101,17 +102,14 @@ impl Harness for RecordingHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let assistant_message_id = self.next_assistant_id();
         let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Pi,
-                model: "model-x".into(),
-                tools: vec![],
-                cwd: "/tmp/repo".into(),
-                session_id: "hs-source".into(),
-                assistant_message_id: assistant_message_id.clone(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "reply text".into(),
-            }),
+            Ok(common::session_started(
+                HarnessId::Pi,
+                "model-x",
+                "/tmp/repo",
+                "hs-source",
+                &assistant_message_id,
+            )),
+            Ok(common::text("reply text")),
             Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,
                 result: Some("reply text".into()),
@@ -150,45 +148,18 @@ impl Harness for RecordingHarness {
 /// Working forever) — the live-session fork rejection. Emitting
 /// `SessionStarted` also stamps the chat's harness session id so the fork
 /// validation gets past the MissingSession gate to the LiveSession one.
-struct StuckHarness;
-
-#[async_trait]
-impl Harness for StuckHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Pi
-    }
-    fn display_name(&self) -> &str {
-        "Stuck"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        _request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![Ok(AgentEvent::SessionStarted {
-            harness: HarnessId::Pi,
-            model: "model-x".into(),
-            tools: vec![],
-            cwd: "/tmp/repo".into(),
-            session_id: "hs-live".into(),
-            assistant_message_id: "a-1".into(),
-        })];
-        Ok(futures::stream::iter(events)
-            .chain(futures::stream::pending())
-            .boxed())
-    }
+fn stuck_harness() -> Arc<dyn Harness> {
+    Arc::new(
+        common::TestHarness::new(HarnessId::Pi, "Stuck", |_, _| {
+            let started =
+                common::session_started(HarnessId::Pi, "model-x", "/tmp/repo", "hs-live", "a-1");
+            Ok(futures::stream::iter([Ok(started)])
+                .chain(futures::stream::pending())
+                .boxed())
+        })
+        .steering()
+        .reasoning(&[]),
+    )
 }
 
 struct Rig {
@@ -225,16 +196,6 @@ async fn rpc(
     }
 }
 
-fn wait_for(cond: impl Fn() -> bool, what: &str) {
-    for _ in 0..400 {
-        if cond() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("timed out waiting for {what}");
-}
-
 async fn fork(core: &EngineCore, request_id: &str, anchor: &str) -> SessionForkResponse {
     let value = rpc(
         core,
@@ -253,6 +214,32 @@ async fn fork(core: &EngineCore, request_id: &str, anchor: &str) -> SessionForkR
 /// Seed the source chat row (Pi config, cwd, harness session) + a two-turn
 /// transcript: u1 → a1 (parks Idle), u2 → a2 (parks Idle). The parked Idle
 /// runs exercise the fork quiesce path.
+/// A model-less source chat row at `/tmp/repo` hosted on `device`.
+fn create_source_chat(core: &EngineCore, chat_id: &str, device: &str, harness: HarnessId) {
+    core.workspace
+        .create_chat(
+            chat_id,
+            None,
+            Some(device),
+            Some(ChatConfig {
+                harness,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            }),
+            Some("/tmp/repo".into()),
+        )
+        .unwrap();
+}
+
+fn assert_unavailable(response: &SessionForkResponse, reason: SessionForkUnavailableReason) {
+    assert!(
+        matches!(response, SessionForkResponse::Unavailable(u) if u.reason == reason),
+        "expected Unavailable({reason:?}), got {response:?}"
+    );
+}
+
 async fn seed_source(core: &EngineCore) {
     core.workspace
         .create_chat(
@@ -292,7 +279,7 @@ async fn seed_source(core: &EngineCore) {
             )
             .await
             .expect("dispatch");
-        wait_for(
+        common::wait_blocking(
             || {
                 core.sessions
                     .session_status(SOURCE)
@@ -558,49 +545,26 @@ async fn first_user_fork_is_empty_with_no_harness_session() {
 #[tokio::test(flavor = "multi_thread")]
 async fn non_pi_source_is_unavailable() {
     let rig = assemble();
-    rig.core
-        .workspace
-        .create_chat(
-            SOURCE,
-            None,
-            Some(rig.core.device_id.as_str()),
-            Some(ChatConfig {
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-            }),
-            Some("/tmp/repo".into()),
-        )
-        .unwrap();
+    create_source_chat(
+        &rig.core,
+        SOURCE,
+        rig.core.device_id.as_str(),
+        HarnessId::ClaudeCode,
+    );
     let response = fork(&rig.core, "fork-x", "m1").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u) if u.reason == SessionForkUnavailableReason::NonPi
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::NonPi);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn child_chat_is_unavailable() {
     let rig = assemble();
     // A plain Pi parent row, then a Cypher child chat under it.
-    rig.core
-        .workspace
-        .create_chat(
-            "parent",
-            None,
-            Some(rig.core.device_id.as_str()),
-            Some(ChatConfig {
-                harness: HarnessId::Pi,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-            }),
-            Some("/tmp/repo".into()),
-        )
-        .unwrap();
+    create_source_chat(
+        &rig.core,
+        "parent",
+        rig.core.device_id.as_str(),
+        HarnessId::Pi,
+    );
     let parent = rig
         .core
         .workspace
@@ -640,34 +604,16 @@ async fn child_chat_is_unavailable() {
     .await
     .unwrap();
     let response: SessionForkResponse = serde_json::from_value(value).unwrap();
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::ChildChat
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::ChildChat);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_session_is_unavailable() {
     let registry = cypher_engine::HarnessRegistry::new();
-    registry.register(Arc::new(StuckHarness));
+    registry.register(stuck_harness());
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
-    core.workspace
-        .create_chat(
-            SOURCE,
-            None,
-            Some(core.device_id.as_str()),
-            Some(ChatConfig {
-                harness: HarnessId::Pi,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-            }),
-            Some("/tmp/repo".into()),
-        )
-        .unwrap();
+    create_source_chat(&core, SOURCE, core.device_id.as_str(), HarnessId::Pi);
     core.sessions
         .dispatch(
             SOURCE,
@@ -690,7 +636,7 @@ async fn live_session_is_unavailable() {
         )
         .await
         .unwrap();
-    wait_for(
+    common::wait_blocking(
         || {
             let working = core
                 .sessions
@@ -717,65 +663,28 @@ async fn live_session_is_unavailable() {
     .await
     .unwrap();
     let response: SessionForkResponse = serde_json::from_value(value).unwrap();
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::LiveSession
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::LiveSession);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_harness_session_is_unavailable() {
     let rig = assemble();
-    rig.core
-        .workspace
-        .create_chat(
-            SOURCE,
-            None,
-            Some(rig.core.device_id.as_str()),
-            Some(ChatConfig {
-                harness: HarnessId::Pi,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-            }),
-            Some("/tmp/repo".into()),
-        )
-        .unwrap();
+    create_source_chat(
+        &rig.core,
+        SOURCE,
+        rig.core.device_id.as_str(),
+        HarnessId::Pi,
+    );
     let response = fork(&rig.core, "fork-nosession", "m1").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::MissingSession
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::MissingSession);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_host_is_unavailable() {
     let rig = assemble();
-    rig.core
-        .workspace
-        .create_chat(
-            SOURCE,
-            None,
-            Some("other-device"),
-            Some(ChatConfig {
-                harness: HarnessId::Pi,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: SandboxLevel::WorkspaceWrite,
-            }),
-            Some("/tmp/repo".into()),
-        )
-        .unwrap();
+    create_source_chat(&rig.core, SOURCE, "other-device", HarnessId::Pi);
     let response = fork(&rig.core, "fork-remote", "m1").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::MissingHost
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::MissingHost);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -783,11 +692,7 @@ async fn unknown_anchor_is_unavailable() {
     let rig = assemble();
     seed_source(&rig.core).await;
     let response = fork(&rig.core, "fork-anchor", "nope").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::BoundaryUnavailable
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::BoundaryUnavailable);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -798,11 +703,7 @@ async fn temporary_side_chat_is_unavailable() {
     // it must be refused even though its row exists.
     rig.core.sessions.register_ephemeral(SOURCE);
     let response = fork(&rig.core, "fork-temp", "m1").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::TemporarySideChat
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::TemporarySideChat);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1129,7 +1030,7 @@ async fn lost_reply_retry_returns_existing_even_when_source_live() {
         )
         .await
         .expect("dispatch");
-    wait_for(
+    common::wait_blocking(
         || {
             core.sessions
                 .session_status(SOURCE)
@@ -1167,7 +1068,7 @@ async fn lost_reply_retry_returns_existing_even_when_source_live() {
         )
         .await
         .expect("dispatch");
-    wait_for(
+    common::wait_blocking(
         || {
             core.sessions
                 .session_status(SOURCE)
@@ -1195,11 +1096,7 @@ async fn request_id_equal_to_source_chat_is_rejected() {
     let rig = assemble();
     seed_source(&rig.core).await;
     let response = fork(&rig.core, SOURCE, "m2").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::BoundaryUnavailable
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::BoundaryUnavailable);
     assert_eq!(rig.fork_requests.lock().unwrap().len(), 0);
 }
 
@@ -1226,11 +1123,7 @@ async fn existing_target_mismatching_source_is_refused() {
         )
         .unwrap();
     let response = fork(&rig.core, "fork-collide", "m2").await;
-    assert!(matches!(
-        response,
-        SessionForkResponse::Unavailable(ref u)
-            if u.reason == SessionForkUnavailableReason::BoundaryUnavailable
-    ));
+    assert_unavailable(&response, SessionForkUnavailableReason::BoundaryUnavailable);
     assert_eq!(rig.fork_requests.lock().unwrap().len(), 0);
 }
 
@@ -1511,7 +1404,7 @@ async fn repeated_rewind_at_the_same_anchor_is_unavailable() {
 async fn live_session_rewind_is_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let registry = cypher_engine::HarnessRegistry::new();
-    registry.register(Arc::new(StuckHarness));
+    registry.register(stuck_harness());
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
     core.workspace
         .create_chat(
@@ -1550,7 +1443,7 @@ async fn live_session_rewind_is_unavailable() {
         )
         .await
         .unwrap();
-    wait_for(
+    common::wait_blocking(
         || {
             let working = core
                 .sessions
@@ -1578,55 +1471,42 @@ async fn live_session_rewind_is_unavailable() {
     core.shutdown().await;
 }
 
+/// REWIND_SESSION and FORK_SESSION are device-addressable (the host owns the
+/// pi session). With no links attached, forwarding is unavailable (offline),
+/// NOT UnknownMethod — proving each method is recognized and routed.
 #[tokio::test(flavor = "multi_thread")]
-async fn forwardable_marks_rewind_session() {
-    // REWIND_SESSION is device-addressable (the host owns the pi session).
+async fn forwardable_marks_rewind_and_fork_session() {
     let registry = cypher_engine::HarnessRegistry::new();
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
-    let reply = rpc(
-        &core,
-        methods::REWIND_SESSION,
-        serde_json::json!({
-            "chatId": "remote-chat",
-            "anchorMessageId": "m1",
-            "targetDeviceId": "other-device",
-        }),
-    )
-    .await;
-    let err = reply.expect_err("forward attempt fails without links");
-    assert!(
-        err.to_string().contains("remote routing unavailable")
-            || err.to_string().contains("cannot reach device"),
-        "{err}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn forwardable_marks_fork_session() {
-    // FORK_SESSION is device-addressable (the source host owns the session).
-    let registry = cypher_engine::HarnessRegistry::new();
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Pi, None).unwrap();
-    let reply = rpc(
-        &core,
-        methods::FORK_SESSION,
-        serde_json::json!({
-            "requestId": "fork-fwd",
-            "sourceChatId": "remote-chat",
-            "anchorMessageId": "m1",
-            "targetDeviceId": "other-device",
-        }),
-    )
-    .await;
-    // No links attached: forwarding is unavailable (offline), NOT UnknownMethod
-    // — proving the method is recognized and routed as forwardable.
-    let err = reply.expect_err("forward attempt fails without links");
-    assert!(
-        err.to_string().contains("remote routing unavailable")
-            || err.to_string().contains("cannot reach device"),
-        "{err}"
-    );
+    for (method, params) in [
+        (
+            methods::REWIND_SESSION,
+            serde_json::json!({
+                "chatId": "remote-chat",
+                "anchorMessageId": "m1",
+                "targetDeviceId": "other-device",
+            }),
+        ),
+        (
+            methods::FORK_SESSION,
+            serde_json::json!({
+                "requestId": "fork-fwd",
+                "sourceChatId": "remote-chat",
+                "anchorMessageId": "m1",
+                "targetDeviceId": "other-device",
+            }),
+        ),
+    ] {
+        let err = rpc(&core, method, params)
+            .await
+            .expect_err("forward attempt fails without links");
+        assert!(
+            err.to_string().contains("remote routing unavailable")
+                || err.to_string().contains("cannot reach device"),
+            "{method}: {err}"
+        );
+    }
 }
 
 /// A backend that appends a user prompt to the source transcript while the

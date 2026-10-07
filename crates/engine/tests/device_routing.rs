@@ -7,6 +7,8 @@
 // `Response` — its size is not ours to shrink.
 #![allow(clippy::result_large_err)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,10 +26,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use cypher_doc::SessionCommandPayload;
 use cypher_engine::{EngineCore, HarnessRegistry};
 use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
-};
+use cypher_proto::{AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
 use cypher_rpc::{
     DeviceFrameHeader, LinkCache, LinkCacheConfig, StaticToken, decode_device_frame,
     encode_device_frame, methods,
@@ -126,59 +125,19 @@ async fn fake_device_room() -> (String, tokio::task::JoinHandle<()>) {
 // ---------------------------------------------------------------------------
 
 /// Instant mock harness so a forwarded QueueCommand fully executes on the target.
-struct InstantHarness;
-
-#[async_trait]
-impl Harness for InstantHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Instant"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        _request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        Ok(futures::stream::iter([
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "instant-1".into(),
-                tools: vec![],
-                cwd: "/tmp".into(),
-                session_id: "hs-1".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "remote reply".into(),
-            }),
-            Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some("hs-1".into()),
-            }),
-        ])
-        .boxed())
-    }
-}
-
 fn registry() -> Arc<HarnessRegistry> {
+    let harness = common::TestHarness::scripted(
+        HarnessId::Mock,
+        "Instant",
+        vec![
+            common::session_started(HarnessId::Mock, "instant-1", "/tmp", "hs-1", "a-1"),
+            common::text("remote reply"),
+            common::done("hs-1"),
+        ],
+    )
+    .reasoning(&[]);
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(InstantHarness));
+    registry.register(Arc::new(harness));
     Arc::new(registry)
 }
 
@@ -335,20 +294,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
     let command = serde_json::to_value(SessionCommandPayload::Run {
-        request: RunRequest {
-            prompt: "run remotely".into(),
-            harness: None,
-            model: None,
-            reasoning: None,
-            model_options: serde_json::Map::new(),
-            cwd: "/tmp".into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: true,
-            attachments: Vec::new(),
-            pending_attachments: Vec::new(),
-            resume: None,
-            worktree: None,
-        },
+        request: common::run_request("run remotely"),
         message_id: "m-a-1".into(),
 
         agent_prompt: None,

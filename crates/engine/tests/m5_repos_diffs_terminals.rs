@@ -1,6 +1,8 @@
 //! M5a integration: repos/worktrees, folder listing, checkout-diff capture + sync,
 //! terminals, and the RPC dispatch for each new method over the memory transport.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,52 +18,15 @@ use cypher_engine::{
 use cypher_proto::{GitHistoryRefKind, TerminalEvent};
 use cypher_rpc::methods;
 
+use common::git;
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test")
-        .output()
-        .await
-        .expect("git spawns");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-async fn git_stdout(cwd: &Path, args: &[&str]) -> String {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .expect("git spawns");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
 /// Init a repo at `dir` with one committed file `a.txt`.
 async fn init_repo(dir: &Path) {
-    std::fs::create_dir_all(dir).expect("repo dir");
-    git(dir, &["init", "-b", "main"]).await;
-    std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("write a.txt");
-    git(dir, &["add", "."]).await;
-    git(dir, &["commit", "-m", "initial"]).await;
+    common::init_repo(dir, "one\ntwo\n").await;
 }
 
 fn test_repos(data_dir: &Path) -> Repos {
@@ -324,10 +289,10 @@ async fn fetch_all_updates_only_remote_tracking_refs() {
     std::fs::write(repo_dir.join("a.txt"), "staged locally\n").expect("local edit");
     git(&repo_dir, &["add", "a.txt"]).await;
     std::fs::write(repo_dir.join("untracked.txt"), "untracked\n").expect("untracked file");
-    let head_before = git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await;
-    let branch_before = git_stdout(&repo_dir, &["branch", "--show-current"]).await;
-    let status_before = git_stdout(&repo_dir, &["status", "--porcelain=v1"]).await;
-    let remote_before = git_stdout(&repo_dir, &["rev-parse", "origin/main"]).await;
+    let head_before = git(&repo_dir, &["rev-parse", "HEAD"]).await;
+    let branch_before = git(&repo_dir, &["branch", "--show-current"]).await;
+    let status_before = git(&repo_dir, &["status", "--porcelain=v1"]).await;
+    let remote_before = git(&repo_dir, &["rev-parse", "origin/main"]).await;
 
     test_repos(&tmp.path().join("data"))
         .fetch_all(&repo_dir)
@@ -335,19 +300,16 @@ async fn fetch_all_updates_only_remote_tracking_refs() {
         .expect("fetch all");
 
     assert_ne!(
-        git_stdout(&repo_dir, &["rev-parse", "origin/main"]).await,
+        git(&repo_dir, &["rev-parse", "origin/main"]).await,
         remote_before
     );
+    assert_eq!(git(&repo_dir, &["rev-parse", "HEAD"]).await, head_before);
     assert_eq!(
-        git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await,
-        head_before
-    );
-    assert_eq!(
-        git_stdout(&repo_dir, &["branch", "--show-current"]).await,
+        git(&repo_dir, &["branch", "--show-current"]).await,
         branch_before
     );
     assert_eq!(
-        git_stdout(&repo_dir, &["status", "--porcelain=v1"]).await,
+        git(&repo_dir, &["status", "--porcelain=v1"]).await,
         status_before
     );
 }
@@ -599,7 +561,7 @@ async fn commit_diff_captures_one_commit_and_roots_diff_the_empty_tree() {
     git(&repo_dir, &["commit", "-m", "second"]).await;
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\nuncommitted\n").expect("edit a.txt");
 
-    let head = git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await;
+    let head = git(&repo_dir, &["rev-parse", "HEAD"]).await;
     let snapshot = capture_commit_diff(&repos, &repo_dir, &head)
         .await
         .expect("commit capture");
@@ -611,7 +573,7 @@ async fn commit_diff_captures_one_commit_and_roots_diff_the_empty_tree() {
     assert_eq!(snapshot.head_sha.as_deref(), Some(head.as_str()));
 
     // The root commit diffs against the empty tree instead of erroring.
-    let root = git_stdout(&repo_dir, &["rev-list", "--max-parents=0", "HEAD"]).await;
+    let root = git(&repo_dir, &["rev-list", "--max-parents=0", "HEAD"]).await;
     let root_snapshot = capture_commit_diff(&repos, &repo_dir, &root)
         .await
         .expect("root capture");
@@ -908,7 +870,7 @@ async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\ncommitted change\n").expect("commit content");
     git(&repo_dir, &["add", "a.txt"]).await;
     git(&repo_dir, &["commit", "-m", "second"]).await;
-    let sha = git_stdout(&repo_dir, &["rev-parse", "HEAD"]).await;
+    let sha = git(&repo_dir, &["rev-parse", "HEAD"]).await;
 
     // A live edit must not affect the immutable History diff source pair.
     std::fs::write(repo_dir.join("a.txt"), "one\ntwo\nworking tree edit\n")

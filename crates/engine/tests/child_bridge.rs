@@ -9,18 +9,18 @@
 //!   `Done` is observable through the replayable `WatchAgentEvents` stream;
 //! - parent `DeleteChat` cascades to child rows/docs/session interruption.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
+use cypher_engine::EngineCore;
+use cypher_harness::Harness;
 use futures::StreamExt;
-use futures::stream::BoxStream;
 
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
-    AgentEvent, ChildAgentProfile, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode, SubagentRunMode,
+    AgentEvent, ChildAgentProfile, DoneStatus, HarnessId, SandboxLevel, SessionStatus,
+    SubagentRunMode,
 };
 use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 
@@ -35,65 +35,39 @@ fn done_ok() -> AgentEvent {
     }
 }
 
-/// One-liner harness serving every harness id (Pi included): the child run
-/// streams a fixed sequence ending in Done with the final result text.
-struct OneLinerHarness;
-
-#[async_trait]
-impl Harness for OneLinerHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Pi
-    }
-    fn display_name(&self) -> &str {
-        "OneLiner"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Pi,
-                model: "anthropic/claude-sonnet-4".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "child-hs".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "planner result text".into(),
-            }),
-            Ok(done_ok()),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
+fn child_started(cwd: &str) -> AgentEvent {
+    common::session_started(
+        HarnessId::Pi,
+        "anthropic/claude-sonnet-4",
+        cwd,
+        "child-hs",
+        "a-1",
+    )
 }
 
-struct Rig {
-    core: EngineCore,
-    _dir: tempfile::TempDir,
+/// An engine (default harness Mock) whose Pi harness is `harness`.
+fn engine(dir: &std::path::Path, harness: common::TestHarness) -> EngineCore {
+    common::assemble_with(
+        dir,
+        HarnessId::Mock,
+        vec![Arc::new(harness) as Arc<dyn Harness>],
+    )
 }
 
-fn assemble() -> Rig {
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(OneLinerHarness));
+/// One-liner Pi harness: the child run streams a fixed sequence ending in
+/// Done with the final result text.
+fn assemble() -> common::Rig {
+    let harness = common::TestHarness::new(HarnessId::Pi, "OneLiner", |request, _| {
+        common::script(vec![
+            child_started(&request.cwd),
+            common::text("planner result text"),
+            done_ok(),
+        ])
+    })
+    .steering();
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    Rig { core, _dir: dir }
+    let core = engine(dir.path(), harness);
+    common::Rig { core, dir }
 }
 
 fn start_params(run_id: &str, parent: &str) -> serde_json::Value {
@@ -124,16 +98,6 @@ async fn start(core: &EngineCore, run_id: &str, parent: &str) -> Result<String, 
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| RpcError::Failed("no childChatId in reply".into()))
-}
-
-fn wait_for(cond: impl Fn() -> bool, what: &str) {
-    for _ in 0..400 {
-        if cond() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    panic!("timed out waiting for {what}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -197,7 +161,7 @@ async fn start_subagent_creates_child_and_queues_run() {
 
     // The queued Run executes through the normal harness: the child chat ends
     // up with a user entry + a terminal assistant entry (harness emits Done).
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .doc_host
@@ -252,7 +216,7 @@ async fn start_subagent_runs_the_full_prompt_behind_a_short_label() {
     assert_eq!(meta.task, "Plan the panel", "the row keeps the short label");
 
     let expected = format!("Task: {full}");
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .doc_host
@@ -449,7 +413,7 @@ async fn start_subagent_retry_queues_exactly_one_run() {
     assert_eq!(a, b);
 
     // Let the (single) queued run execute through the harness.
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -518,7 +482,7 @@ async fn start_subagent_concurrent_calls_make_one_child_one_run() {
     assert_eq!(children.len(), 1, "no duplicate child rows");
 
     // Let the (single) queued run execute, then count user prompt entries.
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -654,7 +618,7 @@ async fn watch_agent_events_replays_terminal_done() {
 
     // The harness streams its fixed sequence immediately — wait for the child
     // run to settle (its session flips Idle after Done).
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -700,52 +664,18 @@ async fn watch_agent_events_replays_terminal_done() {
 /// A harness that records the `RunControls.host` it received (the engine's
 /// child-env seam) so a test can assert the child run got the persisted
 /// profile + chat identity, while the harness itself streams a quick Done.
-struct CapturingHarness {
+fn capturing_harness(
     host: Arc<Mutex<Option<cypher_harness::RunHostContext>>>,
-}
-
-#[async_trait]
-impl Harness for CapturingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Pi
-    }
-    fn display_name(&self) -> &str {
-        "Capture"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        *self.host.lock().unwrap() = Some(controls.host);
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Pi,
-                model: "anthropic/claude-sonnet-4".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "child-hs".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: "child output".into(),
-            }),
-            Ok(done_ok()),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
+) -> common::TestHarness {
+    common::TestHarness::new(HarnessId::Pi, "Capture", move |request, controls| {
+        *host.lock().unwrap() = Some(controls.host);
+        common::script(vec![
+            child_started(&request.cwd),
+            common::text("child output"),
+            done_ok(),
+        ])
+    })
+    .steering()
 }
 
 /// The engine builds the child run's `RunHostContext` from the persisted
@@ -755,16 +685,13 @@ impl Harness for CapturingHarness {
 #[tokio::test(flavor = "multi_thread")]
 async fn child_runs_receive_child_env_via_host_context() {
     let host = Arc::new(Mutex::new(None));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(CapturingHarness { host: host.clone() }));
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    let core = engine(dir.path(), capturing_harness(host.clone()));
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");
     let child_id = start(&core, "run-1", PARENT).await.expect("start ok");
-    wait_for(
+    common::wait_blocking(
         || host.lock().unwrap().is_some(),
         "child run to reach the harness",
     );
@@ -802,11 +729,8 @@ async fn child_runs_receive_child_env_via_host_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
     let host = Arc::new(Mutex::new(None));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(CapturingHarness { host: host.clone() }));
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    let core = engine(dir.path(), capturing_harness(host.clone()));
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");
@@ -821,7 +745,7 @@ async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
         panic!("StartSubagent must be unary");
     };
     let child_id = value["childChatId"].as_str().expect("child id").to_owned();
-    wait_for(
+    common::wait_blocking(
         || host.lock().unwrap().is_some(),
         "child run to reach the harness",
     );
@@ -850,11 +774,8 @@ async fn child_run_messages_under_its_address_but_the_row_keeps_the_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn start_subagent_recovers_an_orphan_existing_child() {
     let host = Arc::new(Mutex::new(None));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(CapturingHarness { host: host.clone() }));
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    let core = engine(dir.path(), capturing_harness(host.clone()));
     core.workspace
         .create_chat(
             PARENT,
@@ -904,7 +825,7 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
 
     // The recovered run dispatches with the freshly registered channel (the
     // crash-gap recovery must not lose the parent's message root).
-    wait_for(
+    common::wait_blocking(
         || host.lock().unwrap().is_some(),
         "recovered run to reach the harness",
     );
@@ -917,7 +838,7 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
     assert_eq!(child_env.run_id, "run-1");
 
     // Exactly one initial Run was queued (recovery is not a duplicate).
-    wait_for(
+    common::wait_blocking(
         || {
             core.sessions
                 .session_status(&child_id)
@@ -951,63 +872,24 @@ async fn start_subagent_recovers_an_orphan_existing_child() {
 async fn later_child_turn_has_no_messaging_channel() {
     // A harness that records EVERY run's host context (so the follow-up turn's
     // channel absence is asserted) and streams a quick Done per run.
-    struct RecordingHarness(Arc<Mutex<Vec<cypher_harness::RunHostContext>>>);
-    #[async_trait]
-    impl Harness for RecordingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Pi
-        }
-        fn display_name(&self) -> &str {
-            "Recording"
-        }
-        // Non-steerable so a follow-up command forces a FRESH run task (whose
-        // host context is what this test inspects) instead of routing into the
-        // parked session.
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::StepBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[ReasoningLevel::Medium]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            self.0.lock().unwrap().push(controls.host.clone());
-            let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-                Ok(AgentEvent::SessionStarted {
-                    harness: HarnessId::Pi,
-                    model: "anthropic/claude-sonnet-4".into(),
-                    tools: vec![],
-                    cwd: request.cwd.clone(),
-                    session_id: "child-hs".into(),
-                    assistant_message_id: "a-1".into(),
-                }),
-                Ok(done_ok()),
-            ];
-            Ok(futures::stream::iter(events).boxed())
-        }
-    }
-
+    // Non-steerable so a follow-up command forces a FRESH run task (whose
+    // host context is what this test inspects) instead of routing into the
+    // parked session.
     let hosts = Arc::new(Mutex::new(Vec::new()));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingHarness(hosts.clone())));
+    let recorded = hosts.clone();
+    let harness = common::TestHarness::new(HarnessId::Pi, "Recording", move |request, controls| {
+        recorded.lock().unwrap().push(controls.host.clone());
+        common::script(vec![child_started(&request.cwd), done_ok()])
+    });
+
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    let core = engine(dir.path(), harness);
     core.workspace
         .create_chat(PARENT, None, Some(core.device_id.as_str()), None, None)
         .expect("parent chat");
     let child_id = start(&core, "run-1", PARENT).await.expect("start ok");
     // Initial run settles (its channel was registered then consumed).
-    wait_for(
+    common::wait_blocking(
         || {
             core.sessions
                 .session_status(&child_id)
@@ -1040,7 +922,7 @@ async fn later_child_turn_has_no_messaging_channel() {
             },
         )
         .expect("queue follow-up");
-    wait_for(
+    common::wait_blocking(
         || hosts.lock().unwrap().len() >= 2,
         "the follow-up run to reach the harness",
     );
@@ -1075,7 +957,7 @@ async fn parent_delete_cascades_to_children() {
     // Let the child run fully settle first: cascade deletion interrupts live
     // children best-effort, and a settled run is the clean (deterministic)
     // case — its terminal bookkeeping has landed before the row goes.
-    wait_for(
+    common::wait_blocking(
         || {
             rig.core
                 .sessions
@@ -1102,7 +984,7 @@ async fn parent_delete_cascades_to_children() {
     assert!(rig.core.workspace.chat(PARENT).expect("read").is_none());
     // The child teardown is a spawned task and interrupts a possibly-live
     // run first (settlement is bounded at ~3s), so wait generously.
-    wait_for(
+    common::wait_blocking(
         || rig.core.workspace.chat(&child_id).expect("read").is_none(),
         "child row cascade delete",
     );

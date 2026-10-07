@@ -4,51 +4,23 @@
 //! lifecycle. A background subagent finishing must never re-arm a parked session
 //! as Working.
 
-use std::sync::{Arc, Mutex};
+mod common;
+
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-use tokio::sync::mpsc;
-
 use cypher_doc::{MessageRole, SessionMessageEntry};
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
+use cypher_engine::EngineCore;
 use cypher_proto::{
-    AgentEvent, ContextUsage, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SandboxLevel, Session, SessionStatus, SteeringMode, SubagentRun, SubagentRunMode,
-    SubagentRunStatus, Throughput, ToolCall,
+    AgentEvent, ContextUsage, DoneStatus, HarnessId, Session, SessionStatus, SubagentRun,
+    SubagentRunMode, SubagentRunStatus, Throughput, ToolCall,
 };
+
+use common::{FeedRig, run_request, status, wait_for};
 
 const CHAT: &str = "chat-subagents";
 
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
-}
-
 fn session_started() -> AgentEvent {
-    AgentEvent::SessionStarted {
-        harness: HarnessId::Mock,
-        model: "mock-1".into(),
-        tools: vec![],
-        cwd: "/tmp".into(),
-        session_id: "hs-sa".into(),
-        assistant_message_id: "a-sa".into(),
-    }
+    common::session_started(HarnessId::Mock, "mock-1", "/tmp", "hs-sa", "a-sa")
 }
 
 fn subagent_tool_call() -> AgentEvent {
@@ -93,86 +65,8 @@ fn clear() -> AgentEvent {
     AgentEvent::SubagentStatus { runs: vec![] }
 }
 
-/// Feed-by-hand harness (same shape as turn_quiesce.rs): the test pushes
-/// events through a channel. The auto-titler's side run gets an immediately
-/// completed empty stream instead.
-struct FeedHarness {
-    main_prompt: String,
-    feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
-}
-
-#[async_trait]
-impl Harness for FeedHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Feed"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        if request.prompt != self.main_prompt {
-            let events = vec![Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: None,
-            })];
-            return Ok(futures::stream::iter(events).boxed());
-        }
-        let feed = self
-            .feed
-            .lock()
-            .unwrap()
-            .take()
-            .expect("FeedHarness serves the main dispatch once per test");
-        Ok(futures::stream::unfold(feed, |mut feed| async move {
-            feed.recv().await.map(|event| (Ok(event), feed))
-        })
-        .boxed())
-    }
-}
-
-struct Rig {
-    core: EngineCore,
-    feed: mpsc::UnboundedSender<AgentEvent>,
-    _dir: tempfile::TempDir,
-}
-
-fn assemble(main_prompt: &str) -> Rig {
-    let (feed, rx) = mpsc::unbounded_channel();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(FeedHarness {
-        main_prompt: main_prompt.into(),
-        feed: Mutex::new(Some(rx)),
-    }));
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    Rig {
-        core,
-        feed,
-        _dir: dir,
-    }
-}
-
-fn status(core: &EngineCore) -> Option<SessionStatus> {
-    core.sessions.session_status(CHAT).map(|s| s.status)
+fn assemble(main_prompt: &str) -> FeedRig {
+    common::feed_rig(main_prompt, false)
 }
 
 fn started_at(core: &EngineCore) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -189,28 +83,10 @@ fn subagents(core: &EngineCore) -> Vec<SubagentRun> {
 }
 
 fn assistant_entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default()
+    common::entries(core, CHAT)
         .into_iter()
         .filter(|e| e.role == MessageRole::Assistant)
         .collect()
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// After a parked (Done) session, a SubagentStatus snapshot must update the
@@ -257,7 +133,7 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -276,7 +152,7 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
 
     // Status, started_at and transcript are untouched.
     assert_eq!(
-        status(&rig.core),
+        status(&rig.core, CHAT),
         Some(SessionStatus::Idle),
         "SubagentStatus must not re-arm a parked session"
     );
@@ -317,7 +193,7 @@ async fn subagent_status_updates_projection_without_polluting_run_state() {
         "clear empties the projection",
     )
     .await;
-    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    assert_eq!(status(&rig.core, CHAT), Some(SessionStatus::Idle));
     assert_eq!(started_at(&rig.core), before_started);
     assert_eq!(assistant_entries(&rig.core).len(), before_entries);
     let rows = rig.core.workspace.read_sessions().unwrap();
@@ -366,7 +242,7 @@ async fn context_usage_on_a_parked_row_syncs_without_polluting_run_state() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -396,7 +272,7 @@ async fn context_usage_on_a_parked_row_syncs_without_polluting_run_state() {
     )
     .await;
 
-    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    assert_eq!(status(&rig.core, CHAT), Some(SessionStatus::Idle));
     assert_eq!(started_at(&rig.core), None);
     assert_eq!(
         rig.core.sessions.session_status(CHAT).map(|s| s.updated_at),
@@ -444,7 +320,7 @@ async fn context_usage_mid_turn_rides_the_settle_write() {
         .expect("dispatch");
     rig.feed.send(session_started()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "turn running",
     )
     .await;
@@ -491,7 +367,7 @@ async fn context_usage_mid_turn_rides_the_settle_write() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -518,7 +394,7 @@ async fn throughput_rides_the_next_row_write_and_ends_with_the_turn() {
         .expect("dispatch");
     rig.feed.send(session_started()).unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Working),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Working),
         "turn running",
     )
     .await;
@@ -546,7 +422,7 @@ async fn throughput_rides_the_next_row_write_and_ends_with_the_turn() {
         "WatchSessions carries the reading",
     )
     .await;
-    assert_eq!(status(&rig.core), Some(SessionStatus::Working));
+    assert_eq!(status(&rig.core, CHAT), Some(SessionStatus::Working));
     assert_eq!(assistant_entries(&rig.core).len(), before_entries);
     let registry_throughput = || {
         rig.core
@@ -580,7 +456,7 @@ async fn throughput_rides_the_next_row_write_and_ends_with_the_turn() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after Done",
     )
     .await;
@@ -621,7 +497,10 @@ async fn subagent_status_mid_turn_does_not_fold() {
     rig.feed.send(running_async()).unwrap();
     rig.feed.send(clear()).unwrap();
     wait_for(
-        || subagents(&rig.core).is_empty() && status(&rig.core) == Some(SessionStatus::Working),
+        || {
+            subagents(&rig.core).is_empty()
+                && status(&rig.core, CHAT) == Some(SessionStatus::Working)
+        },
         "mid-turn projection updates while Working",
     )
     .await;
@@ -635,7 +514,7 @@ async fn subagent_status_mid_turn_does_not_fold() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "turn completes and parks",
     )
     .await;
@@ -680,7 +559,7 @@ async fn parked_stream_open_keeps_running_and_main_idle() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle) && subagents(&rig.core).len() == 1,
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle) && subagents(&rig.core).len() == 1,
         "parked with the running projection",
     )
     .await;
@@ -697,7 +576,7 @@ async fn parked_stream_open_keeps_running_and_main_idle() {
         SubagentRunStatus::Running,
         "heartbeat on the open parked stream keeps Running"
     );
-    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    assert_eq!(status(&rig.core, CHAT), Some(SessionStatus::Idle));
     assert_eq!(
         subagents(&rig.core)[0].ended_at,
         None,
@@ -729,14 +608,18 @@ async fn parked_stream_end_terminalizes_running() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle) && subagents(&rig.core).len() == 1,
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle) && subagents(&rig.core).len() == 1,
         "parked with the running projection",
     )
     .await;
     assert_eq!(subagents(&rig.core)[0].status, SubagentRunStatus::Running);
 
     // Drop the feed: the parked stream EOFs and the run's owner ends.
-    let Rig { feed, core, _dir } = rig;
+    let FeedRig {
+        feed,
+        core,
+        dir: _dir,
+    } = rig;
     drop(feed);
     wait_for(
         || subagents(&core)[0].status == SubagentRunStatus::Error,
@@ -744,7 +627,7 @@ async fn parked_stream_end_terminalizes_running() {
     )
     .await;
     assert_eq!(
-        status(&core),
+        status(&core, CHAT),
         Some(SessionStatus::Idle),
         "owner death must not change the main session status"
     );
@@ -775,7 +658,11 @@ async fn active_stream_end_terminalizes_running() {
     assert_eq!(subagents(&rig.core)[0].status, SubagentRunStatus::Running);
 
     // Mid-turn stream EOF (not parked, not interrupted) = a crash.
-    let Rig { feed, core, _dir } = rig;
+    let FeedRig {
+        feed,
+        core,
+        dir: _dir,
+    } = rig;
     drop(feed);
     wait_for(
         || subagents(&core)[0].status == SubagentRunStatus::Error,
@@ -783,7 +670,7 @@ async fn active_stream_end_terminalizes_running() {
     )
     .await;
     assert_eq!(
-        status(&core),
+        status(&core, CHAT),
         Some(SessionStatus::Errored),
         "active stream end is a crash for the main session"
     );
@@ -818,13 +705,17 @@ async fn settled_runs_survive_owner_death() {
         })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle),
+        || status(&rig.core, CHAT) == Some(SessionStatus::Idle),
         "park after settled snapshot",
     )
     .await;
     assert_eq!(subagents(&rig.core)[0].status, SubagentRunStatus::Done);
 
-    let Rig { feed, core, _dir } = rig;
+    let FeedRig {
+        feed,
+        core,
+        dir: _dir,
+    } = rig;
     drop(feed);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(

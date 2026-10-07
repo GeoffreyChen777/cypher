@@ -2,116 +2,21 @@
 //! workspace row's `archived` flag back off for message-bearing commands (Run,
 //! Steer) — and only those; an Interrupt leaves the archive state alone.
 
-use std::sync::Arc;
-use std::time::Duration;
+mod common;
 
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
+use cypher_doc::SessionCommandPayload;
+use cypher_engine::EngineCore;
+use cypher_proto::{HarnessId, RunRequest};
 
-use cypher_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
-};
+use common::{complete_assistant_count, run_request, wait_for};
 
 const CHAT: &str = "chat-unarchive";
-
-/// Completes a one-line turn for any request.
-struct AckHarness;
-
-#[async_trait]
-impl Harness for AckHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Ack"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "sess-ua".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: format!("ack: {}", request.prompt),
-            }),
-            Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some("sess-ua".into()),
-            }),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-}
-
-fn complete_assistant_count(core: &EngineCore) -> usize {
-    let entries: Vec<SessionMessageEntry> = core
-        .doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_entries().ok())
-        .unwrap_or_default();
-    entries
-        .iter()
-        .filter(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
-        .count()
-}
 
 fn run_payload(message_id: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
-            prompt: "back from the archive".into(),
-            harness: None,
-            model: None,
-            reasoning: None,
-            model_options: Default::default(),
             cwd: "~".into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: true,
-            attachments: Vec::new(),
-            pending_attachments: Vec::new(),
-            resume: None,
-            worktree: None,
+            ..run_request("back from the archive")
         },
         message_id: message_id.into(),
 
@@ -130,15 +35,16 @@ fn archived(core: &EngineCore) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn sending_a_message_unarchives_the_chat() {
     let tmp = tempfile::tempdir().unwrap();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(AckHarness));
-    let core = EngineCore::assemble(
-        &tmp.path().join("data"),
-        Arc::new(registry),
-        HarnessId::Mock,
-        None,
-    )
-    .expect("engine core assembles");
+    // Completes a one-line turn for any request.
+    let harness = common::TestHarness::new(HarnessId::Mock, "Ack", |request, _| {
+        common::reply(
+            HarnessId::Mock,
+            &request,
+            "sess-ua",
+            &format!("ack: {}", request.prompt),
+        )
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
 
     let client = cypher_rpc::memory_client(core.rpc_service());
     client
@@ -170,7 +76,11 @@ async fn sending_a_message_unarchives_the_chat() {
         !archived(&core),
         "sending a message must unarchive the chat"
     );
-    wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
+    wait_for(
+        || complete_assistant_count(&core, CHAT) == 1,
+        "turn to complete",
+    )
+    .await;
 
     // A non-message command must NOT revive it.
     core.workspace

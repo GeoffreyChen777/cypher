@@ -7,107 +7,59 @@
 //! variant against a real edge runs behind `#[ignore]` (CYPHER_EDGE_WS, like
 //! cypher-sync's edge_convergence test).
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
-
-use async_trait::async_trait;
-use futures::StreamExt;
-use futures::stream::BoxStream;
 
 use cypher_doc::{
     CommandBasedOn, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
 };
 use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
-};
+use cypher_harness::Harness;
+use cypher_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel, SessionStatus};
 use cypher_rpc::methods;
+
+use common::{run_request, wait_for};
 
 const VIEWER: &str = "viewer-device";
 
 /// Scripted harness: emits SessionStarted + text + Done with a per-event delay (so
 /// `Working` is observable across the bridge).
-struct ScriptedHarness {
-    id: HarnessId,
-    text: &'static str,
-    step_delay: Duration,
-}
-
-#[async_trait]
-impl Harness for ScriptedHarness {
-    fn id(&self) -> HarnessId {
-        self.id
-    }
-    fn display_name(&self) -> &str {
-        "Scripted"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        _request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-        let harness = self.id;
-        let text = self.text;
-        let delay = self.step_delay;
+fn scripted_harness(harness: HarnessId, text: &'static str, delay: Duration) -> Arc<dyn Harness> {
+    let harness = common::TestHarness::new(harness, "Scripted", move |_, _| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             let script = vec![
-                AgentEvent::SessionStarted {
-                    harness,
-                    model: "scripted-1".into(),
-                    tools: vec![],
-                    cwd: "/tmp".into(),
-                    session_id: "hs-1".into(),
-                    assistant_message_id: "a-1".into(),
-                },
-                AgentEvent::TextDelta { text: text.into() },
-                AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    result: None,
-                    error: None,
-                    session_id: Some("hs-1".into()),
-                },
+                common::session_started(harness, "scripted-1", "/tmp", "hs-1", "a-1"),
+                common::text(text),
+                common::done("hs-1"),
             ];
             for event in script {
-                if tx.send(Ok(event)).await.is_err() {
+                if tx.send(event).is_err() {
                     return;
                 }
                 tokio::time::sleep(delay).await;
             }
         });
-        Ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        })
-        .boxed())
-    }
+        Ok(common::channel_stream(rx))
+    })
+    .reasoning(&[]);
+    Arc::new(harness)
 }
 
 fn registry() -> Arc<HarnessRegistry> {
     let registry = HarnessRegistry::new();
-    registry.register(Arc::new(ScriptedHarness {
-        id: HarnessId::Mock,
-        text: "Hello",
-        step_delay: Duration::from_millis(60),
-    }));
-    registry.register(Arc::new(ScriptedHarness {
-        id: HarnessId::Cursor,
-        text: "From cursor",
-        step_delay: Duration::from_millis(10),
-    }));
+    registry.register(scripted_harness(
+        HarnessId::Mock,
+        "Hello",
+        Duration::from_millis(60),
+    ));
+    registry.register(scripted_harness(
+        HarnessId::Cursor,
+        "From cursor",
+        Duration::from_millis(10),
+    ));
     Arc::new(registry)
 }
 
@@ -129,37 +81,6 @@ async fn bridge(
     a.workspace.connect_registry_url(&server.url());
     b.workspace.connect_registry_url(&server.url());
     server
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-fn run_request(prompt: &str) -> RunRequest {
-    RunRequest {
-        prompt: prompt.into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        attachments: Vec::new(),
-        pending_attachments: Vec::new(),
-        resume: None,
-        worktree: None,
-    }
 }
 
 /// Queue a run command into a chat doc the way a remote viewer would (ledger rule 1).

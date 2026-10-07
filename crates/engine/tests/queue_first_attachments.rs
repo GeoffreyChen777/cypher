@@ -9,123 +9,34 @@
 //! exercised over the real RPC surface (QueueCommand → UploadChunk →
 //! UploadCommit{chatId}).
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use base64::Engine as _;
-use futures::StreamExt;
-use futures::stream::BoxStream;
 
 use cypher_doc::{MessagePart, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
-use cypher_engine::{EngineCore, HarnessRegistry};
-use cypher_harness::{Harness, HarnessError, RunControls};
-use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, PendingAttachment, ReasoningLevel, RunRequest,
-    SandboxLevel, SteeringMode,
-};
+use cypher_engine::EngineCore;
+use cypher_proto::{HarnessId, PendingAttachment, RunRequest};
+
+use common::{command_statuses, run_request};
 
 const CHAT: &str = "chat-queue-first";
 
-/// Records every RunRequest the harness receives (dispatch-side assertions).
-#[derive(Clone, Default)]
-struct RecordingHarness {
-    requests: Arc<Mutex<Vec<RunRequest>>>,
-}
-
-#[async_trait]
-impl Harness for RecordingHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Mock
-    }
-    fn display_name(&self) -> &str {
-        "Recorder"
-    }
-    fn supports_steering(&self) -> bool {
-        false
-    }
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        &[ReasoningLevel::Medium]
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
-    }
-    async fn run(
-        &self,
-        request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.requests.lock().unwrap().push(request.clone());
-        let events: Vec<Result<AgentEvent, HarnessError>> = vec![
-            Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: request.cwd.clone(),
-                session_id: "sess-qf".into(),
-                assistant_message_id: "a-1".into(),
-            }),
-            Ok(AgentEvent::TextDelta {
-                text: format!("ack: {}", request.prompt),
-            }),
-            Ok(AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some("sess-qf".into()),
-            }),
-        ];
-        Ok(futures::stream::iter(events).boxed())
-    }
-}
-
-async fn wait_for<F>(mut predicate: F, what: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
+async fn wait_for(predicate: impl FnMut() -> bool, what: &str) {
+    common::wait_for_within(predicate, what, Duration::from_secs(20)).await;
 }
 
 fn run_payload(message_id: &str, pending: Vec<PendingAttachment>) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
-            prompt: "look at the photo".into(),
-            harness: None,
-            model: None,
-            reasoning: None,
-            model_options: Default::default(),
-            cwd: "/tmp".into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: true,
-            attachments: Vec::new(),
             pending_attachments: pending,
-            resume: None,
-            worktree: None,
+            ..run_request("look at the photo")
         },
         message_id: message_id.into(),
         agent_prompt: None,
     }
-}
-
-fn command_status(core: &EngineCore) -> Vec<(String, SessionCommandStatus, Option<String>)> {
-    core.doc_host
-        .open(CHAT)
-        .ok()
-        .and_then(|h| h.doc().read_commands().ok())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|c| (c.id, c.status, c.resolution))
-        .collect()
 }
 
 fn user_entry_text(core: &EngineCore, message_id: &str) -> Option<String> {
@@ -161,19 +72,25 @@ fn transcript_contains(core: &EngineCore, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn assemble() -> (EngineCore, RecordingHarness, tempfile::TempDir) {
+type RequestLog = Arc<Mutex<Vec<RunRequest>>>;
+
+/// The returned log records every RunRequest the harness receives
+/// (dispatch-side assertions).
+async fn assemble() -> (EngineCore, RequestLog, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let harness = RecordingHarness::default();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(harness.clone()));
-    let core = EngineCore::assemble(
-        &tmp.path().join("data"),
-        Arc::new(registry),
-        HarnessId::Mock,
-        None,
-    )
-    .expect("engine core assembles");
-    (core, harness, tmp)
+    let requests = RequestLog::default();
+    let log = requests.clone();
+    let harness = common::TestHarness::new(HarnessId::Mock, "Recorder", move |request, _| {
+        log.lock().unwrap().push(request.clone());
+        common::reply(
+            HarnessId::Mock,
+            &request,
+            "sess-qf",
+            &format!("ack: {}", request.prompt),
+        )
+    });
+    let core = common::engine_at(&tmp.path().join("data"), harness);
+    (core, requests, tmp)
 }
 
 /// The composer's queue-first send over the real RPC surface: QueueCommand
@@ -182,7 +99,7 @@ async fn assemble() -> (EngineCore, RecordingHarness, tempfile::TempDir) {
 /// with the final path — and the pending id must never reach the transcript.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queue_then_commit_seal_releases_the_run_with_final_path() {
-    let (core, harness, _tmp) = assemble().await;
+    let (core, requests, _tmp) = assemble().await;
     let client = cypher_rpc::memory_client(core.rpc_service());
     let upload_id = "up-qf-1";
 
@@ -206,10 +123,10 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
     // Give the drain a moment: it must NOT execute while unsealed.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        harness.requests.lock().unwrap().is_empty(),
+        requests.lock().unwrap().is_empty(),
         "Run must not execute before its attachments are sealed"
     );
-    let statuses = command_status(&core);
+    let statuses = command_statuses(&core, CHAT);
     assert_eq!(
         statuses[0].1,
         SessionCommandStatus::Pending,
@@ -260,12 +177,11 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
 
     // 3. The seal releases the Run.
     wait_for(
-        || !harness.requests.lock().unwrap().is_empty(),
+        || !requests.lock().unwrap().is_empty(),
         "run executes after the attachment seal",
     )
     .await;
-    let req = harness
-        .requests
+    let req = requests
         .lock()
         .unwrap()
         .iter()
@@ -311,7 +227,7 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
         "pending UI ref absent from every transcript part"
     );
 
-    let statuses = command_status(&core);
+    let statuses = command_statuses(&core, CHAT);
     assert_eq!(
         statuses[0].1,
         SessionCommandStatus::Applied,
@@ -324,7 +240,7 @@ async fn queue_then_commit_seal_releases_the_run_with_final_path() {
 /// attachment grace window — never Pending forever, never executed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsealed_run_expires_after_grace_not_pending_forever() {
-    let (core, harness, _tmp) = assemble().await;
+    let (core, requests, _tmp) = assemble().await;
 
     // Queue directly into the doc with an issued_at already past the grace
     // window (a wedged upload from ~11 minutes ago). `expires_at = None`
@@ -355,7 +271,7 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
 
     wait_for(
         || {
-            command_status(&core)
+            command_statuses(&core, CHAT)
                 .iter()
                 .any(|(_, s, _)| *s == SessionCommandStatus::Expired)
         },
@@ -363,7 +279,7 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
     )
     .await;
     assert!(
-        harness.requests.lock().unwrap().is_empty(),
+        requests.lock().unwrap().is_empty(),
         "an unsealed Run must never dispatch"
     );
     assert!(
@@ -380,7 +296,7 @@ async fn unsealed_run_expires_after_grace_not_pending_forever() {
 /// historical `Attached images` bytes, asserted above).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_image_files_upload_seal_and_reach_the_agent() {
-    let (core, harness, _tmp) = assemble().await;
+    let (core, requests, _tmp) = assemble().await;
     let client = cypher_rpc::memory_client(core.rpc_service());
     let files = [
         ("up-file-img", "shot.png", b"\x89PNG\r\n\x1a\n".to_vec()),
@@ -435,8 +351,7 @@ async fn non_image_files_upload_seal_and_reach_the_agent() {
 
     // Titling runs through the same harness, so its request can land first.
     let chat_run = || {
-        harness
-            .requests
+        requests
             .lock()
             .unwrap()
             .iter()

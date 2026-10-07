@@ -5,6 +5,8 @@
 //! transient row/watch flap; otherwise an idle checkout can repeatedly tear
 //! down and recreate its entry, spawning expensive diff captures forever.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,31 +14,8 @@ use std::time::Duration;
 use cypher_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
 use cypher_proto::HarnessId;
 
-async fn git(cwd: &Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "test")
-        .env("GIT_AUTHOR_EMAIL", "test@test")
-        .env("GIT_COMMITTER_NAME", "test")
-        .env("GIT_COMMITTER_EMAIL", "test@test")
-        .output()
-        .await
-        .expect("git spawns");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 async fn init_dirty_repo(dir: &Path) {
-    std::fs::create_dir_all(dir).expect("repo dir");
-    git(dir, &["init", "-b", "main"]).await;
-    std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("write a.txt");
-    git(dir, &["add", "."]).await;
-    git(dir, &["commit", "-m", "initial"]).await;
+    common::init_repo(dir, "one\ntwo\n").await;
     std::fs::write(dir.join("a.txt"), "one\ntwo\nedited\n").expect("dirty tree");
 }
 
