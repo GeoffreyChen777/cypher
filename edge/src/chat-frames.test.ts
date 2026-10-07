@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, FRAME, MAX_HEADER_BYTES } from "./chat-frames";
+import { bytesOf } from "./testing/bytes";
 
 /** The chat2 wire codec is a cross-language contract (Rust + Swift clients
  * re-implement it); these vectors pin the layout, not just round-tripping. */
-
-const bytesOf = (len: number, seed: number): Uint8Array => {
-  const out = new Uint8Array(len);
-  for (let i = 0; i < len; i++) out[i] = (seed + i * 31) & 0xff;
-  return out;
-};
 
 describe("chat2 frame codec", () => {
   it("pins the wire layout: [type u8][headerLen u32 LE][header][payload]", () => {
