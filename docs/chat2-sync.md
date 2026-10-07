@@ -34,7 +34,7 @@ the other (stripping shrinks bytes, the relay makes serving them instant and rel
 
 ## Workstream A — thin docs (ship first, independently)
 
-Stops new whales being born. No protocol changes; additive on the existing s2 rooms.
+Keeps session docs small: the doc carries summaries, full payloads live elsewhere.
 
 **A1. Fold strips outputs/diffs to summaries.** In `crates/doc/src/parts.rs`:
 - `output`: keep first non-empty line, ≤160 chars (t3code ships 84 and users cope).
@@ -62,8 +62,6 @@ upload degrades to "full output unavailable", never blocks the doc). UI fetches 
 expand; offline shows the summary + a greyed affordance.
 
 **A3. UI.** Tool-part expansion fetches `outputRef` lazily; render summary inline.
-
-Estimate: 2–3 days. Ships in the next release; immediately cuts new-session growth ~7×.
 
 ---
 
@@ -113,8 +111,6 @@ loro-protocol, no base64 — 33% base64 overhead matters at 1.2 Mbps):
 - Ops: `GET /stats` (headSeq, seqFloor, rowBytes, checkpoint age), nightly
   seq-monotonic R2 backup (registry pattern), tombstone-free — rows are the log.
 
-Estimate: 3–4 days including tests (registry-room test suite is the template).
-
 ---
 
 ## Workstream C — Rust client + host duties
@@ -137,104 +133,34 @@ root).
   History trim: shallow checkpoint only at a frontier older than RETAIN_DAYS, same
   aged-frontier discipline as today (the ws4 live-frontier lesson: an offline device's
   concurrent ops must never land behind a shallow root).
-- Tail sidecar: publish last-64 JSON on the debounced commit tick (dirty-flag, like
-  the DO's current lazy recompute). Diff sidecar publish moves from `diff_sync.rs`'s
-  DO PUT to the chat2 PUT unchanged.
-  **Superseded (2026-09-23):** hosts no longer publish the tail. Its reader was the
-  iOS fallback in M4, which native chat2 support removed; nothing else ever read it,
-  and it had grown to 18% of the Durable Object bill. The route remains for a future
-  instant-open reader (`docs/local-edge.md`).
+- Sidecars: hosts publish neither a tail nor a diff sidecar. Nothing read the tail once
+  iOS spoke chat2 natively, and it had grown to 18% of the Durable Object bill; the
+  route remains for a future instant-open reader (`docs/local-edge.md`). Remote
+  clients read working-tree diffs through the device relay.
 - Non-host owner devices may checkpoint as fallback if floor lag exceeds a high-water
   mark (any device holds the full doc; ~20 lines, ships later if ever needed — hosts
   must be online to execute commands anyway, so lag is bounded in practice).
 
-Estimate: 4–5 days.
-
-**C4. iOS** (`apps/ios/Cypher/Sync/`): `ChatRoomClient.swift` cloned from
-`RegistryClient.swift`; delete `LoroProtocol.swift` once s2 dies. Shared framing test
-vectors across Rust/TS/Swift (registry precedent). Estimate: 3–4 days, can trail
-desktop by a release.
+**C4. iOS** (`apps/ios/Cypher/Sync/`): `ChatRoomClient.swift`, modeled on
+`RegistryClient.swift`. Framing test vectors are shared across Rust/TS/Swift (registry
+precedent).
 
 ---
 
-## Migration + whale healing
+## Doc lineage
 
-The healing insight: **wedged s2 rooms are never repaired — they are bypassed.** The
-host's local doc is the source of truth; the wedged DO simply stops receiving traffic
-and ages out. This turns the incident-recovery problem into the migration problem.
+**M1. Lineage epoch.** Every chat2 doc carries `meta.epoch = 2` (thin docs: summaries
+in the doc, full payloads in the A2 sidecar or the host's run journal). The one-time
+epoch rebuild that converted fat s2 docs during the cutover was removed after 0.3.41,
+together with the s2 rooms themselves.
 
-**M1. Epoch rebuild (the healing step).** On first chat2 seed, the host does not
-upload its fat doc — it **rebuilds a thin one**: fold every entry, strip outputs/diffs
-to A1 summaries, upload the full texts it already holds to the A2 sidecar (existing
-whale outputs stay viewable!), write fresh Loro doc with `meta.epoch = 2`. The
-1 MB whale becomes ~160 KB with zero information loss. Commands: copy only unresolved
-ledger entries (dedupe via `evaluate_command` + the mark-before-execute
-`processed_commands` table protects against re-execution).
+**M2. Room generation.** Registry chat rows carry a `roomGen` field (per-field HLC LWW
+like everything else). Every chat is created with `roomGen: 2`; iOS connects a chat's
+room only when the row says 2. Desktop hosts open every chat as chat2, including rows
+that still say 1 or have no row yet.
 
-**M2. Cutover signal.** The registry chat row gains a `roomGen` field (per-field HLC
-LWW like everything else): absent/1 = s2, 2 = chat2. The host flips it in the same
-breath as seeding. Devices dial the room the registry names. No dual-write: at current
-fleet scale (auto-updated within hours) a stale client seeing a frozen s2 doc until it
-updates is acceptable; the field makes the cutover per-chat and instantly revertible.
-
-**M3. Rebuild-vs-lineage on other devices.** A device opening a `roomGen: 2` chat whose
-local doc has `epoch < 2` (or no doc): discard local doc **after** re-queueing any of
-its own unresolved commands as fresh entries in the new doc, then adopt the chat2
-checkpoint. Keep the old snapshot row (suffixed doc id, registry-migration precedent)
-for rollback. Idempotent: epoch check makes re-entry a no-op.
-
-**M4. Ordering.**
-1. Release N: Workstream A (strip + sidecar). New sessions stop growing; nothing else
-   changes. Bake ~2–3 days on the fleet.
-2. Release N+1: B + C behind `roomGen`. Hosts migrate chats lazily — on next open or
-   next command — not in a thundering herd. Wedged whales (the chats users actually
-   notice) migrate the moment the user touches them: open → host rebuilds → seeds
-   chat2 → flips registry → every device loads a 160 KB doc from a table-read DO.
-3. s2 rooms: orphaned like ws3 before them. Nightly R2 backups already exist for
-   forensics; delete the route after a deprecation window.
-4. iOS in the following release; until then iOS reads `roomGen: 2` chats via the tail
-   sidecar (read-only fallback it already has for thin clients) — or gate the flip on
-   fleet capability if that's not acceptable.
-
-**M5. Edge cases.**
-- Host retired/dead, other devices hold the doc: first owner device to open the chat
-  performs the seed (claim-on-first-seed; floor-monotonic guard makes a race benign —
-  worst case two identical rebuilds, second checkpoint wins).
-- No device holds the doc (only R2 backup of the wedged s2 room): operator path —
-  extend `examples/doc_surgery.rs` to rebuild a thin doc from a backup blob and seed
-  chat2 manually. Expected count: single digits.
-- Mid-migration crash: seeding is (rebuild locally → POST checkpoint → flip registry).
-  Each step idempotent; a crash before the flip leaves the chat on s2, retried next open.
-
-**M6. Immediate relief (optional, pre-chat2).** For currently-wedged chats where the
-user can't wait a release cycle: `POST /reset-log` on the s2 room + host re-push works
-today but re-uploads the fat doc and will re-wedge. Only worth doing per-chat on
-explicit request; the real healing is M1.
-
----
-
-## Observability / acceptance
-
-- `cypher sync` gains per-chat `cursor / headSeq / floorLag / pendingPushes`.
-- Alert-shaped stat: any room with `headSeq - checkpointSeq` bytes > 2 MB or
-  checkpoint age > 7 days (the passive failure mode this design trades into — make it
-  visible from day one; silent truncation of the old wedge class must not become
-  silent growth of a new one).
-- e2e: extend `scripts/e2e-smoke.sh` — two engines, chat2 room, kill/rejoin mid-push,
-  cursor resume, checkpoint-skip via frontier match, 1 MB fixture load under
-  `tc`-throttled 1.2 Mbps (load must complete and be Range-resumable).
-- Exit criterion mirroring the registry migration: `churn_stays_bounded` equivalent —
-  N days of streaming on a chat2 room, rows never exceed the checkpoint threshold ×2.
-
-## Sequencing summary
-
-| Step | What | Size |
-|---|---|---|
-| 1 | A: strip outputs/diffs + sidecar | 2–3 d |
-| 2 | B: ChatRoom DO + tests | 3–4 d |
-| 3 | C: Rust client, store migration, host duties | 4–5 d |
-| 4 | M: epoch rebuild, roomGen cutover, e2e | 2–3 d |
-| 5 | iOS client | 3–4 d (trails) |
-
-Roughly three weeks end-to-end with bake time, front-loaded so the bleeding (new
-whales) stops in the first release.
+**M3. Rebuild-vs-lineage on other devices.** A device opening a chat whose local doc
+has `epoch < 2` discards that doc **after** re-queueing any of its own unresolved
+commands as fresh entries, then adopts the chat2 checkpoint. The old snapshot row is
+kept under a suffixed doc id. Importing it instead would duplicate every message,
+because the two Loro histories are unrelated.

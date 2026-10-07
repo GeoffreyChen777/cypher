@@ -1,7 +1,6 @@
-//! Registry row shapes shared with [`crate::registry`]: the materialized
-//! state (`read_all`), delete-cascade results, and the doc-resident row
-//! decoders (epoch-millis timestamps) that turn stored rows into
-//! `cypher_proto` entities.
+//! Registry row shapes: the materialized state (`read_all`), delete-cascade
+//! results, and the doc-resident row decoders (epoch-millis timestamps) that
+//! turn stored rows into `cypher_proto` entities.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

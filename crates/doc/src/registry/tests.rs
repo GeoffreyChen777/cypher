@@ -530,7 +530,7 @@ fn session_throughput_syncs_and_clears_with_the_turn() {
 /// status row itself must survive.
 #[test]
 fn malformed_context_usage_keeps_the_session_row() {
-    let raw: crate::workspace::RawSession = serde_json::from_value(json!({
+    let raw: super::rows::RawSession = serde_json::from_value(json!({
         "chatId": "chat-1",
         "deviceId": "dev-a",
         "status": "idle",

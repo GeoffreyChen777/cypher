@@ -42,8 +42,8 @@ engine B ── RegistryDoc ── RegistryClient ──────────
   mirrored 1:1 in Rust).
 - **RegistryDoc** (`crates/doc/src/registry.rs`): the client-side table. Authoritative rows
   (server truth) + a pending-op queue (offline writes, replayed as an overlay for reads).
-  Typed API is a drop-in for the old `WorkspaceDoc`. Serialized whole into `DocsStore`
-  (`registry1` snapshot row) — offline restarts keep full state, cursor, and queue.
+  Serialized whole into `DocsStore` (`registry1` snapshot row) — offline restarts keep
+  full state, cursor, and queue.
 - **RegistryClient** (`crates/sync/src/registry.rs`): WS transport — hello/cursor handshake,
   push/ack, rows broadcasts, presence, probe/redial liveness (same deaf-socket discipline
   as `RoomClient`), reconnect with backoff. Fills the same `RoomStatsSnapshot` the

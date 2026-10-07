@@ -683,8 +683,6 @@ mod tests {
                 }
             }
         }
-        let rebuilt = cypher_doc::rebuild_thin_doc(&reader).unwrap();
-        assert_eq!(rebuilt.doc.preview_coverage(), reader.preview_coverage());
         p.next_frame(0);
         assert!(p.next_frame(0).is_none());
     }

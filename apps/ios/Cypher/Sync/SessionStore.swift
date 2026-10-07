@@ -7,11 +7,11 @@
 // same id.
 //
 // The registry names the room generation (M2): the store connects only once
-// the chat row says roomGen 2. A gen-1 chat renders nothing and waits for
-// the host's migration sweep to flip it — the local doc is always the chat2
-// lineage; a cached pre-chat2 snapshot is never imported (unrelated Loro
-// histories would duplicate every message), only mined for our own pending
-// commands (M3) and left on disk as rollback.
+// the chat row says roomGen 2; a gen-1 row (a pre-chat2 chat that was never
+// migrated) renders nothing. The local doc is always the chat2 lineage; a
+// cached pre-chat2 snapshot is never imported (unrelated Loro histories would
+// duplicate every message), only mined for our own pending commands (M3) and
+// left on disk as rollback.
 
 import Foundation
 import Loro
@@ -153,8 +153,7 @@ final class SessionStore {
     }
 
     /// Registry projection hook (AppModel forwards the chat row's roomGen).
-    /// A gen-1 store connects the moment the host's migration sweep flips
-    /// the row.
+    /// A gen-1 store connects if the row is ever raised to 2.
     func updateRoomGen(_ gen: Int?) {
         let gen = gen ?? 1
         if gen > roomGen { roomGen = gen }

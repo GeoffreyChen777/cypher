@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use cypher_proto::{Chat, ChatConfig, Device, Session, Space};
 
 use crate::schema::DocError;
-use crate::workspace::{DeletedDevice, DeletedSpace, WorkspaceState};
+
+mod rows;
+pub use rows::{DeletedDevice, DeletedSpace, WorkspaceState};
 
 /// Row kinds — the four sidebar tables.
 pub const KIND_DEVICES: &str = "devices";
@@ -685,7 +687,7 @@ impl RegistryDoc {
         self.overlay_row(kind, id).is_some()
     }
 
-    // ── typed API (the WorkspaceDoc surface) ────────────────────────────────
+    // ── typed API ───────────────────────────────────────────────────────────
 
     /// Upsert a full device row (writer discipline: callers pass their OWN device).
     pub fn upsert_device(&mut self, device: &Device) -> Result<(), DocError> {
@@ -764,7 +766,7 @@ impl RegistryDoc {
 
     pub fn read_devices(&self) -> Result<Vec<Device>, DocError> {
         let mut devices: Vec<Device> = self
-            .read_kind::<crate::workspace::RawDevice>(KIND_DEVICES)
+            .read_kind::<rows::RawDevice>(KIND_DEVICES)
             .into_iter()
             .map(Device::from)
             .collect();
@@ -795,13 +797,13 @@ impl RegistryDoc {
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, DocError> {
         Ok(self
             .overlay_row(KIND_SPACES, space_id)
-            .and_then(|row| row_to::<crate::workspace::RawSpace>(&row))
+            .and_then(|row| row_to::<rows::RawSpace>(&row))
             .map(Space::from))
     }
 
     pub fn read_spaces(&self) -> Result<Vec<Space>, DocError> {
         let mut spaces: Vec<Space> = self
-            .read_kind::<crate::workspace::RawSpace>(KIND_SPACES)
+            .read_kind::<rows::RawSpace>(KIND_SPACES)
             .into_iter()
             .map(Space::from)
             .collect();
@@ -1016,13 +1018,13 @@ impl RegistryDoc {
     pub fn chat(&self, chat_id: &str) -> Result<Option<Chat>, DocError> {
         Ok(self
             .overlay_row(KIND_CHATS, chat_id)
-            .and_then(|row| row_to::<crate::workspace::RawChat>(&row))
+            .and_then(|row| row_to::<rows::RawChat>(&row))
             .map(Chat::from))
     }
 
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
         let mut chats: Vec<Chat> = self
-            .read_kind::<crate::workspace::RawChat>(KIND_CHATS)
+            .read_kind::<rows::RawChat>(KIND_CHATS)
             .into_iter()
             .map(Chat::from)
             .collect();
@@ -1052,23 +1054,6 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("archived", json!(archived))]),
-        );
-        Ok(true)
-    }
-
-    /// Flip the chat's sync room generation (docs/chat2-sync.md M2). The
-    /// host calls this in the same breath as seeding the chat2 checkpoint;
-    /// LWW per-field like every registry write, so the flip is per-chat and
-    /// instantly revertible by writing 1 back.
-    pub fn set_chat_room_gen(&mut self, chat_id: &str, room_gen: u32) -> Result<bool, DocError> {
-        if !self.row_exists(KIND_CHATS, chat_id) {
-            return Ok(false);
-        }
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("roomGen", json!(room_gen))]),
         );
         Ok(true)
     }
@@ -1255,7 +1240,7 @@ impl RegistryDoc {
 
     pub fn read_sessions(&self) -> Result<Vec<Session>, DocError> {
         let mut sessions: Vec<Session> = self
-            .read_kind::<crate::workspace::RawSession>(KIND_SESSIONS)
+            .read_kind::<rows::RawSession>(KIND_SESSIONS)
             .into_iter()
             .map(Session::from)
             .collect();
