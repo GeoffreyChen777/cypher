@@ -19,7 +19,16 @@ enum RowKind {
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
     case errorChip(message: String)
+    /// The toggle over an append-mode translation's original answer. The
+    /// `rows` that follow it — the original's blocks and the separator rule —
+    /// are dropped while it is closed, the default (transcript.rs
+    /// `TranslationOriginal`; see `foldTranslationOriginals`).
+    case translationOriginal(rows: Int)
 }
+
+/// What an append-mode translation puts between the agent's answer and its
+/// translation (quote_origin.rs `APPEND_SEPARATOR`).
+let translationAppendSeparator = "\n\n---\n\n"
 
 struct ToolItem: Hashable {
     /// The tool part's id — Pi's call id, which carries the nesting.
@@ -141,7 +150,7 @@ enum TranscriptRowBuilder {
         if entry.role == .user {
             // One bubble row per user message.
             let text = entry.parts.compactMap { part -> String? in
-                if case .text(_, let t) = part { return t }
+                if case .text(_, let t, _) = part { return t }
                 return nil
             }.joined(separator: "\n")
             guard !text.isEmpty else { return }
@@ -178,7 +187,7 @@ enum TranscriptRowBuilder {
                 pendingTools.append(ToolItem(id: partId, call: call, isError: isError, resolved: resolved))
                 if ix == lastPartIx { flushTools(lastIx: ix) }
 
-            case .text(let partId, let text):
+            case .text(let partId, let text, let agentText):
                 flushTools(lastIx: ix - 1)
                 guard !text.isEmpty else { continue }
                 let key = "\(entry.id)#\(partId)"
@@ -186,7 +195,20 @@ enum TranscriptRowBuilder {
                 let isLiveTail = streaming && ix == lastPartIx
                 let blocks = parse(text: text, key: key, streaming: isLiveTail,
                                    parsers: &parsers, completed: &completed)
-                for run in proseRuns(blocks, liveTail: isLiveTail) {
+                let runs = proseRuns(blocks, liveTail: isLiveTail)
+                // Block rows keep their ids either way, so the toggle only
+                // ever hides or shows rows. The rule closing the original is
+                // never prose, so no run straddles the fold.
+                if let agentText,
+                   let folded = appendedOriginalBlocks(text: text, agent: agentText, blocks: blocks) {
+                    let hidden = runs.filter { $0.lowerBound < folded }.count
+                    rows.append(TranscriptRow(id: "\(key).original", version: UInt64(hidden) << 1,
+                                              turnStart: first,
+                                              kind: .translationOriginal(rows: hidden),
+                                              entryId: entry.id, timestamp: nil, partKey: nil))
+                    first = false
+                }
+                for run in runs {
                     let lastOfPart = run.upperBound == blocks.count
                     let live = isLiveTail && lastOfPart
                     let stamped = settled && ix == lastPartIx && lastOfPart
@@ -235,6 +257,57 @@ enum TranscriptRowBuilder {
             }
         }
         flushTools(lastIx: lastPartIx)
+    }
+
+    /// transcript.rs `appended_original_blocks`: how many top-level blocks of
+    /// an append-mode translation belong to the folded original — its own
+    /// blocks plus the separator rule. nil unless `text` is `agent`, the
+    /// separator and a translation that has begun; until then (and whenever
+    /// the rendering doesn't parse as expected, e.g. an original ending
+    /// inside an open code fence) the text shows whole.
+    static func appendedOriginalBlocks(text: String, agent: String, blocks: [TopBlock]) -> Int? {
+        let rest = text.utf8.dropFirst(agent.utf8.count)
+        guard text.utf8.starts(with: agent.utf8),
+              rest.starts(with: translationAppendSeparator.utf8) else { return nil }
+        // Blocks carry source lines, not offsets: the original ends on line
+        // `agentLines`, so the first block past it must be the rule.
+        let agentLines = agent.utf8.reduce(1) { $1 == UInt8(ascii: "\n") ? $0 + 1 : $0 }
+        guard let rule = blocks.firstIndex(where: { $0.startLine > agentLines }),
+              rule > 0, rule + 1 < blocks.count,
+              case .rule = blocks[rule].block else { return nil }
+        return rule + 1
+    }
+
+    /// transcript.rs `fold_translation_originals`: drop the rows each CLOSED
+    /// toggle covers. `open` holds the ids of toggles the user expanded;
+    /// every other toggle stays collapsed. The row after a fold re-takes its
+    /// gap from the toggle it now follows.
+    static func foldTranslationOriginals(_ rows: [TranscriptRow], open: Set<String>) -> [TranscriptRow] {
+        let hasToggle = rows.contains {
+            if case .translationOriginal = $0.kind { return true }
+            return false
+        }
+        guard hasToggle else { return rows }
+        var folded: [TranscriptRow] = []
+        folded.reserveCapacity(rows.count)
+        var hide = 0
+        var regap = false
+        for var row in rows {
+            if hide > 0 {
+                hide -= 1
+                continue
+            }
+            if regap {
+                row.topGap = gap(for: row, previous: folded.last, isFirst: folded.isEmpty)
+                regap = false
+            }
+            folded.append(row)
+            if case .translationOriginal(let hidden) = row.kind, !open.contains(row.id) {
+                hide = hidden
+                regap = hidden > 0
+            }
+        }
+        return folded
     }
 
     /// A part's blocks in rows: each run of consecutive prose blocks

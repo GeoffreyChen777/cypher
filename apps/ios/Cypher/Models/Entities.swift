@@ -232,14 +232,17 @@ struct RenderToolCall: Hashable {
 }
 
 enum MessagePart: Hashable, Identifiable {
-    case text(id: String, text: String)
+    /// `agentText`: with Pi translation on, the agent's own words when `text`
+    /// shows a translation (doc parts.rs `agent_text`). An append-mode
+    /// rendering is `agentText`, a rule, then the translation.
+    case text(id: String, text: String, agentText: String? = nil)
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
     case error(id: String, message: String)
 
     var id: String {
         switch self {
-        case .text(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
             return id
         }
     }

@@ -381,6 +381,9 @@ final class DemoDataset {
                 ], createdAt: now - 380_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
         case "chat-tabs":
+            // m4 is an append-mode translation (the agent's answer, the rule,
+            // then the translation): its original folds behind "Show original".
+            let answer = "Yes. The header stays neutral; only the failure marker uses `danger`, in light and dark mode alike."
             return [
                 MessageEntry(id: "m1", role: .user, parts: [
                     .text(id: "t0", text: "Tool group headers turn red when any child fails — they should stay quiet, chips carry the error."),
@@ -397,7 +400,9 @@ final class DemoDataset {
                     .text(id: "t0", text: "浅色模式下，失败提示也保持这个规则吗？"),
                 ], createdAt: now - 900_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
                 MessageEntry(id: "m4", role: .assistant, parts: [
-                    .text(id: "t0", text: "是的。标题保持中性色，只有失败标记使用 `danger`，浅色和深色模式一致。"),
+                    .text(id: "t0", text: answer + translationAppendSeparator
+                            + "是的。标题保持中性色，只有失败标记使用 `danger`，浅色和深色模式一致。",
+                          agentText: answer),
                 ], createdAt: now - 850_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
                 MessageEntry(id: "m5", role: .user, parts: [
                     .text(id: "t0", text: "再确认一下，每轮对话之间留白更大。"),

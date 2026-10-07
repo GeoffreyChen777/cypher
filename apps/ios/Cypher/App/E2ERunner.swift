@@ -109,7 +109,7 @@ enum E2ERunner {
             }
             if let big {
                 let bytes = big.flatMap(\.parts).reduce(0) { acc, part in
-                    if case .text(_, let t) = part { return acc + t.count }
+                    if case .text(_, let t, _) = part { return acc + t.count }
                     return acc
                 }
                 log("OK big-doc backfill: \(big.count) entries, ~\(bytes / 1024)KB text")

@@ -483,7 +483,7 @@ final class AppModel {
         demo.sessionStore(for: id).setEntries(copied)
         if isUser {
             let text = anchor.parts.compactMap { part -> String? in
-                if case .text(_, let t) = part { return t }
+                if case .text(_, let t, _) = part { return t }
                 return nil
             }.joined(separator: "\n")
             pendingDrafts[id] = parseUserMessageImages(text).text

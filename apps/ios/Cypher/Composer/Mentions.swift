@@ -561,9 +561,10 @@ enum SessionReferences {
             var lines: [String] = []
             for part in entry.parts {
                 switch part {
-                case .text(_, let text):
+                case .text(_, let text, let agentText):
                     let text = entry.role == .user ? parseUserMessageImages(text).text : text
-                    if !isBlank(text) { lines.append(text) }
+                    let line = agentText ?? text
+                    if !isBlank(line) { lines.append(line) }
                 case .tool(_, let call, let isError, _):
                     lines.append(isError ? "[tool: \(toolLabel(call.tag)) failed]" : "[tool: \(toolLabel(call.tag))]")
                 case .error(_, let message):

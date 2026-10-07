@@ -32,7 +32,7 @@ final class PreviewNativeInteropTests: XCTestCase {
         var sawPreviewAheadOfDoc = false
         let finished = await wait {
             sawPreview = sawPreview || store.entries.flatMap(\.parts).contains {
-                if case .text(_, let t) = $0 { return t.contains("实时预览") }; return false
+                if case .text(_, let t, _) = $0 { return t.contains("实时预览") }; return false
             }
             let durableIDs = Set((SessionStore.decodeEntries(from: store.doc) ?? []).map(\.id))
             for entry in store.entries where !durableIDs.contains(entry.id) && entry.role == .assistant {
@@ -40,11 +40,11 @@ final class PreviewNativeInteropTests: XCTestCase {
                 XCTAssertNotEqual(store.lastEntryId, entry.id, "command basedOn must never use a preview-only entry")
             }
             return store.entries.contains { e in e.id != "seed" && e.role == .assistant && e.status == .complete
-                && e.parts.contains { if case .text(_, let t) = $0 { return t == expected }; return false } }
+                && e.parts.contains { if case .text(_, let t, _) = $0 { return t == expected }; return false } }
         }
         XCTAssertTrue(finished); XCTAssertTrue(sawPreview); XCTAssertTrue(sawPreviewAheadOfDoc)
         let durable = SessionStore.decodeEntries(from: store.doc) ?? []
-        XCTAssertFalse(durable.flatMap(\.parts).contains { if case .text(_, let t) = $0 { return t.contains("实时预览") }; return false })
+        XCTAssertFalse(durable.flatMap(\.parts).contains { if case .text(_, let t, _) = $0 { return t.contains("实时预览") }; return false })
         let receipt = try JSONSerialization.data(withJSONObject: ["passed": finished && sawPreview && sawPreviewAheadOfDoc, "sawPreview": sawPreview, "previewAheadOfDurable": sawPreviewAheadOfDoc])
         try receipt.write(to: control.deletingPathExtension().appendingPathExtension("ios.json"), options: .atomic)
     }

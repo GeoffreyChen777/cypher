@@ -18,7 +18,7 @@ extension PreviewProjection {
             if interrupted {
                 entries[i].parts.append(.text(id: "preview-status", text: "\n\n> 暂存预览 · 正在显示已同步内容，等待预览确认"))
             } else if covered {
-                let current = entries[i].parts.compactMap { part -> String? in if case .text(_, let t) = part { return t }; return nil }.joined(separator: "\n")
+                let current = entries[i].parts.compactMap { part -> String? in if case .text(_, let t, _) = part { return t }; return nil }.joined(separator: "\n")
                 entries[i].parts = [.text(id: "preview-text", text: notice + current)]
             } else { entries[i].parts = parts; entries[i].status = .streaming }
         } else {

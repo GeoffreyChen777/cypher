@@ -35,7 +35,7 @@ final class PreviewProjectionTests: XCTestCase {
         p.disconnect(); XCTAssertTrue(p.interrupted)
         let interrupted = p.overlay(durable, coverage: nil)[0]
         XCTAssertEqual(interrupted.parts.first, durable[0].parts.first)
-        if case .text(_, let text) = interrupted.parts.last! { XCTAssertTrue(text.contains("暂存预览")) }
+        if case .text(_, let text, _) = interrupted.parts.last! { XCTAssertTrue(text.contains("暂存预览")) }
         XCTAssertNil(p.retry(chatId: "c", cursor: 0))
         XCTAssertTrue(p.expire(now: Date().addingTimeInterval(301)))
         XCTAssertEqual(p.overlay(durable, coverage: nil), durable)

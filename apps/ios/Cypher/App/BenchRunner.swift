@@ -80,9 +80,9 @@ enum BenchRunner {
 
         // Stage 4 — revision-gated cache: the scroll-frame path.
         let cache = TranscriptBuilderCache()
-        _ = cache.rows(revision: 1, entries: entries, pendingSends: [])
+        _ = cache.rows(revision: 1, entries: entries, pendingSends: [], openOriginals: [])
         let cached = best(5) {
-            _ = cache.rows(revision: 1, entries: entries, pendingSends: [])
+            _ = cache.rows(revision: 1, entries: entries, pendingSends: [], openOriginals: [])
         }
 
         log("--- \(turns) turns · \(entries.count) entries · \(rowCount) rows · \(bytes / 1024) KB snapshot")

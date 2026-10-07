@@ -446,7 +446,8 @@ final class SessionStore {
               let kind = m["kind"]?.stringValue else { return nil }
         switch kind {
         case "text":
-            return .text(id: id, text: m["text"]?.stringValue ?? "")
+            return .text(id: id, text: m["text"]?.stringValue ?? "",
+                         agentText: m["agentText"]?.stringValue)
         case "tool":
             guard let callMap = m["call"]?.mapValue else { return nil }
             let tag = callMap["kind"]?.stringValue ?? "unknown"

@@ -175,7 +175,7 @@ final class DesktopParityTests: XCTestCase {
         // `len` is the part's UTF-8 byte length (Rust String::len).
         try feed.apply(["append": [["entry": "b", "part": "t0", "text": "好", "len": 6]], "count": 2])
         XCTAssertEqual(feed.messages.map(\.id), ["a", "b"])
-        guard case .text(_, let text) = feed.messages[1].parts[0] else { return XCTFail() }
+        guard case .text(_, let text, _) = feed.messages[1].parts[0] else { return XCTFail() }
         XCTAssertEqual(text, "你好")
         try feed.apply(["upsert": [["entry": entry("z", "head")]], "remove": ["a"], "count": 2])
         XCTAssertEqual(feed.messages.map(\.id), ["z", "b"])
