@@ -14,7 +14,7 @@
 //!   messages rebuild (the anti-"streaming stutter" trick);
 //! - row-set changes diff by (id, version) into one minimal `splice`.
 //!
-//! Stick-to-bottom is a velocity spring (mugen §1e, the same shape as
+//! Stick-to-bottom is a velocity spring (ported from mugen, the same shape as
 //! stackblitz's use-stick-to-bottom): while pinned, a per-frame stepper glides
 //! the viewport toward the list end with a feed-forward term tracking the
 //! smoothed target growth, so 120ms doc commits read as a continuous glide

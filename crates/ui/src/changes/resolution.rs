@@ -3,7 +3,7 @@
 use super::*;
 
 /// The diff shown for a chat: `checkout_id` match first, then device+cwd,
-/// then cwd alone (§1.11).
+/// then cwd alone.
 pub fn resolve_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
     if let Some(checkout_id) = chat.checkout_id.as_deref()
         && let Some(diff) = diffs.iter().find(|d| d.checkout_id == checkout_id)

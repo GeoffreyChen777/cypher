@@ -531,7 +531,7 @@ impl Render for DragGhost {
 /// wrapper that mounts/remounts (route swap, or an ancestor animation keyed by
 /// a fresh epoch) silently REPLAYS the tween from t=0. Manual evaluation keeps
 /// the element tree's shape constant: a finished or stale tween is exactly the
-/// steady state, no matter how the tree around it remounts (round-6 §1–3).
+/// steady state, no matter how the tree around it remounts.
 #[derive(Debug, Clone, Copy)]
 struct WidthTween {
     from: f32,
@@ -1130,7 +1130,7 @@ pub struct Shell {
     data_dir: PathBuf,
     settings: UiSettings,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
-    /// for the §1.6 resort glide.
+    /// for the resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
     /// Per-key paint offsets of the resort in flight, keyed elements restart on
     /// `resort_epoch` bumps.

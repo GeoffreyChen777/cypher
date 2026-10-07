@@ -252,7 +252,7 @@ impl Composer {
     /// Queue a Run (or Steer) doc command with an optimistic echo. New chats
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
-    /// reasoning / options on the Run request itself (§1.7).
+    /// reasoning / options on the Run request itself.
     fn send(&mut self, text: String, steer: bool, cx: &mut Context<Self>) {
         self.send_with(text, steer, SendDraft::Take, cx);
     }

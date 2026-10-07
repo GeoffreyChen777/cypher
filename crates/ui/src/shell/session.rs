@@ -2149,7 +2149,7 @@ impl Shell {
         )
     }
 
-    /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
+    /// The "↓ Scroll to bottom" pill: a LABELED rounded-full
     /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
     /// with a hairline — horizontally centered over the transcript column and
     /// floating a small gap above the composer. It hangs 14px below the

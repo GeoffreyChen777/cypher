@@ -278,11 +278,11 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
-/// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
+/// Terminal tab drag-reorder sliding transforms: 150ms.
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
-/// Diff-pane per-file collapse: 180ms height (§1.11).
+/// Diff-pane per-file collapse: 180ms height.
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
-/// Diff-pane chevron rotate: 200ms (§1.11; approximated as a crossfade — gpui
+/// Diff-pane chevron rotate: 200ms (approximated as a crossfade — gpui
 /// divs have no rotation transform at the pinned rev, same caveat as scale).
 pub const CHEVRON: MotionSpec = MotionSpec::new(200, EASE);
 /// Rail-tick / scroll-to-row glide: 500ms ease-in-out over the whole distance

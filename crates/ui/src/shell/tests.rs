@@ -1406,7 +1406,7 @@ fn cluster_buttons_start_per_platform() {
     assert_eq!(cluster_buttons_start(true, true), 12.0);
 }
 
-// ---- sidebar resort FLIP diff (§1.6) ----
+// ---- sidebar resort FLIP diff ----
 
 fn keys(list: &[(&str, f32)]) -> Vec<(String, f32)> {
     list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
@@ -1459,7 +1459,7 @@ fn resort_offsets_ignore_added_and_removed_keys() {
 
 #[test]
 fn resort_glide_spec_matches_original() {
-    // §1.6: 260ms cubic-bezier(0.22, 1, 0.36, 1).
+    // 260ms cubic-bezier(0.22, 1, 0.36, 1).
     assert_eq!(RESORT.duration_ms, 260);
     assert_eq!(RESORT.curve, motion::EASE_RESORT);
 }

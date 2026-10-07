@@ -288,7 +288,7 @@ impl Transcript {
                 if away && distance > AT_BOTTOM_PX {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
-                    // scroll handler (mugen §1e: interrupt from input, not
+                    // scroll handler (as in mugen: interrupt from input, not
                     // scrollbar position).
                     this.pinned = false;
                     this.spring.reset();

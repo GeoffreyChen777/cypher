@@ -236,7 +236,7 @@ pub fn attachment_strip_height(images: usize, files: usize, inner_width: f32) ->
 /// only `transition-colors`), so this is a native nicety: ONE committed flip
 /// starts exactly one 180ms ease-out morph ([`motion::COLLAPSE`], the same
 /// manual-drive pattern as shell.rs `WidthTween` — never `with_animation`,
-/// whose element-id keying replays tweens on remount, round-6 §1–3).
+/// whose element-id keying replays tweens on remount).
 ///
 /// The morph animates the pill's COMMITTED height: the flip commits its final
 /// layout immediately (the input entity never remounts — the caret survives,

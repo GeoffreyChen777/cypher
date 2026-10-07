@@ -587,7 +587,7 @@ pub struct Composer {
     style_relayout_passes: u8,
     state: Entity<AppState>,
     input: Entity<ComposerInput>,
-    /// Composer actions row: repo/branch/harness-model/traits (§1.7).
+    /// Composer actions row: repo/branch/harness-model/traits.
     /// Shared with the shell's new-session canvas, which renders the
     /// device/project target selectors ([`Pickers::render_target_selectors`]).
     pickers: Entity<Pickers>,

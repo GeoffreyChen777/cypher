@@ -42,7 +42,7 @@ pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_MAX: f32 = 1368.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 
-/// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
+/// Terminal panel height bounds: 160px … 55% of the viewport. The
 /// viewport-relative cap applies at runtime; the absolute cap here only heals
 /// hand-edited files.
 pub const TERMINAL_MIN_HEIGHT: f32 = 160.0;
@@ -274,7 +274,7 @@ impl Default for UiSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Keymap (customizable shortcuts, §1.4)
+// Keymap (customizable shortcuts)
 // ---------------------------------------------------------------------------
 
 /// The rebindable app shortcuts.

@@ -1,6 +1,6 @@
 //! The terminal panel: session-scoped tabs over engine PTYs.
 //!
-//! Feature-inventory §1.10: tabs are per selected chat and restored on return
+//! Tabs are per selected chat and restored on return
 //! (emulators — and their server-side PTYs — survive navigation; detach is not
 //! close). Tab bar supports pointer drag-reorder with 150 ms sliding
 //! transforms, middle-click close, and a "+" new-tab button; Cmd/Ctrl+J
@@ -60,7 +60,7 @@ pub fn init(cx: &mut App) {
 // Pure logic (unit-tested)
 // ---------------------------------------------------------------------------
 
-/// Panel height clamp: 160 px … 55 % of the viewport (§1.10).
+/// Panel height clamp: 160 px … 55 % of the viewport.
 pub fn clamp_terminal_height(height: f32, viewport_h: f32) -> f32 {
     let max = (viewport_h * TERMINAL_MAX_VH).max(TERMINAL_MIN_HEIGHT);
     if height.is_finite() {
@@ -147,7 +147,7 @@ fn is_active_tab(tabs: &ChatTabs, key: u64) -> bool {
     tabs.tabs.get(tabs.active).is_some_and(|t| t.key == key)
 }
 
-/// The `[process exited N]` trailer, dimmed (§1.10).
+/// The `[process exited N]` trailer, dimmed.
 pub fn exit_message(code: i32) -> Vec<u8> {
     format!("\r\n\x1b[90m[process exited {code}]\x1b[0m\r\n").into_bytes()
 }
@@ -1418,7 +1418,7 @@ impl TerminalPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_tab(&chat_select, ix, cx);
                             }))
-                            // Middle-click closes (§1.10).
+                            // Middle-click closes.
                             .on_mouse_down(
                                 MouseButton::Middle,
                                 cx.listener(move |this, _, window, cx| {

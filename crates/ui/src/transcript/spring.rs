@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Stick-to-bottom spring (mugen §1e — same constants as its DEFAULT_SPRING,
+// Stick-to-bottom spring (ported from mugen — same constants as its DEFAULT_SPRING,
 // which follows the shape of stackblitz/use-stick-to-bottom)
 // ---------------------------------------------------------------------------
 

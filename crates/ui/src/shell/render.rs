@@ -674,7 +674,7 @@ impl Shell {
     }
 
     /// Chat-mode sidebar: Cypher / Add project header, project-grouped session
-    /// cards (every host together), the notice strip, and the UserMenu (§1.6).
+    /// cards (every host together), the notice strip, and the UserMenu.
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
@@ -682,11 +682,11 @@ impl Shell {
         };
 
         // Keyed rows: (stable key, estimated height, element) — the key + height
-        // list drives the §1.6 resort FLIP diff below (attention-bucket
+        // list drives the resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
         let keyed: Vec<(String, f32, AnyElement)> = self.render_active_rows(theme, cx);
 
-        // Resort glide (§1.6 View Transitions parity): when the ORDER of a live
+        // Resort glide (View Transitions parity): when the ORDER of a live
         // list changes (new activity resort, grouping flip), surviving rows
         // glide from their old y to the new one — layout is already at the new
         // position; the offset is a paint-only relative inset animated to 0
@@ -1192,7 +1192,7 @@ impl Render for Shell {
             .unwrap_or_else(|| self.state.read(cx).gate());
 
         // Fullscreen hides the macOS traffic lights — reflow the control
-        // cluster with a 200ms ease-out tween (§1.1). A fullscreen transition
+        // cluster with a 200ms ease-out tween. A fullscreen transition
         // resizes the window, which re-renders us, so polling here is exact.
         let fullscreen = window.is_fullscreen();
         if self.fullscreen != Some(fullscreen) {
