@@ -7,7 +7,7 @@
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
-use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, ListOffset, SharedString, Task, div, prelude::*, px};
 use std::time::{Duration, Instant};
 
 use cypher_doc::{MessagePart, MessageRole, SessionMessageEntry};
@@ -117,6 +117,24 @@ pub fn active_tick(tick_rows: &[usize], top_row: usize) -> Option<usize> {
     match tick_rows.iter().rposition(|&row| row <= top_row) {
         Some(ix) => Some(ix),
         None => Some(0),
+    }
+}
+
+/// The prompt row ↑ (`forward == false`) or ↓ lands on. `rows` are the
+/// prompts' transcript rows in order; `top` is the viewport top as (row, px
+/// into that row). ↑ takes the nearest prompt that starts above the top — the
+/// one you are partway into first, then the one before it; ↓ takes the first
+/// prompt that starts below the top. A prompt resting exactly at the top (a
+/// landed step) counts as neither, so repeated presses keep moving.
+pub fn prompt_step(rows: &[usize], top: (usize, f32), forward: bool) -> Option<usize> {
+    let (row, offset) = top;
+    if forward {
+        rows.iter().copied().find(|&r| r > row)
+    } else {
+        rows.iter()
+            .copied()
+            .rev()
+            .find(|&r| r < row || (r == row && offset > 1.0))
     }
 }
 
@@ -240,6 +258,23 @@ fn scroll_trace_enabled() -> bool {
 // ---------------------------------------------------------------------------
 
 impl Transcript {
+    /// The user's prompts paired with their transcript rows (user rows share
+    /// the entry id), in order: the rail's ticks, and the stops ↑/↓ step
+    /// between.
+    pub(crate) fn prompt_rows(&self, cx: &App) -> Vec<(RailTick, usize)> {
+        let state = self.state_entity().read(cx);
+        rail_ticks(&state.transcript, state.pending_echoes())
+            .into_iter()
+            .filter_map(|tick| {
+                let row = self
+                    .rows()
+                    .iter()
+                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
+                Some((tick, row))
+            })
+            .collect()
+    }
+
     /// Smooth-scroll the list so `target` sits at the viewport top, reusing the
     /// transcript scroll-task slot (any running stick/jump animation yields).
     ///
@@ -258,6 +293,9 @@ impl Transcript {
     /// - once the target row is measured the glide is pixel-exact.
     pub fn scroll_to_row(&mut self, target: usize, cx: &mut Context<Self>) {
         if motion::reduced_motion(cx) {
+            // No glide, but the same hand-off: releasing the pin and hold is
+            // what keeps the snap from being pulled straight back.
+            self.set_scroll_task(Task::ready(()));
             self.list_state().scroll_to(ListOffset {
                 item_ix: target,
                 offset_in_item: px(0.0),
@@ -419,22 +457,7 @@ impl Transcript {
         if !self.rail_enabled() {
             return gpui::Empty.into_any_element();
         }
-        let (entries, echoes) = {
-            let state = self.state_entity().read(cx);
-            (state.transcript.clone(), state.pending_echoes().to_vec())
-        };
-        let ticks = rail_ticks(&entries, &echoes);
-        // Map each tick to its transcript row (user rows share the entry id).
-        let pairs: Vec<(RailTick, usize)> = ticks
-            .into_iter()
-            .filter_map(|tick| {
-                let row = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
-                Some((tick, row))
-            })
-            .collect();
+        let pairs = self.prompt_rows(cx);
         // A minimap of one exchange is noise, not navigation — the original
         // rail hides below two marks (message-rail.tsx `marks.length < 2`).
         if pairs.len() < 2 {
@@ -711,6 +734,38 @@ mod tests {
         // Above the first tick row → first tick still active.
         assert_eq!(active_tick(&[3, 7], 1), Some(0));
         assert_eq!(active_tick(&[], 4), None);
+    }
+
+    #[test]
+    fn prompt_step_moves_off_a_landed_prompt() {
+        let rows = [0, 5, 9];
+        // Resting exactly on a prompt: ↑/↓ go to its neighbours.
+        assert_eq!(prompt_step(&rows, (5, 0.0), false), Some(0));
+        assert_eq!(prompt_step(&rows, (5, 0.0), true), Some(9));
+        // Sub-pixel drift still counts as resting on it.
+        assert_eq!(prompt_step(&rows, (5, 0.5), false), Some(0));
+    }
+
+    #[test]
+    fn prompt_step_up_returns_to_the_prompt_being_read_first() {
+        let rows = [0, 5, 9];
+        // Inside the reply after prompt 5: ↑ goes back to 5, not past it.
+        assert_eq!(prompt_step(&rows, (7, 0.0), false), Some(5));
+        // Partway into prompt 5's own row: ↑ re-aligns to it.
+        assert_eq!(prompt_step(&rows, (5, 30.0), false), Some(5));
+        // ↓ from inside a section goes to the next prompt.
+        assert_eq!(prompt_step(&rows, (7, 0.0), true), Some(9));
+        assert_eq!(prompt_step(&rows, (5, 30.0), true), Some(9));
+    }
+
+    #[test]
+    fn prompt_step_stops_at_the_ends() {
+        let rows = [2, 5];
+        assert_eq!(prompt_step(&rows, (2, 0.0), false), None);
+        assert_eq!(prompt_step(&rows, (0, 0.0), false), None);
+        assert_eq!(prompt_step(&rows, (5, 0.0), true), None);
+        assert_eq!(prompt_step(&rows, (8, 0.0), true), None);
+        assert_eq!(prompt_step(&[], (3, 0.0), true), None);
     }
 
     #[test]

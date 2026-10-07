@@ -33,9 +33,10 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, ListAlignment,
-    ListOffset, ListScrollEvent, ListState, ObjectFit, SharedString, StyledImage as _, StyledText,
-    Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
+    AnyElement, App, BorderStyle, ClipboardItem, Context, Entity, EventEmitter, KeyBinding,
+    ListAlignment, ListOffset, ListScrollEvent, ListState, ObjectFit, SharedString,
+    StyledImage as _, StyledText, Subscription, Task, TextRun, Window, actions, canvas, div, img,
+    list, prelude::*, px, quad,
 };
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
@@ -50,6 +51,20 @@ use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::{MonoStyled, Theme};
 use cypher_syntax::LanguageId as Lang;
+
+/// Key context of a transcript holding focus (a click into the chat history).
+pub const KEY_CONTEXT: &str = "Transcript";
+
+actions!(transcript, [PrevPrompt, NextPrompt]);
+
+/// Bind the transcript keymap: ↑/↓ step between the user's prompts while the
+/// chat history holds focus. Call at boot and on every keymap re-apply.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", PrevPrompt, Some(KEY_CONTEXT)),
+        KeyBinding::new("down", NextPrompt, Some(KEY_CONTEXT)),
+    ]);
+}
 
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
@@ -2175,6 +2190,13 @@ pub struct Transcript {
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
     scroll_anim: Option<Task<()>>,
+    /// Keyboard focus for the chat history: a click anywhere in it lands here,
+    /// so ↑/↓ ([`KEY_CONTEXT`]) step between prompts.
+    focus: gpui::FocusHandle,
+    /// The prompt row a ↑/↓ glide is heading to, and when it set off. Held
+    /// key-repeat steps on from here rather than from the mid-glide viewport,
+    /// which would keep re-targeting the same prompt.
+    prompt_nav: Option<(usize, Instant)>,
     /// MessageRail width gate (set by the shell from the container width).
     rail_enabled: bool,
     /// Selection scope this transcript paints into: the shared Transcript
@@ -2405,6 +2427,8 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
+            focus: cx.focus_handle(),
+            prompt_nav: None,
             rail_enabled,
             scope,
             embedded,
@@ -2726,7 +2750,60 @@ impl Transcript {
         // it) — scrolling back down re-arms the hold like any restick.
         self.release_own_turn_hold();
         self.pinned = false;
+        self.prompt_nav = None;
         self.scroll_anim = Some(task);
+    }
+
+    /// ↑/↓ on a focused transcript: glide to the previous/next prompt — the
+    /// rail's stops and the rail's glide. Past the last prompt, ↓ returns to
+    /// the live bottom.
+    fn step_prompt(&mut self, forward: bool, cx: &mut Context<Self>) {
+        // The attachment lightbox sits inside this context; keys are its own.
+        if self.attachment_preview.is_some() {
+            return;
+        }
+        let glide = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
+        let in_flight = self
+            .prompt_nav
+            .filter(|(_, started)| started.elapsed() < glide)
+            .map(|(row, _)| row);
+        let top = match in_flight {
+            Some(row) => (row, 0.0),
+            None => {
+                if forward && (self.is_glued() || self.distance_from_bottom() <= AT_BOTTOM_PX) {
+                    // Already at the end: nothing below can reach the top.
+                    if !self.pinned {
+                        self.jump_to_bottom(cx);
+                    }
+                    return;
+                }
+                // The glued anchor sits one viewport below the visible top;
+                // materialize it as the true top, as `scroll_to_row` does.
+                let viewport = f32::from(self.list.viewport_bounds().size.height);
+                if self.is_glued() && viewport > 0.0 {
+                    self.list.scroll_by(px(-(viewport + 0.5)));
+                }
+                let top = self.list.logical_scroll_top();
+                (top.item_ix, f32::from(top.offset_in_item))
+            }
+        };
+        let rows: Vec<usize> = self
+            .prompt_rows(cx)
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect();
+        match crate::rail::prompt_step(&rows, top, forward) {
+            Some(target) => {
+                self.scroll_to_row(target, cx);
+                self.prompt_nav = Some((target, Instant::now()));
+            }
+            None if forward => {
+                self.scroll_anim = None;
+                self.prompt_nav = None;
+                self.jump_to_bottom(cx);
+            }
+            None => {}
+        }
     }
 
     /// Give the viewport to the user/navigation without dropping the
@@ -6267,6 +6344,13 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
+            // A click anywhere in the chat history focuses it (gpui moves
+            // focus on mouse down); ⌘C still reaches the shell root's copy
+            // handler, an ancestor on the key dispatch path.
+            .track_focus(&self.focus)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &PrevPrompt, _, cx| this.step_prompt(false, cx)))
+            .on_action(cx.listener(|this, _: &NextPrompt, _, cx| this.step_prompt(true, cx)))
             // The main/side-chat rounded card owns the background. Keeping
             // this viewport transparent preserves that card's corner cutouts.
             // FIRST child ⇒ paints first: clears the frame's TRANSCRIPT
