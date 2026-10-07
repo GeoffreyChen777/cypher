@@ -1,43 +1,10 @@
 //! EngineRpc — the engine-side `RpcService`: sessions + docs + the workspace-doc
 //! entity surface.
 //!
-//! Methods (feature-inventory §2):
-//! - `ListHarnesses` → `[HarnessDescriptor]`
-//! - `ListModels {harness}` → `[Model]`
-//! - `QueueCommand {chatId, command}` → `{commandId}` (durable doc command)
-//! - `WatchDocMessages {chatId}` → stream of joined `SessionMessageEntry[]`,
-//!   re-emitted on every doc change
-//! - `WatchChats` / `WatchDevices` → streams of the workspace doc's entity rows
-//! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
-//!   remote devices' workspace session rows
-//! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, deleteDevice, markChatSeen)
-//! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
-//!   and data boundary (never forwarded)
-//! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
-//! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
-//!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
-//!   `SelectOrg {organizationId}`
-//! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
-//!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
-//!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
-//!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
-//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows}` → `TerminalSession`,
-//!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
-//!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
-//!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
-//!   real multi-account auth in M6.
-//! - Agent accounts (§3.7): `ListAgentAccounts {forceUsage?}` →
-//!   `AgentAccountsSnapshot`, `ActivateAgentAccount`/`ForgetAgentAccount`
-//!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
-//!   `{loginId, url, mode}`, `CompleteAgentLogin {loginId, code}` → snapshot,
-//!   `PollAgentLogin {loginId}`, `CancelAgentLogin {loginId}`.
-//! - Uploads (§3.7): `UploadChunk {uploadId, data, seq?}`,
-//!   `UploadCommit {uploadId, fileName}` → `{path}`,
-//!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
-//!   done}` (path-jailed to the uploads dir + workspace-known chat cwds).
+//! The method catalogue is `cypher_rpc::methods`; `EngineRpc`'s
+//! `RpcService::handle` dispatches each one.
 //!
-//! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
+//! ## Device-addressed routing (`targetDeviceId`)
 //!
 //! ControlRpc methods are relay-forwardable: params may carry `targetDeviceId`. When it
 //! names another device, the call is forwarded verbatim over that device's relay DO via
@@ -45,8 +12,7 @@
 //! forward can never loop. Streaming methods are proxied by re-subscribing remotely and
 //! piping items. To make another method device-addressable, nothing per-method is needed
 //! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
-//! handlers stay transport-agnostic. Currently routed: `ListHarnesses`, `ListModels`,
-//! `QueueCommand`, `WatchDocMessages`, and `WatchDocCommands`.
+//! handlers stay transport-agnostic.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -385,7 +351,7 @@ struct DeletePiSubagentParams {
     name: String,
 }
 
-/// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
+/// The Mutate surface (DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 enum MutateParams {
@@ -1369,7 +1335,7 @@ impl EngineRpc {
     }
 }
 
-/// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
+/// ControlRpc methods that honor `targetDeviceId`. Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {

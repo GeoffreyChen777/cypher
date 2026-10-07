@@ -1,4 +1,4 @@
-//! Temporary Side Chats (round 21): engine-hosted chats opened from a settled
+//! Temporary Side Chats: engine-hosted chats opened from a settled
 //! selection (transcript / git diff / terminal).
 //!
 //! Until promoted a Side Chat lives ONLY in engine memory:
@@ -41,7 +41,7 @@ use crate::workspace_host::WorkspaceHost;
 use crate::{EngineError, new_id, now_ms};
 use cypher_proto::agent_prompt::AgentQuote;
 
-/// Global cap on UNPROMOTED side chats per engine (round-21 audit): beyond
+/// Global cap on UNPROMOTED side chats per engine: beyond
 /// 8 temporary chats the engine refuses new starts with a clear error. The
 /// UI's per-parent tab cap is a UX guard; this is the authoritative bound.
 const MAX_UNPROMOTED_SIDE_CHATS: usize = 8;
@@ -111,7 +111,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Round-21 side-chat manager (see the module docs).
+/// Side-chat manager (see the module docs).
 #[derive(Clone)]
 pub struct SideChats {
     inner: Arc<SideChatsInner>,
@@ -137,7 +137,7 @@ impl SideChats {
     /// Registers the ephemeral status watch + ephemeral doc handle and records
     /// the source + selection for the first send's context injection.
     ///
-    /// Validation (round-21 audit): the parent chat MUST exist and MUST be
+    /// Validation: the parent chat MUST exist and MUST be
     /// hosted by this engine (relay forwarding lands the call here; a missing
     /// or remote parent is a hard error, never a silent local fallback); the
     /// selection must be non-empty and ≤64 KiB characters; and the engine
@@ -341,7 +341,7 @@ impl SideChats {
     /// a successful promotion returns the same chat id without double-
     /// promoting.
     ///
-    /// Order (round-21 audit): snapshot FIRST ([`DocHost::prepare_promotion`],
+    /// Order: snapshot FIRST ([`DocHost::prepare_promotion`],
     /// failing the promotion rather than exposing a row with a lost
     /// transcript), then the workspace row (deterministic title from the
     /// selected quote), then the doc-handle flip + chat2 join
@@ -422,7 +422,7 @@ impl SideChats {
         })
     }
 
-    /// Shutdown reaper (round 21): dispose every UNPROMOTED Side Chat —
+    /// Shutdown reaper: dispose every UNPROMOTED Side Chat —
     /// interrupt live runs and drop all ephemeral state. Promoted chats are
     /// normal root chats and are left untouched (their docs flush through
     /// the regular shutdown path). Called from [`crate::EngineCore::shutdown`].
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn transcript_context_caps_at_8_newest_messages() {
-        // Round-21 audit: the parent context window is the NEWEST whole
+        // the parent context window is the NEWEST whole
         // messages through the anchor, capped at 8 — older messages never
         // leak into the first send.
         let entries: Vec<_> = (0..12)
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn transcript_context_keeps_whole_newest_messages_within_budget() {
-        // Round-21 audit: with a tight budget the NEWEST whole messages are
+        // with a tight budget the NEWEST whole messages are
         // kept and OLDER ones are dropped — never a mid-message truncation
         // of a newer entry. 3 messages of 30 KiB each can't all fit 48 KiB,
         // so only the newest (c) survives whole.

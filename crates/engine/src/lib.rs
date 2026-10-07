@@ -1,9 +1,8 @@
 //! cypher-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
-//! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
-//! sessions + docs + commands + minimal IPC. Terminals, repos/diffs, uploads, auth,
-//! agent accounts, and the device-room host land in later milestones.
+//! Spec: ARCHITECTURE.md §5. Also hosts terminals, repos/diffs, uploads, auth, agent
+//! accounts, and the device-room relay.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -184,7 +183,7 @@ pub struct EngineCore {
     pub github: github::Github,
     mcp_logins: Arc<mcp::login::Logins>,
     provider_logins: Arc<pi_providers::Logins>,
-    /// Temporary Side Chats (round 21): engine-hosted chats opened from a
+    /// Temporary Side Chats: engine-hosted chats opened from a
     /// settled selection. Owned HERE (not by [`EngineRpc`]) so every RPC
     /// service built from this core shares one manager and shutdown reaps
     /// unpromoted chats.

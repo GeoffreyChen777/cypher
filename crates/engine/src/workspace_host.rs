@@ -1,6 +1,5 @@
 //! WorkspaceHost — owns the per-user workspace **registry** (docs/
-//! registry-sync.md; replaces the Loro workspace doc after the 2026-07/08
-//! wedge incidents): local snapshot persistence, edge room sync
+//! registry-sync.md): local snapshot persistence, edge room sync
 //! (`/registry/{orgId}/ws` → room `reg1/{orgId}/{userId}`, offline-tolerant —
 //! spaces/sessions are private to their owner, never org-visible), the device
 //! registry row for THIS device, and the typed watch channels the
@@ -273,7 +272,7 @@ impl RegistryTransport for EdgeRegistryTransport {
 /// Quiet-probe cadence for the registry room: fixed at 15 minutes. One room
 /// per engine, so the fixed cadence costs ~100 DO wakes/day total, and the
 /// probe is deadline-checked — a mute room is detected within
-/// probe cadence + 10s instead of hours (2026-08-04 deaf-socket lesson).
+/// probe cadence + 10s instead of hours.
 const REGISTRY_PROBE_QUIET: std::time::Duration = std::time::Duration::from_secs(900);
 /// Deaf-socket escalation: live peer presence dark this long after the
 /// tripwire probe → redial on a fresh socket (see `check_presence_deafness`).
@@ -286,7 +285,7 @@ const PRESENCE_DEAF_REDIAL_MS: i64 = 60_000;
 /// already heartbeats each 15s. The monotonic seen-cache and the relay
 /// status probe deliberately keep devices *fresh-looking* through other
 /// paths; they must never feed this tripwire (they'd mask exactly the
-/// failure it exists to catch — 2026-08-04 deaf-socket incident).
+/// failure it exists to catch).
 #[derive(Default)]
 struct PresenceWatch {
     /// Armed once at least one OTHER device has been seen live via the
@@ -678,8 +677,7 @@ impl WorkspaceHost {
 
     /// Probe the registry room's liveness NOW (window-focus sweep). Probes are
     /// deadline-checked in the client: an unanswered probe tears the session
-    /// down for a fresh socket, so a deaf-receiving room (2026-08-04 incident)
-    /// heals within seconds of the user looking at the app.
+    /// down for a fresh socket, so a deaf-receiving room heals within seconds of the user looking at the app.
     pub fn probe(&self) {
         // Foreground/manual retry bypasses negative-cache delays. The task
         // consumes this after any in-flight request, so a late false reply
@@ -1185,7 +1183,7 @@ impl WorkspaceHost {
 
     /// Sidebar freshness with an explicit timestamp: set the promoted Side
     /// Chat's preview + last-message activity from its transcript's newest
-    /// message (round-21 audit — a promoted chat must not land blank in the
+    /// message (a promoted chat must not land blank in the
     /// sidebar). Best-effort: `false` when the row is missing.
     pub fn set_chat_last_message(
         &self,
@@ -1196,7 +1194,7 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_last_message(chat_id, preview, at))?)
     }
 
-    /// Promote a temporary Side Chat into a normal ROOT chat (round 21): a
+    /// Promote a temporary Side Chat into a normal ROOT chat: a
     /// non-child Chat row with the SAME id, inheriting the parent's device /
     /// space / cwd / branch / config / checkout (deliberately NOT the parent's
     /// harness session — the promoted chat's own session continuity rides the

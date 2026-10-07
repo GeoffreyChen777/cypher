@@ -275,7 +275,7 @@ fn validate_development_environment() -> anyhow::Result<()> {
 
 /// mimalloc: system malloc (macOS libmalloc especially) never returns the
 /// streaming churn's high-water pages, so transient allocation became
-/// permanent RSS (docs/memory-plan.md §1).
+/// permanent RSS.
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -500,8 +500,8 @@ fn dirs_data_dir() -> std::path::PathBuf {
 }
 
 /// `cypher sync`: dial the running engine's IPC and print per-room sync state.
-/// The introspection surface every 2026-08 incident was missing — "is this
-/// device's workspace room actually receiving?" as a one-liner.
+/// Answers "is this device's workspace room actually receiving?" as a
+/// one-liner.
 async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
     let ipc_socket = config.ipc_socket;
     let client = cypher_rpc::connect_local(&ipc_socket).await.map_err(|e| {
@@ -540,8 +540,8 @@ async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
         };
         let get = |k: &str| room.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
         // REJECTED is loud and only shown when nonzero: rejected writes with
-        // a fresh-looking room is exactly the latched-session wedge
-        // (2026-08-04) this readout previously masked.
+        // a fresh-looking room is exactly the latched-session wedge this
+        // readout previously masked.
         let rejected = get("rejected");
         format!(
             "{} pushed {} · acked {} · rejoins {} probes {} resyncs {} drops {}{}",
@@ -636,7 +636,7 @@ async fn sync_cli(config: cypher_engine::EngineConfig) -> anyhow::Result<()> {
 ///
 /// The returned file holds an exclusive `flock` for the process lifetime:
 /// rotate-on-launch is only safe when nothing is still WRITING the current
-/// file. On 2026-08-04 a dev build launched twice next to the running
+/// file. Once, a dev build launched twice next to the running
 /// installed app — the first rename put the daemon's live log at `.old`, the
 /// second unlinked it entirely, and the daemon spent the rest of the incident
 /// logging to an orphaned inode (an entire day of sync diagnostics gone at
@@ -703,7 +703,7 @@ mod log_file_tests {
         let first = open_log_file_in(dir, "headed").expect("first log");
         assert!(dir.join("cypher-headed.log").is_file());
         // Second launch while the first is alive: canonical file untouched,
-        // pid-suffixed overflow file instead (the 2026-08-04 clobber).
+        // pid-suffixed overflow file instead.
         let second = open_log_file_in(dir, "headed").expect("second log");
         let pid_path = dir.join(format!("cypher-headed.{}.log", std::process::id()));
         assert!(pid_path.is_file(), "expected pid-suffixed overflow log");

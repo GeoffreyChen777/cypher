@@ -1,5 +1,4 @@
-//! Auth — the engine owns the WorkOS session for its device (feature-inventory §3.7,
-//! ARCHITECTURE §5). Port of zeron's `apps/backend/src/auth.ts`.
+//! Auth — the engine owns the WorkOS session for its device (ARCHITECTURE §5). Port of zeron's `apps/backend/src/auth.ts`.
 //!
 //! The engine is a public client: it builds the AuthKit authorize URL itself but
 //! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker
@@ -10,7 +9,7 @@
 //!
 //! Two modes:
 //! - **Dev** (no WorkOS client id configured, or the edge reports `auth: "dev"`): always
-//!   signed in; the bearer IS the configured user id (current M2/M3 behavior).
+//!   signed in; the bearer IS the configured user id.
 //! - **WorkOS**: authorization-code flow. Headed devices use a loopback callback server
 //!   on an ephemeral port; headless devices use the paste-code flow (the redirect is the
 //!   edge's hosted `/auth/cli/callback` page, which shows `state.code` to paste back via
@@ -42,7 +41,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 // ---------------------------------------------------------------------------
-// Wire types (feature-inventory §2 AuthRpc)
+// Wire types (AuthRpc)
 // ---------------------------------------------------------------------------
 
 /// Wire-identical to [`cypher_proto::UserProfile`]: camelCase on the wire and

@@ -1,5 +1,5 @@
-//! Terminals — PTY sessions owned by this device (feature-inventory §3.4; port of
-//! zeron's `terminals.ts` over `portable-pty`).
+//! Terminals — PTY sessions owned by this device (port of zeron's
+//! `terminals.ts` over `portable-pty`).
 //!
 //! - `open` spawns the user's login shell in the chat's cwd; `subscribe` replays a
 //!   bounded 1MB window (resumable via `afterSeq`) then tails live output, batched
@@ -8,9 +8,8 @@
 //!   running process, kept until its tab is explicitly closed or the engine exits.
 //!   Only EXITED sessions expire (30min TTL on their inert replay buffers), and
 //!   [`MAX_TERMINALS`] bounds leakage from renderers that lost their tab state.
-//! - Ownership: M5 is single-user local — every IPC/relay caller is the device
-//!   owner, so the per-user owner re-checks from zeron's Router land with real
-//!   multi-account auth in M6.
+//! - Ownership: every IPC/relay caller is the device owner, so there are no
+//!   per-user owner re-checks.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};

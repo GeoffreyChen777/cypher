@@ -1,7 +1,7 @@
 //! SessionsEngine — per-chat agent runs: dispatch, steering, interrupts, input bridging,
 //! journal + broadcast fan-out, and 120ms coalesced doc streaming.
 //!
-//! Pragmatic port of zeron's `sessions.ts` (spec: feature-inventory §3.2):
+//! Pragmatic port of zeron's `sessions.ts`:
 //! - every `AgentEvent` is (a) appended to the on-disk run journal, (b) broadcast to
 //!   in-process subscribers, (c) folded via `fold_event_into_parts` and diffed into the
 //!   chat's `SessionDoc` through `SegmentWriter` on a coalesced `STREAM_COMMIT_MS` timer;
@@ -179,7 +179,7 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
-    /// Temporary Side Chat ids (round 21): in-memory status + harness-session
+    /// Temporary Side Chat ids: in-memory status + harness-session
     /// continuity ONLY. Everything that would make a chat observable or durable
     /// — the public `sessions_tx` watch, workspace session rows, the run
     /// journal, the auto-titler, turn-start snapshots, and persistent
@@ -283,7 +283,7 @@ impl SessionsEngine {
         let _ = self.inner.turn_listener.set(listener);
     }
 
-    // ── temporary Side Chat support (round 21) ─────────────────────────────
+    // ── temporary Side Chat support ─────────────────────────────
 
     /// Mark `chat_id` as a temporary Side Chat: its status/harness-session
     /// continuity stays in memory while every workspace/journal/observability
@@ -340,7 +340,7 @@ impl SessionsEngine {
             .map_or(0, |tx| tx.receiver_count())
     }
 
-    /// Promotion hook (round-21 audit): remove the chat from the ephemeral
+    /// Promotion hook: remove the chat from the ephemeral
     /// set (statuses now flow through the public paths) and publish its
     /// CURRENT status to the public `WatchSessions` watch + the workspace
     /// session row immediately — the panel switches to the normal surface at
@@ -693,7 +693,7 @@ impl SessionsEngine {
                     // workspace doc from this one peer, so causal order makes it
                     // impossible for an observer to hold [new message, old status]
                     // — that gap read as unseen-with-no-live-run = a phantom
-                    // "completed" flash on every remote send (2026-07-31).
+                    // "completed" flash on every remote send.
                     self.set_status(chat_id, SessionStatus::Working, false);
                     self.inner.note_message(chat_id, &visible_prompt);
                     return Ok(run_id);
@@ -867,8 +867,7 @@ impl SessionsEngine {
         // holding the lock. After that, the user entry (client-minted id),
         // then Working BEFORE the lastMessageAt bump — same causal-order
         // invariant as the dispatch route (an observer must never hold [new
-        // message, settled status]: the phantom "completed" flash,
-        // 2026-07-31).
+        // message, settled status]: the phantom "completed" flash).
         let effective =
             agent_prompt_for(harness, agent_prompt.clone()).unwrap_or_else(|| prompt.to_string());
         let sent = {
@@ -1630,7 +1629,7 @@ impl Inner {
     // tombstone fired on "run died before SessionStarted", which — since the
     // ACP conversion made stale ids a harness-internal fallback — only ever
     // meant a child STARTUP failure, and permanently severed good
-    // conversations (user incident 2026-08-13). A truly stale id simply
+    // conversations. A truly stale id simply
     // yields a fresh session whose SessionStarted overwrites the row.
 
     /// The session id to resume for a run in `chat_id` launching from `cwd`
@@ -1981,7 +1980,7 @@ async fn drive_run(
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
-    // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
+    // TURN-QUIESCE WATCHDOG: a harness
     // that loses a turn's Done — the adapter never settles `session/prompt`
     // even though the agent finished — strands Working forever: the live
     // heartbeat above keeps the row fresh, and there is no per-turn timeout
@@ -2009,7 +2008,7 @@ async fn drive_run(
     // consumes the SDK's turn-end without emitting anything; codex shows
     // the same shape. The watchdog is that turn shape's ONLY settle path,
     // so the normal window (then 120s) read as 2min of stuck-Working after every
-    // background notification (user report 2026-08-13). The in-flight
+    // background notification. The in-flight
     // fold gate below still protects running tools; reasoning heartbeats
     // push the window during real thinking. `CYPHER_SELF_TURN_QUIESCE_MS`
     // overrides; 0 falls back to the normal window. An explicit
@@ -2253,8 +2252,7 @@ async fn drive_run(
         // - SELF-CONTINUED WORK — Claude Code re-invokes itself when a
         //   background task finishes (turns no prompt started) and streams
         //   real output for them. Dropping those LOST transcript content
-        //   (2026-08-12: "Build finished successfully…" streamed by the
-        //   agent, absent from the doc). Fresh text or a genuinely new tool
+        //   (agent output that never reached the doc). Fresh text or a genuinely new tool
         //   call resumes the session: new segment, Working, and the turn
         //   settles again via Done — or via the quiesce watchdog, which is
         //   what makes this resume safe where the naive version was not.
@@ -2396,11 +2394,10 @@ async fn drive_run(
         // Startup-crash retry: a run that dies before ever starting (errored
         // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
         // failed to come up — not that the injected resume id was bad. Since
-        // the ACP conversion (2026-08-08) a stale id is handled inside the
+        // the ACP conversion a stale id is handled inside the
         // harness (`session/load` falls back to `session/new`), so the old
         // guess here — tombstone the id, retry fresh — fired only on child
-        // startup failures and permanently severed GOOD conversations (user
-        // incident 2026-08-13). The id stays; retry ONCE against the same
+        // startup failures and permanently severed GOOD conversations. The id stays; retry ONCE against the same
         // user entry, resume and all, in case the crash was transient. A
         // helper that is down hard fails the retry too and surfaces its
         // crash text (the harness now appends exit status + stderr).

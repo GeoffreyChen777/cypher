@@ -7,7 +7,7 @@
 //! helper process (`PiHarness::fork_session`), never the source chat's live
 //! client.
 //!
-//! Authoritative order (round-21 promotion discipline, reused from Side
+//! Authoritative order (promotion discipline, reused from Side
 //! Chats): the target doc is opened EPHEMERAL and populated, then
 //! `prepare_promotion` persists the snapshot FIRST, the fork Chat row lands,
 //! then `finish_promotion` flips the handle + joins chat2. Any failure

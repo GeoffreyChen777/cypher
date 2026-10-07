@@ -74,9 +74,8 @@ pub struct EdgeConfig {
     /// connect/request. `None` from the provider = signed out.
     pub token: Arc<dyn cypher_rpc::TokenSource>,
     /// This engine's device id, carried on room dials (`&device=`) so the
-    /// edge can attribute sockets in logs. Debugging the 2026-08-04 deaf
-    /// socket meant reverse-engineering devices from rotating IPv6 privacy
-    /// addresses; never again. Empty = omitted (tests).
+    /// edge can attribute sockets in logs instead of guessing devices from
+    /// rotating IPv6 privacy addresses. Empty = omitted (tests).
     pub device_id: String,
     /// The viewport's pending activity refresh, read by the registry presence
     /// beat so that refresh costs no request of its own. Default = an unshared
@@ -262,10 +261,10 @@ pub struct ChatDocHandle {
     last_access: AtomicI64,
     /// Last known snapshot blob size — the eviction budget estimate's input.
     snapshot_bytes: AtomicUsize,
-    /// A threshold checkpoint POST is in flight (review H1: the quiesce
+    /// A threshold checkpoint POST is in flight (the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
-    /// Temporary Side Chat doc (round 21): a fresh in-memory `SessionDoc` with
+    /// Temporary Side Chat doc: a fresh in-memory `SessionDoc` with
     /// NO load/save/chat2/edge/eviction. Flipped false at promotion — the same
     /// handle then serves the normal chat (snapshot persisted, chat2 joined,
     /// maintenance runs) so a live run keeps streaming through the transition.
@@ -275,7 +274,7 @@ pub struct ChatDocHandle {
     chat2: Mutex<Option<cypher_sync::ChatClient>>,
     /// Local commits made before the relay connects (the dial can take up
     /// to a minute; offline, forever): buffered here by the subscription
-    /// below and drained into the client on join (review B3 — a user
+    /// below and drained into the client on join (a user
     /// message typed during the dial must not silently never sync).
     chat2_pending_local: Mutex<Vec<Vec<u8>>>,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
@@ -356,7 +355,7 @@ impl ChatDocHandle {
     /// lands. Check-and-route happens under ONE client-lock critical section:
     /// the join stores the client and drains the pending buffer under the
     /// same lock, so a commit is either drained there or enqueued directly
-    /// here — never dropped between (verify pass). Called only from the feed
+    /// here — never dropped between. Called only from the feed
     /// pump task, never from inside a Loro hook (see
     /// [`DocHost::install_chat2_local_feed`]). A `deferred` commit (it only
     /// grew the model's thinking) rides the next push instead of opening one;
@@ -775,7 +774,7 @@ impl DocHost {
         // Retry on the workspace host's capped, jittered backoff; a system
         // wake redials immediately; eviction/purge ends the loop via `weak`.
         if let Some(edge) = &self.inner.config.edge {
-            // Subscription BEFORE the dial (review B3): every local
+            // Subscription BEFORE the dial: every local
             // commit lands in the client when connected, else in the
             // pending buffer the join drains — nothing composed during
             // (or before) the dial is lost to the room.
@@ -823,7 +822,7 @@ impl DocHost {
         Ok(handle)
     }
 
-    /// Open (or return) a temporary Side Chat doc (round 21): a FRESH
+    /// Open (or return) a temporary Side Chat doc: a FRESH
     /// in-memory [`SessionDoc`] with no snapshot load/save, no chat2/edge
     /// room, no maintenance and no LRU eviction — host-memory only until
     /// promotion. The handle is registered in the same map so `WatchDocMessages`
@@ -884,7 +883,7 @@ impl DocHost {
             .map_or(0, |h| h.messages_tx.receiver_count())
     }
 
-    /// Promotion step 1 (round-21 audit): persist the temporary doc's
+    /// Promotion step 1: persist the temporary doc's
     /// transcript as an epoch-2 snapshot. MUST succeed before any row exposes
     /// the chat — a promotion never leaves a row whose transcript could be
     /// lost (a failed save FAILS the promotion rather than warning and
@@ -909,7 +908,7 @@ impl DocHost {
         Ok(())
     }
 
-    /// Promote a temporary Side Chat doc into a normal chat doc (round 21):
+    /// Promote a temporary Side Chat doc into a normal chat doc:
     /// flip the SAME handle to non-ephemeral (so the live run keeps streaming
     /// through the transition and future maintenance/flush/eviction treat it
     /// as a real chat), and join the chat2 room. The transcript snapshot is
@@ -930,7 +929,7 @@ impl DocHost {
         // observe a normal (non-ephemeral) handle.
         handle.ephemeral.store(false, Ordering::Release);
         if let Some(edge) = &self.inner.config.edge {
-            // Subscription BEFORE the dial (review B3): every local commit
+            // Subscription BEFORE the dial: every local commit
             // lands in the client when connected, else in the pending buffer
             // the join drains — nothing composed during the dial is lost.
             self.install_chat2_local_feed(&handle);
@@ -966,7 +965,7 @@ impl DocHost {
     /// `utils/subscription.rs`). A lock taken inside a hook therefore turns
     /// ordinary contention into a cross-thread stall, and a hook triggered by
     /// the client's own sink (export on ACK) into a self-deadlock. That is
-    /// how the 2026-09-18 headless hang started: one blocked ACK, then the
+    /// how a headless hang once started: one blocked ACK, then the
     /// agent run parked on the emitter guard, then every runtime worker.
     /// The pump task below does the client/pending routing under the client
     /// lock, outside any Loro hook.
@@ -1081,7 +1080,7 @@ impl DocHost {
                             // section: the subscription pushes to the buffer
                             // while holding this same lock, so every commit
                             // is either drained here or enqueued directly
-                            // after — never dropped between (verify pass).
+                            // after — never dropped between.
                             let mut client_slot = lock(&handle.chat2);
                             let pending: Vec<Vec<u8>> =
                                 std::mem::take(&mut *lock(&handle.chat2_pending_local));
@@ -1093,8 +1092,7 @@ impl DocHost {
                         tracing::info!(chat = %chat, "chat2 room joined (converged)");
                         // Bootstrap heal: a room with NO checkpoint can't
                         // cover its rows' causal deps for cold readers — a
-                        // pre-0.1.34 first contact whose init batch never
-                        // went up (every reader parks every row on missing
+                        // first contact whose init batch never went up (every reader parks every row on missing
                         // deps, transcript invisible forever), or a host
                         // whose WS pushes strand. The checkpoint is the
                         // universal patch: full doc over plain HTTP. Checked
@@ -1232,7 +1230,7 @@ impl DocHost {
             return;
         }
         // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in
-        // flight at a time (review H1).
+        // flight at a time.
         if stats.row_bytes <= 512 * 1024 && stats.row_count <= 200 {
             return;
         }
@@ -1735,7 +1733,7 @@ impl DocHost {
         };
         // `valid` above guarantees the split; re-split to encode the part
         // segment for transport (PART_RE allows `#`, which a raw URL would
-        // truncate as a fragment — the 2026-08-10 silent-collision bug).
+        // truncate as a fragment and silently collide).
         let (chat, part) = blob_ref.split_once('/').expect("validated above");
         let url = format!(
             "{}/blob/{}/{}",
@@ -2598,7 +2596,7 @@ mod loro_hook_tests {
         )
     }
 
-    /// The 2026-09-18 hang, reduced: a thread that holds the chat2 client
+    /// The headless hang, reduced: a thread that holds the chat2 client
     /// lock must never stall a commit on the same doc. The Loro local-update
     /// hook only forwards to the feed channel; the client/pending routing
     /// happens on the pump task afterwards, under the lock but outside Loro.
