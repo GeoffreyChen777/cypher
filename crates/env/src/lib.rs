@@ -1,7 +1,6 @@
 //! cypher-env — environment resolution for the Cypher product.
 //!
-//! Every environment variable is read under the `CYPHER_*` family. The legacy
-//! `ZERON_*` family is no longer read — the product fully cut over to Cypher.
+//! Every environment variable is read under the `CYPHER_*` family.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -143,14 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn var_reads_only_cypher_family() {
+    fn var_reads_the_cypher_family() {
         set("CYPHER_TEST_VAR", Some("new"));
-        set("ZERON_TEST_VAR", Some("old"));
         assert_eq!(var("TEST_VAR").as_deref(), Some("new"));
         set("CYPHER_TEST_VAR", None);
-        // The legacy ZERON_* family is no longer read.
         assert_eq!(var("TEST_VAR"), None);
-        set("ZERON_TEST_VAR", None);
     }
 
     #[test]
@@ -166,10 +162,7 @@ mod tests {
         assert_eq!(data_dir(), PathBuf::from("/tmp/cypher-data"));
 
         set("CYPHER_DATA_DIR", None);
-        set("ZERON_DATA_DIR", Some("/tmp/zeron-data"));
-        // Legacy ZERON_DATA_DIR is ignored; the ~/.cypher default applies.
         assert_eq!(data_dir(), home_dir().join(".cypher"));
-        set("ZERON_DATA_DIR", None);
     }
 
     #[test]

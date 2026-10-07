@@ -246,85 +246,39 @@ mod gate_tests {
     }
 
     #[test]
-    fn parse_auth_state_legacy_tag_carries_the_avatar_url() {
-        // The engine's old `_tag` shape, with an avatar on the user.
-        let legacy = serde_json::json!({
-            "_tag": "SignedIn",
-            "user": {"id": "u1", "email": "a@b.c", "name": null, "avatarUrl": "https://avatars.example.com/a.png"},
+    fn parse_auth_state_carries_the_avatar_url() {
+        let signed_in = serde_json::json!({
+            "state": "signedIn",
+            "user": {"id": "u1", "email": "a@b.c", "avatarUrl": "https://avatars.example.com/b.png"},
             "orgId": "org_1",
         });
-        let parsed = parse_auth_state(&legacy).expect("legacy SignedIn parses");
+        let parsed = parse_auth_state(&signed_in).expect("SignedIn parses");
         let AuthState::SignedIn { user, org_id } = parsed else {
             panic!("expected SignedIn");
         };
         assert_eq!(org_id.as_deref(), Some("org_1"));
         assert_eq!(
             user.avatar_url.as_deref(),
-            Some("https://avatars.example.com/a.png")
+            Some("https://avatars.example.com/b.png")
         );
 
-        // Legacy frames without an avatar stay readable (None).
+        // Frames without an avatar stay readable (None).
         let bare = serde_json::json!({
-            "_tag": "NeedsOrganization",
+            "state": "needsOrganization",
             "user": {"id": "u1", "email": "a@b.c"},
         });
-        let parsed = parse_auth_state(&bare).expect("legacy NeedsOrganization parses");
+        let parsed = parse_auth_state(&bare).expect("NeedsOrganization parses");
         let AuthState::NeedsOrganization { user } = parsed else {
             panic!("expected NeedsOrganization");
         };
         assert_eq!(user.avatar_url, None);
-
-        // The canonical `state`-tagged shape parses through serde with the
-        // avatar intact (both converge on one form).
-        let canonical = serde_json::json!({
-            "state": "signedIn",
-            "user": {"id": "u1", "email": "a@b.c", "avatarUrl": "https://avatars.example.com/b.png"},
-            "orgId": "org_1",
-        });
-        let parsed = parse_auth_state(&canonical).expect("canonical SignedIn parses");
-        let AuthState::SignedIn { user, .. } = parsed else {
-            panic!("expected SignedIn");
-        };
-        assert_eq!(
-            user.avatar_url.as_deref(),
-            Some("https://avatars.example.com/b.png")
-        );
     }
 }
 
-/// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its
-/// own enum (`{"_tag": "SignedIn", ...}`) while the proto type expects
-/// `{"state": "signedIn", ...}` — accept both so either side can converge
-/// without breaking a viewport.
+/// Parse an `AuthStatus` frame (`{"state": "signedIn", ...}`). Anything else,
+/// including the pre-0.3 engine's `{"_tag": ...}` shape, reads as `None`.
 pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
-    if let Ok(state) = serde_json::from_value::<AuthState>(value.clone()) {
-        return Some(state);
-    }
-    let tag = value.get("_tag").and_then(|t| t.as_str())?;
-    let user = || -> Option<crate::UserProfile> {
-        let u = value.get("user")?;
-        Some(crate::UserProfile {
-            id: u.get("id")?.as_str()?.to_string(),
-            email: u.get("email")?.as_str()?.to_string(),
-            name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
-            avatar_url: u
-                .get("avatarUrl")
-                .and_then(|a| a.as_str())
-                .map(str::to_string),
-        })
-    };
-    match tag {
-        "SignedOut" => Some(AuthState::SignedOut),
-        "NeedsOrganization" => Some(AuthState::NeedsOrganization { user: user()? }),
-        "SignedIn" => Some(AuthState::SignedIn {
-            user: user()?,
-            org_id: value
-                .get("orgId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        }),
-        _ => None,
-    }
+    serde_json::from_value::<AuthState>(value.clone()).ok()
 }
 
 // ---------------------------------------------------------------------------
