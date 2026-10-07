@@ -1,6 +1,6 @@
 //! Streaming fade veil — per-appended-chunk opacity over already-committed text.
 //!
-//! The desktop app (docs/research/mugen-pretext.md §2e) commits streamed text to
+//! The original desktop app commits streamed text to
 //! layout instantly and dissolves a purely cosmetic veil over the newly arrived
 //! characters. This module is the gpui port of that idea:
 //!
@@ -218,19 +218,6 @@ impl RowVeil {
     pub fn is_fading(&self) -> bool {
         self.elems.values().any(ElemVeil::is_fading)
     }
-}
-
-/// Intersect spans with `[start, end)` and shift them to local offsets — used
-/// by per-line code rendering where chunks are tracked on the whole code text.
-pub fn slice_spans(spans: &[VeilSpan], start: usize, end: usize) -> Vec<VeilSpan> {
-    spans
-        .iter()
-        .filter_map(|(r, a)| {
-            let s = r.start.max(start);
-            let e = r.end.min(end);
-            (s < e).then(|| (s - start..e - start, *a))
-        })
-        .collect()
 }
 
 /// Multiply veil opacities into the runs' paint colors, splitting runs at span
@@ -481,16 +468,6 @@ mod tests {
         let out = apply_veil(vec![r], &[(0..5, 0.25)]);
         assert_eq!(out[0].background_color.unwrap().a, 0.25);
         assert_eq!(out[0].underline.as_ref().unwrap().color.unwrap().a, 0.25);
-    }
-
-    #[test]
-    fn slice_spans_shifts_to_local_offsets() {
-        let spans = vec![(3..10, 0.4), (12..20, 0.1)];
-        // A "line" covering bytes 5..15.
-        let local = slice_spans(&spans, 5, 15);
-        assert_eq!(local, vec![(0..5, 0.4), (7..10, 0.1)]);
-        // Disjoint window → empty.
-        assert!(slice_spans(&spans, 25, 30).is_empty());
     }
 
     #[test]

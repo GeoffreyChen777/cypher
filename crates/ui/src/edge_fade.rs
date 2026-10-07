@@ -19,7 +19,6 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band,
         band_top: None,
         band_bottom: None,
-        inset_top: 0.0,
         top,
         bottom,
         left: false,
@@ -34,7 +33,6 @@ pub struct EdgeFaded {
     band: f32,
     band_top: Option<f32>,
     band_bottom: Option<f32>,
-    inset_top: f32,
     top: bool,
     bottom: bool,
     left: bool,
@@ -86,15 +84,6 @@ impl EdgeFaded {
     /// paint time (the right-pane surface-tab strip).
     pub fn fade_overflow_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
-        self
-    }
-
-    /// Pull the fade's TOP edge `px` inside the wrapper: gpui clamps the ramp
-    /// to 0 past an active edge, so content between the wrapper's real top
-    /// and the inset edge paints fully transparent — content under opaque-ish
-    /// chrome (titlebar TEXT) vanishes before it can overlap.
-    pub fn inset_top(mut self, px: f32) -> Self {
-        self.inset_top = px;
         self
     }
 }
@@ -157,20 +146,15 @@ impl Element for EdgeFaded {
             left &= scrolled > 1.0;
             right &= scrolled < max_scroll - 1.0;
         }
-        let fade = (top || bottom || left || right).then(|| {
-            let mut bounds = bounds;
-            bounds.origin.y += px(self.inset_top);
-            bounds.size.height -= px(self.inset_top);
-            EdgeFade {
-                bounds,
-                band: px(self.band),
-                band_top: self.band_top.map(px),
-                band_bottom: self.band_bottom.map(px),
-                top,
-                bottom,
-                left,
-                right,
-            }
+        let fade = (top || bottom || left || right).then(|| EdgeFade {
+            bounds,
+            band: px(self.band),
+            band_top: self.band_top.map(px),
+            band_bottom: self.band_bottom.map(px),
+            top,
+            bottom,
+            left,
+            right,
         });
         window.with_edge_fade(fade, |window| self.child.paint(window, cx));
     }

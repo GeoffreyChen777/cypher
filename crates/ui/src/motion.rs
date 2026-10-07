@@ -1,7 +1,7 @@
 //! Animation kit — the cypher motion catalog as reusable helpers over gpui
 //! [`Animation`]/[`AnimationExt`].
 //!
-//! Catalog (docs/research/feature-inventory.md §1.12):
+//! Catalog:
 //! - `fade-in`   0.5s  cubic-bezier(0.16,1,0.3,1), translateY 4→0 (entrances)
 //! - `fade-quick` 0.15s
 //! - `menu-in`   0.14s scale 0.96 + translateY −2 (popovers)
@@ -16,9 +16,9 @@
 //!
 //! Reduced motion: gpui's `App::reduce_motion` flag is honored *automatically* by
 //! every `with_animation` element — oneshot animations snap to their end state,
-//! repeating ones to their start state, and no frames are scheduled. The
-//! [`set_reduced_motion`]/[`reduced_motion`] wrappers make it a single global
-//! switch; pure helpers take the flag explicitly where they run outside elements.
+//! repeating ones to their start state, and no frames are scheduled.
+//! [`reduced_motion`] reads that single global switch; pure helpers take the
+//! flag explicitly where they run outside elements.
 //!
 //! translateY is implemented as a relative-position `top` inset: taffy applies
 //! relative insets after layout, so — like a CSS transform — siblings never move.
@@ -41,15 +41,11 @@ pub use gpui::AnimationExt;
 // Pulse clock — throttled drive for the repeating loaders
 // ---------------------------------------------------------------------------
 
-/// Repeat-tick interval for the pulse/spinner loaders (~30fps).
-///
-/// The loaders used to run as gpui `with_animation(...repeating...)` elements,
-/// which request a redraw every display frame for as long as they are mounted
-/// — one Working session row pinned the whole window at 120Hz (measured 36%
-/// CPU on an M-series laptop, with the always-hot Metal pipeline holding
-/// hundreds of MB of graphics buffers). A shared 30fps clock is visually
-/// equivalent for these chunky cell waves at a quarter of the redraws, and a
-/// window with no spinner mounted schedules nothing at all.
+/// Repeat-tick interval for the pulse/spinner loaders (~30fps). A shared 30fps
+/// clock instead of per-element repeating animations (which redraw every
+/// display frame) is visually equivalent for these chunky cell waves at a
+/// quarter of the redraws, and a window with no spinner mounted schedules
+/// nothing at all.
 const PULSE_TICK: Duration = Duration::from_millis(33);
 
 /// How long a view stays on the tick list after its last spinner paint. One
@@ -200,11 +196,6 @@ impl CubicBezier {
         // `delta ∈ [0,1]` and aborts, so clamp the output hard.
         self.sample_y(self.solve_t_for_x(x)).clamp(0.0, 1.0)
     }
-
-    /// This curve as a gpui easing closure.
-    pub fn easing(self) -> impl Fn(f32) -> f32 + 'static {
-        move |x| self.eval(x)
-    }
 }
 
 /// zeron's signature entrance curve — CSS `cubic-bezier(0.16, 1, 0.3, 1)`.
@@ -266,16 +257,9 @@ impl MotionSpec {
     }
 
     /// A oneshot gpui [`Animation`] for this spec (delay folded in).
-    /// Wall-clock span honors [`speed_scale`] (measurement knob).
     pub fn animation(&self) -> Animation {
         let spec = *self;
-        Animation::new(spec.total().mul_f32(speed_scale())).with_easing(move |d| spec.progress(d))
-    }
-
-    /// A repeating gpui [`Animation`] with linear easing over the raw period —
-    /// for the pulse/wave loaders whose per-cell easing happens in the animator.
-    pub fn repeating(&self) -> Animation {
-        Animation::new(self.total()).repeat()
+        Animation::new(spec.total()).with_easing(move |d| spec.progress(d))
     }
 }
 
@@ -294,11 +278,11 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
-/// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
+/// Terminal tab drag-reorder sliding transforms: 150ms.
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
-/// Diff-pane per-file collapse: 180ms height (§1.11).
+/// Diff-pane per-file collapse: 180ms height.
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
-/// Diff-pane chevron rotate: 200ms (§1.11; approximated as a crossfade — gpui
+/// Diff-pane chevron rotate: 200ms (approximated as a crossfade — gpui
 /// divs have no rotation transform at the pinned rev, same caveat as scale).
 pub const CHEVRON: MotionSpec = MotionSpec::new(200, EASE);
 /// Rail-tick / scroll-to-row glide: 500ms ease-in-out over the whole distance
@@ -391,21 +375,9 @@ where
 // Loader math (pure; rendered by crate::loaders)
 // ---------------------------------------------------------------------------
 
-/// Cypher-pulse floor opacity.
 // The loader constants and math live in `cypher_proto::motion` (pure phase
 // functions); this crate animates them with gpui.
-pub use cypher_proto::motion::{
-    PULSE_MIN_OPACITY, PULSE_MIN_SCALE, PULSE_STAGGER, gspin_opacity, pulse_opacity, pulse_scale,
-    pulse_wave, staggered_phase,
-};
-
-/// Gradient-matrix spinner wave: intensity (0..1) of cell `wave_index` out of
-/// `wave_count` diagonals, at raw delta `raw_delta` of the 750ms period. The wave
-/// front travels across diagonals once per period.
-pub fn matrix_wave(raw_delta: f32, wave_index: usize, wave_count: usize) -> f32 {
-    let count = wave_count.max(1) as f32;
-    pulse_wave(staggered_phase(raw_delta, wave_index, 1.0 / count))
-}
+pub use cypher_proto::motion::{gspin_opacity, pulse_wave, staggered_phase};
 
 /// Linear interpolation (layout tweens).
 pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
@@ -473,7 +445,7 @@ pub struct HoverFades {
 
 impl HoverFades {
     fn duration() -> Duration {
-        HOVER_FADE.total().mul_f32(speed_scale())
+        HOVER_FADE.total()
     }
 
     /// Pointer entered (`hovered`) or left the element behind `key`. Reduced
@@ -613,28 +585,9 @@ pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
 // Reduced motion
 // ---------------------------------------------------------------------------
 
-/// Dev/measurement knob (`CYPHER_MOTION_SCALE`, default 1): stretches every
-/// catalog timeline by this factor — e.g. `CYPHER_MOTION_SCALE=10` slows the
-/// 200ms pane tweens to 2s so screenshot bursts can sample the geometry
-/// per frame. Read once; never set in production.
-pub fn speed_scale() -> f32 {
-    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| {
-        cypher_env::var("MOTION_SCALE")
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|s| s.is_finite())
-            .map(|s| s.clamp(0.01, 100.0))
-            .unwrap_or(1.0)
-    })
-}
-
-/// Global reduced-motion flag. gpui snaps every `with_animation` element when
-/// set (end state for oneshots, rest state for loops) and schedules no frames.
-pub fn set_reduced_motion(cx: &mut App, reduced: bool) {
-    cx.set_reduce_motion(reduced);
-}
-
-/// Read the global reduced-motion flag.
+/// Read the global reduced-motion flag. gpui snaps every `with_animation`
+/// element when it is set (end state for oneshots, rest state for loops) and
+/// schedules no frames.
 pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
@@ -762,39 +715,6 @@ mod tests {
         assert_eq!(CYPHER_PULSE.duration_ms, 2400);
         assert_eq!(GRADIENT_SPIN.duration_ms, 750);
         assert_eq!(EASE_OUT_EXPO, CubicBezier::new(0.16, 1.0, 0.3, 1.0));
-    }
-
-    #[test]
-    fn pulse_wave_endpoints() {
-        assert_close(pulse_wave(0.0), 0.0, 1e-6, "wave start");
-        assert_close(pulse_wave(0.5), 1.0, 1e-6, "wave peak");
-        assert_close(pulse_wave(1.0), 0.0, 1e-6, "wave end");
-        assert_close(pulse_opacity(0.0), 0.08, 1e-6, "opacity floor");
-        assert_close(pulse_opacity(0.5), 1.0, 1e-6, "opacity peak");
-        assert_close(pulse_scale(0.0), 0.9, 1e-6, "scale floor");
-        assert_close(pulse_scale(0.5), 1.0, 1e-6, "scale peak");
-    }
-
-    #[test]
-    fn stagger_wraps_and_orders_cells() {
-        // Cell 0 at delta 0 is at phase 0; later cells lag by the stagger.
-        assert_close(staggered_phase(0.0, 0, PULSE_STAGGER), 0.0, 1e-6, "cell 0");
-        assert_close(
-            staggered_phase(0.0, 1, PULSE_STAGGER),
-            1.0 - PULSE_STAGGER,
-            1e-5,
-            "cell 1 wraps",
-        );
-        // A full period later the phase is identical.
-        assert_close(
-            staggered_phase(0.3, 2, PULSE_STAGGER),
-            staggered_phase(0.3 + 1.0, 2, PULSE_STAGGER),
-            2e-6,
-            "periodic",
-        );
-        // Matrix wave peaks travel: diagonal k peaks when the front reaches it.
-        let peak0 = matrix_wave(0.5, 0, 5);
-        assert_close(peak0, 1.0, 1e-5, "diag 0 peak at half period");
     }
 
     #[test]

@@ -412,12 +412,9 @@ mod tests {
                 text: text.into(),
                 agent_text: agent_text.map(Into::into),
             }],
-            created_at: 0,
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            completed_at: None,
-            comments: Vec::new(),
+            ..crate::test_fixtures::entry()
         }
     }
 

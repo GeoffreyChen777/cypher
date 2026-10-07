@@ -1,57 +1,50 @@
 //! cypher-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
-//! diff pane.
-//!
-//! Design: ARCHITECTURE.md §4; animation catalog docs/research/feature-inventory.md
-//! §1.12; virtualization/markdown techniques docs/research/mugen-pretext.md.
-//!
-//! M3a foundation:
-//! - [`theme`] — always-dark monochrome theme (oklch-derived neutrals), a gpui Global;
-//! - [`motion`] — the cypher animation catalog over gpui `Animation` + cubic-bezier;
-//! - [`state`] — `AppState` entity + `EngineHandle` (connect-or-embed engine);
-//! - [`settings`] — persisted pane widths/collapse flags;
-//! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
-//! - [`loaders`] — cypher pulse loader, gradient spinner, boot splash.
+//! diff pane. Design: ARCHITECTURE.md §4. The only public surface is
+//! [`run_app`] and its [`UiConfig`].
 
-pub mod app_menus;
-pub mod appearance;
-pub mod attachments;
-pub mod changes;
-pub mod chat_style;
-pub mod comments;
-pub mod composer;
-pub mod context_ring;
+mod app_menus;
+mod appearance;
+mod attachments;
+mod changes;
+mod chat_style;
+mod comments;
+mod composer;
+mod context_ring;
 #[cfg(feature = "dev-capture")]
-pub mod dev_capture;
-pub mod edge_fade;
-pub mod files;
-pub mod find;
-pub mod frost;
-pub mod history;
-pub mod icons;
-pub mod loaders;
-pub mod markdown;
-pub mod motion;
-pub mod notification_activity;
-pub mod notify;
-pub mod pickers;
-pub mod popover;
-pub mod quote_origin;
-pub mod rail;
-pub mod settings;
-pub mod shell;
-pub mod side_chats;
-pub mod slash_menu;
-pub mod soft_shadow;
-pub mod sound;
-pub mod space_style;
-pub mod state;
-pub mod subagents;
-pub mod surface_style;
-pub mod syntax_cache;
-pub mod terminal;
-pub mod theme;
-pub mod transcript;
-pub mod workspace;
+mod dev_capture;
+mod edge_fade;
+mod files;
+mod find;
+mod frost;
+mod fs_util;
+mod history;
+mod icons;
+mod loaders;
+mod markdown;
+mod motion;
+mod notification_activity;
+mod notify;
+mod pickers;
+mod popover;
+mod quote_origin;
+mod rail;
+mod settings;
+mod shell;
+mod side_chats;
+mod slash_menu;
+mod soft_shadow;
+mod sound;
+mod space_style;
+mod state;
+mod subagents;
+mod surface_style;
+mod syntax_cache;
+mod terminal;
+#[cfg(test)]
+mod test_fixtures;
+mod theme;
+mod transcript;
+mod workspace;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -265,7 +258,7 @@ fn open_main_window(
     data_dir: PathBuf,
     cx: &mut App,
 ) {
-    // zeron window geometry: 1320×880, min 900×600 (feature-inventory §1.1).
+    // zeron window geometry: 1320×880, min 900×600.
     let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
     cx.open_window(shell_window_options(bounds, cx), move |window, cx| {
         // React to the user flipping macOS between light and dark. Detached:
@@ -307,18 +300,12 @@ fn shell_window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(900.), px(600.))),
-        // `kind` is deliberately left at its default `WindowKind::Normal`
-        // (gpui platform.rs WindowOptions::default), which on macOS maps
-        // to `NSNormalWindowLevel` (gpui_macos window.rs) — same as zed's
-        // main window. Nothing here raises the window level or touches
-        // presentation options; the "menu bar never appears" symptom came
-        // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
-        // from window kind/level, and `appears_transparent` only affects
-        // the titlebar, not the menu bar.
+        // `kind` stays at its default `WindowKind::Normal`
+        // (`NSNormalWindowLevel` on macOS, same as zed's main window);
+        // `appears_transparent` only affects the titlebar, not the menu bar.
         // macOS: frameless-inset chrome like the original Electron app
-        // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-        // feature-inventory §1.1). No title text — the strip is
-        // custom-drawn (zed sets `title: None` the same way). On
+        // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15). No
+        // title text — the strip is custom-drawn (zed sets `title: None` the same way). On
         // Linux/Windows `appears_transparent` hides the system titlebar
         // for our custom-drawn chrome; harmless where unsupported.
         titlebar: Some(TitlebarOptions {

@@ -5,12 +5,11 @@
 //!   the same set the Electron app used via `@solar-icons/react`. Solar Icons is
 //!   licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/);
 //!   attribution: "Solar Icons by 480 Design".
-//! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square
-//!   are ports of the hand-drawn inline SVGs in zeron's `terminal-panel.tsx` /
-//!   `composer-actions.tsx`.
+//! - The terminal tab glyphs (`terminal`, `plus`, `close`) are ports of the
+//!   hand-drawn inline SVGs in zeron's `terminal-panel.tsx`.
 //! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`) are
 //!   ports of zeron's `icons.tsx`. gpui tints SVGs with the text color, so the
-//!   Claude mark's brand orange is applied at the call site ([`CLAUDE_BRAND`]).
+//!   Claude mark's brand orange is applied at the call site ([`claude_brand`]).
 //! - `github-mark` is the `mark-github` glyph from GitHub's Octicons (MIT).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
@@ -26,7 +25,8 @@ macro_rules! icon_assets {
     ($(($const_name:ident, $path:literal)),+ $(,)?) => {
         $(pub const $const_name: &str = concat!("icons/", $path, ".svg");)+
 
-        /// The official Cypher app icon — raster brand artwork, not a glyph.
+        /// The official Cypher app icon — raster brand artwork (served from the
+        /// master `dist/cypher.png`), not a glyph.
         pub const CYPHER_APP_ICON: &str = "images/cypher-app-icon.png";
 
         /// Serves the embedded glyph icons (SVG) and the app icon (PNG) to
@@ -40,7 +40,7 @@ macro_rules! icon_assets {
                         include_bytes!(concat!("../assets/icons/", $path, ".svg")).as_slice(),
                     )),)+
                     CYPHER_APP_ICON => Some(Cow::Borrowed(
-                        include_bytes!("../assets/images/cypher-app-icon.png").as_slice(),
+                        include_bytes!("../../../dist/cypher.png").as_slice(),
                     )),
                     _ => None,
                 })
@@ -62,9 +62,7 @@ icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (LAPTOP, "laptop"),
-    (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT_VERTICAL, "sort-vertical"),
-    (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
@@ -170,7 +168,6 @@ icon_assets![
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
-    (STOP, "stop"),
     (CHECK, "check"),
     // Tool-chip status pair drawn to `check`'s weight: a cross for a failed
     // call, and a ring with a quarter arc the chip rotates while it runs.
@@ -263,12 +260,5 @@ mod tests {
                 .unwrap()
                 .contains(&SharedString::from(CYPHER_APP_ICON))
         );
-    }
-
-    #[test]
-    fn old_geometric_logo_is_not_registered() {
-        assert!(Assets.load("icons/cypher-logo.svg").unwrap().is_none());
-        let listed = Assets.list("icons/").unwrap();
-        assert!(!listed.iter().any(|p| p.contains("cypher-logo")));
     }
 }

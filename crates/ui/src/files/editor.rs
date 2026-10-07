@@ -425,10 +425,6 @@ impl CodeEditor {
         self.read_only
     }
 
-    pub fn language(&self) -> Option<LanguageId> {
-        self.language
-    }
-
     /// `(line, column)` of the caret, 1-based, for a status readout.
     pub fn caret_position(&self) -> (usize, usize) {
         let offset = self.cursor_offset();

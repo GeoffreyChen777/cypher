@@ -1,6 +1,6 @@
 //! Popover / menu primitives: an anchored floating layer with the `menu-in`
 //! animation, outside-click dismissal, and pure keyboard-navigation + search
-//! reducers shared by every picker and menu (feature-inventory §1.12 popovers).
+//! reducers shared by every picker and menu.
 //!
 //! gpui pattern (examples/popover.rs at the pinned rev): the trigger element
 //! conditionally children a `deferred(anchored().child(content))` — deferred
@@ -41,10 +41,6 @@ impl<T> Loadable<T> {
         }
     }
 
-    pub fn is_loading(&self) -> bool {
-        matches!(self, Loadable::Loading)
-    }
-
     pub fn error(&self) -> Option<&str> {
         match self {
             Loadable::Error(message) => Some(message),
@@ -63,7 +59,7 @@ impl<T> Loadable<T> {
 /// with the out animation and dead hit-testing) → [`reap_popup`]'s timer
 /// `finish_close`es ~[`motion::MENU_OUT`] later. Use [`Self::is_open`] for
 /// logic (a closing popup already reads as closed) and [`Self::get`] /
-/// [`Self::is_closing`] for rendering.
+/// [`Self::closing_since`] for rendering.
 pub struct Popup<T> {
     /// `Some((state, closing_since))` while mounted; `closing_since` is the
     /// exit-phase start.
@@ -90,10 +86,6 @@ impl<T> Popup<T> {
     /// Open and interactive (not closing).
     pub fn is_open(&self) -> bool {
         matches!(self.inner, Some((_, None)))
-    }
-
-    pub fn is_closing(&self) -> bool {
-        matches!(self.inner, Some((_, Some(_))))
     }
 
     /// When the exit phase began — what the render path hands to the popover
@@ -172,7 +164,7 @@ impl<T> Popup<T> {
     /// newer phase's own reap handles it.
     pub fn finish_close(&mut self) {
         if let Some((_, Some(since))) = &self.inner
-            && since.elapsed() >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
+            && since.elapsed() >= motion::MENU_OUT.total()
         {
             self.inner = None;
         }
@@ -191,7 +183,6 @@ pub fn reap_popup<V: 'static, T: 'static>(
             .timer(
                 motion::MENU_OUT
                     .total()
-                    .mul_f32(motion::speed_scale())
                     .saturating_add(std::time::Duration::from_millis(20)),
             )
             .await;
@@ -344,10 +335,7 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
 /// the wall clock at render time. Monotonic by construction — unlike the
 /// animation element's own clock, it can never replay from 0 mid-exit.
 fn exit_progress(since: std::time::Instant) -> f32 {
-    let total = motion::MENU_OUT
-        .total()
-        .mul_f32(motion::speed_scale())
-        .as_secs_f32();
+    let total = motion::MENU_OUT.total().as_secs_f32();
     let raw = if total <= 0.0 {
         1.0
     } else {
@@ -1166,10 +1154,9 @@ mod tests {
     fn loadable_accessors() {
         let l: Loadable<u32> = Loadable::Ready(7);
         assert_eq!(l.ready(), Some(&7));
-        assert!(!l.is_loading());
+        assert!(!matches!(l, Loadable::Loading));
         let e: Loadable<u32> = Loadable::Error("boom".into());
         assert_eq!(e.error(), Some("boom"));
-        assert!(Loadable::<u32>::Loading.is_loading());
         assert_eq!(Loadable::<u32>::default(), Loadable::Idle);
     }
 }

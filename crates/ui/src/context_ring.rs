@@ -186,16 +186,6 @@ impl EdgeCurve {
     }
 }
 
-/// The centerline of [`edge_arc_outline`]: `share` of the band, from its
-/// bottom end. Empty for nothing to fill.
-pub fn edge_arc_points(height: f32, radius: f32, inset: f32, share: f32) -> Vec<Pt> {
-    EdgeCurve::new(height, radius, inset)
-        .samples(share)
-        .into_iter()
-        .map(|(point, _, _)| point)
-        .collect()
-}
-
 /// The band round the left end as one closed outline, `width` thick about
 /// the centerline with semicircular ends: the edge side bottom to top, the
 /// top end, the inner side back down, the bottom end. One shape, so a
@@ -236,26 +226,13 @@ pub fn edge_arc_outline(height: f32, radius: f32, inset: f32, width: f32, share:
     outline
 }
 
-/// Which rounded end of the pill the single-line form follows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeSide {
-    Left,
-    Right,
-}
-
-/// The gauge: a faint track round the `side` end of the box it fills
+/// The gauge: a faint track round the right end of the box it fills
 /// ([`EDGE_ANGLE`]), with the filled share laid over it from the bottom up,
 /// both
 /// [`EDGE_STROKE`] thick with rounded ends, [`EDGE_GAP`] clear of an edge
 /// rounded with `corner_radius`. The caller sizes it to the box (the pill's
 /// inside, within its border).
-pub fn edge_arc(
-    side: EdgeSide,
-    fraction: f32,
-    corner_radius: f32,
-    track: Hsla,
-    fill: Hsla,
-) -> gpui::Canvas<()> {
+pub fn edge_arc(fraction: f32, corner_radius: f32, track: Hsla, fill: Hsla) -> gpui::Canvas<()> {
     let fraction = fraction.clamp(0.0, 1.0);
     canvas(
         |_, _, _| (),
@@ -263,10 +240,7 @@ pub fn edge_arc(
             let height = f32::from(bounds.size.height);
             let top = f32::from(bounds.origin.y);
             // The geometry is the left end's; the right end is its mirror.
-            let x_of = |x: f32| match side {
-                EdgeSide::Left => f32::from(bounds.origin.x) + x,
-                EdgeSide::Right => f32::from(bounds.origin.x + bounds.size.width) - x,
-            };
+            let x_of = |x: f32| f32::from(bounds.origin.x + bounds.size.width) - x;
             let band = |share: f32| {
                 let outline = edge_arc_outline(
                     height,
@@ -323,6 +297,16 @@ impl Render for ContextRingTooltip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The centerline of [`edge_arc_outline`]: `share` of the band, from its
+    /// bottom end. Empty for nothing to fill.
+    fn edge_arc_points(height: f32, radius: f32, inset: f32, share: f32) -> Vec<Pt> {
+        EdgeCurve::new(height, radius, inset)
+            .samples(share)
+            .into_iter()
+            .map(|(point, _, _)| point)
+            .collect()
+    }
 
     #[test]
     fn token_counts_read_compactly() {

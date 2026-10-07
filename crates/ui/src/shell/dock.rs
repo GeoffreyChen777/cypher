@@ -1379,7 +1379,7 @@ mod tests {
 
     #[test]
     fn dock_surface_reorder_moves_mixed_strips() {
-        // Round 21: the surface strip mixes diffs, files, and side chats;
+        // The surface strip mixes diffs, files, and side chats;
         // the drag-drop reorder must move them as one ordered list.
         let mut tabs = vec![
             DockSurface::Diff(1),

@@ -81,13 +81,9 @@ impl ComposerDefaults {
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+        crate::fs_util::write_atomic(data_dir, FILE_NAME, json.as_bytes(), 0o666)
     }
 
     pub fn path(data_dir: &Path) -> PathBuf {

@@ -1,4 +1,4 @@
-//! The shared floating Comment pill / anchored editor (round 20).
+//! The shared floating Comment pill / anchored editor.
 //!
 //! One shell-level [`CommentPopup`] entity serves every surface that can
 //! comment: the transcript's markdown text, a Git diff pane's code lines,
@@ -39,7 +39,7 @@ pub enum CommentPopupEvent {
         origin: Option<cypher_proto::agent_prompt::AgentQuote>,
         comment: String,
     },
-    /// The pill's "Side Chat" action (round 21): the user wants a temporary
+    /// The pill's "Side Chat" action: the user wants a temporary
     /// Side Chat opened from this settled selection. `chat_id` is the chat
     /// selected when the selection settled (the side chat's parent); the
     /// shell calls `StartSideChat` and opens a Side Chat tab in the right
@@ -117,7 +117,7 @@ struct CommentOffer {
     head: Option<CommentHead>,
     /// Drops the source surface's selection wash on save/cancel/dismiss.
     clear_selection: Rc<dyn Fn(&mut App)>,
-    /// Side Chat source metadata (round 21): the offering surface
+    /// Side Chat source metadata: the offering surface
     /// captures it at settle time so the popup's "Side Chat" action can
     /// open a temporary Side Chat from the selection. `None` on surfaces
     /// that offer comments only (side chat panels themselves never do).
@@ -439,7 +439,7 @@ impl CommentPopup {
         let theme = Theme::of(cx).clone();
         let anchor = Self::resolved_anchor(&offer.head, offer.anchor);
         let weak = cx.weak_entity();
-        // Round 21: the pill offers BOTH actions — "Comment" opens the
+        // The pill offers BOTH actions — "Comment" opens the
         // anchored editor; "Side Chat" opens a temporary Side Chat from the
         // selection (only when the offering surface carried a source).
         type ClickHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
@@ -675,7 +675,7 @@ mod tests {
         );
     }
 
-    /// Round 21: the SideChatRequested event carries the settled quote IN FULL
+    /// The SideChatRequested event carries the settled quote IN FULL
     /// (the engine validates + injects it; the panel previews a truncated
     /// copy, never the wire payload).
     #[test]

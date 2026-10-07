@@ -69,29 +69,8 @@ pub fn current(cx: &App) -> DiffLayout {
         .unwrap_or_default()
 }
 fn save(dir: &Path, layout: DiffLayout) -> std::io::Result<()> {
-    use std::io::Write;
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".diff-view-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(
-            &serde_json::to_vec(&Preference { layout }).map_err(std::io::Error::other)?,
-        )?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, dir.join(FILE_NAME))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(tmp);
-    }
-    result
+    let bytes = serde_json::to_vec(&Preference { layout }).map_err(std::io::Error::other)?;
+    crate::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
 }
 pub fn set(layout: DiffLayout, cx: &mut App) -> std::io::Result<()> {
     let state = cx

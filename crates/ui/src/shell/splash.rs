@@ -1,0 +1,259 @@
+//! The boot splash.
+
+use super::*;
+
+impl Shell {
+    /// Mirror [`AppState::attention_count`] onto the Dock icon (zero when the
+    /// setting is off). Written only on change — this runs on every state
+    /// notify.
+    pub(super) fn sync_dock_badge(&mut self, cx: &mut Context<Self>) {
+        // One Dock icon: the main window owns it (the count is app-wide).
+        if self.is_project_window() {
+            return;
+        }
+        let count = if self.settings.dock_badge_enabled {
+            self.state.read(cx).attention_count(Utc::now())
+        } else {
+            0
+        };
+        if self.dock_badge != Some(count) {
+            self.dock_badge = Some(count);
+            tracing::debug!(count, "dock badge");
+            crate::notify::set_badge(count);
+        }
+    }
+
+    pub(super) fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.sync_window_scope(cx);
+        // App-wide flows (relaunch, runtime switches, capture knobs) are the
+        // main window's; a project window only renders its project.
+        let main_window = !self.is_project_window();
+        // A remotely applied update swapped this app's bundle; the relauncher
+        // is waiting for this process to exit. Quit through the normal path so
+        // the embedded engine flushes before the new bundle opens.
+        if main_window
+            && !self.relaunch_quit_sent
+            && state
+                .read(cx)
+                .update
+                .as_ref()
+                .is_some_and(|update| update.relaunch_pending)
+        {
+            self.relaunch_quit_sent = true;
+            tracing::info!(
+                "update applied by the engine; quitting so the relauncher can open the new bundle"
+            );
+            cx.quit();
+            return;
+        }
+        let next_sync_flow = {
+            let state = state.read(cx);
+            sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
+        };
+        if main_window && next_sync_flow != self.sync_flow {
+            self.sync_flow = next_sync_flow;
+            if matches!(
+                self.sync_flow,
+                SyncFlow::RestartPending { .. } | SyncFlow::SwitchOffer { .. }
+            ) {
+                self.org = None;
+            }
+        }
+        // The in-place local→synced switch: once the replacement runtime is
+        // attached and Ready, kick the import (or finish) from here.
+        if main_window {
+            self.drive_sync_switch(cx);
+        }
+        let signed_out_synced = main_window && {
+            let state = state.read(cx);
+            state.workspace_scope == Some(WorkspaceScope::Synced)
+                && matches!(state.auth, Some(AuthState::SignedOut))
+        };
+        // AuthStatus is shared by every viewport. Whichever viewport owns the
+        // embedded runtime drains it; remote viewports request daemon shutdown
+        // and all of them independently reattach to the new local runtime.
+        if signed_out_synced && self.runtime_change_task.is_none() {
+            self.start_local_runtime_transition(false, cx);
+        }
+        // Capture knob: the add-space palette needs only the device registry.
+        if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
+            self.debug_dialog = None;
+            self.open_add_space(cx);
+        }
+        // Capture knob: pop the requested dialog once chats have landed.
+        if let Some(which) = self.debug_dialog.clone()
+            && let Some(first) = state.read(cx).chats.first().map(|c| c.id.clone())
+        {
+            self.debug_dialog = None;
+            match which.as_str() {
+                "rename" => self.open_rename_chat(first, cx),
+                "delete" => {
+                    self.delete_confirm = Some(first);
+                }
+                _ => {}
+            }
+        }
+        // Session chimes (herdr semantics, `sound::sound_for_transition`): a
+        // question rings whenever a session flips to AwaitingInput, a
+        // completion rings on the Working→Idle edge — for ANY session on any
+        // device. A row's first appearance only seeds the baseline, so boot
+        // (restored rows) and fresh sends stay silent. Desktop banners
+        // (`notify::post`) ride the SAME edges and gates behind their own
+        // settings flag — one detector, two outputs, so the banner can never
+        // fire where the chime wouldn't.
+        //
+        // STALENESS-GATED like the dot (`effective_indicator`), for the same
+        // reason: raw row statuses include the past. A dead turn's Working row
+        // (host killed mid-run, Idle write lost to a wedged room) seeded
+        // prev=Working here, and the moment the old Idle finally synced in —
+        // typically piggybacked on the round-trip of a fresh send — the chime
+        // heard a phantom Working→Idle and rang "done" on send (user report
+        // 2026-07-31). The dot never showed that ghost; the chime must judge
+        // by the identical clock.
+        //
+        // SEND-PENDING-GATED too (`AppState::send_pending`): a send whose
+        // queued command the host hasn't executed yet can still surface a
+        // phantom Working→Idle (a stale Working row crossing the 45s gate on
+        // the send's own re-render, or a late old Idle row) — the done-chime
+        // stays quiet for that chat until the host acks, while the baseline
+        // keeps tracking silently so the ghost edge never fires later. The
+        // question chime is NOT gated: an instant AwaitingInput ack should
+        // still ring.
+        //
+        // WINDOW-SCOPED: each window rings for the sessions it lists, so a
+        // project open in its own window rings once, from there. Rows outside
+        // the scope still track their baseline silently — a project that
+        // returns to the main window never replays an edge it already rang.
+        {
+            let now = Utc::now();
+            type Ping = (
+                String,
+                cypher_proto::SessionStatus,
+                bool,
+                Option<String>,
+                bool,
+            );
+            let sessions: Vec<Ping> = {
+                let state = state.read(cx);
+                let scope = state.project_scope();
+                state
+                    .sessions
+                    .iter()
+                    .map(|s| {
+                        use cypher_proto::view::Indicator;
+                        let status = match cypher_proto::view::effective_indicator(Some(s), now) {
+                            Indicator::Working => cypher_proto::SessionStatus::Working,
+                            Indicator::AwaitingInput => cypher_proto::SessionStatus::AwaitingInput,
+                            Indicator::Errored => cypher_proto::SessionStatus::Errored,
+                            Indicator::None => cypher_proto::SessionStatus::Idle,
+                        };
+                        let send_pending = state.send_pending(&s.chat_id, now);
+                        let chat = state.chats.iter().find(|c| c.id == s.chat_id);
+                        let title = chat.and_then(|c| c.title.clone());
+                        // Rows without a chat yet belong to the main window.
+                        let in_scope = chat.map_or(scope.only.is_none(), |c| scope.chat_visible(c));
+                        (s.chat_id.clone(), status, send_pending, title, in_scope)
+                    })
+                    .collect()
+            };
+            let (sound_enabled, notifications_enabled, background_only) = self.chime_settings(cx);
+            // Background-only banners: `active_window()` is app-level (any
+            // Cypher window being key), so a ping for a *background chat* in a
+            // focused app still stays a chime — you're already looking at
+            // Cypher; the sidebar dot carries the rest.
+            let app_focused = cx.active_window().is_some();
+            for (chat_id, status, send_pending, title, in_scope) in sessions {
+                let prev = self.sound_prev.insert(chat_id, status);
+                if in_scope
+                    && let Some(prev) = prev
+                    && let Some(sound) = crate::sound::sound_for_transition(prev, status)
+                    && !(send_pending && sound == crate::sound::Sound::Done)
+                {
+                    if sound_enabled {
+                        crate::sound::play(sound);
+                    }
+                    if notifications_enabled && !(background_only && app_focused) {
+                        let title = title.unwrap_or_else(|| "New session".into());
+                        let body = match sound {
+                            crate::sound::Sound::Done => "Run finished",
+                            crate::sound::Sound::Request => "Waiting on your input",
+                        };
+                        crate::notify::post(&title, body);
+                    }
+                }
+            }
+        }
+        self.sync_dock_badge(cx);
+        // Boot: restore the last selected space once the first spaces frame
+        // lands (a still-existing row wins over the auto-selected first one;
+        // the boot-auto-selected chat's own space wins over both — selecting a
+        // chat implies its space, which `select_chat` already applied).
+        if !self.space_boot_applied && !state.read(cx).spaces.is_empty() {
+            self.space_boot_applied = true;
+            if state.read(cx).selected_chat.is_none() {
+                // Restore the last selected project (unless the user opted
+                // out of projects); a still-existing row wins over the
+                // auto-selected first one. The sidebar never filters — the
+                // canvas defaults are the only target.
+                let exists = |id: &String| state.read(cx).space_row(id).is_some();
+                let target = if !state.read(cx).no_project {
+                    self.settings.last_space_id.clone().filter(&exists)
+                } else {
+                    None
+                };
+                if target.is_some() {
+                    state.update(cx, |s, cx| s.select_space(target.clone(), cx));
+                    // A boot canvas tile opened before the spaces frame
+                    // copied main's then-empty pick: aim it too.
+                    let canvases: Vec<Entity<AppState>> = self
+                        .slots
+                        .values()
+                        .filter(|slot| matches!(slot.tab, crate::workspace::TabKey::NewSession(_)))
+                        .map(|slot| slot.state.clone())
+                        .collect();
+                    for canvas in canvases {
+                        canvas.update(cx, |s, cx| s.select_space(target.clone(), cx));
+                    }
+                }
+            }
+        }
+        // Persist the selected space (the new-tab fallback) — only when it
+        // resolves to a LIVE Space. A dangling id (space deleted elsewhere)
+        // must never overwrite the remembered one, or the next boot would
+        // restore a dead project.
+        if main_window {
+            let state = state.read(cx);
+            let live = state.selected_space_if_live();
+            if live.is_some() && live != self.settings.last_space_id {
+                self.settings.last_space_id = live;
+                self.schedule_save(cx);
+            }
+        }
+        // Boot landing: the most recent session once the first chats frame
+        // syncs (manual selection wins).
+        self.boot_select_chat(cx);
+        // Deleted / archived sessions, and sessions whose project moved to
+        // (or out of) this window's scope, leave the workspace.
+        self.prune_tabs(cx);
+        match state.read(cx).connection {
+            ConnectionStatus::Ready => {
+                if self.splash == SplashPhase::Visible {
+                    self.splash = SplashPhase::FadingOut;
+                    self.splash_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(SPLASH_OUT.total() + Duration::from_millis(30))
+                            .await;
+                        this.update(cx, |shell, cx| {
+                            shell.splash = SplashPhase::Gone;
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                }
+            }
+            // Reveal the gate card immediately; the splash never returns mid-session.
+            ConnectionStatus::Failed(_) => self.splash = SplashPhase::Gone,
+            ConnectionStatus::Connecting => {}
+        }
+    }
+}

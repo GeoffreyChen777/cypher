@@ -2,9 +2,8 @@
 //! list; a click opens (or focuses) the session as a tab in the workspace
 //! (docs/workspace-layout.md): the focused tile, or — ⌘-click — a new split
 //! to its right. The main state's selection follows the focused tile
-//! (`Shell::sync_follow`). `UiSettings.open_tabs` is legacy — no longer
-//! read or written; the layout persists as `UiSettings.workspace` (and
-//! `project_workspaces` per project window), restored at boot landing.
+//! (`Shell::sync_follow`). The layout persists as `UiSettings.workspace`
+//! (and `project_workspaces` per project window), restored at boot landing.
 
 use super::*;
 use crate::workspace::{TabKey, Workspace};
@@ -546,24 +545,10 @@ mod cycle_tests {
 
     fn chat(id: &str, space_id: Option<&str>) -> cypher_proto::Chat {
         cypher_proto::Chat {
-            pinned: false,
             id: id.into(),
-            device_id: "dev".into(),
-            title: None,
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
             created_at: Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
             space_id: space_id.map(Into::into),
-            last_seen_at: None,
-            room_gen: None,
-            child: None,
+            ..crate::test_fixtures::chat()
         }
     }
 

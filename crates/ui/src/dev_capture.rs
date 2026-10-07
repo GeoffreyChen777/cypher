@@ -296,7 +296,10 @@ async fn run(
         "type" => {
             // `dispatch_keystroke` simulates IME input for plain keys, so
             // each character lands in the focused text field.
-            let text = line.splitn(2, ' ').nth(1).unwrap_or_default().to_string();
+            let text = line
+                .split_once(' ')
+                .map_or("", |(_, rest)| rest)
+                .to_string();
             for ch in text.chars() {
                 let combo = match ch {
                     ' ' => "space".to_string(),

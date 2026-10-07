@@ -42,7 +42,7 @@ pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_MAX: f32 = 1368.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 
-/// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
+/// Terminal panel height bounds: 160px … 55% of the viewport. The
 /// viewport-relative cap applies at runtime; the absolute cap here only heals
 /// hand-edited files.
 pub const TERMINAL_MIN_HEIGHT: f32 = 160.0;
@@ -70,35 +70,10 @@ const FILE_NAME: &str = "ui-settings.json";
 pub struct UiSettings {
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
-    /// Legacy: the grouped-by-project toggle predates spaces (which group by
-    /// folder inherently). Kept for file compatibility; no longer read.
-    pub sidebar_grouped: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-session canvas's default target.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
-    /// Open session tabs in visual order (drag-reorder edits in place).
-    /// Device-local: a tab is a local viewport onto the synced session list —
-    /// closing one never archives the session. Ids of archived/deleted chats
-    /// are pruned against the doc ([`Shell::sync_open_tabs`]). `None` = file
-    /// written by a pre-tabs build; seeded once from the last space's sessions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub open_tabs: Option<Vec<String>>,
-    /// Legacy: the sidebar's project filter, from when a dropdown filtered
-    /// the session list. Serialized as `spaceFilter` for file compatibility
-    /// but ignored by current runtime behavior — the sidebar always shows
-    /// every project now, and the canvas target selectors are the only
-    /// switcher. It remains round-trippable for compatibility.
-    #[serde(rename = "spaceFilter", skip_serializing_if = "Option::is_none")]
-    pub legacy_space_filter: Option<String>,
-    /// Legacy: per-space tab order, from when tabs were the selected space's
-    /// non-archived sessions. Kept for file compatibility; no longer read.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub tab_order: std::collections::HashMap<String, Vec<String>>,
-    /// Legacy: manual sidebar space order, from when spaces were a sidebar
-    /// list. Kept for file compatibility; no longer read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub space_order: Vec<String>,
     /// Session notification chimes (done / awaiting-input). `CYPHER_DISABLE_SOUND`
     /// overrides.
     pub sound_enabled: bool,
@@ -115,15 +90,9 @@ pub struct UiSettings {
     /// no longer written; the size of a session whose dock was never dragged
     /// (see [`SessionDock`]).
     pub right_pane_width: f32,
-    /// Legacy: panel *open* flags are session-scoped in-memory state now
-    /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
-    /// compatibility; no longer read or written by the shell.
-    pub right_pane_open: bool,
     /// Legacy global terminal height (px) — see [`Self::right_pane_width`].
     pub terminal_height: f32,
-    /// Legacy — see [`Self::right_pane_open`].
-    pub terminal_open: bool,
-    /// Customizable shortcut combos (feature-inventory §1.4).
+    /// Customizable shortcut combos.
     pub keymap: KeymapConfig,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
@@ -275,20 +244,13 @@ impl Default for UiSettings {
         Self {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
-            sidebar_grouped: false,
             last_space_id: None,
-            open_tabs: None,
-            legacy_space_filter: None,
-            tab_order: std::collections::HashMap::new(),
-            space_order: Vec::new(),
             sound_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
             dock_badge_enabled: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
-            right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
-            terminal_open: false,
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             setup_completed: false,
@@ -312,7 +274,7 @@ impl Default for UiSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Keymap (customizable shortcuts, §1.4)
+// Keymap (customizable shortcuts)
 // ---------------------------------------------------------------------------
 
 /// The rebindable app shortcuts.
@@ -597,20 +559,6 @@ pub fn combo_from_keystroke_on(
     Some(parts.join("-"))
 }
 
-/// Shortcut ids whose combos collide with another shortcut (conflict detection).
-pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
-    ShortcutId::ALL
-        .into_iter()
-        .filter(|&id| {
-            let combo = keymap.get(id);
-            !combo.is_empty()
-                && ShortcutId::ALL
-                    .into_iter()
-                    .any(|other| other != id && keymap.get(other) == combo)
-        })
-        .collect()
-}
-
 /// Translate a stored combo into a bindable keystroke for this platform.
 pub fn platform_combo(combo: &str) -> String {
     platform_combo_on(cfg!(target_os = "macos"), combo)
@@ -736,13 +684,9 @@ impl UiSettings {
 
     /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+        crate::fs_util::write_atomic(data_dir, FILE_NAME, json.as_bytes(), 0o666)
     }
 
     pub fn path(data_dir: &Path) -> PathBuf {
@@ -809,510 +753,4 @@ fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings = UiSettings {
-            sidebar_width: 300.0,
-            sidebar_collapsed: true,
-            sidebar_grouped: true,
-            last_space_id: Some("space-1".into()),
-            open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
-            legacy_space_filter: Some("space-1".into()),
-            tab_order: std::collections::HashMap::from([(
-                "space-1".to_string(),
-                vec!["b".to_string(), "a".to_string()],
-            )]),
-            space_order: vec!["space-2".to_string(), "space-1".to_string()],
-            sound_enabled: false,
-            notifications_enabled: false,
-            notifications_background_only: false,
-            dock_badge_enabled: false,
-            right_pane_width: 700.0,
-            right_pane_open: true,
-            terminal_height: 320.0,
-            terminal_open: true,
-            keymap: KeymapConfig {
-                toggle_sidebar: "mod-shift-s".into(),
-                ..KeymapConfig::default()
-            },
-            appearance: crate::appearance::AppearanceMode::Light,
-            setup_completed: true,
-            pi_runtime_setup_version: 1,
-            shown_slash_commands: vec!["goal".into(), "skill:x".into()],
-            offered_slash_commands: commands::SHOWN_BY_DEFAULT
-                .iter()
-                .map(|name| name.to_string())
-                .collect(),
-            sidebar_sort: SidebarSort::Device,
-            sidebar_device_filter: Some("dev-1".into()),
-            sidebar_sort_reversed: true,
-            workspace: Some(sample_workspace()),
-            project_workspaces: HashMap::from([("space-1".to_string(), sample_workspace())]),
-            session_docks: HashMap::from([(
-                "a".to_string(),
-                SessionDock {
-                    right: Some(0.4),
-                    terminal: None,
-                    right_open: true,
-                    terminal_open: false,
-                    used_at: 7,
-                },
-            )]),
-        };
-        settings.save(dir.path()).unwrap();
-        assert_eq!(UiSettings::load(dir.path()), settings);
-        let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
-        for key in [
-            "\"workspace\"",
-            "\"projectWorkspaces\"",
-            "\"sessionDocks\"",
-            "\"rightOpen\"",
-        ] {
-            assert!(json.contains(key), "{key} missing: {json}");
-        }
-    }
-
-    fn sample_workspace() -> crate::workspace::Workspace {
-        use crate::workspace::{Edge, TabKey, Workspace};
-        let mut ws = Workspace::new();
-        let first = ws.open(TabKey::session("a"));
-        ws.open_split(TabKey::session("b"), first, Edge::Right);
-        ws
-    }
-
-    /// Files from before the workspace layout load with no saved layout and
-    /// no per-session docks — and don't write the keys back until used.
-    #[test]
-    fn legacy_files_without_a_workspace_load() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "openTabs": ["a"], "rightPaneWidth": 700, "terminalHeight": 300}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.workspace, None);
-        assert!(loaded.project_workspaces.is_empty() && loaded.session_docks.is_empty());
-        assert_eq!(loaded.right_pane_width, 700.0, "legacy sizes still seed");
-        assert_eq!(loaded.terminal_height, 300.0);
-        let json = serde_json::to_string(&loaded).unwrap();
-        assert!(
-            !json.contains("workspace") && !json.contains("sessionDocks"),
-            "{json}"
-        );
-    }
-
-    /// The old hidden-command list loads without error and leaves every
-    /// command but the defaults hidden; it is not written back.
-    #[test]
-    fn legacy_hidden_slash_commands_are_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "hiddenSlashCommands": ["mcp", "skill:x"]}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.sidebar_width, 300.0, "the rest of the file loads");
-        assert_eq!(loaded.shown_slash_commands, commands::SHOWN_BY_DEFAULT);
-        let json = serde_json::to_string(&loaded).unwrap();
-        assert!(!json.contains("hiddenSlashCommands"), "{json}");
-    }
-
-    /// A layout of the wrong shape (a newer build's tab kind after a
-    /// downgrade, a negative index) drops only itself: every other setting
-    /// survives the load.
-    #[test]
-    fn a_type_invalid_workspace_drops_only_itself() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{
-                "keymap": {"toggleSidebar": "mod-shift-s"},
-                "appearance": "light",
-                "workspace": {"root": {"group": 1}, "groups": {"1": {"tabs": [{"futureKind": 3}], "active": -1}}},
-                "projectWorkspaces": {"p": {"root": {"group": 1}, "groups": {"1": {"active": -2}}}, "q": {}},
-                "sessionDocks": {"a": {"right": "wide"}, "b": {"rightOpen": true, "usedAt": 5}}
-            }"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.keymap.toggle_sidebar, "mod-shift-s");
-        assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::Light);
-        assert_eq!(loaded.workspace, None);
-        assert_eq!(
-            loaded.project_workspaces.keys().collect::<Vec<_>>(),
-            vec!["q"]
-        );
-        assert_eq!(loaded.session_docks.keys().collect::<Vec<_>>(), vec!["b"]);
-        assert!(loaded.session_docks["b"].right_open);
-        // A map of the wrong type altogether is dropped the same way.
-        let loaded: UiSettings =
-            serde_json::from_str(r#"{"soundEnabled": false, "sessionDocks": [1, 2]}"#).unwrap();
-        assert!(!loaded.sound_enabled);
-        assert!(loaded.session_docks.is_empty());
-    }
-
-    #[test]
-    fn a_corrupt_saved_workspace_is_repaired_not_fatal() {
-        let loaded: UiSettings = serde_json::from_str(
-            r#"{"soundEnabled": false, "workspace": {"root": {"group": 9}, "groups": {}}}"#,
-        )
-        .unwrap();
-        assert!(!loaded.sound_enabled);
-        let ws = loaded.workspace.expect("repaired, not dropped");
-        assert_eq!(ws.group_count(), 1);
-        assert_eq!(ws.tabs().count(), 0);
-    }
-
-    #[test]
-    fn session_docks_heal_and_stay_bounded() {
-        let mut settings = UiSettings::default();
-        for i in 0..SESSION_DOCKS_CAP + 5 {
-            settings.remember_session_dock(&format!("c{i}"), SessionDock::default(), i as i64);
-        }
-        assert_eq!(settings.session_docks.len(), SESSION_DOCKS_CAP);
-        // The oldest went first; the newest is the default for new sessions.
-        assert!(!settings.session_docks.contains_key("c0"));
-        assert!(!settings.session_docks.contains_key("c4"));
-        assert!(settings.session_docks.contains_key("c5"));
-        let latest = settings.latest_session_dock().unwrap();
-        assert_eq!(latest.used_at, (SESSION_DOCKS_CAP + 4) as i64);
-        settings.prune_session_docks(|id| id == "c10");
-        assert_eq!(settings.session_docks.len(), 1);
-
-        let healed: UiSettings = serde_json::from_str(
-            r#"{"sessionDocks": {"a": {"right": 3.0, "terminal": -1.0, "terminalOpen": true}}}"#,
-        )
-        .unwrap();
-        let a = healed.clamped().session_docks["a"];
-        assert_eq!(a.right, Some(DOCK_FRACTION_MAX));
-        assert_eq!(a.terminal, Some(DOCK_FRACTION_MIN));
-        assert!(a.terminal_open && !a.right_open);
-        assert_eq!(clamp_fraction(f32::NAN), None);
-    }
-
-    #[test]
-    fn a_new_session_starts_from_the_latest_sizes_with_docks_closed() {
-        let latest = SessionDock {
-            right: Some(0.3),
-            terminal: Some(0.25),
-            right_open: true,
-            terminal_open: true,
-            used_at: 5,
-        };
-        let seeded = SessionDock::seeded_from(Some(&latest));
-        assert_eq!((seeded.right, seeded.terminal), (Some(0.3), Some(0.25)));
-        assert!(!seeded.right_open && !seeded.terminal_open);
-        assert_eq!(SessionDock::seeded_from(None), SessionDock::default());
-    }
-
-    /// The retired sidebar filter keeps its old `spaceFilter` JSON key — an
-    /// explicitly legacy/unused compatibility field. Old files load it into
-    /// `legacy_space_filter`; runtime behavior never reads it.
-    #[test]
-    fn space_filter_serializes_under_its_legacy_key() {
-        let settings = UiSettings {
-            legacy_space_filter: Some("space-1".into()),
-            ..UiSettings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        assert!(json.contains("\"spaceFilter\":\"space-1\""), "{json}");
-        assert!(!json.contains("legacySpaceFilter"), "{json}");
-        // And a pre-redesign file (with `spaceFilter`) still parses.
-        let loaded: UiSettings =
-            serde_json::from_str(r#"{"sidebarWidth": 280, "spaceFilter": "space-9"}"#).unwrap();
-        assert_eq!(loaded.legacy_space_filter.as_deref(), Some("space-9"));
-    }
-
-    /// A settings file written before light mode existed has no `appearance`
-    /// key; it must load as "follow the OS" rather than failing the whole parse
-    /// and resetting every other preference to defaults.
-    #[test]
-    fn settings_without_appearance_default_to_system() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled, "other keys still parse");
-        assert!(
-            loaded.notifications_enabled,
-            "pre-banner files default banners on"
-        );
-        assert!(
-            loaded.notifications_background_only,
-            "pre-banner files default background-only on"
-        );
-        assert!(
-            loaded.dock_badge_enabled,
-            "pre-badge files default the Dock badge on"
-        );
-        assert!(
-            !loaded.setup_completed,
-            "pre-setup files still show first-run setup"
-        );
-        let pre_runtime: UiSettings = serde_json::from_str(r#"{"setupCompleted":true}"#).unwrap();
-        assert_eq!(
-            pre_runtime.pi_runtime_setup_version, 0,
-            "users who completed the old system-Pi setup see the runtime prompt once"
-        );
-    }
-
-    #[test]
-    fn missing_and_corrupt_files_yield_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
-        std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
-    }
-
-    #[test]
-    fn loaded_values_are_clamped() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 10000, "rightPaneWidth": 1}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
-        assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
-    }
-
-    #[test]
-    fn nan_heals_to_default() {
-        let healed = UiSettings {
-            sidebar_width: f32::NAN,
-            ..Default::default()
-        }
-        .clamped();
-        assert_eq!(healed.sidebar_width, SIDEBAR_DEFAULT);
-    }
-
-    #[test]
-    fn defaults_match_zeron() {
-        let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, 256.0);
-        assert_eq!(d.right_pane_width, 520.0);
-        assert_eq!(d.terminal_height, 280.0);
-        assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
-    }
-
-    #[test]
-    fn keymap_defaults_and_reset() {
-        let mut keymap = KeymapConfig::default();
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-s");
-        assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-b");
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
-        let ctrl = if cfg!(target_os = "macos") {
-            "ctrl"
-        } else {
-            "mod"
-        };
-        assert_eq!(keymap.get(ShortcutId::NextSession), format!("{ctrl}-tab"));
-        assert_eq!(
-            keymap.get(ShortcutId::PrevSession),
-            format!("{ctrl}-shift-tab")
-        );
-        keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
-        keymap.reset(ShortcutId::ToggleSidebar);
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-s");
-    }
-
-    #[test]
-    fn combo_recording() {
-        // How this platform spells a recorded ctrl (see `combo_from_keystroke_on`).
-        let ctrl_combo = |suffix: &str| {
-            if cfg!(target_os = "macos") {
-                format!("ctrl-{suffix}")
-            } else {
-                format!("mod-{suffix}")
-            }
-        };
-        assert_eq!(
-            combo_from_keystroke(true, false, false, false, "s"),
-            Some(ctrl_combo("s"))
-        );
-        assert_eq!(
-            combo_from_keystroke(false, false, false, true, "s"),
-            Some("mod-s".into())
-        );
-        assert_eq!(
-            combo_from_keystroke(true, false, true, false, "tab"),
-            Some(ctrl_combo("shift-tab"))
-        );
-        assert_eq!(
-            combo_from_keystroke(true, true, true, false, "K"),
-            Some(ctrl_combo("alt-shift-k"))
-        );
-        // Plain keys record without modifiers (Esc is filtered by the caller).
-        assert_eq!(
-            combo_from_keystroke(false, false, false, false, "f5"),
-            Some("f5".into())
-        );
-        // Bare modifier presses record nothing.
-        assert_eq!(
-            combo_from_keystroke(true, false, false, false, "ctrl"),
-            None
-        );
-        assert_eq!(
-            combo_from_keystroke(false, false, true, false, "shift"),
-            None
-        );
-        assert_eq!(combo_from_keystroke(false, false, false, false, ""), None);
-    }
-
-    #[test]
-    fn every_default_is_spelled_the_way_the_recorder_spells_it() {
-        // The invariant `default_combo_on` documents. Checked for BOTH
-        // platforms because the hazard only exists off macOS, so a single-OS
-        // CI run would never see it.
-        for mac in [true, false] {
-            for id in ShortcutId::ALL {
-                let combo = id.default_combo_on(mac);
-                // Via the platform spelling, where modifier names are
-                // unambiguous, so the decode can't inherit the bug it checks.
-                let bound = platform_combo_on(mac, combo);
-                let mut parts: Vec<&str> = bound.split('-').collect();
-                let key = parts.pop().expect("a combo always ends in a key");
-                let recorded = combo_from_keystroke_on(
-                    mac,
-                    parts.contains(&"ctrl"),
-                    parts.contains(&"alt"),
-                    parts.contains(&"shift"),
-                    parts.contains(&"cmd"),
-                    key,
-                );
-                assert_eq!(
-                    recorded.as_deref(),
-                    Some(combo),
-                    "{} default {combo:?} is unreachable from the recorder (mac={mac})",
-                    id.label()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn defaults_are_distinct_physical_keys() {
-        // Distinct STRINGS is not enough — two defaults could still resolve to
-        // the same keystroke through `platform_combo`.
-        let mut seen = std::collections::HashSet::new();
-        for id in ShortcutId::ALL {
-            let bound = platform_combo(id.default_combo());
-            assert!(seen.insert(bound.clone()), "{bound:?} bound twice");
-        }
-    }
-
-    #[test]
-    fn conflict_detection() {
-        let mut keymap = KeymapConfig::default();
-        assert!(conflicted_shortcuts(&keymap).is_empty());
-        keymap.set(ShortcutId::ToggleChanges, "mod-s".into());
-        let conflicts = conflicted_shortcuts(&keymap);
-        assert!(conflicts.contains(&ShortcutId::ToggleSidebar));
-        assert!(conflicts.contains(&ShortcutId::ToggleChanges));
-        assert!(!conflicts.contains(&ShortcutId::ToggleTerminal));
-        keymap.reset(ShortcutId::ToggleChanges);
-        assert!(conflicted_shortcuts(&keymap).is_empty());
-    }
-
-    #[test]
-    fn combo_translation() {
-        let primary = if cfg!(target_os = "macos") {
-            "cmd"
-        } else {
-            "ctrl"
-        };
-        assert_eq!(platform_combo("mod-s"), format!("{primary}-s"));
-        assert_eq!(platform_combo("alt-f4"), "alt-f4");
-        let display_primary = if cfg!(target_os = "macos") {
-            "Cmd"
-        } else {
-            "Ctrl"
-        };
-        assert_eq!(
-            display_combo("mod-shift-s"),
-            format!("{display_primary}+Shift+S")
-        );
-        assert_eq!(display_combo("f5"), "F5");
-        // Literal ctrl passes through untouched — the macOS spelling of
-        // session cycling.
-        assert_eq!(platform_combo("ctrl-shift-tab"), "ctrl-shift-tab");
-        assert_eq!(display_combo("ctrl-shift-tab"), "Ctrl+Shift+Tab");
-    }
-
-    #[test]
-    fn keymap_survives_old_settings_files() {
-        // Files written before the keymap existed load with defaults.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.keymap, KeymapConfig::default());
-        assert!(!loaded.sidebar_grouped);
-    }
-
-    #[test]
-    fn a_keymap_missing_newer_shortcuts_keeps_its_customizations() {
-        // Upgrade path: a file from a build that predates session cycling
-        // carries the user's rebinds and defaults only the new rows.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"keymap": {"toggleSidebar": "mod-shift-x"}}"#,
-        )
-        .unwrap();
-        let keymap = UiSettings::load(dir.path()).keymap;
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
-        assert_eq!(
-            keymap.get(ShortcutId::NextSession),
-            ShortcutId::NextSession.default_combo()
-        );
-        // The workspace rows arrived later still: defaults, customizations
-        // intact.
-        assert_eq!(keymap.get(ShortcutId::SplitRight), "mod-\\");
-        assert_eq!(keymap.get(ShortcutId::ToggleZoom), "mod-shift-enter");
-    }
-
-    #[test]
-    fn workspace_shortcuts_are_grouped_and_round_trip() {
-        let workspace: Vec<ShortcutId> = ShortcutId::ALL
-            .into_iter()
-            .filter(|id| id.group() == ShortcutGroup::Workspace)
-            .collect();
-        assert_eq!(workspace.len(), 8);
-        assert_eq!(ShortcutId::NewSession.group(), ShortcutGroup::General);
-        let mut keymap = KeymapConfig::default();
-        keymap.set(ShortcutId::FocusLeft, "mod-shift-left".into());
-        let json = serde_json::to_string(&keymap).unwrap();
-        assert!(json.contains(r#""focusLeft":"mod-shift-left""#), "{json}");
-        let back: KeymapConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, keymap);
-    }
-
-    #[test]
-    fn terminal_height_clamps_on_load() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 5}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_MIN_HEIGHT
-        );
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 99999}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_ABS_MAX_HEIGHT
-        );
-    }
-}
+mod tests;
