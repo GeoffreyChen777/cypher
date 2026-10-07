@@ -60,10 +60,3 @@ final class ModelPickerUITests: XCTestCase {
                       "the chip shows the new pick: \(chip.label)")
     }
 }
-
-private extension XCUIElement {
-    func waitForSelected(timeout: TimeInterval) -> Bool {
-        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "selected == true"), object: self)
-        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
-    }
-}
