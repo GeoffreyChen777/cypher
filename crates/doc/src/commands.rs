@@ -37,7 +37,6 @@ pub enum SessionCommandStatus {
     Rejected,
     Expired,
     Superseded,
-    Cancelled,
 }
 
 // One durable command per user action, matched in ~85 places across the

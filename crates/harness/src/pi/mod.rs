@@ -1252,7 +1252,7 @@ impl PiHarness {
 
     /// Run `/command` through a short-lived `pi --mode rpc` child so command
     /// handlers (MCP OAuth, etc.) execute inside Pi, the same path as the TUI.
-    pub async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
+    async fn run_slash_command(&self, prompt: &str) -> Result<String, HarnessError> {
         self.run_slash_command_ui(prompt, None).await
     }
 

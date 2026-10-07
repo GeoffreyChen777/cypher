@@ -1,6 +1,6 @@
 //! ChatClient — WebSocket transport for chat2 rooms (docs/chat2-sync.md C1):
 //! hello/state handshake with client-side checkpoint precision, cursor-based
-//! row backfill, push/ack with a pending-unacked queue, opaque presence
+//! row backfill, push/ack with a pending-unacked queue, inbound presence
 //! relay, probe/redial liveness, and reconnect with exponential backoff.
 //!
 //! The client owns no CRDT semantics: update bytes flow through a
@@ -556,7 +556,6 @@ pub struct ChatClient {
     nudge: mpsc::Sender<()>,
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
-    presence_out: mpsc::Sender<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -678,7 +677,6 @@ impl ChatClient {
         let (probe_tx, probe_rx) = mpsc::channel(1);
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (sync_tx, sync_rx) = mpsc::channel(1);
-        let (presence_tx, presence_rx) = mpsc::channel(4);
         let mut restored = Shared {
             cursor: initial_cursor,
             ..Shared::default()
@@ -713,7 +711,6 @@ impl ChatClient {
             nudge_rx,
             probe_rx,
             redial_rx,
-            presence_rx,
             flags: flags.clone(),
             resumed: false,
             cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
@@ -734,7 +731,6 @@ impl ChatClient {
                 nudge: nudge_tx,
                 probe: probe_tx,
                 redial: redial_tx,
-                presence_out: presence_tx,
                 flags,
                 task: Some(task),
             }),
@@ -855,12 +851,6 @@ impl ChatClient {
         let _ = self.nudge.try_send(());
     }
 
-    /// Publish this device's presence beat with an opaque payload (cursor
-    /// positions etc. — relayed verbatim, never stored).
-    pub fn send_presence(&self, at: i64, payload: Vec<u8>) {
-        let _ = self.presence_out.try_send((at, payload));
-    }
-
     /// Force the currently queued durable batch now (Run/Steer/Interrupt/
     /// completion boundaries will use this hook). Does not alter local docs.
     pub fn flush_pending(&self) {
@@ -959,7 +949,6 @@ struct Actor {
     nudge_rx: mpsc::Receiver<()>,
     probe_rx: mpsc::Receiver<()>,
     redial_rx: mpsc::Receiver<()>,
-    presence_rx: mpsc::Receiver<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
     /// False until the first backfill of THIS client instance completes.
     /// (Continuity is instance-scoped: a host that restores an older doc
@@ -1471,18 +1460,6 @@ impl Actor {
                     // Once joined, queued writes belong on WS, not both paths.
                     if !self.push_pending(&mut pipe).await {
                         return SessionEnd::Reconnect;
-                    }
-                }
-                beat = self.presence_rx.recv() => {
-                    if let Some((at, payload)) = beat {
-                        let frame = wire::encode(
-                            frame_type::PRESENCE,
-                            &wire::PresenceOutHeader { at },
-                            &payload,
-                        );
-                        if pipe.tx.send(frame).await.is_err() {
-                            return SessionEnd::Reconnect;
-                        }
                     }
                 }
                 _ = self.probe_rx.recv() => {

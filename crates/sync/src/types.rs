@@ -14,8 +14,6 @@ pub enum SyncError {
     WebSocket(String),
     #[error("protocol: {0}")]
     Protocol(String),
-    #[error("join refused: {0}")]
-    JoinRefused(String),
     #[error("loro: {0}")]
     Loro(String),
     #[error("auth: {0}")]

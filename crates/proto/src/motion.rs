@@ -10,11 +10,6 @@
 //! it from a frame delta or from wall-clock elapsed time and get identical
 //! output.
 
-/// Cypher loader pulse period.
-pub const CYPHER_PULSE_MS: u64 = 2_400;
-/// Gradient matrix spinner wave period.
-pub const GRADIENT_SPIN_MS: u64 = 750;
-
 /// Cells in the cypher wave loader.
 pub const CYPHER_CELLS: usize = 5;
 /// Side length of the gradient spinner matrix.
@@ -32,13 +27,6 @@ pub const PULSE_STAGGER: f32 = 0.15 / 2.4;
 pub const GSPIN_ROW_TINTS: [u32; MATRIX_SIDE] = [0xB6D3EF, 0xEDB185, 0xF888A0];
 /// Opacity a gradient-spinner cell rests at between pulses.
 pub const GSPIN_DIM: f32 = 0.1;
-
-/// Clockwise ring position of each `(row, col)` cell of the 2×3 mini spinner,
-/// top-left first: (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0). Every cell of
-/// a 2×3 grid is on the ring, so the brightness chases around it.
-pub const MINI_RING: [[usize; 2]; 3] = [[0, 1], [5, 2], [4, 3]];
-/// Cells in the mini spinner's ring.
-pub const MINI_RING_LEN: f32 = 6.0;
 
 /// Linear interpolation.
 pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
@@ -155,12 +143,5 @@ mod tests {
         assert!(bottom < top, "bottom {bottom} should lead top {top}");
         // Symmetric about the centre column.
         close(gspin_cell_phase(1, 0), gspin_cell_phase(1, 2), "symmetry");
-    }
-
-    #[test]
-    fn the_mini_ring_visits_every_cell_once() {
-        let mut seen: Vec<usize> = MINI_RING.iter().flatten().copied().collect();
-        seen.sort_unstable();
-        assert_eq!(seen, (0..MINI_RING_LEN as usize).collect::<Vec<_>>());
     }
 }
