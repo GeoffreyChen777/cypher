@@ -1,12 +1,8 @@
-//! The born-gen2 race (2026-08-11): the composer attaches the transcript
-//! watch — opening the chat doc — BEFORE its own `Mutate createChat` lands,
-//! so `open()` sees no registry row. Defaulting the absent row to gen 1
-//! minted a brand-new legacy s2 room post-cutover: the host ran the whole
-//! session against a room no other device reads (they follow the row's
-//! roomGen 2 to an empty chat2 room), the run's live doc ref blocked the
-//! cutover watcher's drop-and-reopen heal, the stuck handle got retired
-//! (suppressing every snapshot save), and the transcript vanished on the
-//! next restart. An absent row must mean "being born on chat2".
+//! The born-chat2 race: the composer attaches the transcript watch — opening
+//! the chat doc — BEFORE its own `Mutate createChat` lands, so `open()` sees
+//! no registry row. An absent row must mean "being born on chat2": the
+//! transcript written under that open must survive the row's arrival and a
+//! restart.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -173,8 +169,7 @@ async fn transcript_survives_open_racing_create_chat() {
             .expect("queue run command");
         wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
 
-        // The row arriving mid-life must not blank the transcript (the old
-        // watcher retired the handle; a reopen then built a fresh empty doc).
+        // The row arriving mid-life must not blank the transcript.
         let mid = entries(&core);
         assert!(
             mid.iter().any(|e| e.role == MessageRole::User),
@@ -186,9 +181,7 @@ async fn transcript_survives_open_racing_create_chat() {
     }
     drop(watch_holder);
 
-    // Restart on the same data dir: the transcript must have persisted. The
-    // stuck s2 handle's `retired` flag used to suppress every snapshot save,
-    // so the doc's only copy died with the process.
+    // Restart on the same data dir: the transcript must have persisted.
     let core = assemble(&dir);
     let after = entries(&core);
     assert_eq!(

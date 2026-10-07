@@ -322,7 +322,6 @@ impl EngineCore {
         if let Err(err) = sessions.recover_orphaned_subagents() {
             tracing::error!(error = %err, "orphaned-subagent recovery failed");
         }
-        doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
         let repos = Repos::new(data_dir, &device_id);
         // Worktree materialization for Run commands carrying a WorktreeSpec
         // happens on the HOST at drain time (see `DocHost::materialize_worktree`).

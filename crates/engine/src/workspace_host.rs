@@ -1055,9 +1055,7 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
-                // Born on chat2: a brand-new chat has an empty doc — nothing
-                // to seed, no migration race to lose. Only pre-existing chats
-                // go through the seed+flip path (the host migration sweep).
+                // Born on chat2. Peers (iOS) gate on `roomGen >= 2`.
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
@@ -1221,12 +1219,6 @@ impl WorkspaceHost {
     /// import).
     pub fn import_space_row(&self, space: &Space) -> Result<(), EngineError> {
         Ok(self.mutate(|doc| doc.upsert_space(space))?)
-    }
-
-    /// Flip the chat's sync room generation (docs/chat2-sync.md M2) — the
-    /// host calls this in the same breath as seeding the chat2 checkpoint.
-    pub fn set_chat_room_gen(&self, chat_id: &str, room_gen: u32) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.set_chat_room_gen(chat_id, room_gen))?)
     }
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {

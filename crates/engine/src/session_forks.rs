@@ -512,14 +512,6 @@ impl SessionForks {
             .workspace
             .note_message(&chat.id, &last_entry_activity(&kept).unwrap_or_default());
 
-        // An emptied transcript is the one shape boot-time transcript salvage
-        // would try to "repair" from the pre-chat2 rollback copy — which is
-        // exactly the history the user just deleted. Drop that copy so the
-        // removal stays removed.
-        if kept.is_empty() {
-            self.inner.doc_host.drop_pre_chat2_rollback(&chat.id);
-        }
-
         let chat = self
             .inner
             .workspace
