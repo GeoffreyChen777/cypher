@@ -694,42 +694,6 @@ final class AppModel {
                                          repoPath: space.path, refName: refName)
     }
 
-    /// Mid-session ref switch (desktop switch_session_ref): retarget onto the
-    /// ref's existing worktree (row writes, no git), else checkout in the
-    /// session's own cwd on the host. Returns an error message or nil.
-    func switchSessionRef(chat: Chat, ref: RepoRef) async -> String? {
-        guard let cwd = chat.cwd else { return "Session has no working folder" }
-        if let worktree = ref.worktreePath {
-            if worktree == cwd { return nil }  // already here
-            if let demo {
-                if let ix = demo.chats.firstIndex(where: { $0.id == chat.id }) {
-                    demo.chats[ix].cwd = worktree
-                    demo.chats[ix].branch = ref.name
-                }
-                return nil
-            }
-            workspace?.setChatCheckout(chatId: chat.id, cwd: worktree, branch: ref.name)
-            return nil
-        }
-        if let demo {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            demo.switchRef(path: cwd, refName: ref.name)
-            if let ix = demo.chats.firstIndex(where: { $0.id == chat.id }) {
-                demo.chats[ix].branch = ref.name
-            }
-            return nil
-        }
-        guard let workspace else { return "Not connected" }
-        let error = await workspace.switchRef(deviceId: chat.deviceId,
-                                              repoPath: cwd, refName: ref.name)
-        if error == nil {
-            // The host's HEAD watcher reconciles chat.branch eventually;
-            // stamp it optimistically so the UI answers immediately.
-            workspace.setChatCheckout(chatId: chat.id, cwd: cwd, branch: ref.name)
-        }
-        return error
-    }
-
     /// CreateWorktree off the base ref; returns the new worktree's path.
     func createWorktree(space: Space, base: String) async -> String? {
         if let demo {

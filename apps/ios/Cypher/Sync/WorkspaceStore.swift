@@ -607,28 +607,6 @@ final class WorkspaceStore {
         afterLocalWrite()
     }
 
-    /// Hard-delete a space and cascade to its chats: ONE batch tombstones the
-    /// space row and every chat/session row whose spaceId matches — the
-    /// server applies the batch atomically.
-    func deleteSpace(spaceId: String) {
-        var keys: [(kind: String, id: String)] = []
-        for chat in chats where chat.spaceId == spaceId {
-            keys.append(("chats", chat.id))
-            keys.append(("sessions", chat.id))
-        }
-        keys.append(("spaces", spaceId))
-        doc.deleteRows(keys)
-        afterLocalWrite()
-    }
-
-    /// Unpair a device: tombstone the device row only. Spaces and chats stay
-    /// so that machine can keep its work after it drops to local-only. The
-    /// local (this) device is the caller's responsibility to refuse.
-    func deleteDevice(deviceId: String) {
-        doc.deleteRows([("devices", deviceId)])
-        afterLocalWrite()
-    }
-
     /// Field sets are `update` ops — they NEVER create or revive rows (the
     /// old "never invent rows" discipline), so check the overlay row first.
     private func updateChat(_ chatId: String, set: [String: JSONValue]) {

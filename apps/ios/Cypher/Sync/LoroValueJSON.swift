@@ -64,10 +64,4 @@ extension LoroValue {
         default: return .null
         }
     }
-
-    static func fromEncodable<T: Encodable>(_ value: T) -> LoroValue? {
-        guard let data = try? JSONEncoder().encode(value),
-              let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return fromJSON(obj)
-    }
 }

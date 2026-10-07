@@ -363,22 +363,6 @@ struct RunRequest: Codable {
     var attachments: [String] = []
 }
 
-enum SessionCommandPayload {
-    case run(request: RunRequest, messageId: String, agentPrompt: String? = nil)
-    case steer(prompt: String, messageId: String?, agentPrompt: String? = nil)
-    case interrupt
-    case respondInput(requestId: String, answers: [UserInputAnswer])
-
-    var kind: String {
-        switch self {
-        case .run: return "run"
-        case .steer: return "steer"
-        case .interrupt: return "interrupt"
-        case .respondInput: return "respondInput"
-        }
-    }
-}
-
 func nowMs() -> Int64 {
     Int64(Date().timeIntervalSince1970 * 1000)
 }
