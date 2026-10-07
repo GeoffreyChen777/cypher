@@ -135,7 +135,7 @@ impl EdgeConfig {
         self.token.subscribe()
     }
 
-    /// A per-dial room URL provider for `path` (e.g. `/session/{chatId}/ws`):
+    /// A per-dial room URL provider for `path` (e.g. `/chat2/{chatId}/ws`):
     /// the bearer is re-fetched before every connect, so reconnects after a
     /// token expiry present a fresh `?token=` instead of the boot-time one.
     pub fn room_url(&self, path: impl Into<String>) -> Arc<dyn cypher_sync::UrlProvider> {
