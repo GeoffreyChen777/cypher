@@ -1638,7 +1638,6 @@ dependencies = [
 name = "cypher-harness"
 version = "0.3.41"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
  "chrono",
@@ -1646,7 +1645,6 @@ dependencies = [
  "cypher-proto",
  "futures",
  "libc",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
@@ -1661,21 +1659,17 @@ name = "cypher-proto"
 version = "0.3.41"
 dependencies = [
  "chrono",
- "cypher-env",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
 name = "cypher-rpc"
 version = "0.3.41"
 dependencies = [
- "anyhow",
  "async-trait",
  "cypher-doc",
  "cypher-env",
- "cypher-proto",
  "cypher-sync",
  "futures",
  "libc",
@@ -1700,7 +1694,6 @@ dependencies = [
  "cypher-proto",
  "futures",
  "loro",
- "loro-protocol",
  "reqwest",
  "rusqlite",
  "serde",
@@ -4289,12 +4282,6 @@ dependencies = [
  "tracing",
  "xxhash-rust",
 ]
-
-[[package]]
-name = "loro-protocol"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f1697b501f505f286c411c38b062a73f080028157c766cd75f12e243239454"
 
 [[package]]
 name = "loro-rle"
