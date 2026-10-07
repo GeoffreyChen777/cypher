@@ -3,64 +3,21 @@
 //! speaks the DO's JSON WS protocol. TS↔Rust interop is proven separately by
 //! the `--ignored` live-edge test (registry_edge.rs) and scripts/e2e-smoke.sh.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use cypher_doc::{REGISTRY_DOC_ID, RegistryDoc};
-use cypher_proto::{Chat, Device, Session, SessionStatus};
+use cypher_proto::{Session, SessionStatus};
 use cypher_sync::registry::mock_server::MockRegistryServer;
 use cypher_sync::{DocsStore, RegistryClient, RegistryEvent};
 
-fn ts(ms: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
-}
+use common::{chat, device, ts};
 
-fn device(id: &str) -> Device {
-    Device {
-        id: id.into(),
-        name: format!("{id}-name"),
-        platform: "linux".into(),
-        last_seen_at: Some(ts(1_000)),
-        created_at: Some(ts(500)),
-        version: Some("0.1.0".into()),
-    }
-}
-
-fn chat(id: &str, device_id: &str) -> Chat {
-    Chat {
-        pinned: false,
-        id: id.into(),
-        device_id: device_id.into(),
-        title: Some("chat".into()),
-        archived: false,
-        cwd: Some("/tmp".into()),
-        branch: None,
-        checkout_id: None,
-        config: None,
-        last_message_preview: None,
-        last_message_at: None,
-        created_at: ts(2_000),
-        harness_session_id: None,
-        harness_session_cwd: None,
-        space_id: None,
-        last_seen_at: None,
-        room_gen: None,
-        child: None,
-    }
-}
-
-async fn wait_until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if condition() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("condition not reached in time");
+/// Generous: these tests drive a real socket through the mock server.
+async fn wait_until(condition: impl FnMut() -> bool) {
+    common::wait_until(Duration::from_secs(10), condition).await
 }
 
 fn new_doc(device: &str) -> Arc<Mutex<RegistryDoc>> {

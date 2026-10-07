@@ -10,52 +10,27 @@
 //! CYPHER_EDGE_WS=ws://127.0.0.1:27640 cargo test -p cypher-sync --test registry_edge -- --ignored
 //! ```
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use cypher_doc::RegistryDoc;
 use cypher_proto::{Chat, Session, SessionStatus};
 use cypher_sync::RegistryClient;
 
-fn ts(ms: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
-}
+use common::ts;
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
-        pinned: false,
-        id: id.into(),
-        device_id: device_id.into(),
         title: Some("live chat".into()),
-        archived: false,
-        cwd: Some("/tmp".into()),
-        branch: None,
-        checkout_id: None,
-        config: None,
-        last_message_preview: None,
-        last_message_at: None,
-        created_at: ts(2_000),
-        harness_session_id: None,
-        harness_session_cwd: None,
-        space_id: None,
-        last_seen_at: None,
-        room_gen: None,
-        child: None,
+        ..common::chat(id, device_id)
     }
 }
 
-async fn wait_until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if condition() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("condition not reached in time");
+/// A live edge round-trips over the network: allow it time.
+async fn wait_until(condition: impl FnMut() -> bool) {
+    common::wait_until(Duration::from_secs(30), condition).await
 }
 
 fn edge_url(org: &str, user: &str) -> String {

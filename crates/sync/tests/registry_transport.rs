@@ -2,6 +2,8 @@
 //! dialing is unavailable. These deliberately use a closed WS port and a
 //! controllable fake RegistryTransport.
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,38 +17,14 @@ use tokio::sync::Notify;
 
 fn chat(id: &str, title: &str) -> Chat {
     Chat {
-        pinned: false,
-        id: id.into(),
-        device_id: "dev-http".into(),
         title: Some(title.into()),
-        archived: false,
-        cwd: Some("/tmp".into()),
-        branch: None,
-        checkout_id: None,
-        config: None,
-        last_message_preview: None,
-        last_message_at: None,
         created_at: DateTime::<Utc>::UNIX_EPOCH,
-        harness_session_id: None,
-        harness_session_cwd: None,
-        space_id: None,
-        last_seen_at: None,
-        room_gen: None,
-        child: None,
+        ..common::chat(id, "dev-http")
     }
 }
 
-async fn wait_until(mut check: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if check() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("condition not reached");
+async fn wait_until(check: impl FnMut() -> bool) {
+    common::wait_until(Duration::from_secs(5), check).await
 }
 
 struct FakeTransport {

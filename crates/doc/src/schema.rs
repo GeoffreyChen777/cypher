@@ -2070,6 +2070,48 @@ mod tests {
     }
 
     #[test]
+    fn run_request_attachments_survive_command_round_trip() {
+        use crate::commands::SessionCommandPayload;
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let request = cypher_proto::RunRequest {
+            prompt: "p".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/tmp".into(),
+            sandbox: cypher_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: true,
+            attachments: vec!["/tmp/a.png".into()],
+            pending_attachments: Vec::new(),
+            resume: None,
+            worktree: None,
+        };
+        doc.queue_command(&SessionCommandEntry {
+            id: "c1".into(),
+            payload: SessionCommandPayload::Run {
+                request,
+                message_id: "m1".into(),
+                agent_prompt: None,
+            },
+            issued_by: "d".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            sent_at: None,
+        })
+        .unwrap();
+        match &doc.read_commands().unwrap()[0].payload {
+            SessionCommandPayload::Run { request, .. } => {
+                assert_eq!(request.attachments, vec!["/tmp/a.png".to_string()]);
+            }
+            other => panic!("unexpected payload {other:?}"),
+        }
+    }
+
+    #[test]
     fn sealed_attachments_round_trip_and_survive_snapshot() {
         // A fresh doc (no container) reads empty — the container is additive.
         let doc = SessionDoc::init("chat-1").unwrap();
