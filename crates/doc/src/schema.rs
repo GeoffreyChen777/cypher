@@ -16,7 +16,7 @@ use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValu
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
-use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
+use crate::constants::SESSION_SCHEMA_VERSION;
 use crate::parts::{MessagePart, MessageStatus};
 
 #[derive(Debug, thiserror::Error)]
@@ -1372,39 +1372,6 @@ fn loro_value_from_json(v: &serde_json::Value) -> LoroValue {
     LoroValue::from(v.clone())
 }
 
-/// Tail sidecar shape (`SessionTail` in TS).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionTail {
-    pub chat_id: String,
-    pub schema_version: u32,
-    pub messages: Vec<SessionMessageEntry>,
-    pub total_messages: usize,
-    pub updated_at: i64,
-}
-
-/// Materialize the last-N joined messages (`materializeTail` in TS).
-pub fn materialize_tail(
-    doc: &SessionDoc,
-    now: i64,
-    tail_count: usize,
-) -> Result<SessionTail, DocError> {
-    let all = join_continuation_entries(doc.read_entries()?);
-    let total = all.len();
-    let start = total.saturating_sub(if tail_count == 0 {
-        TAIL_MESSAGE_COUNT
-    } else {
-        tail_count
-    });
-    Ok(SessionTail {
-        chat_id: doc.chat_id().unwrap_or_default(),
-        schema_version: SESSION_SCHEMA_VERSION,
-        messages: all[start..].to_vec(),
-        total_messages: total,
-        updated_at: now,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2144,20 +2111,6 @@ mod tests {
             Some(("/up/1-c.png".into(), "c.png".into()))
         );
         assert_eq!(restored.sealed_attachments().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn tail_materializes_last_n_joined() {
-        let doc = SessionDoc::init("chat-1").unwrap();
-        for i in 0..5 {
-            doc.push_message(&user_entry(&format!("m{i}"), &format!("msg {i}")))
-                .unwrap();
-        }
-        let tail = materialize_tail(&doc, 99, 2).unwrap();
-        assert_eq!(tail.total_messages, 5);
-        assert_eq!(tail.messages.len(), 2);
-        assert_eq!(tail.messages[1].id, "m4");
-        assert_eq!(tail.chat_id, "chat-1");
     }
 
     /// 2026-08-10 incident: entries/parts missing strict fields must salvage
