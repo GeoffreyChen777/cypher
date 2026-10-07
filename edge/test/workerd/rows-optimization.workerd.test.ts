@@ -1,12 +1,11 @@
 /**
- * Deferred-write optimizations against real
- * workerd + real DO SQLite.
+ * Deferred-write optimizations against real workerd + real DO SQLite.
  *
  * Each case pins one of the three: attribution counters moved to memory,
  * `backupDirty` written only on the 0→1 edge, and the registry's `setAlarm`
  * skipped when the instant it wants is already scheduled. The branches here
- * are the ones §4.1 of that document calls out as the hibernation risk —
- * rebuild-from-one-read, and convergence after an eviction.
+ * are the hibernation risks: rebuild-from-one-read, and convergence after an
+ * eviction.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
