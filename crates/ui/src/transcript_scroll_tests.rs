@@ -356,3 +356,124 @@ fn interleaved_input_never_wedges_the_wheel(cx: &mut gpui::TestAppContext) {
         }
     }
 }
+
+impl Rig {
+    /// A click in the chat history: gives the transcript keyboard focus.
+    fn click_history(&mut self) {
+        self.visual
+            .simulate_click(point(px(400.0), px(300.0)), gpui::Modifiers::none());
+        self.frames(1);
+    }
+
+    fn press(&mut self, keys: &str) {
+        self.visual.simulate_keystrokes(keys);
+        self.frames(2);
+    }
+
+    /// `n` of the `u{n}` prompt resting at the viewport top, if one is.
+    fn prompt_at_top(&mut self) -> Option<usize> {
+        self.transcript.read_with(&self.visual, |t, _| {
+            let top = t.list.logical_scroll_top();
+            let row = t.rows.get(top.item_ix)?;
+            if row.role != MessageRole::User || f32::from(top.offset_in_item) >= 1.0 {
+                return None;
+            }
+            row.id.strip_prefix('u')?.parse().ok()
+        })
+    }
+}
+
+/// Arrow-key tests snap (reduced motion) and need the transcript keymap.
+fn arrow_rig(cx: &mut gpui::TestAppContext) -> Rig {
+    cx.update(|cx| {
+        cx.set_reduce_motion(true);
+        init(cx);
+    });
+    let mut rig = Rig::new(cx, history(10));
+    rig.click_history();
+    let focused = rig
+        .visual
+        .update(|window, cx| rig.transcript.read(cx).focus.is_focused(window));
+    assert!(focused, "a click in the chat history focuses it");
+    rig
+}
+
+#[gpui::test]
+fn arrow_keys_step_between_prompts(cx: &mut gpui::TestAppContext) {
+    let mut rig = arrow_rig(cx);
+    // From the live bottom, ↑ lands the nearest prompt above the top…
+    rig.press("up");
+    let start = rig.prompt_at_top().expect("↑ lands a prompt at the top");
+    // The newest prompts are on screen below the top, so it is an older one.
+    assert!((1..9).contains(&start), "landed on u{start}");
+    // …then walks back one prompt per press, holding at the first.
+    for expected in (0..start).rev() {
+        rig.press("up");
+        assert_eq!(rig.prompt_at_top(), Some(expected));
+    }
+    rig.press("up");
+    assert_eq!(rig.prompt_at_top(), Some(0), "↑ on the first prompt stays");
+    // ↓ walks forward again, one prompt per press.
+    for expected in 1..=start {
+        rig.press("down");
+        assert_eq!(rig.prompt_at_top(), Some(expected));
+    }
+}
+
+#[gpui::test]
+fn held_arrow_keeps_stepping_mid_glide(cx: &mut gpui::TestAppContext) {
+    cx.update(init);
+    let mut rig = Rig::new(cx, history(10));
+    rig.click_history();
+    let nav_target = |rig: &mut Rig| {
+        rig.transcript.read_with(&rig.visual, |t, _| {
+            let (row, _) = t.prompt_nav?;
+            t.rows[row].id.strip_prefix('u')?.parse::<usize>().ok()
+        })
+    };
+    // Key-repeat: the second press lands before the first glide does, and
+    // steps on from its target instead of re-aiming at the same prompt.
+    rig.visual.simulate_keystrokes("up");
+    let first = nav_target(&mut rig).expect("↑ starts a glide");
+    rig.visual.simulate_keystrokes("up");
+    assert_eq!(nav_target(&mut rig), Some(first - 1));
+    for _ in 0..90 {
+        if rig.prompt_at_top() == Some(first - 1) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+        rig.visual
+            .executor()
+            .advance_clock(Duration::from_millis(16));
+        rig.frames(1);
+    }
+    panic!("the glide never landed u{}", first - 1);
+}
+
+#[gpui::test]
+fn arrow_down_past_the_last_prompt_returns_to_the_bottom(cx: &mut gpui::TestAppContext) {
+    let mut rig = arrow_rig(cx);
+    rig.press("up");
+    rig.press("up");
+    assert!(rig.prompt_at_top().is_some());
+    let pinned = |rig: &mut Rig| rig.transcript.read_with(&rig.visual, |t, _| t.is_pinned());
+    assert!(
+        !pinned(&mut rig),
+        "stepping to a prompt releases the bottom pin"
+    );
+    for _ in 0..12 {
+        rig.press("down");
+    }
+    rig.frames(30);
+    assert!(
+        pinned(&mut rig),
+        "↓ past the last prompt re-pins the bottom"
+    );
+    let distance = rig
+        .transcript
+        .read_with(&rig.visual, |t, _| t.distance_from_bottom());
+    assert!(
+        distance <= AT_BOTTOM_PX,
+        "back at the bottom, {distance}px off"
+    );
+}

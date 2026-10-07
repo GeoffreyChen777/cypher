@@ -214,6 +214,7 @@ pub fn run_app(config: UiConfig) {
         changes::layout::init(data_dir.clone(), cx);
         chat_style::init(data_dir, cx);
         composer::init(cx);
+        transcript::init(cx);
         terminal::panel::init(cx);
         files::editor::init(cx);
         app_menus::init(cx);
