@@ -3,6 +3,5 @@
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     TEST_LOG: DurableObjectNamespace;
-    TEST_PREVIEW: DurableObjectNamespace<import("./preview-fixture").TestPreviewRoom>;
   }
 }
