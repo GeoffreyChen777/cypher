@@ -16,6 +16,14 @@ enum Theme {
     static let surface = adaptive(light: neutral(0.968), dark: grey(13))
     /// Raised surface: popovers, dialogs, cards.
     static let surfaceRaised = adaptive(light: neutral(0.940), dark: neutral(0.235))
+    /// User message bubble: the desktop's bubble as painted (chat_style.rs
+    /// `bubble`, a translucent muted blue over its chat panel). Nothing shows
+    /// through the transcript here, so it carries those pixels opaque rather
+    /// than the tint. Blue survives red-green color blindness, and the plate
+    /// also steps in lightness off the page so hue is not the only cue.
+    static let userBubble = adaptive(
+        light: Color(red: 0xE2 / 255.0, green: 0xE9 / 255.0, blue: 0xF4 / 255.0),
+        dark: Color(red: 0x2C / 255.0, green: 0x33 / 255.0, blue: 0x3E / 255.0))
     static let sheetPanel = adaptive(light: .white, dark: grey(0x14))
     /// Inset-grouped list cells: one step off the shell surface.
     static let groupedRow = adaptive(light: .white, dark: grey(0x1a))

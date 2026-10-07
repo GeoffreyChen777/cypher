@@ -847,7 +847,7 @@ struct UserBubble: View {
                         // the text up 1pt while preserving the bubble's height.
                         .padding(.top, 9)
                         .padding(.bottom, 11)
-                        .background(Theme.surfaceRaised.opacity(isSteer ? 0.55 : 1),
+                        .background(Theme.userBubble.opacity(isSteer ? 0.55 : 1),
                                     in: RoundedRectangle(cornerRadius: Theme.bubbleRadius))
                         .overlay {
                             RoundedRectangle(cornerRadius: Theme.bubbleRadius)

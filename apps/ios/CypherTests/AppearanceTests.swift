@@ -61,6 +61,20 @@ final class AppearanceTests: XCTestCase {
         }
     }
 
+    func testUserBubbleIsAMutedBlueThatStepsOffThePage() {
+        for style: UIUserInterfaceStyle in [.light, .dark] {
+            let bubble = rgba(Theme.userBubble, style)
+            // Blue rather than grey, and lighter/darker than the page too,
+            // so hue is not the only cue.
+            XCTAssertGreaterThan(bubble[2], bubble[0] + 0.05)
+            XCTAssertGreaterThanOrEqual(contrast(Theme.userBubble, Theme.bg, style), 1.2)
+            // What a bubble paints: prompt text and mention chips.
+            for text in [Theme.text, Theme.inlineCodeText] {
+                XCTAssertGreaterThanOrEqual(contrast(text, Theme.userBubble, style), 4.5)
+            }
+        }
+    }
+
     func testAttributedColorsRemainDynamicWithoutRebuildingText() throws {
         var code = InlineStyle.plain
         code.code = true
