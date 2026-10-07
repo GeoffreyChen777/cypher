@@ -103,6 +103,10 @@ struct DocPartJson {
     /// LoroText: it is written whole, never streamed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_text: Option<String>,
+    /// A reasoning part's body (additive). Its own key, not `text`: readers
+    /// older than the kind fall back to a text part built from `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,6 +202,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             message: Some(message.clone()),
             ..Default::default()
         },
+        MessagePart::Reasoning { id, text } => DocPartJson {
+            id: id.clone(),
+            kind: "reasoning".into(),
+            reasoning: Some(text.clone()),
+            ..Default::default()
+        },
     })
 }
 
@@ -236,6 +246,10 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "error" => MessagePart::Error {
             id: p.id,
             message: p.message.unwrap_or_default(),
+        },
+        "reasoning" => MessagePart::Reasoning {
+            id: p.id,
+            text: p.reasoning.unwrap_or_default(),
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -817,6 +831,12 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(agent_text) = &doc_part.agent_text {
         map.insert("agentText", agent_text.as_str())?;
     }
+    if let Some(reasoning) = &doc_part.reasoning {
+        // Streamed like text, so a growing thought appends instead of
+        // rewriting the whole string every commit.
+        let t = map.insert_container("reasoning", LoroText::new())?;
+        t.insert(0, reasoning)?;
+    }
     if let Some(call) = &doc_part.call {
         map.insert("call", loro_value_from_json(call))?;
     }
@@ -968,6 +988,12 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         .and_then(|x| x.as_str())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{entry_id}#recovered-{ix}"));
+    if let Some(text) = obj.get("reasoning").and_then(|x| x.as_str()) {
+        return Some(MessagePart::Reasoning {
+            id,
+            text: text.to_owned(),
+        });
+    }
     if let Some(text) = obj.get("text").and_then(|x| x.as_str()) {
         return Some(MessagePart::Text {
             id,
@@ -1125,6 +1151,9 @@ impl<'a> SegmentWriter<'a> {
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
         let parts = self.parts_list()?;
         let mut dirty = false;
+        // Any change other than thinking growth: the commit must reach other
+        // devices on the normal cadence (see `local_commit_is_deferrable`).
+        let mut eager = false;
 
         for (i, part) in folded.iter().enumerate() {
             match self.written.get(i) {
@@ -1132,6 +1161,7 @@ impl<'a> SegmentWriter<'a> {
                     push_part(&parts, part)?;
                     self.written.push(part.clone());
                     dirty = true;
+                    eager |= !matches!(part, MessagePart::Reasoning { .. });
                 }
                 Some(prev) if prev == part => {}
                 Some(prev) => {
@@ -1155,24 +1185,23 @@ impl<'a> SegmentWriter<'a> {
                                 let part_map = part_map_at(&parts, i)?;
                                 write_agent_text(&part_map, new_agent.as_deref())?;
                                 dirty = true;
+                                eager = true;
                             }
                             // Trailing-text growth: append the suffix into the LoroText.
                             let delta = &new[old.len()..];
                             if !delta.is_empty() {
-                                let part_map = part_map_at(&parts, i)?;
-                                match part_map.get("text") {
-                                    Some(loro::ValueOrContainer::Container(
-                                        loro::Container::Text(t),
-                                    )) => {
-                                        let len = t.len_unicode();
-                                        t.insert(len, delta)?;
-                                    }
-                                    _ => {
-                                        return Err(DocError::Schema(
-                                            "text part missing LoroText".into(),
-                                        ));
-                                    }
-                                }
+                                append_text(&part_map_at(&parts, i)?, "text", delta)?;
+                                dirty = true;
+                                eager = true;
+                            }
+                        }
+                        (
+                            MessagePart::Reasoning { text: old, .. },
+                            MessagePart::Reasoning { text: new, .. },
+                        ) if new.starts_with(old.as_str()) => {
+                            let delta = &new[old.len()..];
+                            if !delta.is_empty() {
+                                append_text(&part_map_at(&parts, i)?, "reasoning", delta)?;
                                 dirty = true;
                             }
                         }
@@ -1183,6 +1212,7 @@ impl<'a> SegmentWriter<'a> {
                             let part_map = part_map_at(&parts, i)?;
                             update_part_fields(&part_map, part)?;
                             dirty = true;
+                            eager = true;
                         }
                     }
                     self.written[i] = part.clone();
@@ -1190,9 +1220,14 @@ impl<'a> SegmentWriter<'a> {
             }
         }
 
-        dirty |= self.doc.preview_commit(&self.entry_id, folded, false)?;
-        if dirty {
+        if self.doc.preview_commit(&self.entry_id, folded, false)? {
+            dirty = true;
+            eager = true;
+        }
+        if dirty && eager {
             self.doc.doc.commit();
+        } else if dirty {
+            commit_deferrable(&self.doc.doc);
         }
         Ok(())
     }
@@ -1208,6 +1243,44 @@ impl<'a> SegmentWriter<'a> {
         self.doc.preview_commit(&self.entry_id, folded, true)?;
         self.doc.doc.commit();
         Ok(())
+    }
+}
+
+thread_local! {
+    static DEFERRABLE_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the local commit running on this thread only grew reasoning. A
+/// sync client may hold such an update for its next push instead of
+/// scheduling one: thinking then reaches other devices with the next text,
+/// tool call or segment boundary, for no writes of its own. Meaningful only
+/// inside a `subscribe_local_update` hook, which Loro runs synchronously in
+/// the commit, on the committing thread — another writer's commit can never
+/// read this one's mark.
+pub fn local_commit_is_deferrable() -> bool {
+    DEFERRABLE_COMMIT.with(std::cell::Cell::get)
+}
+
+fn commit_deferrable(doc: &LoroDoc) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEFERRABLE_COMMIT.with(|mark| mark.set(false));
+        }
+    }
+    DEFERRABLE_COMMIT.with(|mark| mark.set(true));
+    let _reset = Reset;
+    doc.commit();
+}
+
+/// Append `delta` to the part's streamed LoroText under `key`.
+fn append_text(part_map: &LoroMap, key: &str, delta: &str) -> Result<(), DocError> {
+    match part_map.get(key) {
+        Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
+            t.insert(t.len_unicode(), delta)?;
+            Ok(())
+        }
+        _ => Err(DocError::Schema(format!("{key} part missing LoroText"))),
     }
 }
 
@@ -1271,6 +1344,14 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
             t.update(text, Default::default())
                 .map_err(|e| DocError::Schema(e.to_string()))?;
         }
+    }
+    if let Some(reasoning) = &doc_part.reasoning
+        && let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) =
+            map.get("reasoning")
+    {
+        // Defensive only: the fold never rewrites earlier thinking.
+        t.update(reasoning, Default::default())
+            .map_err(|e| DocError::Schema(e.to_string()))?;
     }
     Ok(())
 }
@@ -1533,6 +1614,95 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn segment_writer_streams_reasoning_under_its_own_key() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ReasoningDelta {
+                text: "Weigh ".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ReasoningDelta {
+                text: "the options.".into(),
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "Done.".into(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+
+        assert_eq!(
+            doc.read_entries().unwrap()[0].parts,
+            [
+                MessagePart::Reasoning {
+                    id: "r0".into(),
+                    text: "Weigh the options.".into(),
+                },
+                MessagePart::Text {
+                    id: "t1".into(),
+                    text: "Done.".into(),
+                    agent_text: None,
+                },
+            ]
+        );
+        // Readers older than the kind decode an unknown kind as a text part
+        // from `text`. With none they get an empty one, which they skip —
+        // never the thinking shown as the answer.
+        let raw = doc
+            .doc()
+            .get_list("messages")
+            .get_deep_value()
+            .to_json_value();
+        let part = &raw[0]["parts"][0];
+        assert_eq!(part["kind"], "reasoning");
+        assert_eq!(part["reasoning"], "Weigh the options.");
+        assert!(part.get("text").is_none());
+    }
+
+    #[test]
+    fn only_a_commit_that_grew_reasoning_alone_is_deferrable() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let marks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = doc.doc().subscribe_local_update(Box::new({
+            let marks = marks.clone();
+            move |_| {
+                marks.lock().unwrap().push(local_commit_is_deferrable());
+                true
+            }
+        }));
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        for event in [
+            AgentEvent::ReasoningDelta { text: "a".into() }, // new thought
+            AgentEvent::ReasoningDelta { text: "b".into() }, // growth
+            AgentEvent::TextDelta { text: "x".into() },      // answer text
+            AgentEvent::ReasoningDelta { text: "c".into() }, // a later thought
+        ] {
+            fold_event_into_parts(&mut folded, &event);
+            writer.sync(&folded).unwrap();
+        }
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        // begin, a, b, x, c, finish (status + completedAt).
+        assert_eq!(
+            *marks.lock().unwrap(),
+            [false, true, true, false, true, false]
+        );
+        assert!(
+            !local_commit_is_deferrable(),
+            "the mark never outlives its commit"
+        );
     }
 
     fn agent_text_of(doc: &SessionDoc) -> (String, Option<String>) {

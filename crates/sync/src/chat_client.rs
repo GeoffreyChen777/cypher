@@ -335,6 +335,16 @@ struct PendingPush {
     bytes: Vec<u8>,
     persisted: bool,
     sent: bool,
+    /// Held for the next push rather than opening one: see
+    /// [`ChatClient::enqueue_deferred_update`].
+    deferred: bool,
+}
+
+/// Make every held batch due: the push about to happen carries them.
+fn release_deferred(shared: &mut Shared) {
+    for push in shared.pending.iter_mut() {
+        push.deferred = false;
+    }
 }
 
 fn merge_loro_updates(updates: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -684,6 +694,7 @@ impl ChatClient {
                     // The server may have accepted this batch before a crash.
                     // Never change its payload under the restored batch ID.
                     sent: true,
+                    deferred: false,
                 }),
         );
         let shared = Arc::new(Mutex::new(restored));
@@ -750,6 +761,20 @@ impl ChatClient {
     /// on every reconnect — the exact wedge class chat2 replaces. The ops
     /// stay in the local doc and reach peers via the next checkpoint.
     pub fn enqueue_update(&self, bytes: Vec<u8>) {
+        self.enqueue(bytes, false);
+    }
+
+    /// Queue an update that does not justify a push of its own (a commit
+    /// that only grew the model's thinking). It is stored in the outbox like
+    /// any batch, but rides along with the next push: any
+    /// [`Self::enqueue_update`] releases it, as does [`Self::flush_pending`]
+    /// at a segment boundary. Thinking then costs no durable writes beyond
+    /// the pushes a turn makes anyway.
+    pub fn enqueue_deferred_update(&self, bytes: Vec<u8>) {
+        self.enqueue(bytes, true);
+    }
+
+    fn enqueue(&self, bytes: Vec<u8>, deferred: bool) {
         if bytes.len() > MAX_PUSH_BYTES {
             use std::sync::atomic::Ordering::Relaxed;
             tracing::error!(
@@ -785,6 +810,10 @@ impl ChatClient {
                 && self.sink.update_outbox(&batch_id, &merged).is_ok()
             {
                 last.bytes = merged;
+                if deferred {
+                    return;
+                }
+                release_deferred(&mut shared);
                 shared
                     .flush_at
                     .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
@@ -805,12 +834,20 @@ impl ChatClient {
                 shared.retry_at = Some(tokio::time::Instant::now() + Duration::from_secs(1));
                 let _ = self.events.send(ChatEvent::PushRejected);
             }
+            if !deferred {
+                // Batches stay in order: whatever was held goes out first.
+                release_deferred(&mut shared);
+            }
             shared.pending.push_back(PendingPush {
                 batch_id,
                 bytes,
                 persisted,
                 sent: false,
+                deferred,
             });
+            if deferred {
+                return;
+            }
             shared
                 .flush_at
                 .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
@@ -827,7 +864,10 @@ impl ChatClient {
     /// Force the currently queued durable batch now (Run/Steer/Interrupt/
     /// completion boundaries will use this hook). Does not alter local docs.
     pub fn flush_pending(&self) {
-        lock(&self.shared).force_flush = true;
+        let mut shared = lock(&self.shared);
+        release_deferred(&mut shared);
+        shared.force_flush = true;
+        drop(shared);
         let _ = self.nudge.try_send(());
     }
 
@@ -1567,6 +1607,10 @@ impl Actor {
         let frame = {
             let mut shared = lock(&self.shared);
             if shared.in_flight.is_some() {
+                return true;
+            }
+            // A held update never opens a push of its own.
+            if shared.pending.front().is_some_and(|push| push.deferred) {
                 return true;
             }
             if !shared.force_flush

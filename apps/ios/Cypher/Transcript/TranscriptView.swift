@@ -41,9 +41,9 @@ struct TranscriptView: View {
 
     @State private var veils = VeilStore()
     @State private var folds: [String: Bool] = [:]
-    /// Translation-original toggles the reader opened; every other one stays
-    /// folded (transcript.rs `translation_originals`).
-    @State private var openOriginals: Set<String> = []
+    /// Toggles the reader opened (a translation's original, a thought);
+    /// every other one stays folded (transcript.rs `open_toggles`).
+    @State private var openToggles: Set<String> = []
     /// Per tool group row: the part ids of chips whose detail is open.
     @State private var openChips: [String: Set<String>] = [:]
     @State private var turns = TurnTracker()
@@ -463,7 +463,7 @@ struct TranscriptView: View {
     /// rounds, jumps) is into this array.
     private func transcriptRows() -> [TranscriptRow] {
         store.transcriptCache.rows(revision: store.revision, entries: store.entries,
-                                   pendingSends: store.pendingSends, openOriginals: openOriginals)
+                                   pendingSends: store.pendingSends, openToggles: openToggles)
     }
 
     private func windowStart(of rows: [TranscriptRow]) -> Int {
@@ -632,7 +632,9 @@ struct TranscriptView: View {
                 ProseRowView(row: row, blocks: blocks, streaming: streaming, veils: veils)
 
             case .markdown(let block, _):
+                // A thought's code block or table: its own colors, quieted.
                 MarkdownBlockView(block: block, cacheKey: row.id)
+                    .opacity(row.muted ? 0.75 : 1)
 
             case .toolGroup(let tools, let autoOpen):
                 ToolGroupView(tools: tools,
@@ -656,8 +658,16 @@ struct TranscriptView: View {
                 ErrorChipView(message: message)
 
             case .translationOriginal:
-                TranslationOriginalToggle(open: openOriginals.contains(row.id)) {
-                    openOriginals.formSymmetricDifference([row.id])
+                FoldToggle(open: openToggles.contains(row.id), closedLabel: "Show original",
+                           openLabel: "Hide original", identifier: "translation-original-toggle") {
+                    openToggles.formSymmetricDifference([row.id])
+                }
+
+            case .thought(_, let live):
+                let label = live ? "Thinking…" : "Thought"
+                FoldToggle(open: openToggles.contains(row.id), closedLabel: label,
+                           openLabel: label, identifier: "thought-toggle") {
+                    openToggles.formSymmetricDifference([row.id])
                 }
             }
         }
@@ -751,22 +761,22 @@ final class TranscriptBuilderCache {
     /// Round index by the id of the row that starts it.
     private(set) var roundIndex: [String: Int] = [:]
 
-    /// Rows for the store's current `revision`, with the translation originals
-    /// not in `openOriginals` folded away. Rows only change when the doc or
-    /// the open set does — gate on both and hand back the same array.
+    /// Rows for the store's current `revision`, with the toggles not in
+    /// `openToggles` folded away. Rows only change when the doc or the open
+    /// set does — gate on both and hand back the same array.
     func rows(revision: UInt64,
               entries: [MessageEntry],
               pendingSends: [PendingSend],
-              openOriginals: Set<String>) -> [TranscriptRow] {
+              openToggles: Set<String>) -> [TranscriptRow] {
         if cachedRevision != revision {
             builtRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
                                                   parsers: &parsers, completed: &completed)
             cachedRevision = revision
             foldedFor = nil
         }
-        if foldedFor == openOriginals { return cachedRows }
-        cachedRows = TranscriptRowBuilder.foldTranslationOriginals(builtRows, open: openOriginals)
-        foldedFor = openOriginals
+        if foldedFor == openToggles { return cachedRows }
+        cachedRows = TranscriptRowBuilder.foldClosedToggles(builtRows, open: openToggles)
+        foldedFor = openToggles
         let rounds = TranscriptRound.rounds(in: cachedRows)
         if rounds != self.rounds {
             self.rounds = rounds
@@ -786,7 +796,14 @@ final class TranscriptBuilderCache {
             let streaming = entry.status == .streaming
             let lastIx = entry.parts.indices.last
             for (ix, part) in entry.parts.enumerated() {
-                guard case .text(let partId, let text, _) = part, !text.isEmpty else { continue }
+                let partId: String, text: String
+                switch part {
+                case .text(let id, let body, _), .reasoning(let id, let body):
+                    (partId, text) = (id, body)
+                default:
+                    continue
+                }
+                guard !text.isEmpty else { continue }
                 if streaming && ix == lastIx { continue }  // live tail: incremental parser's job
                 let key = "\(entry.id)#\(partId)"
                 if completed[key]?.source != text {
@@ -905,7 +922,8 @@ struct ProseRowView: View {
     }
 
     private var text: NSAttributedString {
-        let prose = TranscriptTextStyle.prose(blocks)
+        var prose = TranscriptTextStyle.prose(blocks)
+        if row.muted { prose = TranscriptTextStyle.muted(prose) }
         guard streaming else { return prose }
         let veil = veils.veil(for: row.id, seeded: false)
         let faded = NSMutableAttributedString(attributedString: prose)
@@ -962,12 +980,15 @@ struct ToolGroupView: View {
     }
 }
 
-/// The toggle over an append-mode translation's original (transcript.rs
-/// `render_translation_original`): a chevron tile and a quiet label, styled
-/// like a tool group's header. Toggling refolds the rows, which shows or
-/// hides the original's blocks below it.
-struct TranslationOriginalToggle: View {
+/// The toggle over folded rows — a translation's original, a thought
+/// (transcript.rs `render_fold_toggle`): a chevron tile and a quiet label,
+/// styled like a tool group's header. Toggling refolds the rows, which shows
+/// or hides the blocks below it.
+struct FoldToggle: View {
     let open: Bool
+    let closedLabel: String
+    let openLabel: String
+    let identifier: String
     let toggle: () -> Void
 
     var body: some View {
@@ -979,7 +1000,7 @@ struct TranslationOriginalToggle: View {
                     .rotationEffect(.degrees(open ? 90 : 0))
                     .frame(width: 18, height: 18)
                     .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 5))
-                Text(open ? "Hide original" : "Show original")
+                Text(open ? openLabel : closedLabel)
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
@@ -989,7 +1010,8 @@ struct TranslationOriginalToggle: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressWashButtonStyle(cornerRadius: 6))
-        .accessibilityIdentifier("translation-original-toggle")
+        .accessibilityValue(open ? "Expanded" : "Collapsed")
+        .accessibilityIdentifier(identifier)
     }
 }
 

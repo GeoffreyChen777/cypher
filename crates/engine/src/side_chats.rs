@@ -720,6 +720,8 @@ fn serialize_context_entry(entry: &SessionMessageEntry) -> Option<String> {
                     }
                 }
             }
+            // Hidden reasoning stays out of context (see above).
+            MessagePart::Reasoning { .. } => {}
         }
     }
     let joined = body.join("\n");

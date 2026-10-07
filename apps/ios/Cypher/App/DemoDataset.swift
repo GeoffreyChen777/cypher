@@ -389,6 +389,8 @@ final class DemoDataset {
                     .text(id: "t0", text: "Tool group headers turn red when any child fails — they should stay quiet, chips carry the error."),
                 ], createdAt: now - 1_000_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
                 MessageEntry(id: "m2", role: .assistant, parts: [
+                    // Thinking folds behind a collapsed "Thought" toggle.
+                    .reasoning(id: "r0", text: "The header color is probably derived from the worst child status. Find where `group_header_color` is computed, then keep the header on `text_muted` and let only the failed chip turn red."),
                     .tool(id: "tool1", call: RenderToolCall(tag: "search", fields: ["pattern": "group_header_color"]), isError: false, resolved: true),
                     .tool(id: "tool2", call: RenderToolCall(tag: "exec", fields: ["command": "cargo test -p cypher-ui tool_group"]), isError: true, resolved: true),
                     .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs"]), isError: false, resolved: true),

@@ -19,6 +19,7 @@ fn queued(id: &str, persisted: bool) -> PendingPush {
         bytes: id.as_bytes().to_vec(),
         persisted,
         sent: false,
+        deferred: false,
     }
 }
 
@@ -515,6 +516,183 @@ async fn commits_during_an_inflight_push_ride_the_next_push_as_one_batch() {
     assert!(sink.load_outbox().unwrap().is_empty());
     assert!(end.rx.try_recv().is_err(), "no third push");
     client.shutdown().await;
+}
+
+const EMPTY_ROOM: &str =
+    r#"{"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}"#;
+
+/// A client joined to a scripted room whose server task reports each PUSH it
+/// receives (payload) and ACKs it in order.
+async fn deferral_rig(
+    doc: loro::LoroDoc,
+) -> (
+    ChatClient,
+    Arc<RecordingSink>,
+    mpsc::Receiver<Vec<u8>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let sink = Arc::new(RecordingSink {
+        doc: Some(doc),
+        ..RecordingSink::default()
+    });
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let (pushes_tx, pushes_rx) = mpsc::channel(8);
+    let server = tokio::spawn(async move {
+        serve_join(
+            &mut end,
+            serde_json::from_str(EMPTY_ROOM).unwrap(),
+            &[],
+            vec![],
+            false,
+        )
+        .await;
+        for seq in 1..=64 {
+            let push = expect_kind(&mut end, frame_type::PUSH).await;
+            if pushes_tx.send(push.payload.clone()).await.is_err() {
+                return;
+            }
+            send(
+                &end,
+                frame_type::ACK,
+                serde_json::json!({"batchId":push.header["batchId"],"seq":seq,"dup":false}),
+                &[],
+            )
+            .await;
+        }
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "d",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    (client, sink, pushes_rx, server)
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_thinking_waits_for_the_next_push_and_rides_it() {
+    let (doc, base, deltas) = streaming_doc(&[" thinking", " answer"]);
+    let (client, sink, mut pushes, server) = deferral_rig(doc).await;
+
+    client.enqueue_deferred_update(deltas[0].clone());
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(
+        pushes.try_recv().is_err(),
+        "held thinking never opens a push"
+    );
+    assert_eq!(client.stats().pending_pushes, 1);
+    assert_eq!(
+        sink.load_outbox().unwrap().len(),
+        1,
+        "but it is in the outbox"
+    );
+
+    client.enqueue_update(deltas[1].clone());
+    let push = pushes.recv().await.unwrap();
+    let peer = loro::LoroDoc::from_snapshot(&base).unwrap();
+    peer.import(&push).unwrap();
+    assert_eq!(
+        peer.get_text("text").to_string(),
+        "user prompt thinking answer"
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(pushes.try_recv().is_err(), "one push carried both");
+    assert_eq!(client.stats().pending_pushes, 0);
+    client.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_boundary_flush_releases_held_thinking() {
+    let (doc, base, deltas) = streaming_doc(&[" thinking"]);
+    let (client, _sink, mut pushes, server) = deferral_rig(doc).await;
+
+    client.enqueue_deferred_update(deltas[0].clone());
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(pushes.try_recv().is_err());
+    client.flush_pending();
+    let push = pushes.recv().await.unwrap();
+    let peer = loro::LoroDoc::from_snapshot(&base).unwrap();
+    peer.import(&push).unwrap();
+    assert_eq!(peer.get_text("text").to_string(), "user prompt thinking");
+    client.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ack_does_not_chain_push_held_thinking() {
+    let (doc, _base, deltas) = streaming_doc(&[" answer", " thinking", " more"]);
+    let sink = Arc::new(RecordingSink {
+        doc: Some(doc),
+        ..RecordingSink::default()
+    });
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let (pushes_tx, mut pushes) = mpsc::channel(8);
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_join(
+            &mut end,
+            serde_json::from_str(EMPTY_ROOM).unwrap(),
+            &[],
+            vec![],
+            false,
+        )
+        .await;
+        let mut release = Some(release_rx);
+        for seq in 1..=64 {
+            let push = expect_kind(&mut end, frame_type::PUSH).await;
+            pushes_tx.send(push.payload.clone()).await.unwrap();
+            // Hold the first ACK until the test has queued thinking behind it.
+            if let Some(release) = release.take() {
+                release.await.unwrap();
+            }
+            send(
+                &end,
+                frame_type::ACK,
+                serde_json::json!({"batchId":push.header["batchId"],"seq":seq,"dup":false}),
+                &[],
+            )
+            .await;
+        }
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "d",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+
+    client.enqueue_update(deltas[0].clone());
+    pushes.recv().await.unwrap();
+    // Queued while that push is in flight: a held batch of its own.
+    client.enqueue_deferred_update(deltas[1].clone());
+    assert_eq!(client.stats().pending_pushes, 2);
+    release_tx.send(()).unwrap();
+    // The ACK re-arms an immediate push of what is queued — never a held one.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(
+        pushes.try_recv().is_err(),
+        "the ACK does not push held thinking"
+    );
+    assert_eq!(client.stats().pending_pushes, 1);
+
+    // The next real update carries it.
+    client.enqueue_update(deltas[2].clone());
+    pushes.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(client.stats().pending_pushes, 0);
+    client.shutdown().await;
+    server.abort();
 }
 
 // ── plumbing: linked pipes + scripted connector ─────────────────────────────

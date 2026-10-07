@@ -448,6 +448,8 @@ final class SessionStore {
         case "text":
             return .text(id: id, text: m["text"]?.stringValue ?? "",
                          agentText: m["agentText"]?.stringValue)
+        case "reasoning":
+            return .reasoning(id: id, text: m["reasoning"]?.stringValue ?? "")
         case "tool":
             guard let callMap = m["call"]?.mapValue else { return nil }
             let tag = callMap["kind"]?.stringValue ?? "unknown"

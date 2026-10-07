@@ -59,6 +59,19 @@ enum TranscriptTextStyle {
         return result
     }
 
+    /// Thinking's quieter tone: body text takes the muted color; inline code
+    /// and links keep theirs.
+    static func muted(_ text: NSAttributedString) -> NSAttributedString {
+        let result = NSMutableAttributedString(attributedString: text)
+        var plain: [NSRange] = []
+        result.enumerateAttributes(in: NSRange(location: 0, length: result.length)) { attributes, range, _ in
+            if attributes[.cypherInlineCode] == nil, attributes[.link] == nil { plain.append(range) }
+        }
+        let color = UIColor(Theme.textMuted)
+        for range in plain { result.addAttribute(.foregroundColor, value: color, range: range) }
+        return result
+    }
+
     /// Fade the streamed tail: `veil`'s segments are character offsets into
     /// `result`, and only text colors change, never the layout.
     static func applyVeil(_ veil: RowVeil, to result: NSMutableAttributedString) {

@@ -217,6 +217,15 @@ pub enum MessagePart {
         id: String,
         message: String,
     },
+    /// The model's thinking as it streamed ([`AgentEvent::ReasoningDelta`]),
+    /// kept so every device can show it. In the doc its body sits under
+    /// `reasoning`, never `text`: readers older than this kind decode an
+    /// unknown kind as a text part from `text`, so they get an empty one —
+    /// which they skip — instead of the thinking shown as the answer.
+    Reasoning {
+        id: String,
+        text: String,
+    },
 }
 
 impl MessagePart {
@@ -225,7 +234,8 @@ impl MessagePart {
             MessagePart::Text { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
-            | MessagePart::Error { id, .. } => id,
+            | MessagePart::Error { id, .. }
+            | MessagePart::Reasoning { id, .. } => id,
         }
     }
 
@@ -256,6 +266,7 @@ impl MessagePart {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
             }
             MessagePart::Error { message, .. } => message.len(),
+            MessagePart::Reasoning { text, .. } => text.len(),
         }
     }
 }
@@ -290,8 +301,22 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 });
             }
         }
-        AgentEvent::ReasoningDelta { .. } => {
-            // Reasoning is not rendered as a transcript part (matches zeron).
+        AgentEvent::ReasoningDelta { text } => {
+            // Thinking grows its trailing part the way text does; anything
+            // else in between (text, a tool call) starts a new one. Empty
+            // deltas are heartbeats and fold to nothing.
+            if text.is_empty() {
+                return;
+            }
+            if let Some(MessagePart::Reasoning { text: tail, .. }) = out.last_mut() {
+                tail.push_str(text);
+            } else {
+                let id = format!("r{}", out.len());
+                out.push(MessagePart::Reasoning {
+                    id,
+                    text: text.clone(),
+                });
+            }
         }
         AgentEvent::ToolCall { id, call } => {
             if let Some(existing) = out.iter_mut().find_map(|p| match p {
@@ -671,10 +696,42 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
                     piece += 1;
                 }
             }
+            MessagePart::Reasoning { id, text } if text.len() > MSG_INLINE_MAX => {
+                for (piece, range) in char_chunks(text, MSG_INLINE_MAX).into_iter().enumerate() {
+                    let sub = MessagePart::Reasoning {
+                        id: if piece == 0 {
+                            id.clone()
+                        } else {
+                            format!("{id}~{piece}")
+                        },
+                        text: text[range].to_string(),
+                    };
+                    push_part(&mut chunks, &mut current_bytes, sub);
+                }
+            }
             other => push_part(&mut chunks, &mut current_bytes, other.clone()),
         }
     }
     chunks
+}
+
+/// Byte ranges of `text` at most `max` long, cut on char boundaries.
+fn char_chunks(text: &str, max: usize) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut end = (start + max).min(text.len());
+        while end < text.len() && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        // Guard: ensure forward progress on pathological boundaries.
+        if end <= start {
+            end = text.len();
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
 }
 
 /// Render-time inverse of splitting: concatenate continuation entries' parts in list order.
@@ -688,6 +745,70 @@ mod tests {
 
     fn text_delta(s: &str) -> AgentEvent {
         AgentEvent::TextDelta { text: s.into() }
+    }
+
+    fn reasoning_delta(s: &str) -> AgentEvent {
+        AgentEvent::ReasoningDelta { text: s.into() }
+    }
+
+    #[test]
+    fn reasoning_deltas_merge_and_heartbeats_fold_to_nothing() {
+        let mut parts = Vec::new();
+        for event in [
+            reasoning_delta(""),
+            reasoning_delta("Plan"),
+            reasoning_delta(""),
+            reasoning_delta(" it"),
+            text_delta("Answer"),
+            reasoning_delta("More"),
+        ] {
+            fold_event_into_parts(&mut parts, &event);
+        }
+        assert_eq!(
+            parts,
+            [
+                MessagePart::Reasoning {
+                    id: "r0".into(),
+                    text: "Plan it".into(),
+                },
+                MessagePart::Text {
+                    id: "t1".into(),
+                    text: "Answer".into(),
+                    agent_text: None,
+                },
+                MessagePart::Reasoning {
+                    id: "r2".into(),
+                    text: "More".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oversized_thought_splits_like_text() {
+        let thought = MessagePart::Reasoning {
+            id: "r0".into(),
+            text: "é".repeat(MSG_INLINE_MAX / 2 + 10),
+        };
+        let chunks = split_parts(std::slice::from_ref(&thought));
+        assert_eq!(chunks.len(), 2);
+        let pieces: Vec<&MessagePart> = chunks.iter().flatten().collect();
+        assert_eq!(pieces[0].id(), "r0");
+        assert_eq!(pieces[1].id(), "r0~1");
+        let joined: String = pieces
+            .iter()
+            .map(|p| match p {
+                MessagePart::Reasoning { text, .. } => text.as_str(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            &MessagePart::Reasoning {
+                id: "r0".into(),
+                text: joined
+            },
+            &thought
+        );
     }
 
     #[test]

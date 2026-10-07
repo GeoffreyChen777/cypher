@@ -239,10 +239,14 @@ enum MessagePart: Hashable, Identifiable {
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
     case error(id: String, message: String)
+    /// The model's thinking (doc parts.rs `Reasoning`), stored under the
+    /// part's `reasoning` key.
+    case reasoning(id: String, text: String)
 
     var id: String {
         switch self {
-        case .text(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _),
+             .reasoning(let id, _):
             return id
         }
     }

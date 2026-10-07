@@ -335,6 +335,63 @@ async fn queued_run_command_executes_end_to_end() {
 }
 
 #[tokio::test]
+async fn a_runs_thinking_is_kept_in_the_doc_before_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = mock_script();
+    // After SessionStarted: a heartbeat, the thought, then the answer.
+    script.splice(
+        1..5,
+        [
+            AgentEvent::ReasoningDelta {
+                text: String::new(),
+            },
+            AgentEvent::ReasoningDelta {
+                text: "Plan".into(),
+            },
+            AgentEvent::ReasoningDelta { text: " it".into() },
+            AgentEvent::TextDelta {
+                text: "Answer".into(),
+            },
+        ],
+    );
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("think first"),
+            message_id: "msg-user-1".into(),
+            agent_prompt: None,
+        },
+    );
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "assistant entry to complete",
+    )
+    .await;
+    let all = entries(&core);
+    assert_eq!(
+        all[1].parts,
+        vec![
+            MessagePart::Reasoning {
+                id: "r0".into(),
+                text: "Plan it".into(),
+            },
+            MessagePart::Text {
+                id: "t1".into(),
+                text: "Answer".into(),
+                agent_text: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn session_status_transitions_idle_working_idle() {
     let dir = tempfile::tempdir().unwrap();
     let core = assemble(

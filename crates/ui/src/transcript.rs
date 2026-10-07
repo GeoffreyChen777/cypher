@@ -613,11 +613,34 @@ pub enum RowKind {
     /// The toggle over an append-mode translation's original answer. The
     /// `blocks` rows that follow it — the original's blocks and the separator
     /// rule — are dropped from the list while the toggle is closed (the
-    /// default, see [`fold_translation_originals`]), so the answer reads like
+    /// default, see [`fold_closed_toggles`]), so the answer reads like
     /// a replace-mode translation with the original one click away.
     TranslationOriginal {
         blocks: usize,
     },
+    /// The toggle over a reasoning part: "Thinking…" while it streams,
+    /// "Thought" once it settled. The `blocks` [`RowKind::ThoughtBlock`] rows
+    /// that follow are dropped while it is closed, the default (see
+    /// [`fold_closed_toggles`]).
+    Thought {
+        blocks: usize,
+        live: bool,
+    },
+    /// One top-level markdown block of a reasoning part, painted muted.
+    /// `live` blocks fade in like [`RowKind::LiveMarkdown`].
+    ThoughtBlock {
+        tree: Arc<BlockTree>,
+        block_ix: usize,
+        live: bool,
+    },
+}
+
+/// Rows whose text streams in under a fade veil.
+fn is_live_markdown(kind: &RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::LiveMarkdown { .. } | RowKind::ThoughtBlock { live: true, .. }
+    )
 }
 
 /// A transcript row: stable id + content version (diff key) + block payload.
@@ -677,11 +700,15 @@ fn row_match_count(row: &Row, query: &str) -> u32 {
             .blocks
             .get(*block_ix)
             .map_or(0, |top| render::count_block_matches(&top.block, query)),
+        // Thinking is not searched: a hit inside a collapsed thought could
+        // not be shown.
         RowKind::ToolGroup { .. }
         | RowKind::Worked { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
-        | RowKind::TranslationOriginal { .. } => 0,
+        | RowKind::TranslationOriginal { .. }
+        | RowKind::Thought { .. }
+        | RowKind::ThoughtBlock { .. } => 0,
     };
     count.min(u32::MAX as usize) as u32
 }
@@ -1295,7 +1322,7 @@ pub fn rows_for_entry(
                         let tree = parse(&key, text);
                         // Block rows keep their ids either way (quotes map
                         // back through them), so the toggle only ever hides
-                        // or shows rows — see `fold_translation_originals`.
+                        // or shows rows — see `fold_closed_toggles`.
                         if let Some(blocks) = agent_text
                             .as_deref()
                             .and_then(|agent| appended_original_blocks(text, agent, &tree))
@@ -1342,6 +1369,50 @@ pub fn rows_for_entry(
                                         tree: tree.clone(),
                                         block_ix,
                                     }
+                                },
+                            });
+                        }
+                    }
+                    MessagePart::Reasoning { id: part_id, text } => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        let key = format!("{}#{}", entry.id, part_id);
+                        let tree = parse(&key, text);
+                        // Still thinking: the reasoning is the live tail.
+                        let live = streaming && part_ix == last_part_ix;
+                        rows.push(Row {
+                            id: format!("{key}.thought").into(),
+                            version: (tree.blocks.len() as u64) << 1 | live as u64,
+                            turn_start: false,
+                            entry_id: entry_id.clone(),
+                            role: entry.role,
+                            timestamp: None,
+                            kind: RowKind::Thought {
+                                blocks: tree.blocks.len(),
+                                live,
+                            },
+                        });
+                        // Same ids and content-hash versions as answer blocks,
+                        // so a streaming thought only splices its tail.
+                        for block_ix in 0..tree.blocks.len() {
+                            let range = &tree.blocks[block_ix].range;
+                            let end = range.end.min(text.len());
+                            let bytes = text
+                                .as_bytes()
+                                .get(range.start.min(end)..end)
+                                .unwrap_or_default();
+                            rows.push(Row {
+                                id: format!("{key}.{block_ix}").into(),
+                                version: (fnv1a(bytes) << 1) | live as u64,
+                                turn_start: false,
+                                entry_id: entry_id.clone(),
+                                role: entry.role,
+                                timestamp: None,
+                                kind: RowKind::ThoughtBlock {
+                                    tree: tree.clone(),
+                                    block_ix,
+                                    live,
                                 },
                             });
                         }
@@ -1512,25 +1583,30 @@ fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree) -> Option
         .then_some(rule + 1)
 }
 
-/// Drop the rows each CLOSED translation-original toggle covers. `open` holds
-/// the ids of toggles the user expanded; every other toggle stays collapsed.
-pub fn fold_translation_originals(
-    rows: &mut Vec<Row>,
-    open: &std::collections::HashSet<SharedString>,
-) {
+/// Drop the rows each CLOSED toggle covers — a translation's original or a
+/// thought. `open` holds the ids of toggles the user expanded; every other
+/// toggle stays collapsed. A folded row's timestamp (a reply that ended while
+/// thinking) moves onto its toggle, so the entry keeps its strip.
+pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet<SharedString>) {
     let mut hide = 0usize;
-    rows.retain(|row| {
+    let mut folded: Vec<Row> = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
         if hide > 0 {
             hide -= 1;
-            return false;
+            if let (Some(stamp), Some(toggle)) = (row.timestamp, folded.last_mut()) {
+                toggle.timestamp = Some(stamp);
+                toggle.version ^= 1 << 62;
+            }
+            continue;
         }
-        if let RowKind::TranslationOriginal { blocks } = row.kind
+        if let RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } = row.kind
             && !open.contains(&row.id)
         {
             hide = blocks;
         }
-        true
-    });
+        folded.push(row);
+    }
+    *rows = folded;
 }
 
 /// `CYPHER_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -1661,7 +1737,12 @@ fn top_gap_for_style(prev: Option<&Row>, row: &Row, message_gap: f32, paragraph_
     if row.turn_start {
         return message_gap;
     }
-    let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+    let is_md = |k: &RowKind| {
+        matches!(
+            k,
+            RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. } | RowKind::ThoughtBlock { .. }
+        )
+    };
     let same_part_markdown = prev.is_some_and(|p| {
         is_md(&p.kind) && is_md(&row.kind) && part_prefix(&p.id) == part_prefix(&row.id)
     });
@@ -1928,7 +2009,16 @@ fn worked_rule_at(rows: &[Row]) -> Option<usize> {
     if !rows.last().is_some_and(is_md) {
         return None;
     }
-    Some(rows.iter().rposition(|r| !is_md(r))? + 1)
+    let at = rows.iter().rposition(|r| !is_md(r))? + 1;
+    // Thinking is work done before the answer, but a reply that only thought
+    // first is still a plain reply, not a work log.
+    let is_thought = |r: &Row| {
+        matches!(
+            r.kind,
+            RowKind::Thought { .. } | RowKind::ThoughtBlock { .. }
+        )
+    };
+    rows[..at].iter().any(|r| !is_thought(r)).then_some(at)
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,10 +2226,10 @@ pub struct Transcript {
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
     tool_overflow: std::collections::HashSet<SharedString>,
-    /// Append-mode translation toggles the user opened, by row id; every
-    /// other original stays folded ([`fold_translation_originals`]).
-    /// Render-local like `folds`.
-    translation_originals: std::collections::HashSet<SharedString>,
+    /// Toggles the user opened (an append-mode translation's original, a
+    /// thought), by row id; every other one stays folded
+    /// ([`fold_closed_toggles`]). Render-local like `folds`.
+    open_toggles: std::collections::HashSet<SharedString>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -2408,7 +2498,7 @@ impl Transcript {
             folds: HashMap::new(),
             tool_details: HashMap::new(),
             tool_overflow: std::collections::HashSet::new(),
-            translation_originals: std::collections::HashSet::new(),
+            open_toggles: std::collections::HashSet::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -3499,7 +3589,7 @@ impl Transcript {
             self.tree_cache.clear();
             self.folds.clear();
             self.tool_overflow.clear();
-            self.translation_originals.clear();
+            self.open_toggles.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -3525,7 +3615,7 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            fold_translation_originals(&mut rows, &self.translation_originals);
+            fold_closed_toggles(&mut rows, &self.open_toggles);
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
@@ -3554,7 +3644,7 @@ impl Transcript {
             self.veil_attach_pending = false;
             self.veil_baseline = new_rows
                 .iter()
-                .filter(|r| matches!(r.kind, RowKind::LiveMarkdown { .. }))
+                .filter(|r| is_live_markdown(&r.kind))
                 .map(|r| r.id.clone())
                 .collect();
         }
@@ -3565,12 +3655,12 @@ impl Transcript {
         self.veils.retain(|id, _| {
             new_rows
                 .iter()
-                .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
         });
         self.veil_baseline.retain(|id| {
             new_rows
                 .iter()
-                .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
+                .any(|r| &r.id == id && is_live_markdown(&r.kind))
         });
 
         let was_empty = self.rows.is_empty();
@@ -4421,92 +4511,21 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
-                let opts = RenderOptions {
-                    row_key: row.id.clone(),
-                    veil: None,
-                    cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
-                    copy: Some(self.copy_ui_for(&row.id, cx)),
-                    selection: Some(self.selection_ui_for(&row.id, cx)),
-                    scope: self.scope,
-                };
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
-                render::render_block(
-                    &top.block,
-                    *block_ix,
-                    *block_ix,
-                    &opts,
-                    &theme,
-                    window,
-                    highlight
-                        .get(block_ix)
-                        .and_then(|o| o.as_deref())
-                        .map(|document| document.lines.as_slice()),
-                )
+                self.render_markdown_block(&row.id, tree, *block_ix, false, &theme, window, cx)
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
-                // Per-appended-chunk fade veil (opacity only — layout commits
-                // instantly). Reduced motion renders with no veil at all.
-                // Baseline rows (text already streamed when the transcript
-                // attached) start seeded: the existing reply must not fade in
-                // on a session switch — only fresh appends animate.
-                let veil = (!motion::reduced_motion(cx)).then(|| {
-                    self.veils
-                        .entry(row.id.clone())
-                        .or_insert_with(|| {
-                            if self.veil_baseline.contains(&row.id) {
-                                Rc::new(RefCell::new(RowVeil::seeded()))
-                            } else {
-                                Rc::default()
-                            }
-                        })
-                        .clone()
-                });
-                let opts = RenderOptions {
-                    row_key: row.id.clone(),
-                    veil: veil.clone(),
-                    cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: Instant::now(),
-                    copy: Some(self.copy_ui_for(&row.id, cx)),
-                    selection: Some(self.selection_ui_for(&row.id, cx)),
-                    scope: self.scope,
-                };
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
-                let timer = frame_stats_enabled().then(Instant::now);
-                let el = render::render_block(
-                    &top.block,
-                    *block_ix,
-                    *block_ix,
-                    &opts,
-                    &theme,
-                    window,
-                    highlight
-                        .get(block_ix)
-                        .and_then(|o| o.as_deref())
-                        .map(|document| document.lines.as_slice()),
-                );
-                if let Some(start) = timer {
-                    record_live_frame_us(start.elapsed().as_micros() as u64);
-                }
-                // The attach pass for this row is done (every element rendered
-                // above seeded its baseline synchronously): elements appearing
-                // from the NEXT pass on are newly streamed and fade normally.
-                if let Some(veil) = &veil {
-                    veil.borrow_mut().finish_seeding();
-                }
-                // Drive the veil clock: while any chunk is still dissolving,
-                // repaint next frame (self-limiting — one callback per frame).
-                if veil.is_some_and(|v| v.borrow().is_fading()) {
-                    let id = cx.entity_id();
-                    window.on_next_frame(move |_, cx| cx.notify(id));
-                }
-                el
+                self.render_markdown_block(&row.id, tree, *block_ix, true, &theme, window, cx)
+            }
+            RowKind::ThoughtBlock {
+                tree,
+                block_ix,
+                live,
+            } => {
+                // Thinking reads as the answer's quieter companion: the same
+                // blocks, in the muted text tone.
+                let mut muted = theme.clone();
+                muted.text = theme.text_muted;
+                self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx)
             }
             RowKind::ToolGroup { tools, auto_open } => {
                 self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
@@ -4517,7 +4536,11 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::Worked { label } => worked_rule(label.clone(), &theme),
             RowKind::TranslationOriginal { .. } => {
-                self.render_translation_original(&row.id, &theme, cx)
+                self.render_fold_toggle(&row.id, ("Show original", "Hide original"), &theme, cx)
+            }
+            RowKind::Thought { live, .. } => {
+                let label = if *live { "Thinking…" } else { "Thought" };
+                self.render_fold_toggle(&row.id, (label, label), &theme, cx)
             }
         };
 
@@ -5157,16 +5180,92 @@ impl Transcript {
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
     }
 
-    /// The toggle over an append-mode translation's original: a chevron tile
-    /// and a quiet label, styled like a tool group's header. Clicking rebuilds
-    /// the rows, which shows or hides the original's blocks below it.
-    fn render_translation_original(
+    /// One top-level markdown block row: settled, or `live` under the
+    /// streaming fade veil.
+    #[allow(clippy::too_many_arguments)]
+    fn render_markdown_block(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        block_ix: usize,
+        live: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Per-appended-chunk fade veil (opacity only — layout commits
+        // instantly). Reduced motion renders with no veil at all.
+        // Baseline rows (text already streamed when the transcript
+        // attached) start seeded: the existing reply must not fade in
+        // on a session switch — only fresh appends animate.
+        let veil = (live && !motion::reduced_motion(cx)).then(|| {
+            self.veils
+                .entry(row_id.clone())
+                .or_insert_with(|| {
+                    if self.veil_baseline.contains(row_id) {
+                        Rc::new(RefCell::new(RowVeil::seeded()))
+                    } else {
+                        Rc::default()
+                    }
+                })
+                .clone()
+        });
+        let opts = RenderOptions {
+            row_key: row_id.clone(),
+            veil: veil.clone(),
+            cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+            now: Instant::now(),
+            copy: Some(self.copy_ui_for(row_id, cx)),
+            selection: Some(self.selection_ui_for(row_id, cx)),
+            scope: self.scope,
+        };
+        let highlight = self.code_highlight_for(row_id, tree, Some(block_ix), cx);
+        let Some(top) = tree.blocks.get(block_ix) else {
+            return gpui::Empty.into_any_element();
+        };
+        let timer = (live && frame_stats_enabled()).then(Instant::now);
+        let el = render::render_block(
+            &top.block,
+            block_ix,
+            block_ix,
+            &opts,
+            theme,
+            window,
+            highlight
+                .get(&block_ix)
+                .and_then(|o| o.as_deref())
+                .map(|document| document.lines.as_slice()),
+        );
+        if let Some(start) = timer {
+            record_live_frame_us(start.elapsed().as_micros() as u64);
+        }
+        // The attach pass for this row is done (every element rendered
+        // above seeded its baseline synchronously): elements appearing
+        // from the NEXT pass on are newly streamed and fade normally.
+        if let Some(veil) = &veil {
+            veil.borrow_mut().finish_seeding();
+        }
+        // Drive the veil clock: while any chunk is still dissolving,
+        // repaint next frame (self-limiting — one callback per frame).
+        if veil.is_some_and(|v| v.borrow().is_fading()) {
+            let id = cx.entity_id();
+            window.on_next_frame(move |_, cx| cx.notify(id));
+        }
+        el
+    }
+
+    /// The toggle over folded rows (a translation's original, a thought): a
+    /// chevron tile and a quiet label, styled like a tool group's header.
+    /// Clicking rebuilds the rows, which shows or hides the blocks below it.
+    /// `labels` are (closed, open).
+    fn render_fold_toggle(
         &self,
         row_id: &SharedString,
+        labels: (&'static str, &'static str),
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.translation_originals.contains(row_id);
+        let open = self.open_toggles.contains(row_id);
         let key = row_id.clone();
         div()
             .w_full()
@@ -5185,8 +5284,8 @@ impl Transcript {
                     .text_color(theme.text_muted)
                     .hover(|s| s.text_color(theme.text))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.translation_originals.remove(&key) {
-                            this.translation_originals.insert(key.clone());
+                        if !this.open_toggles.remove(&key) {
+                            this.open_toggles.insert(key.clone());
                         }
                         // A local fold change: rebuild despite an unchanged
                         // state revision.
@@ -5207,11 +5306,7 @@ impl Transcript {
                             .text_color(theme.text_muted.opacity(0.7))
                             .child(SharedString::from(if open { "▾" } else { "▸" })),
                     )
-                    .child(SharedString::from(if open {
-                        "Hide original"
-                    } else {
-                        "Show original"
-                    })),
+                    .child(SharedString::from(if open { labels.1 } else { labels.0 })),
             )
             .into_any_element()
     }
@@ -6804,6 +6899,120 @@ mod tests {
         assert!(message_for_copy(&entries, &echoes, "missing").is_none());
     }
 
+    fn thought_part(id: &str, text: &str) -> MessagePart {
+        MessagePart::Reasoning {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_thought_folds_behind_a_collapsed_toggle() {
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                thought_part("r0", "**Plan**\n\nRead the file first."),
+                text_part("t1", "Done."),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, ["m1#r0.thought", "m1#r0.0", "m1#r0.1", "m1#t1.0"]);
+        assert!(matches!(
+            rows[0].kind,
+            RowKind::Thought {
+                blocks: 2,
+                live: false
+            }
+        ));
+        assert!(rows[0].turn_start);
+        assert!(matches!(
+            rows[1].kind,
+            RowKind::ThoughtBlock { live: false, .. }
+        ));
+
+        // Collapsed by default: the toggle stands in for the thought.
+        let mut folded = rows.clone();
+        fold_closed_toggles(&mut folded, &Default::default());
+        let ids: Vec<&str> = folded.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, ["m1#r0.thought", "m1#t1.0"]);
+        // Off the thought, the answer sits at the ordinary block gap.
+        assert_eq!(top_gap_for(Some(&folded[0]), &folded[1]), GAP_BLOCK);
+
+        let mut open = rows.clone();
+        fold_closed_toggles(&mut open, &["m1#r0.thought".into()].into());
+        assert_eq!(open.len(), rows.len());
+    }
+
+    #[test]
+    fn a_thought_is_live_only_while_it_is_the_streaming_tail() {
+        let thinking = assistant(
+            "m1",
+            MessageStatus::Streaming,
+            vec![thought_part("r0", "Hmm")],
+        );
+        let rows = rows_for_entry(&thinking, false, &mut parse);
+        assert!(matches!(rows[0].kind, RowKind::Thought { live: true, .. }));
+        assert!(is_live_markdown(&rows[1].kind));
+
+        let answering = assistant(
+            "m1",
+            MessageStatus::Streaming,
+            vec![thought_part("r0", "Hmm"), text_part("t1", "So")],
+        );
+        let rows = rows_for_entry(&answering, false, &mut parse);
+        assert!(matches!(rows[0].kind, RowKind::Thought { live: false, .. }));
+        assert!(!is_live_markdown(&rows[1].kind));
+    }
+
+    #[test]
+    fn a_reply_that_ended_thinking_keeps_its_timestamp_on_the_toggle() {
+        let entry = assistant(
+            "m1",
+            MessageStatus::Aborted,
+            vec![text_part("t0", "Partial"), thought_part("r1", "Then…")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert!(rows.last().unwrap().timestamp.is_some());
+        let mut folded = rows.clone();
+        fold_closed_toggles(&mut folded, &Default::default());
+        let ids: Vec<&str> = folded.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, ["m1#t0.0", "m1#r1.thought"]);
+        assert!(folded[1].timestamp.is_some());
+        assert_ne!(folded[1].version, rows[1].version);
+    }
+
+    #[test]
+    fn thinking_alone_is_not_a_work_log() {
+        let settled = |parts: Vec<MessagePart>| {
+            let mut entry = assistant("m1", MessageStatus::Complete, parts);
+            entry.completed_at = Some(90_000);
+            rows_for_entry(&entry, false, &mut parse)
+        };
+        let worked = |rows: &[Row]| {
+            rows.iter()
+                .position(|r| matches!(r.kind, RowKind::Worked { .. }))
+        };
+        assert_eq!(
+            worked(&settled(vec![
+                thought_part("r0", "Hmm"),
+                text_part("t1", "Hi")
+            ])),
+            None
+        );
+        // With real work, the rule follows the last thought, before the answer.
+        let rows = settled(vec![
+            thought_part("r0", "Hmm"),
+            tool_part("tool-1", "ls"),
+            thought_part("r2", "Now answer"),
+            text_part("t3", "Hi"),
+        ]);
+        let at = worked(&rows).expect("a work rule");
+        assert_eq!(rows[at - 1].id.as_ref(), "m1#r2.0");
+        assert_eq!(rows[at + 1].id.as_ref(), "m1#t3.0");
+    }
+
     #[test]
     fn append_translation_folds_its_original_behind_a_toggle() {
         let original = "The answer.\n\n- one\n- two";
@@ -6837,13 +7046,13 @@ mod tests {
         // Collapsed by default: the translation keeps its block ids (quotes
         // map back through them), everything before it is folded away.
         let mut folded = rows.clone();
-        fold_translation_originals(&mut folded, &Default::default());
+        fold_closed_toggles(&mut folded, &Default::default());
         let ids: Vec<&str> = folded.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(ids, ["m1#t0.original", "m1#t0.3", "m1#t0.4"]);
         assert!(folded.last().unwrap().timestamp.is_some());
 
         let mut open = rows.clone();
-        fold_translation_originals(&mut open, &["m1#t0.original".into()].into());
+        fold_closed_toggles(&mut open, &["m1#t0.original".into()].into());
         assert_eq!(open.len(), rows.len());
     }
 

@@ -575,6 +575,10 @@ enum SessionReferences {
                         let text = question.question.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !text.isEmpty { lines.append("[question: \(text)]") }
                     }
+                case .reasoning:
+                    // Hidden reasoning stays out of a reference, as on the
+                    // desktop (side_chats.rs `serialize_context_entry`).
+                    continue
                 }
             }
             return ReferenceEntry(id: entry.id, role: entry.role, continuationOf: nil, lines: lines)

@@ -22,8 +22,13 @@ enum RowKind {
     /// The toggle over an append-mode translation's original answer. The
     /// `rows` that follow it — the original's blocks and the separator rule —
     /// are dropped while it is closed, the default (transcript.rs
-    /// `TranslationOriginal`; see `foldTranslationOriginals`).
+    /// `TranslationOriginal`; see `foldClosedToggles`).
     case translationOriginal(rows: Int)
+    /// The toggle over a reasoning part: "Thinking…" while it streams,
+    /// "Thought" once settled. The `rows` that follow — the thought's blocks,
+    /// `muted` — are dropped while it is closed, the default (transcript.rs
+    /// `Thought`).
+    case thought(rows: Int, live: Bool)
 }
 
 /// What an append-mode translation puts between the agent's answer and its
@@ -73,6 +78,8 @@ struct TranscriptRow: Identifiable {
     /// The owning entry's role — what a selection's actions may do with it
     /// (fork before a prompt / after a reply; never a system row).
     var role: MessageRole = .assistant
+    /// A block of the model's thinking: painted in the muted tone.
+    var muted = false
 }
 
 /// A settled part's parse, keyed by content so a completed block is parsed
@@ -181,6 +188,39 @@ enum TranscriptRowBuilder {
             groupIx += 1
         }
 
+        /// One row per prose run / other block of a part, named by its first
+        /// block so a run keeps its id as blocks join it.
+        func appendBlockRows(key: String, blocks: [TopBlock], runs: [Range<Int>], partIx: Int,
+                             liveTail: Bool, muted: Bool) {
+            for run in runs {
+                let lastOfPart = run.upperBound == blocks.count
+                let live = liveTail && lastOfPart
+                let stamped = settled && partIx == lastPartIx && lastOfPart
+                let kind: RowKind
+                var version: UInt64
+                if TranscriptTextStyle.isProse(blocks[run.lowerBound].block) {
+                    var hash: UInt64 = 0xcbf29ce484222325
+                    for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100000001b3 }
+                    version = (hash << 1) | (live ? 1 : 0)
+                    kind = .prose(blocks: blocks[run].map(\.block), streaming: live)
+                } else {
+                    version = (blocks[run.lowerBound].fingerprint << 1) | (live ? 1 : 0)
+                    kind = .markdown(block: blocks[run.lowerBound].block, streaming: live)
+                }
+                if stamped {
+                    version ^= 1 << 62  // timestamp attach keeps the diff key honest
+                }
+                rows.append(TranscriptRow(
+                    id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
+                    kind: kind,
+                    entryId: entry.id,
+                    timestamp: stamped ? entry.createdAt : nil,
+                    partKey: key,
+                    muted: muted))
+                first = false
+            }
+        }
+
         for (ix, part) in entry.parts.enumerated() {
             switch part {
             case .tool(let partId, let call, let isError, let resolved):
@@ -208,34 +248,27 @@ enum TranscriptRowBuilder {
                                               entryId: entry.id, timestamp: nil, partKey: nil))
                     first = false
                 }
-                for run in runs {
-                    let lastOfPart = run.upperBound == blocks.count
-                    let live = isLiveTail && lastOfPart
-                    let stamped = settled && ix == lastPartIx && lastOfPart
-                    let kind: RowKind
-                    var version: UInt64
-                    if TranscriptTextStyle.isProse(blocks[run.lowerBound].block) {
-                        var hash: UInt64 = 0xcbf29ce484222325
-                        for top in blocks[run] { hash = (hash ^ top.fingerprint) &* 0x100000001b3 }
-                        version = (hash << 1) | (live ? 1 : 0)
-                        kind = .prose(blocks: blocks[run].map(\.block), streaming: live)
-                    } else {
-                        version = (blocks[run.lowerBound].fingerprint << 1) | (live ? 1 : 0)
-                        kind = .markdown(block: blocks[run.lowerBound].block, streaming: live)
-                    }
-                    if stamped {
-                        version ^= 1 << 62  // timestamp attach keeps the diff key honest
-                    }
-                    // Named by its first block, so a run keeps its id as blocks
-                    // join it.
-                    rows.append(TranscriptRow(
-                        id: "\(key).\(run.lowerBound)", version: version, turnStart: first,
-                        kind: kind,
-                        entryId: entry.id,
-                        timestamp: stamped ? entry.createdAt : nil,
-                        partKey: key))
-                    first = false
-                }
+                appendBlockRows(key: key, blocks: blocks, runs: runs, partIx: ix,
+                                liveTail: isLiveTail, muted: false)
+
+            case .reasoning(let partId, let text):
+                flushTools(lastIx: ix - 1)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                let key = "\(entry.id)#\(partId)"
+                live.insert(key)
+                // Still thinking: the reasoning is the live tail.
+                let isLiveTail = streaming && ix == lastPartIx
+                let blocks = parse(text: text, key: key, streaming: isLiveTail,
+                                   parsers: &parsers, completed: &completed)
+                let runs = proseRuns(blocks, liveTail: isLiveTail)
+                rows.append(TranscriptRow(id: "\(key).thought",
+                                          version: UInt64(runs.count) << 1 | (isLiveTail ? 1 : 0),
+                                          turnStart: first,
+                                          kind: .thought(rows: runs.count, live: isLiveTail),
+                                          entryId: entry.id, timestamp: nil, partKey: nil))
+                first = false
+                appendBlockRows(key: key, blocks: blocks, runs: runs, partIx: ix,
+                                liveTail: isLiveTail, muted: true)
 
             case .input(let partId, _, let questions, let resolved):
                 flushTools(lastIx: ix - 1)
@@ -278,16 +311,22 @@ enum TranscriptRowBuilder {
         return rule + 1
     }
 
-    /// transcript.rs `fold_translation_originals`: drop the rows each CLOSED
-    /// toggle covers. `open` holds the ids of toggles the user expanded;
-    /// every other toggle stays collapsed. The row after a fold re-takes its
-    /// gap from the toggle it now follows.
-    static func foldTranslationOriginals(_ rows: [TranscriptRow], open: Set<String>) -> [TranscriptRow] {
-        let hasToggle = rows.contains {
-            if case .translationOriginal = $0.kind { return true }
-            return false
+    /// The rows a toggle covers, if `kind` is one (a translation's original
+    /// or a thought).
+    static func toggledRows(_ kind: RowKind) -> Int? {
+        switch kind {
+        case .translationOriginal(let rows), .thought(let rows, _): return rows
+        default: return nil
         }
-        guard hasToggle else { return rows }
+    }
+
+    /// transcript.rs `fold_closed_toggles`: drop the rows each CLOSED toggle
+    /// covers. `open` holds the ids of toggles the user expanded; every other
+    /// toggle stays collapsed. The row after a fold re-takes its gap from the
+    /// toggle it now follows, and a folded row's timestamp (a reply that
+    /// ended while thinking) moves onto its toggle.
+    static func foldClosedToggles(_ rows: [TranscriptRow], open: Set<String>) -> [TranscriptRow] {
+        guard rows.contains(where: { toggledRows($0.kind) != nil }) else { return rows }
         var folded: [TranscriptRow] = []
         folded.reserveCapacity(rows.count)
         var hide = 0
@@ -295,6 +334,10 @@ enum TranscriptRowBuilder {
         for var row in rows {
             if hide > 0 {
                 hide -= 1
+                if let stamp = row.timestamp, let toggle = folded.indices.last {
+                    folded[toggle].timestamp = stamp
+                    folded[toggle].version ^= 1 << 62
+                }
                 continue
             }
             if regap {
@@ -302,7 +345,7 @@ enum TranscriptRowBuilder {
                 regap = false
             }
             folded.append(row)
-            if case .translationOriginal(let hidden) = row.kind, !open.contains(row.id) {
+            if let hidden = toggledRows(row.kind), !open.contains(row.id) {
                 hide = hidden
                 regap = hidden > 0
             }

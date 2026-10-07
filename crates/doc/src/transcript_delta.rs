@@ -92,20 +92,25 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         if p == n {
             continue;
         }
-        let (
-            MessagePart::Text {
-                id: pid,
-                text: pt,
-                agent_text: pa,
-            },
-            MessagePart::Text {
-                id: nid,
-                text: nt,
-                agent_text: na,
-            },
-        ) = (p, n)
-        else {
-            return None;
+        let ((pid, pt, pa), (nid, nt, na)) = match (p, n) {
+            (
+                MessagePart::Text {
+                    id: pid,
+                    text: pt,
+                    agent_text: pa,
+                },
+                MessagePart::Text {
+                    id: nid,
+                    text: nt,
+                    agent_text: na,
+                },
+            ) => ((pid, pt, pa.as_ref()), (nid, nt, na.as_ref())),
+            // Streaming thinking grows the same way.
+            (
+                MessagePart::Reasoning { id: pid, text: pt },
+                MessagePart::Reasoning { id: nid, text: nt },
+            ) => ((pid, pt, None), (nid, nt, None)),
+            _ => return None,
         };
         // An append carries text only: a change to the agent's version (an
         // append-mode translation grows the text AND stamps the original)
@@ -236,10 +241,11 @@ pub fn apply_transcript_frame(
                 let Some(target) = current.iter_mut().find(|e| e.id == entry) else {
                     return Err(TranscriptDesync(format!("missing append entry {entry}")));
                 };
-                let Some(MessagePart::Text { text: tail, .. }) = target
-                    .parts
-                    .iter_mut()
-                    .find(|p| matches!(p, MessagePart::Text { id, .. } if *id == part))
+                let Some(
+                    MessagePart::Text { text: tail, .. } | MessagePart::Reasoning { text: tail, .. },
+                ) = target.parts.iter_mut().find(|p| {
+                    matches!(p, MessagePart::Text { id, .. } | MessagePart::Reasoning { id, .. } if *id == part)
+                })
                 else {
                     return Err(TranscriptDesync(format!("missing append part {part}")));
                 };
@@ -338,6 +344,27 @@ mod tests {
             other => panic!("expected delta, got {other:?}"),
         }
         apply(&[a.clone(), b0], &[a, b1]);
+    }
+
+    #[test]
+    fn a_streaming_thought_is_an_append_too() {
+        let thinking = |text: &str| {
+            let mut e = entry("b", "");
+            e.parts = vec![MessagePart::Reasoning {
+                id: "r0".into(),
+                text: text.into(),
+            }];
+            e
+        };
+        let (b0, b1) = (thinking("weighing"), thinking("weighing options"));
+        match &diff_transcript(std::slice::from_ref(&b0), std::slice::from_ref(&b1)) {
+            TranscriptFrame::Delta { upsert, append, .. } => {
+                assert!(upsert.is_empty());
+                assert_eq!(append[0].text, " options");
+            }
+            other => panic!("expected delta, got {other:?}"),
+        }
+        apply(&[b0], &[b1]);
     }
 
     #[test]

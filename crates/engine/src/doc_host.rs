@@ -380,10 +380,13 @@ impl ChatDocHandle {
     /// same lock, so a commit is either drained there or enqueued directly
     /// here — never dropped between (verify pass). Called only from the feed
     /// pump task, never from inside a Loro hook (see
-    /// [`DocHost::install_chat2_local_feed`]).
-    fn route_local_update(&self, bytes: Vec<u8>) {
+    /// [`DocHost::install_chat2_local_feed`]). A `deferred` commit (it only
+    /// grew the model's thinking) rides the next push instead of opening one;
+    /// before the join everything is sent on join anyway.
+    fn route_local_update(&self, bytes: Vec<u8>, deferred: bool) {
         let client_guard = lock(&self.chat2);
         match &*client_guard {
+            Some(client) if deferred => client.enqueue_deferred_update(bytes),
             Some(client) => client.enqueue_update(bytes),
             None => lock(&self.chat2_pending_local).push(bytes),
         }
@@ -1250,20 +1253,23 @@ impl DocHost {
     /// The pump task below does the client/pending routing under the client
     /// lock, outside any Loro hook.
     fn install_chat2_local_feed(&self, handle: &Arc<ChatDocHandle>) {
-        let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, bool)>();
         let sub = handle
             .doc
             .doc()
             .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
+                // The deferral mark is read here, inside the commit on the
+                // committing thread — a thread-local, so no lock.
+                let deferred = cypher_doc::local_commit_is_deferrable();
                 // `false` unsubscribes once the pump is gone (handle evicted).
-                feed_tx.send(bytes.clone()).is_ok()
+                feed_tx.send((bytes.clone(), deferred)).is_ok()
             }));
         *lock(&handle.chat2_local_sub) = Some(sub);
         let weak = Arc::downgrade(handle);
         self.spawn_worker(async move {
-            while let Some(bytes) = feed_rx.recv().await {
+            while let Some((bytes, deferred)) = feed_rx.recv().await {
                 let Some(handle) = weak.upgrade() else { return };
-                handle.route_local_update(bytes);
+                handle.route_local_update(bytes, deferred);
             }
         });
     }

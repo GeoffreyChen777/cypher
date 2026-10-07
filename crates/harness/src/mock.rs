@@ -258,11 +258,34 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
-        let events: Vec<Result<AgentEvent, HarnessError>> = body
+        // Dev/testing knob: `CYPHER_MOCK_THINK=1` opens the reply with scripted
+        // thinking (`ReasoningDelta`, a few chunks so `CYPHER_MOCK_DELAY_MS`
+        // shows it stream) — the data-side way to put the collapsed thought
+        // toggle on screen with the mock harness.
+        let mock_think = cypher_env::var("MOCK_THINK").is_some_and(|v| !v.is_empty() && v != "0");
+        let think_events = mock_think
+            .then(|| {
+                [
+                    "**Planning the answer**\n\n",
+                    "The user wants the streaming path explained. ",
+                    "Walk it in order — command, host, fold — ",
+                    "then run the tests to confirm nothing regressed.",
+                ]
+                .map(|text| AgentEvent::ReasoningDelta { text: text.into() })
+            })
+            .into_iter()
+            .flatten();
+        // Thinking follows a leading SessionStarted, which resets the fold.
+        let lead = body
             .iter()
-            .cycle()
-            .take(body.len() * repeat)
+            .take_while(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+            .count();
+        let events: Vec<Result<AgentEvent, HarnessError>> = body[..lead]
+            .iter()
             .cloned()
+            .chain(think_events)
+            .chain(body[lead..].iter().cloned())
+            .chain(body.iter().cycle().take(body.len() * (repeat - 1)).cloned())
             .chain(code_tool_events)
             .chain(code_event)
             .chain(table_event)
