@@ -80,7 +80,7 @@
 4. **WS 鉴权走查询串**：`edge/src/auth.ts:36` 接受 `?token=`；桌面 `crates/engine/src/doc_host.rs:151-153`（拼 `?token=&device=`）、`crates/rpc/src/device_room.rs:168-179`、iOS `App/AppConfig.swift:175-188`。HTTP 请求用 `Authorization: Bearer`。→ 新入口的访问日志必须脱敏 `token` 参数。
 5. **TLS 信任根**：Rust 侧 `Cargo.toml:80`（`tokio-tungstenite` `rustls-tls-webpki-roots`）、`:110`（`reqwest` `rustls-tls`）—— 只信 webpki 根集，Let's Encrypt（ISRG Root X1）在内；iOS 用系统信任。
 6. **发布/更新/运行时下载**：`crates/update/src/lib.rs:195-215`（`/releases/{channel}/manifest.json`、`manifest.json`）、`crates/engine/src/pi_runtime.rs:550-551`（`/releases/runtimes/pi`）、`edge/src/install.sh:15`（`CYPHER_BASE_URL` 默认同主机名）、`scripts/ci/release.py:692`（`--base-url` 默认值）。
-7. **遗留路由仍有写入者**：`crates/engine/src/diff_sync.rs:625` 仍向 `POST {edge}/diff/{chatId}`（SessionRoom `s2/` 路由，`index.ts:217`）发布 diff sidecar；`session-room.ts:319-326` 只写 blob，不触碰 loro。Rust/Swift 中没有 `GET /diff/{chatId}` 的读取者。`/session/*/ws`、`/workspace/*`、`/snapshot`、`/append` 在 `crates`、`apps/ios` 中无调用点。
+7. **遗留路由已删除**：桌面自 `3830a0f` 起不再 `POST {edge}/diff/{chatId}`；Edge 已删除 `/session/*`、`/workspace/*` 及顶层 `/tail`、`/stats`、`/diff`、`/snapshot`、`/append` 路由（SessionRoom 类仍作为 410 存根绑定）。`crates`、`apps/ios` 中无调用点。
 
 ### 1.3 DO 运行时语义的实际使用面（Rust 必须再现的清单）【现状】
 
@@ -178,7 +178,7 @@
 
 - **对象存储用自托管 MinIO**：Rust 进程通过 S3 API 读写；`release.py:385-398` 的 `R2` 类只用到 `get/digest/put` 三个方法，直接换成指向 MinIO 的 S3 客户端（同一套凭据模型），不需要自建上传 API。选择同机 MinIO 的理由：**S3 作为边界**（换后端只改配置）、多盘时的**纠删码盘级冗余**、将来第二台机器/地域的 **bucket 复制只是配置**、bucket 版本化给附件免费的误删恢复；数据不离开自己的机器。代价：多一个守护进程与它的升级/备份口径；带宽不变（仍在同一上行链路后面）。备选 Garage / SeaweedFS（同为 S3 API，§11）。
 - **保留 room 命名前缀**：`chat2/`、`reg1/`、`d2/`、`apns/` 是历史上按"代"废弃旧 room 的产物（`index.ts:197-201,377`；`docs/chat2-sync.md:157`；`docs/registry-sync.md:3,106`）。`chat2` 在客户端 URL 里，`reg1` 的派生 id 被 iOS 持久化为推送 `scope`（§1.4）。迁移中**原样导入、不新增、不改名**；有了 Postgres 之后，身份类变更走 SQL 迁移而不是换前缀，前缀只保留给真正的协议不兼容升级。
-- **遗留 SessionRoom 不迁入线上服务**：只做冷归档导出（§5）。`POST /diff/:chatId` 以兼容路由形式保留并落到 chat2 room 的 `sidecar-diff` 槽（§4.1）。
+- **遗留 SessionRoom 不迁入线上服务**：只做冷归档导出（§5）。
 - **codec 共享**：服务端 crate 直接依赖 `cypher-sync`（chat 帧、预览帧）、`cypher-doc`（注册表合并核心）、`cypher-rpc`（设备帧）中的纯函数，而不是复制；Rust 客户端与 Rust 服务端字节级一致由此免费获得，TS/Swift 一致性继续由 §12.1 的向量保证。【建议】后续可把这些纯 codec 抽成 `cypher-wire` 小 crate 以缩小服务端依赖面（不改行为，不是切换前提）。
 
 ---
@@ -388,7 +388,7 @@ Cloudflare 之前吸收：L3/L4 洪水、L7 洪水、TLS 握手放大、机器�
 | `POST /auth/exchange` `POST /auth/verify-email` `POST /auth/refresh` `GET|POST /auth/orgs` `GET /auth/cli/callback` `GET /auth/ios/callback`（`auth-routes.ts`） | WorkOS 转发；错误信封 `{error, code, retryable}`（`auth-routes.ts:46-62`） | `auth.rs:807,882,1000,649-667`；iOS `Auth/AuthClient.swift:125-148`、`SignInView.swift:29` | 保留；**变更**：日志中的 `cf-connecting-ip`（`auth-routes.ts:151`）改读 `X-Forwarded-For` |
 | `POST /notifications/revoke`（:172） | 无鉴权撤销能力，转 PushDevice `/unregister` | iOS `NotificationController.swift:303` | 保留；`bindingId` 走 `rooms.id_hex` 全局索引 |
 | `GET /session/:id/ws` `GET /tail/:id` `GET /stats/:id` `GET /snapshot/:id` `POST /append/:id`（:193-226） | SessionRoom `s2/` | 无（`ARCHITECTURE.md` §1；grep 无命中） | **删除**（410 Gone）；数据冷归档 |
-| `GET|POST /diff/:chatId`（:217） | SessionRoom `s2/` 的 blob 槽（`session-room.ts:311-326`） | **桌面仍 POST**：`diff_sync.rs:625`；GET 无读者 | **变更**：兼容路由，POST 落到对应 chat2 room 的 `sidecar-diff`（等价 `PUT /chat2/:id/diff`，`chat-room.ts:272-282`，content-type `application/json`），响应 `{ok:true}`；GET 从同一槽返回。客户端后续改为 `PUT /chat2/{id}/diff`（非切换前提） |
+| `GET|POST /diff/:chatId` | 已删除（原 SessionRoom `s2/` 的 blob 槽） | 无（桌面自 `3830a0f` 起不再 POST） | **删除** |
 | `/workspace/:orgId/*`（:268-327） | SessionRoom `ws4/` | 无 | **删除**（410） |
 | `GET /chat2/:id/ws`（:233-245） | 二进制帧协议 | `doc_host.rs:1307`；iOS `AppConfig.swift:186` | 保留（帧、`state` 载荷为 frontier 字节、`hello_first`、关闭码 1003/1009/4410） |
 | `GET /chat2/:id/checkpoint`（`chat-room.ts:136-165`） | 200/206/416，`accept-ranges`、`content-range`、`x-chat2-checkpoint-seq`，只接受 `bytes=N-`（`:605-610`） | `chat2_host.rs:177-274`（续传 + seq 校验 `:233-247`）；iOS `AppConfig.swift:196` | 保留 |
