@@ -1,9 +1,6 @@
 //! Shared client-side sync types: the error surface, the per-dial URL/token
-//! seam, and the stats snapshot behind `SyncStatus` / `cypher sync`.
-//!
-//! These lived in the legacy s2 room client (`room.rs`) until the chat2
-//! cutover retired it; the registry and chat2 clients keep speaking the same
-//! vocabulary.
+//! seam, and the stats snapshot behind `SyncStatus` / `cypher sync`, shared by
+//! the registry and chat2 clients.
 
 use futures::future::BoxFuture;
 

@@ -36,8 +36,8 @@ pub enum Indicator {
 }
 
 /// A `Working`/`AwaitingInput` session older than this is treated as dead — a
-/// crashed backend must never show an eternal "Working" (feature-inventory
-/// §1.12). Engines heartbeat sessions well inside this window.
+/// crashed backend must never show an eternal "Working". Engines heartbeat
+/// sessions well inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
 /// Staleness-checked indicator for a session row. Pure.

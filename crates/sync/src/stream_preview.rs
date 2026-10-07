@@ -1,5 +1,6 @@
-//! Inactive P1 codec. Parsing is NOT authorization; see docs/ephemeral-stream-v1.md.
-//! Deliberately not registered in ChatClient or the legacy wire dispatcher.
+//! Ephemeral stream-preview frame codec (`ephemeral-stream-v1`), driven by
+//! [`crate::preview_link`]. Parsing is NOT authorization; see
+//! docs/ephemeral-stream-v1.md.
 
 use crate::chat_frames::{self, WireFrame};
 

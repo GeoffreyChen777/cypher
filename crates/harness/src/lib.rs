@@ -6,9 +6,7 @@
 //! via `codex-acp`, Cursor, Grok Build and Hermes natively — and pi via its
 //! OWN RPC protocol (`pi --mode rpc`, the [`pi`] harness), not an adapter.
 //! Decision records: docs/research/acp.md (ACP + the pi migration note),
-//! docs/research/pi-rpc.md (the native pi harness). The bespoke
-//! stream-json/app-server adapters this crate used to hold are documented
-//! historically in docs/research/harness.md.
+//! docs/research/pi-rpc.md (the native pi harness).
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
