@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use gpui::{App, Global, Hsla, SharedString};
+use gpui::{App, Global, Hsla, SharedString, hsla};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{Appearance, MarkdownMetrics, Theme};
@@ -287,13 +287,20 @@ pub fn resolve(settings: &ChatAppearance, base: &Theme, revision: u64, fonts: &[
     theme
 }
 
+/// The user message plate. Unset, it is a translucent muted blue (~#2C333E on
+/// the dark panel, ~#E2E9F4 on white). User reports drove each choice: the
+/// old neutral wash sat too close to every other surface, a full-chroma
+/// indigo tint read too loud, and warm sand was not colour-blind friendly.
+/// Blue survives red-green colour blindness, and the plate also steps in
+/// lightness from the panel so hue is not the only cue. Translucent because
+/// an opaque plate reads as a slab over glass.
 pub fn bubble(theme: &Theme) -> Hsla {
     theme.user_bubble.unwrap_or_else(|| {
-        theme.wash(if theme.appearance.is_dark() {
-            0.08
+        if theme.appearance.is_dark() {
+            hsla(217.0 / 360.0, 0.82, 0.76, 0.18)
         } else {
-            0.04
-        })
+            hsla(217.0 / 360.0, 0.57, 0.44, 0.14)
+        }
     })
 }
 

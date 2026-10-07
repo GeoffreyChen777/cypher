@@ -1057,17 +1057,6 @@ pub fn glass_selected_bg() -> Hsla {
     }
 }
 
-/// The user message bubble's plate: the same translucent wash family as
-/// [`glass_selected_bg`], one step softer — at the selection weight the
-/// bubble read too strong for settled content (user report), and an opaque
-/// plate before that read as a solid slab over glass.
-pub fn user_bubble_bg() -> Hsla {
-    match current_appearance() {
-        Appearance::Dark => wash(0.08),
-        Appearance::Light => wash(0.04),
-    }
-}
-
 /// Selected/keyboard-active treatment for rows and chips INSIDE a floating
 /// card (menu rows, the picker rail, segmented chips). The card is already the
 /// bright plane in light mode, so a white lift can't read there — selection is
