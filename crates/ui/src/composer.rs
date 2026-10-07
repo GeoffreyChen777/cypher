@@ -601,8 +601,8 @@ pub struct Composer {
     /// Focused while the lightbox is open so Escape reaches it; the input
     /// gets focus back on close.
     preview_focus: FocusHandle,
-    /// Focus grab deferred to the next render (open sites don't all have a
-    /// `Window` — the `CYPHER_ATTACH_PREVIEW` boot knob opens in `new`).
+    /// Focus grab deferred to the next render, so an open site without a
+    /// `Window` can still hand focus to the lightbox.
     preview_focus_pending: bool,
     /// In-flight file-picker prompt (paperclip).
     picker_task: Option<Task<()>>,

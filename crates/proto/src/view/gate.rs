@@ -141,5 +141,14 @@ mod tests {
             panic!("expected NeedsOrganization");
         };
         assert_eq!(user.avatar_url, None);
+
+        // Anything else is no auth state, including the retired `_tag` shape.
+        for garbage in [
+            serde_json::json!({"_tag": "SignedIn", "user": {"id": "u1", "email": "a@b.c"}}),
+            serde_json::json!({"state": "wat"}),
+            serde_json::json!(42),
+        ] {
+            assert!(parse_auth_state(&garbage).is_none(), "{garbage}");
+        }
     }
 }
