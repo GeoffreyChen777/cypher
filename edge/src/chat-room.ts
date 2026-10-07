@@ -1,8 +1,7 @@
 /**
  * ChatRoom — one Durable Object per chat session (`chat2/{chatId}`), the
- * dumb authenticated log relay replacing SessionRoom's loro-aware s2 rooms
- * (docs/chat2-sync.md workstream B). Modeled line-for-line on RegistryRoom,
- * NOT on SessionRoom: no loro-wasm import anywhere in this class.
+ * dumb authenticated log relay (docs/chat2-sync.md workstream B). Modeled
+ * line-for-line on RegistryRoom: no loro-wasm import anywhere in this class.
  *
  * The DO's entire job: append opaque update blobs to a seq-ordered log,
  * relay them to live sockets, store one client-built checkpoint blob, and
@@ -312,8 +311,7 @@ export class ChatRoom implements DurableObject {
         ...logStats(sql),
         connectedSockets: this.ctx.getWebSockets().length,
         presence: Object.fromEntries(this.presence),
-        // The ONLY per-device attribution surface — kept from the 2026-08-05
-        // incident tooling (SessionRoom's /stats pushOutcomes). Served from
+        // The ONLY per-device attribution surface. Served from
         // memory: the table holds everything flushed so far, the map holds
         // that plus this instance's unflushed delta.
         pushOutcomes: Object.fromEntries(this.loadOutcomes()) as Record<string, PushOutcome>,
