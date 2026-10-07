@@ -81,17 +81,6 @@ pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>
     crate::chat_indicator(chat, live)
 }
 
-/// Attention bucket for the sidebar's Active list — lower is more urgent.
-pub fn attention_rank(status: ChatIndicator) -> u8 {
-    match status {
-        ChatIndicator::AwaitingInput => 0,
-        ChatIndicator::Errored => 1,
-        ChatIndicator::Working => 2,
-        ChatIndicator::Completed => 3,
-        ChatIndicator::Idle => 4,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Sort orders
 // ---------------------------------------------------------------------------
@@ -102,8 +91,7 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 /// meant that merely OPENING a completed session (completed → seen → idle)
 /// dropped its row under the pointer (user report: "their position in the
 /// scrollbar changes"). Matches the old sidebar, which rendered chats in
-/// recency order and let the dots carry urgency; [`attention_rank`] still
-/// aggregates the space rows' urgency dot.
+/// recency order and let the dots carry urgency.
 pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
     rows.sort_by(|(_, a), (_, b)| {
         let ka = a.last_message_at.unwrap_or(a.created_at);

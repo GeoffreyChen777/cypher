@@ -59,9 +59,10 @@ The development bearer is a shared secret, so the override is fenced
 - anything without an `https://` (or loopback `http://`) scheme is rejected.
 
 The rest of the development contract is unchanged: a `development` feature
-build, `CYPHER_PROFILE=development`, a 64-hex `CYPHER_DEV_ACCESS_TOKEN`, and a
-data directory under `~/.cypher-development/`. Production builds and the
-production profile cannot reach any of it.
+build, `CYPHER_PROFILE=development`, a `CYPHER_DEV_ACCESS_TOKEN` bearer (against a
+loopback Edge in `AUTH_MODE=dev` this is the identity `dev-user@dev-org`, which
+`scripts/dev-engine.sh` sets), and a data directory under `~/.cypher-development/`.
+Production builds and the production profile cannot reach any of it.
 
 iOS switches endpoints separately, through the `-setedge <url>` launch argument
 (`apps/ios/Cypher/App/AppModel.swift`); `scripts/dev-ios.sh` injects only the

@@ -69,8 +69,7 @@ expand; offline shows the summary + a greyed affordance.
 
 New DO class `ChatRoom`, room name `chat2/{chatId}`, modeled line-for-line on
 `RegistryRoom` (registry-room.ts, 425 LOC), not on SessionRoom. **No loro-wasm import
-anywhere in the class.** The TS schema mirror (`edge/src/session-doc/`) and the wasm
-bundling alias have since been removed with the s2 routes.
+anywhere in the class.**
 
 **Storage** (DO SQLite):
 - `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` —

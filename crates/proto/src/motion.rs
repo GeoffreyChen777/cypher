@@ -10,17 +10,8 @@
 //! it from a frame delta or from wall-clock elapsed time and get identical
 //! output.
 
-/// Cells in the cypher wave loader.
-pub const CYPHER_CELLS: usize = 5;
 /// Side length of the gradient spinner matrix.
 pub const MATRIX_SIDE: usize = 3;
-
-/// Cypher loader cells rest at this opacity between pulses.
-pub const PULSE_MIN_OPACITY: f32 = 0.08;
-/// …and at this scale.
-pub const PULSE_MIN_SCALE: f32 = 0.9;
-/// Per-cell stagger, as a fraction of the pulse period (0.15s of 2.4s).
-pub const PULSE_STAGGER: f32 = 0.15 / 2.4;
 
 /// Per-row tints of the gradient matrix spinner — zeron's "sunrise" gradient
 /// sampled at each row: cool blue at the top, through amber, to pink.
@@ -41,16 +32,6 @@ pub fn staggered_phase(raw_delta: f32, index: usize, stagger: f32) -> f32 {
 /// Cosine pulse: 0 at phase 0, 1 at phase 0.5, back to 0 at phase 1.
 pub fn pulse_wave(phase: f32) -> f32 {
     0.5 - 0.5 * (phase * std::f32::consts::TAU).cos()
-}
-
-/// Cypher loader cell opacity for a phase: 0.08 → 1 → 0.08.
-pub fn pulse_opacity(phase: f32) -> f32 {
-    PULSE_MIN_OPACITY + (1.0 - PULSE_MIN_OPACITY) * pulse_wave(phase)
-}
-
-/// Cypher loader cell scale for a phase: 0.9 → 1 → 0.9.
-pub fn pulse_scale(phase: f32) -> f32 {
-    PULSE_MIN_SCALE + (1.0 - PULSE_MIN_SCALE) * pulse_wave(phase)
 }
 
 /// Gradient-spin cell opacity for a local phase `t` (0..1 of the period),
@@ -91,31 +72,27 @@ mod tests {
         close(pulse_wave(0.0), 0.0, "trough at 0");
         close(pulse_wave(0.5), 1.0, "crest at half");
         close(pulse_wave(1.0), 0.0, "trough at 1");
-        // Opacity and scale ride the same wave between their own bounds.
-        close(pulse_opacity(0.0), PULSE_MIN_OPACITY, "dim rest");
-        close(pulse_opacity(0.5), 1.0, "full crest");
-        close(pulse_scale(0.0), PULSE_MIN_SCALE, "small rest");
-        close(pulse_scale(0.5), 1.0, "full scale");
     }
 
     #[test]
     fn stagger_offsets_each_cell_and_wraps() {
-        close(staggered_phase(0.0, 0, PULSE_STAGGER), 0.0, "cell 0");
+        const STAGGER: f32 = 0.15 / 2.4;
+        close(staggered_phase(0.0, 0, STAGGER), 0.0, "cell 0");
         close(
-            staggered_phase(0.0, 1, PULSE_STAGGER),
-            1.0 - PULSE_STAGGER,
+            staggered_phase(0.0, 1, STAGGER),
+            1.0 - STAGGER,
             "cell 1 trails into the previous cycle",
         );
         // Phase is periodic: a whole extra turn changes nothing.
         close(
-            staggered_phase(0.3, 2, PULSE_STAGGER),
-            staggered_phase(1.3, 2, PULSE_STAGGER),
+            staggered_phase(0.3, 2, STAGGER),
+            staggered_phase(1.3, 2, STAGGER),
             "wraps",
         );
         // Always inside the unit interval, for any input.
         for raw in [-4.2f32, -0.1, 0.0, 0.5, 7.9] {
-            for index in 0..CYPHER_CELLS {
-                let phase = staggered_phase(raw, index, PULSE_STAGGER);
+            for index in 0..5 {
+                let phase = staggered_phase(raw, index, STAGGER);
                 assert!((0.0..1.0).contains(&phase), "{raw} {index} -> {phase}");
             }
         }
