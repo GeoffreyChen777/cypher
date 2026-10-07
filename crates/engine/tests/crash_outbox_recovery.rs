@@ -1,5 +1,7 @@
-//! P0 characterization, NOT a guarantee or a fix: kill an isolated EngineCore
-//! process with a real unACKed ChatClient batch, then reopen its stores.
+//! SIGKILL an isolated EngineCore process holding a real unACKed ChatClient
+//! batch, then reopen its stores: the journal keeps the event tail and the
+//! durable chat2 outbox restores the transcript update the debounced snapshot
+//! may not have saved.
 use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
 use cypher_engine::chat2_host::EngineChatSink;
 use cypher_engine::profile::EngineProfile;
@@ -13,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
-const CHAT: &str = "p0-crash";
+const CHAT: &str = "crash-outbox";
 const TAIL: &str = "unacked-text-after-last-snapshot";
 struct NoCheckpoint;
 impl CheckpointFetcher for NoCheckpoint {
@@ -31,7 +33,7 @@ fn entry(id: &str) -> SessionMessageEntry {
             agent_text: None,
         }],
         created_at: 1,
-        device_id: "p0-host".into(),
+        device_id: "crash-host".into(),
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         completed_at: None,
@@ -43,10 +45,10 @@ fn contains(doc: &SessionDoc) -> bool {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "helper process, invoked only by the SIGKILL characterization test"]
-async fn p0_engine_child() {
+#[ignore = "helper process, invoked only by the SIGKILL recovery test"]
+async fn crash_engine_child() {
     let dir = std::path::PathBuf::from(
-        std::env::var("CYPHER_P0_CHILD_DIR").expect("parent provides isolated directory"),
+        std::env::var("CYPHER_CRASH_CHILD_DIR").expect("parent provides isolated directory"),
     );
     let profile = EngineProfile::local(&dir).unwrap();
     let core = EngineCore::assemble_with_profile(
@@ -84,7 +86,7 @@ async fn p0_engine_child() {
                 frame_type::ROWS_REQ => vec![
                     wire::encode(
                         frame_type::ROW,
-                        &serde_json::json!({"seq":1,"device":"p0-host","batchId":"baseline"}),
+                        &serde_json::json!({"seq":1,"device":"crash-host","batchId":"baseline"}),
                         &initial,
                     ),
                     wire::encode(
@@ -107,7 +109,7 @@ async fn p0_engine_child() {
         }
     });
     let client = Arc::new(
-        ChatClient::connect(&url, sink, Arc::new(NoCheckpoint), "p0-host", 1)
+        ChatClient::connect(&url, sink, Arc::new(NoCheckpoint), "crash-host", 1)
             .await
             .unwrap(),
     );
@@ -128,7 +130,7 @@ async fn p0_engine_child() {
     assert!(!bytes.is_empty());
     assert_eq!(client.stats().pending_pushes, 1);
     assert_eq!(client.stats().cursor, 1);
-    if std::env::var("CYPHER_P0_SNAPSHOT").as_deref() == Ok("yes") {
+    if std::env::var("CYPHER_CRASH_SNAPSHOT").as_deref() == Ok("yes") {
         core.doc_host.flush_all();
     }
     let saved = store.load_snapshot_with_cursor(CHAT).unwrap().unwrap();
@@ -152,15 +154,15 @@ async fn p0_engine_child() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn sigkill_characterizes_journal_snapshot_and_unacked_queue() {
+async fn sigkill_recovers_journal_and_unacked_outbox() {
     use std::os::unix::process::ExitStatusExt;
     for snapshot in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "p0_engine_child", "--ignored", "--nocapture"])
-            .env("CYPHER_P0_CHILD_DIR", dir.path())
-            .env("CYPHER_P0_SNAPSHOT", if snapshot { "yes" } else { "no" })
+            .args(["--exact", "crash_engine_child", "--ignored", "--nocapture"])
+            .env("CYPHER_CRASH_CHILD_DIR", dir.path())
+            .env("CYPHER_CRASH_SNAPSHOT", if snapshot { "yes" } else { "no" })
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
@@ -219,9 +221,6 @@ async fn sigkill_characterizes_journal_snapshot_and_unacked_queue() {
                 "schema_migrations",
                 "snapshots"
             ]
-        );
-        println!(
-            "P2_CRASH snapshot={snapshot} journal_tail=true transcript_tail=true cursor=1 durable_outbox=true"
         );
         core.shutdown().await;
     }
