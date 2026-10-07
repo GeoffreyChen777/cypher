@@ -12,9 +12,8 @@ export CYPHER_DATA_DIR="$HOME/.cypher-development/$mode-engine"
 umask 077
 mkdir -p "$CYPHER_DATA_DIR"
 if [[ "$mode" == dev ]]; then
-  # The hosted development Worker was retired on 2026-09-22; the development
-  # Edge is now a local `wrangler dev` (cd edge && npm run dev) unless an
-  # endpoint is named explicitly:
+  # The development Edge is a local `wrangler dev` (cd edge && npm run dev)
+  # unless an endpoint is named explicitly:
   #   CYPHER_DEV_EDGE_URL=https://edge-dev.example.com scripts/dev-engine.sh dev
   # A caller-supplied value wins over the private file.
   dev_edge_override="${CYPHER_DEV_EDGE_URL:-}"
@@ -28,15 +27,11 @@ if [[ "$mode" == dev ]]; then
   fi
   # The binary reads these names directly (cypher_env::var prefixes CYPHER_).
   : "${CYPHER_DEV_ACCESS_TOKEN:?Missing CYPHER_DEV_ACCESS_TOKEN}"
-  # The retired hosted Worker ran AUTH_MODE=dev-locked, where the private
-  # 64-hex secret *was* the credential and the Worker answered with the fixed
-  # identity dev-user/dev-org. A local `wrangler dev` runs AUTH_MODE=dev, where
-  # the bearer is the user id and only a `user@org` form carries an org claim,
-  # so the bare secret authenticates as a user with no org and every
-  # /registry/dev-org/* route answers 403. Against a loopback Edge, send the
-  # identity that Worker used to grant: it maps to orgs/dev-org/dev-user, the
-  # directory already on disk. The private secret still goes to a real remote
-  # staging endpoint unchanged.
+  # A local `wrangler dev` runs AUTH_MODE=dev, where the bearer is the user id
+  # and only a `user@org` form carries an org claim, so the bare secret would
+  # get 403 from every /registry/dev-org/* route. Against a loopback Edge, send
+  # dev-user@dev-org instead: it maps to the existing orgs/dev-org/dev-user
+  # directory. The private secret still goes to a remote staging endpoint.
   if [[ -z "${CYPHER_DEV_EDGE_URL:-}" \
         || "${CYPHER_DEV_EDGE_URL}" =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:|/|$) ]]; then
     export CYPHER_DEV_ACCESS_TOKEN=dev-user@dev-org
