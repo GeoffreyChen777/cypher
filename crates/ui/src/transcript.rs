@@ -592,6 +592,18 @@ pub enum RowKind {
         /// Part of an [`RowKind::Activity`]: no header of its own, the chips
         /// always shown on the activity's rail.
         nested: bool,
+        /// Leading chips its run's cap folds away ([`cap_work_runs`]); 0
+        /// outside a run, where the group caps itself.
+        skip: usize,
+    },
+    /// Stands in for the start of an open work run that the tool call cap
+    /// folds away — "Show 6 earlier tool calls and 3 thoughts" — or, once
+    /// the user revealed it (`tools == 0`), folds it back. Keyed by the run's
+    /// [`RowKind::Activity`] row id (`run`).
+    RunOverflow {
+        run: SharedString,
+        tools: usize,
+        thoughts: usize,
     },
     /// The toggle over a run of work that mixed tool calls with thinking —
     /// one row instead of alternating "Thought" and "Ran N commands" rows.
@@ -663,6 +675,7 @@ fn is_nested(kind: &RowKind) -> bool {
         RowKind::ToolGroup { nested: true, .. }
             | RowKind::Thought { nested: true, .. }
             | RowKind::ThoughtBlock { nested: true, .. }
+            | RowKind::RunOverflow { .. }
     )
 }
 
@@ -735,6 +748,7 @@ fn row_match_count(row: &Row, query: &str) -> u32 {
         // not be shown.
         RowKind::ToolGroup { .. }
         | RowKind::Activity { .. }
+        | RowKind::RunOverflow { .. }
         | RowKind::Worked { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
@@ -1291,6 +1305,7 @@ pub fn rows_for_entry(
                 tools: Arc::new(tools),
                 auto_open,
                 nested: false,
+                skip: 0,
             },
             entry_id: entry.id.clone().into(),
             role: entry.role,
@@ -1760,6 +1775,103 @@ pub fn fold_closed_toggles(rows: &mut Vec<Row>, pins: &HashMap<SharedString, boo
         folded.push(row);
     }
     *rows = folded;
+}
+
+/// Cap each open work run the way a tool group caps its chips: keep the
+/// run's LAST `limit` tool calls ([`hidden_tool_count`]) and fold everything
+/// before them — earlier calls and thoughts alike — behind one
+/// [`RowKind::RunOverflow`] row. The cut lands right after the last hidden
+/// call, so the thinking that led into the first kept one stays; a cut inside
+/// a tool group hides that group's leading chips (`skip`). `revealed` holds
+/// the runs the user unfolded, by [`RowKind::Activity`] row id: they show
+/// whole, under a row that folds them back.
+///
+/// Runs after [`fold_closed_toggles`]: a closed run has no rows left to cap.
+pub fn cap_work_runs(
+    rows: &mut Vec<Row>,
+    limit: u32,
+    revealed: &std::collections::HashSet<SharedString>,
+) {
+    let mut ix = 0;
+    while ix < rows.len() {
+        if !matches!(rows[ix].kind, RowKind::Activity { .. }) {
+            ix += 1;
+            continue;
+        }
+        let run = rows[ix].id.clone();
+        let start = ix + 1;
+        let end = start
+            + rows[start..]
+                .iter()
+                .take_while(|row| is_nested(&row.kind))
+                .count();
+        let total: usize = rows[start..end]
+            .iter()
+            .map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => tools.len(),
+                _ => 0,
+            })
+            .sum();
+        let is_revealed = revealed.contains(&run);
+        let hidden = hidden_tool_count(total, limit, is_revealed);
+        if hidden == 0 && !(is_revealed && hidden_tool_count(total, limit, false) > 0) {
+            ix = end;
+            continue;
+        }
+        // `rows[start..cut]` fold away whole; `skip` chips of `rows[cut]` too.
+        let (mut cut, mut left, mut skip, mut thoughts) = (start, hidden, 0, 0);
+        while left > 0 {
+            match &rows[cut].kind {
+                RowKind::ToolGroup { tools, .. } if tools.len() > left => {
+                    skip = left;
+                    break;
+                }
+                RowKind::ToolGroup { tools, .. } => left -= tools.len(),
+                RowKind::Thought { .. } => thoughts += 1,
+                _ => {}
+            }
+            cut += 1;
+        }
+        let group = &mut rows[cut];
+        if let RowKind::ToolGroup {
+            skip: group_skip, ..
+        } = &mut group.kind
+            && skip > 0
+        {
+            *group_skip = skip;
+            group.version ^= (skip as u64) << 48;
+        }
+        let overflow = Row {
+            id: format!("{run}.overflow").into(),
+            version: (hidden as u64) << 32 | thoughts as u64,
+            turn_start: false,
+            kind: RowKind::RunOverflow {
+                run,
+                tools: hidden,
+                thoughts,
+            },
+            entry_id: rows[ix].entry_id.clone(),
+            role: rows[ix].role,
+            timestamp: None,
+        };
+        rows.splice(start..cut, [overflow]);
+        ix = end - (cut - start) + 1;
+    }
+}
+
+/// The label of a work run's [`RowKind::RunOverflow`] row: what it folds
+/// away, or — for a revealed run (`tools == 0`) — that it folds it back.
+fn run_overflow_label(tools: usize, thoughts: usize) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    match (tools, thoughts) {
+        (0, _) => "Show fewer tool calls".to_string(),
+        (tools, 0) => format!("Show {tools} earlier tool call{}", plural(tools)),
+        (tools, thoughts) => format!(
+            "Show {tools} earlier tool call{} and {thoughts} thought{}",
+            plural(tools),
+            plural(thoughts)
+        ),
+    }
 }
 
 /// `CYPHER_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -2488,8 +2600,9 @@ pub struct Transcript {
     /// [`Self::sync`] skips the transcript clone and row rebuild when a
     /// notify changed neither.
     /// (The attachment devices ride along: protected attachments re-key when
-    /// the chat's row or the local device id lands.)
-    synced_revision: Option<(u64, Option<String>, Vec<String>)>,
+    /// the chat's row or the local device id lands; so does the tool call
+    /// cap, which [`cap_work_runs`] applies at build time.)
+    synced_revision: Option<(u64, Option<String>, Vec<String>, u32)>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -2656,6 +2769,9 @@ impl Transcript {
             cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
                 this.dismiss_comment_ui_and_selection(cx);
                 this.render_cache.borrow_mut().clear();
+                // A new tool call cap re-caps work runs, which are capped at
+                // build time; the revision gate skips every other change.
+                this.sync(cx);
                 // Invalidate measurements without resetting the scroll anchor,
                 // transcript rows, folds, or streamed content.
                 this.list.remeasure_items(0..this.rows.len());
@@ -3714,11 +3830,13 @@ impl Transcript {
                 s.transcript_revision(),
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
+                crate::chat_style::settings(cx).tool_call_limit,
             )
         };
         if self.synced_revision.as_ref() == Some(&revision) {
             return;
         }
+        let tool_call_limit = revision.3;
         self.synced_revision = Some(revision);
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
@@ -3793,6 +3911,7 @@ impl Transcript {
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
             fold_closed_toggles(&mut rows, &self.toggle_pins);
+            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
@@ -4728,7 +4847,13 @@ impl Transcript {
                 tools,
                 auto_open,
                 nested,
-            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, &theme, cx),
+                skip,
+            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, *skip, &theme, cx),
+            RowKind::RunOverflow {
+                run,
+                tools,
+                thoughts,
+            } => self.render_run_overflow(&row.id, run, *tools, *thoughts, &theme, cx),
             RowKind::Activity { summary, .. } => {
                 let open = toggle_open(&row, &self.toggle_pins);
                 self.render_fold_toggle(&row.id, open, summary.clone(), &theme, cx)
@@ -5649,14 +5774,63 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The row a capped work run folds its start behind, on the run's rail
+    /// like the group's own overflow row. A click reveals the run whole, or
+    /// caps it again.
+    fn render_run_overflow(
+        &self,
+        row_id: &SharedString,
+        run: &SharedString,
+        tools: usize,
+        thoughts: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = run.clone();
+        div()
+            .id(SharedString::from(format!("{row_id}-toggle")))
+            .h(px(OVERFLOW_ROW_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .hover(|s| s.text_color(theme.text_muted))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.tool_overflow.remove(&key) {
+                    this.tool_overflow.insert(key.clone());
+                }
+                // The cap is applied when rows are built: rebuild despite an
+                // unchanged state revision.
+                this.synced_revision = None;
+                this.sync(cx);
+                cx.notify();
+            }))
+            .child(guide_rail().h_full())
+            .child(
+                div()
+                    .ml(px(12.0))
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(run_overflow_label(tools, thoughts))),
+            )
+            .into_any_element()
+    }
+
     /// A tool group's header and chips. A `nested` group belongs to a work
-    /// run: the run's toggle is its header, so it shows only its chips.
+    /// run: the run's toggle is its header, so it shows only its chips, less
+    /// the `skip` leading ones its run's cap folds away.
+    #[allow(clippy::too_many_arguments)]
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
         auto_open: bool,
         nested: bool,
+        skip: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -5669,13 +5843,20 @@ impl Transcript {
         // ones behind one "Show N earlier tool calls" row. A long agent run
         // then costs a bounded slice of the transcript instead of pushing the
         // answer off-screen. Revealing is per row and survives re-renders.
-        let revealed = self.tool_overflow.contains(row_id);
-        let limit = crate::chat_style::settings(cx).tool_call_limit;
-        let hidden = hidden_tool_count(tools.len(), limit, revealed);
-        // The row stays after revealing (as "Show fewer") so the same click
-        // target puts the chips back.
-        let overflow_row =
-            hidden > 0 || (revealed && hidden_tool_count(tools.len(), limit, false) > 0);
+        // A work run caps its calls as a whole, under its own overflow row
+        // ([`cap_work_runs`]).
+        let (hidden, overflow_row) = if nested {
+            (skip, false)
+        } else {
+            let revealed = self.tool_overflow.contains(row_id);
+            let limit = crate::chat_style::settings(cx).tool_call_limit;
+            let hidden = hidden_tool_count(tools.len(), limit, revealed);
+            // The row stays after revealing (as "Show fewer") so the same
+            // click target puts the chips back.
+            let overflow_row =
+                hidden > 0 || (revealed && hidden_tool_count(tools.len(), limit, false) > 0);
+            (hidden, overflow_row)
+        };
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -7447,6 +7628,107 @@ mod tests {
             panic!("expected the work run's toggle");
         };
         assert_eq!(summary.as_ref(), "Ran 10 commands · 8 thoughts · 1 failed");
+    }
+
+    #[test]
+    fn the_tool_call_cap_folds_the_start_of_an_open_work_run() {
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                thought_part("r0", "Look around."),
+                tool_part("x1", "ls"),
+                tool_part("x2", "git status"),
+                tool_part("x3", "git log"),
+                thought_part("r4", "Build it."),
+                tool_part("x5", "cargo build"),
+                tool_part("x6", "cargo test"),
+                tool_part("x7", "cargo clippy"),
+                thought_part("r8", "Ship it."),
+                tool_part("x9", "git add ."),
+                tool_part("x10", "git commit"),
+                tool_part("x11", "git push"),
+                text_part("t12", "Done."),
+            ],
+        );
+        let mut open = rows_for_entry(&entry, false, &mut parse);
+        fold_closed_toggles(&mut open, &[("m1#r0.activity".into(), true)].into());
+        let none = Default::default();
+
+        // Nine calls, five kept: the cut falls inside the second group, which
+        // keeps its last two chips.
+        let mut capped = open.clone();
+        cap_work_runs(&mut capped, 5, &none);
+        assert_eq!(
+            ids(&capped),
+            [
+                "m1#r0.activity",
+                "m1#r0.activity.overflow",
+                "m1#g1",
+                "m1#r8.thought",
+                "m1#g2",
+                "m1#t12.0",
+            ]
+        );
+        let RowKind::RunOverflow {
+            run,
+            tools,
+            thoughts,
+        } = &capped[1].kind
+        else {
+            panic!("expected the run's overflow row");
+        };
+        assert_eq!((run.as_ref(), *tools, *thoughts), ("m1#r0.activity", 4, 2));
+        assert_eq!(
+            run_overflow_label(*tools, *thoughts),
+            "Show 4 earlier tool calls and 2 thoughts"
+        );
+        assert!(matches!(capped[2].kind, RowKind::ToolGroup { skip: 1, .. }));
+        assert_ne!(capped[2].version, open[4].version);
+        // On the run's rail, like its chips.
+        assert_eq!(top_gap_for(Some(&capped[0]), &capped[1]), CHIPS_TOP_PAD);
+        assert_eq!(top_gap_for(Some(&capped[1]), &capped[2]), 0.0);
+
+        // A cut between groups keeps the thinking that led into the first
+        // kept call.
+        let mut capped = open.clone();
+        cap_work_runs(&mut capped, 6, &none);
+        assert_eq!(
+            ids(&capped),
+            [
+                "m1#r0.activity",
+                "m1#r0.activity.overflow",
+                "m1#r4.thought",
+                "m1#g1",
+                "m1#r8.thought",
+                "m1#g2",
+                "m1#t12.0",
+            ]
+        );
+        assert!(matches!(capped[3].kind, RowKind::ToolGroup { skip: 0, .. }));
+
+        // Revealed, the run shows whole under a row that folds it back.
+        let mut revealed = open.clone();
+        cap_work_runs(&mut revealed, 5, &["m1#r0.activity".into()].into());
+        assert_eq!(revealed.len(), open.len() + 1);
+        assert!(matches!(
+            revealed[1].kind,
+            RowKind::RunOverflow { tools: 0, .. }
+        ));
+        assert_eq!(&ids(&revealed)[2..], &ids(&open)[1..]);
+        assert_eq!(run_overflow_label(0, 0), "Show fewer tool calls");
+
+        // "Show all", one call short of the cap, or a closed run: untouched.
+        for limit in [0, 8, 9] {
+            let mut uncapped = open.clone();
+            cap_work_runs(&mut uncapped, limit, &none);
+            assert_eq!(ids(&uncapped), ids(&open));
+        }
+        let mut closed = rows_for_entry(&entry, false, &mut parse);
+        fold_closed_toggles(&mut closed, &Default::default());
+        let before = ids(&closed).join(" ");
+        cap_work_runs(&mut closed, 5, &none);
+        assert_eq!(ids(&closed).join(" "), before);
     }
 
     #[test]
