@@ -80,12 +80,18 @@ struct SignInView: View {
                 VStack(spacing: 12) {
                     #if CYPHER_DEVELOPMENT
                     Text("Cypher Dev — isolated test workspace")
-                    SecureField("Development token", text: $developmentToken)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Button("Connect to Dev Edge") {
-                        model.connectDevelopment(token: developmentToken)
-                        developmentToken = ""
-                    }.disabled(!DevelopmentProfile.validToken(developmentToken))
+                    if DevelopmentProfile.isLoopback(DevelopmentProfile.edge) {
+                        Button("Connect to local Dev Edge") {
+                            model.connectDevelopment(secret: nil)
+                        }
+                    } else {
+                        SecureField("Development token", text: $developmentToken)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button("Connect to Dev Edge") {
+                            model.connectDevelopment(secret: developmentToken)
+                            developmentToken = ""
+                        }.disabled(!DevelopmentProfile.validToken(developmentToken))
+                    }
                     #else
                     if let verification {
                         verificationForm(verification)

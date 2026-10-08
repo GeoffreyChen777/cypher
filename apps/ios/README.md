@@ -284,7 +284,9 @@ Run these commands from the repository root.
   the code it shows (`/auth/exchange`), pick an org (`/auth/refresh` re-scopes
   the token with the `org_id` claim).
 - **Dev**: against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`), enter a user
-  id + org id; the bearer is `userId@orgId`.
+  id + org id; the bearer is `userId@orgId`. The `CypherDev` bundle
+  (`scripts/dev-ios.sh`) connects to a local `wrangler dev` on
+  `127.0.0.1:27640` by itself (see `docs/local-edge.md`).
 - **Demo mode**: fully offline dataset with a scripted streaming reply —
   explore the UI with no infrastructure. Development builds also take
   `-mock-providers` (`scripts/dev-ios.sh -mock-providers`) to append mock

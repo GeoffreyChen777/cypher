@@ -64,9 +64,14 @@ loopback Edge in `AUTH_MODE=dev` this is the identity `dev-user@dev-org`, which
 `scripts/dev-engine.sh` sets), and a data directory under `~/.cypher-development/`.
 Production builds and the production profile cannot reach any of it.
 
-iOS switches endpoints separately, through the `-setedge <url>` launch argument
-(`apps/ios/Cypher/App/AppModel.swift`); `scripts/dev-ios.sh` injects only the
-access token, via `SIMCTL_CHILD_CYPHER_DEV_ACCESS_TOKEN`.
+The iOS Dev bundle (`CypherDev` scheme, `scripts/dev-ios.sh`) follows the same
+rules (`apps/ios/Cypher/App/DevelopmentProfile.swift`): it defaults to
+`http://127.0.0.1:27640`, which the simulator reaches on the Mac's loopback, and
+connects there as `dev-user@dev-org` with no secret. `CYPHER_DEV_EDGE_URL` names a
+staging Edge instead, which takes the 64-hex `CYPHER_DEV_ACCESS_TOKEN`;
+`dev-ios.sh` passes both through `SIMCTL_CHILD_*` and drops a stale value naming
+the retired Worker. Debug builds can still point at any loopback Edge with
+`-setedge <url> -setmode dev`.
 
 ## Measuring what a change costs
 

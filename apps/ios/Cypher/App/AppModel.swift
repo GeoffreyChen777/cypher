@@ -82,8 +82,7 @@ final class AppModel {
                DevelopmentProfile.validToken(token) {
                 Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
             }
-            if let token = Keychain.load(key: "developmentToken"), DevelopmentProfile.validToken(token) {
-                connectDevelopment(token: token)
+            if connectDevelopment(secret: Keychain.load(key: "developmentToken")) {
                 if args.contains("-dev-interop") { Task { await DevelopmentInterop.run(model: self) } }
             }
             return
@@ -211,16 +210,22 @@ final class AppModel {
     // MARK: Sign-in flows
 
     #if CYPHER_DEVELOPMENT
-    func connectDevelopment(token: String) {
-        guard DevelopmentProfile.validToken(token) else { return }
-        Keychain.save(token, key: "developmentToken", thisDeviceOnly: true)
+    /// Connect to the development Edge. A loopback Edge needs no secret; a
+    /// remote one needs its 64-hex secret, which is kept in the Keychain.
+    @discardableResult
+    func connectDevelopment(secret: String?) -> Bool {
+        guard let bearer = DevelopmentProfile.bearer(secret: secret) else { return false }
+        if let secret, DevelopmentProfile.validToken(secret) {
+            Keychain.save(secret, key: "developmentToken", thisDeviceOnly: true)
+        }
         edgeURLString = DevelopmentProfile.edge.absoluteString
         authModeRaw = AppConfig.Mode.dev.rawValue
         storedUserId = DevelopmentProfile.user
         storedOrgId = DevelopmentProfile.org
         startPathMonitor()
         connect(url: DevelopmentProfile.edge, mode: .dev, userId: DevelopmentProfile.user,
-                orgId: DevelopmentProfile.org, tokens: nil, devBearer: token)
+                orgId: DevelopmentProfile.org, tokens: nil, devBearer: bearer)
+        return true
     }
     #endif
 
