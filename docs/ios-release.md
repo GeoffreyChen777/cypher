@@ -37,6 +37,19 @@ its provisioning profile.
 
 A `workflow_dispatch` run builds and verifies but never uploads.
 
+## Release: 0.2.0 (25), 2026-10-08
+
+- Covers the one iOS commit since build 24: `5b6122d` (a run of tool calls
+  and thinking folds behind one toggle summing it up, with each thought as
+  a lightbulb chip inside; a clicked toggle keeps its state).
+- Release build for `generic/platform=iOS Simulator` succeeded locally with
+  Xcode 27.0; `release.py ios-context` accepts the tag.
+- `CypherTests` on an iPhone 17 Pro Max simulator: all 275 passed, including
+  `ThoughtFoldTests` and `TranslationFoldTests`. CypherUI was not rerun.
+- Desktop 0.3.43 ships alongside it with the same change.
+- Upload is left to `.github/workflows/ios.yml` (Xcode 27 runner) via the
+  `cypher-ios-v0.2.0-b25` tag.
+
 ## Release: 0.2.0 (24), 2026-10-07
 
 - Covers the three iOS commits since build 23: `67c8b25` (user bubbles in
