@@ -78,6 +78,15 @@ node "$SPEC/patches/pi-agent-squad-cypher-host.mjs" \
 node "$SPEC/patches/pi-agent-squad-prompt-options.mjs" \
   "$STAGE/npm/node_modules/pi-agent-squad"
 
+# Cypher labels each answer with the model that wrote it. pi-ai's Responses
+# stream and pi-claude-bridge never recorded the model the provider says
+# answered (`responseModel`), so a substituted model was invisible there (see
+# the patch headers). Missing anchors fail the build on purpose.
+node "$SPEC/patches/pi-ai-response-model.mjs" \
+  "$STAGE/npm/node_modules/@earendil-works/pi-ai"
+node "$SPEC/patches/pi-claude-bridge-response-model.mjs" \
+  "$STAGE/npm/node_modules/pi-claude-bridge"
+
 # Keep only this artifact's native esbuild binary. Pi's shrinkwrap currently
 # brings every platform package into some npm layouts (~285 MB uncompressed).
 keep="${ESBUILD#@esbuild/}"
@@ -183,6 +192,9 @@ PI_PACKAGE_DIR="$STAGE/pi" \
 # Loads the real squad and bridge in both orders: what reaches Claude Code.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
   "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.test.mjs"
+# Feeds the patched Responses stream; loads the patched bridge.
+CYPHER_PI_RUNTIME_STAGE="$STAGE" \
+  "$STAGE/bin/node" --test "$SPEC/patches/response-model.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"

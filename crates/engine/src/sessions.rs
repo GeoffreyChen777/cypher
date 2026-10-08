@@ -33,9 +33,9 @@ use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
-    Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
+    RunRequest, Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1827,22 +1827,30 @@ fn folded_text(parts: &[MessagePart]) -> String {
         .join("\n")
 }
 
+/// The segment being written: the parts folded so far and the models that
+/// answered them (one per completed assistant message).
+struct Segment<'s> {
+    folded: &'s [MessagePart],
+    models: &'s [AnsweredModel],
+}
+
 fn sync_segment<'a>(
     doc: &'a SessionDoc,
     writer: &mut Option<SegmentWriter<'a>>,
     entry_id: &str,
     device_id: &str,
     started_at: i64,
-    folded: &[MessagePart],
+    segment: Segment<'_>,
 ) -> Result<(), DocError> {
-    if folded.is_empty() {
+    if segment.folded.is_empty() {
         return Ok(());
     }
-    let rendered = render_parts(folded);
+    let rendered = render_parts(segment.folded);
     if writer.is_none() {
         *writer = Some(SegmentWriter::begin(doc, entry_id, device_id, started_at)?);
     }
     if let Some(w) = writer.as_mut() {
+        w.set_models(segment.models)?;
         w.sync(&rendered)?;
     }
     Ok(())
@@ -1854,17 +1862,19 @@ fn finish_segment<'a>(
     entry_id: &str,
     device_id: &str,
     started_at: i64,
-    folded: &[MessagePart],
+    segment: Segment<'_>,
     status: MessageStatus,
 ) -> Result<(), DocError> {
-    let rendered = render_parts(folded);
-    match writer {
-        Some(w) => w.finish(&rendered, status),
-        None if !folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish(&rendered, status)
+    let rendered = render_parts(segment.folded);
+    let mut writer = match writer {
+        Some(w) => w,
+        None if !segment.folded.is_empty() => {
+            SegmentWriter::begin(doc, entry_id, device_id, started_at)?
         }
-        None => Ok(()),
-    }
+        None => return Ok(()),
+    };
+    writer.set_models(segment.models)?;
+    writer.finish(&rendered, status)
 }
 
 /// Resume bookkeeping for one run task: which user entry the run answers (so
@@ -1948,6 +1958,9 @@ async fn drive_run(
         host.preview_run(&chat_id, &run_id);
     }
     let mut folded: Vec<MessagePart> = Vec::new();
+    // The models that answered the current segment, beside `folded` and
+    // cleared with it at every segment boundary.
+    let mut segment_models: Vec<AnsweredModel> = Vec::new();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -2105,8 +2118,9 @@ async fn drive_run(
             },
             _ = tokio::time::sleep_until(flush_at), if dirty => {
                 // Coalesced STREAM_COMMIT_MS tick: one doc commit per window.
+                let segment = Segment { folded: &folded, models: &segment_models };
                 if let Err(err) = sync_segment(
-                    doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
+                    doc_ref, &mut writer, &entry_id, &device_id, segment_started, segment,
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
                 }
@@ -2153,7 +2167,7 @@ async fn drive_run(
                         &entry_id,
                         &device_id,
                         segment_started,
-                        &folded,
+                        Segment { folded: &folded, models: &segment_models },
                         MessageStatus::Complete,
                     ) {
                         tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
@@ -2162,6 +2176,7 @@ async fn drive_run(
                     if let Some(host) = inner.doc_host() { host.flush_chat_sync(&chat_id); }
                 }
                 folded.clear();
+                segment_models.clear();
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();
@@ -2476,7 +2491,10 @@ async fn drive_run(
                 &entry_id,
                 &device_id,
                 segment_started,
-                &folded,
+                Segment {
+                    folded: &folded,
+                    models: &segment_models,
+                },
                 MessageStatus::Complete,
             ) {
                 tracing::warn!(chat = %chat_id, error = %err, "segment finish failed");
@@ -2486,6 +2504,7 @@ async fn drive_run(
             }
             inner.note_message(&chat_id, &folded_text(&folded));
             folded.clear();
+            segment_models.clear();
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
@@ -2526,6 +2545,14 @@ async fn drive_run(
             }
             AgentEvent::InputResolved { .. } => {
                 inner.set_status(&chat_id, SessionStatus::Working, false);
+            }
+            // Lands on the segment with its next sync or finish (a steer
+            // splits only at the NEXT message's start, so this message's
+            // model labels the segment it wrote).
+            AgentEvent::AssistantMessageCompleted {
+                model: Some(model), ..
+            } if !segment_models.contains(model) => {
+                segment_models.push(model.clone());
             }
             _ => {}
         }
@@ -2586,7 +2613,10 @@ async fn drive_run(
                     &entry_id,
                     &device_id,
                     segment_started,
-                    &folded,
+                    Segment {
+                        folded: &folded,
+                        models: &segment_models,
+                    },
                     message_status,
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
@@ -2623,6 +2653,7 @@ async fn drive_run(
                     break SessionStatus::Idle;
                 }
                 folded.clear();
+                segment_models.clear();
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();

@@ -1660,6 +1660,7 @@ impl PiForkBackend for RacingBackend {
                 continuation_of: None,
                 completed_at: None,
                 comments: Vec::new(),
+                models: Vec::new(),
             })
             .expect("append raced prompt");
         let path = self.session_root.join("fork-raced.jsonl");

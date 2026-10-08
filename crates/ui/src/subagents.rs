@@ -1171,6 +1171,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         }
     }
 

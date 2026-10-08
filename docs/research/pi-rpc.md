@@ -143,7 +143,7 @@ with no RPC equivalent worth dispatching.
 | `message_start` (assistant, after a `queued` or `handled` steer) | `Steered` boundary (one per routed message) |
 | routed `prompt` response `started` (pi settled first) | the next turn opens: `Steered` boundary |
 | parked restart (`prompt` + `streamingBehavior:"steer"` dispatched while `in_turn == false`) | `Steered` boundary emitted at DISPATCH, before the prompt — pre-response notify/dialog output folds into the new segment |
-| `message_end` (assistant) | `AssistantMessageCompleted` (journal boundary) |
+| `message_end` (assistant) | `AssistantMessageCompleted` (journal boundary) carrying the answering model (`responseModel`, else `model`); the engine records it on the segment's doc entry (`models`) for the transcript strip |
 | `tool_execution_start` | typed `ToolCall` (pi tool-name mapping, below) |
 | `tool_execution_end` | `ToolResult` (capped 16KB output text, no diff) |
 | `extension_error` | `Error` |

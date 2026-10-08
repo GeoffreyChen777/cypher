@@ -19,6 +19,7 @@ fn entry(id: &str, role: MessageRole, text: &str, status: MessageStatus) -> Sess
         continuation_of: None,
         completed_at: None,
         comments: Vec::new(),
+        models: Vec::new(),
     }
 }
 

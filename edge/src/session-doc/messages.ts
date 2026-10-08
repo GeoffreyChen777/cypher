@@ -134,6 +134,11 @@ export interface SessionMessageEntry {
    * as the user selected it and what they wrote about it. Absent on prompts
    * sent without comments and on entries written before the field existed. */
   readonly comments?: ReadonlyArray<{ readonly quote: string; readonly comment: string }>;
+  /** The models that answered an assistant entry, distinct and in the order
+   * they first answered: `model` as the provider reported it, `requested`
+   * beside it only when the request named a different spelling. Written by
+   * harnesses that report it (pi); absent otherwise and on older entries. */
+  readonly models?: ReadonlyArray<{ readonly model: string; readonly requested?: string }>;
 }
 
 const encoder = new TextEncoder();
@@ -222,10 +227,18 @@ export const joinContinuations = (
         const root = order[at]!;
         // The join spans the root's start to the LAST segment's finish — a
         // still-streaming continuation clears the root's stamp.
+        // Every segment's models, once each, in order.
+        const models = [...(root.models ?? [])];
+        for (const m of entry.models ?? []) {
+          if (!models.some((k) => k.model === m.model && k.requested === m.requested)) {
+            models.push(m);
+          }
+        }
         order[at] = {
           ...root,
           parts: [...root.parts, ...entry.parts],
-          completedAt: entry.completedAt
+          completedAt: entry.completedAt,
+          ...(models.length > 0 ? { models } : {})
         };
         continue;
       }
