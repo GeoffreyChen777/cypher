@@ -258,7 +258,8 @@ while read -r line; do
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}'
       # The message ends to call a tool; the tool executes after message_end.
       # It reports its output tokens; m2 below does not (the estimate stands).
-      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","content":[{"type":"text","text":"Hello world"}],"usage":{"output":7},"stopReason":"toolUse"}}'
+      # The provider answered m1 with another model than requested.
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m1","model":"gpt-6-astra","responseModel":"gpt-5.4","content":[{"type":"text","text":"Hello world"}],"usage":{"output":7},"stopReason":"toolUse"}}'
       emit '{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cargo test -p cypher-harness"}}'
       emit '{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","result":{"content":[{"type":"text","text":"   Compiling cypher-harness v0.1.21\n    Finished `dev` profile"}]},"isError":false}'
       # A toolResult message is not an assistant message: internal only.
@@ -272,7 +273,7 @@ while read -r line; do
       # A second assistant message completes the turn (LLM→tool→LLM).
       emit '{"type":"message_start","message":{"role":"assistant","id":"m2","content":[]}}'
       emit '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Done."}}'
-      emit '{"type":"message_end","message":{"role":"assistant","id":"m2","content":[{"type":"text","text":"Done."}],"stopReason":"stop"}}'
+      emit '{"type":"message_end","message":{"role":"assistant","id":"m2","model":"gpt-6-astra","content":[{"type":"text","text":"Done."}],"stopReason":"stop"}}'
       emit '{"type":"agent_settled"}'
       exit 0
       ;;

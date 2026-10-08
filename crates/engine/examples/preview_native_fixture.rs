@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         continuation_of: None,
         completed_at: None,
         comments: Vec::new(),
+        models: Vec::new(),
     })?;
     std::fs::write(
         &control,

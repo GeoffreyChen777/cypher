@@ -83,6 +83,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
         || prev.completed_at != next.completed_at
+        || prev.models != next.models
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -289,6 +290,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         }
     }
 

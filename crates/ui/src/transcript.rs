@@ -41,7 +41,7 @@ use gpui::{
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use cypher_proto::view::Indicator;
-use cypher_proto::{Chat, HarnessId, ToolCall};
+use cypher_proto::{AnsweredModel, Chat, HarnessId, ToolCall};
 
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
@@ -705,6 +705,47 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+    /// The model(s) that wrote the answer, revealed after the timestamp in
+    /// the same hover strip. Travels with `timestamp`; set only on settled
+    /// assistant entries whose harness reported the model (pi).
+    pub answered: Option<AnsweredLabel>,
+}
+
+/// What a settled answer's strip says about the model(s) that wrote it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnsweredLabel {
+    /// The answering model ids, in the order they first answered.
+    pub text: SharedString,
+    /// A model answered that wasn't the one requested: the strip highlights
+    /// the label and this explains it on hover.
+    pub substituted: Option<SharedString>,
+}
+
+/// The strip label for an entry's answering models; `None` when the entry
+/// records none (another harness, or written before models were recorded).
+pub fn answered_label(models: &[AnsweredModel]) -> Option<AnsweredLabel> {
+    let mut served: Vec<&str> = Vec::new();
+    let mut swaps: Vec<String> = Vec::new();
+    for answered in models {
+        if !served.contains(&answered.model.as_str()) {
+            served.push(&answered.model);
+        }
+        if answered.substituted()
+            && let Some(requested) = &answered.requested
+        {
+            let swap = format!("Requested {requested}, answered by {}", answered.model);
+            if !swaps.contains(&swap) {
+                swaps.push(swap);
+            }
+        }
+    }
+    if served.is_empty() {
+        return None;
+    }
+    Some(AnsweredLabel {
+        text: served.join(", ").into(),
+        substituted: (!swaps.is_empty()).then(|| swaps.join("\n").into()),
+    })
 }
 
 /// Whether a user row renders as the quiet slash-command action chip rather
@@ -1277,6 +1318,7 @@ pub fn rows_for_entry(
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
+            answered: None,
         }];
     }
 
@@ -1310,6 +1352,7 @@ pub fn rows_for_entry(
             entry_id: entry.id.clone().into(),
             role: entry.role,
             timestamp: None,
+            answered: None,
         });
         *group_ix += 1;
     };
@@ -1403,6 +1446,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: RowKind::TranslationOriginal { blocks },
                             });
                         }
@@ -1428,6 +1472,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -1457,6 +1502,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                             kind: RowKind::Thought {
                                 blocks: tree.blocks.len(),
                                 live,
@@ -1480,6 +1526,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: RowKind::ThoughtBlock {
                                     tree: tree.clone(),
                                     block_ix,
@@ -1520,6 +1567,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                         });
                     }
                     MessagePart::Error {
@@ -1537,6 +1585,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                         });
                     }
                     // Tools are grouped by the outer arm; nothing reaches here.
@@ -1573,6 +1622,7 @@ pub fn rows_for_entry(
                 entry_id: entry_id.clone(),
                 role: entry.role,
                 timestamp: None,
+                answered: None,
             },
         );
     }
@@ -1587,6 +1637,13 @@ pub fn rows_for_entry(
     if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
         last.version ^= 1 << 62;
+        if entry.role == MessageRole::Assistant
+            && let Some(label) = answered_label(&entry.models)
+        {
+            last.version ^= fnv1a(label.text.as_bytes()).rotate_left(1)
+                ^ u64::from(label.substituted.is_some());
+            last.answered = Some(label);
+        }
     }
     rows
 }
@@ -1642,6 +1699,7 @@ fn fold_work_run(
             entry_id: entry.id.clone().into(),
             role: entry.role,
             timestamp: None,
+            answered: None,
         },
     );
 }
@@ -1764,6 +1822,11 @@ pub fn fold_closed_toggles(rows: &mut Vec<Row>, pins: &HashMap<SharedString, boo
             if let (Some(stamp), Some(toggle)) = (row.timestamp, folded.last_mut()) {
                 toggle.timestamp = Some(stamp);
                 toggle.version ^= 1 << 62;
+                if let Some(label) = row.answered {
+                    toggle.version ^= fnv1a(label.text.as_bytes()).rotate_left(1)
+                        ^ u64::from(label.substituted.is_some());
+                    toggle.answered = Some(label);
+                }
             }
             continue;
         }
@@ -1853,6 +1916,7 @@ pub fn cap_work_runs(
             entry_id: rows[ix].entry_id.clone(),
             role: rows[ix].role,
             timestamp: None,
+            answered: None,
         };
         rows.splice(start..cut, [overflow]);
         ix = end - (cut - start) + 1;
@@ -5172,6 +5236,10 @@ impl Transcript {
                             .text_size(px(11.0))
                             .text_color(theme.text_muted.opacity(0.55))
                             .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
+                            .when_some(row.answered.clone(), |el, label| {
+                                el.child(SharedString::from("·"))
+                                    .child(answered_model_label(row.id.clone(), label, &theme))
+                            })
                             .when_some(fork_button, |el, button| el.child(button))
                             .when_some(rewind_button, |el, button| el.child(button))
                             .when_some(copy_button, |el, button| el.child(button)),
@@ -6467,6 +6535,36 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The answering model in a settled answer's hover strip, after its
+/// timestamp: in the strip's own tone, or in the warning tone — with what was
+/// requested on hover — when another model answered.
+fn answered_model_label(row_id: SharedString, label: AnsweredLabel, theme: &Theme) -> AnyElement {
+    let el = div()
+        .id((row_id, 3usize))
+        .flex_none()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0));
+    match label.substituted {
+        None => el.child(label.text).into_any_element(),
+        Some(tip) => el
+            .text_color(theme.warning.opacity(0.85))
+            .child(
+                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                    .size(px(11.0))
+                    .text_color(theme.warning.opacity(0.85)),
+            )
+            .child(label.text)
+            .tooltip(move |_, cx| {
+                cx.new(|_| MessageActionTooltip { text: tip.clone() })
+                    .into()
+            })
+            .tooltip_show_delay(Duration::from_millis(350))
+            .into_any_element(),
+    }
+}
+
 /// The settled turn's work rule: the "Worked for 1m 32s" label followed by a
 /// hairline that runs out to the content column's edge — the quiet seam
 /// between what the turn DID (tool chips, questions, errors) and the answer it
@@ -7278,6 +7376,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         }
     }
 
@@ -9024,6 +9123,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -9050,6 +9150,61 @@ mod tests {
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
         // Every row knows its entry (the hover group).
         assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
+    }
+
+    fn answered(model: &str, requested: Option<&str>) -> AnsweredModel {
+        AnsweredModel {
+            model: model.into(),
+            requested: requested.map(str::to_owned),
+        }
+    }
+
+    /// The answering models ride the settled answer's strip, and only a
+    /// different model — not a dated snapshot of the requested one — flags it.
+    #[test]
+    fn the_answering_model_labels_the_settled_strip() {
+        let mut done = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![text_part("p1", "one\n\ntwo")],
+        );
+        let plain = rows_for_entry(&done, false, &mut parse);
+        assert!(plain.iter().all(|r| r.answered.is_none()), "none recorded");
+
+        done.models = vec![
+            answered("gpt-6-astra-2026-09-01", Some("gpt-6-astra")),
+            answered("gpt-6-astra", None),
+        ];
+        let rows = rows_for_entry(&done, false, &mut parse);
+        let last = rows.last().unwrap();
+        assert_eq!(
+            last.answered,
+            Some(AnsweredLabel {
+                text: "gpt-6-astra-2026-09-01, gpt-6-astra".into(),
+                substituted: None,
+            })
+        );
+        assert!(rows[..rows.len() - 1].iter().all(|r| r.answered.is_none()));
+        // The diff key changes with the label, or the strip would not repaint.
+        assert_ne!(last.version, plain.last().unwrap().version);
+
+        done.models = vec![
+            answered("gpt-6-astra", None),
+            answered("gpt-5.4-mini", Some("gpt-6-astra")),
+        ];
+        let rows = rows_for_entry(&done, false, &mut parse);
+        assert_eq!(
+            rows.last().unwrap().answered,
+            Some(AnsweredLabel {
+                text: "gpt-6-astra, gpt-5.4-mini".into(),
+                substituted: Some("Requested gpt-6-astra, answered by gpt-5.4-mini".into()),
+            })
+        );
+
+        // Not while the turn is still streaming.
+        done.status = Some(MessageStatus::Streaming);
+        let rows = rows_for_entry(&done, false, &mut parse);
+        assert!(rows.iter().all(|r| r.answered.is_none()));
     }
 
     #[test]
@@ -9450,6 +9605,7 @@ mod tests {
                 continuation_of: None,
                 completed_at: None,
                 comments: Vec::new(),
+                models: Vec::new(),
             };
             let rows = rows_for_entry(&entry, false, &mut parse);
             assert!(!rows.is_empty(), "{id} renders a row");
@@ -9470,6 +9626,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         };
         let rows = rows_for_entry(&tool_entry, false, &mut parse);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));

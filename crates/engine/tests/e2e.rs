@@ -17,8 +17,8 @@ use cypher_engine::{EngineCore, HarnessRegistry, RunJournal};
 use cypher_harness::mock::MockHarness;
 use cypher_harness::{Harness, HarnessError, RunControls};
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode, ToolCall,
+    AgentEvent, AnsweredModel, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SandboxLevel, SessionStatus, SteeringMode, ToolCall,
 };
 use cypher_sync::DocsStore;
 
@@ -717,6 +717,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
@@ -2265,6 +2266,93 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             agent_text: None,
         }],
         "stale echo must not split the streaming text"
+    );
+}
+
+#[tokio::test]
+async fn each_segment_records_the_models_that_answered_it() {
+    // Each completed assistant message names its model; the segment it
+    // wrote keeps them (once each, in order), and a steer boundary starts
+    // the next segment's list afresh.
+    let completed =
+        |id: &str, model: &str, requested: Option<&str>| AgentEvent::AssistantMessageCompleted {
+            assistant_message_id: id.into(),
+            model: Some(AnsweredModel {
+                model: model.into(),
+                requested: requested.map(str::to_owned),
+            }),
+        };
+    let script = vec![
+        AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-models".into(),
+            assistant_message_id: "a-1".into(),
+        },
+        AgentEvent::TextDelta {
+            text: "looking".into(),
+        },
+        completed("a-1", "gpt-5.4-mini", Some("gpt-6-astra")),
+        AgentEvent::TextDelta {
+            text: " done".into(),
+        },
+        completed("a-2", "gpt-6-astra", None),
+        completed("a-3", "gpt-6-astra", None),
+        AgentEvent::Steered {
+            assistant_message_id: Some("a-3".into()),
+            next_assistant_message_id: Some("a-4".into()),
+        },
+        AgentEvent::TextDelta {
+            text: "steered".into(),
+        },
+        completed("a-4", "gpt-6-astra", None),
+        done(DoneStatus::Completed),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-models",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-models".into(),
+
+            agent_prompt: None,
+        },
+    );
+
+    wait_for(
+        || {
+            entries_now(&core).len() == 3
+                && core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle)
+        },
+        "both segments to land",
+    )
+    .await;
+    let all = entries(&core);
+    assert!(all[0].models.is_empty(), "user entries carry none");
+    assert_eq!(
+        all[1].models,
+        vec![
+            AnsweredModel {
+                model: "gpt-5.4-mini".into(),
+                requested: Some("gpt-6-astra".into()),
+            },
+            AnsweredModel {
+                model: "gpt-6-astra".into(),
+                requested: None,
+            },
+        ]
+    );
+    assert_eq!(
+        all[2].models,
+        vec![AnsweredModel {
+            model: "gpt-6-astra".into(),
+            requested: None,
+        }]
     );
 }
 

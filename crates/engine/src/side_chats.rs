@@ -828,6 +828,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         }
     }
 
@@ -1014,6 +1015,7 @@ mod tests {
                 continuation_of: None,
                 completed_at: None,
                 comments: Vec::new(),
+                models: Vec::new(),
             },
         ];
         let out = bounded_transcript_context(&entries, None).unwrap();

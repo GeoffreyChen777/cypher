@@ -4,7 +4,7 @@
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
-//!   completedAt?, comments?: json }
+//!   completedAt?, comments?: json, models?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -14,6 +14,8 @@
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
+
+use cypher_proto::AnsweredModel;
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
@@ -64,6 +66,12 @@ pub struct SessionMessageEntry {
     /// writers, and every prompt sent without comments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<MessageComment>,
+    /// The models that answered an assistant segment, distinct and in the
+    /// order they first answered (a turn is one or more model calls). Only
+    /// harnesses that report it (pi) write it, as each call completes.
+    /// Additive: absent on old rows, old writers, and other harnesses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<AnsweredModel>,
 }
 
 /// One comment sent with a user prompt: the quote as the user selected it
@@ -807,6 +815,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
             loro_value_from_json(&serde_json::to_value(&entry.comments)?),
         )?;
     }
+    if !entry.models.is_empty() {
+        map.insert(
+            "models",
+            loro_value_from_json(&serde_json::to_value(&entry.models)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -894,6 +908,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         completed_at: Option<i64>,
         #[serde(default)]
         comments: Vec<MessageComment>,
+        #[serde(default)]
+        models: Vec<AnsweredModel>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -906,6 +922,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             continuation_of: raw.continuation_of,
             completed_at: raw.completed_at,
             comments: raw.comments,
+            models: raw.models,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -974,6 +991,10 @@ fn salvage_entry(
         comments: obj
             .get("comments")
             .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default(),
+        models: obj
+            .get("models")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_default(),
     })
 }
@@ -1061,6 +1082,11 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
                     // never labelled complete while it is still being written.
                     out[at].completed_at = entry.completed_at;
                     out[at].parts.extend(entry.parts);
+                    for model in entry.models {
+                        if !out[at].models.contains(&model) {
+                            out[at].models.push(model);
+                        }
+                    }
                 } else {
                     // Orphan continuation — surface as its own entry rather than dropping.
                     out.push(entry);
@@ -1093,6 +1119,9 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     entry_id: String,
+    /// The `models` written so far, and whether a change awaits a commit.
+    models: Vec<AnsweredModel>,
+    models_dirty: bool,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1118,6 +1147,7 @@ impl<'a> SegmentWriter<'a> {
                 continuation_of: None,
                 completed_at: None,
                 comments: Vec::new(),
+                models: Vec::new(),
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1127,6 +1157,8 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             entry_id: entry_id.to_owned(),
+            models: Vec::new(),
+            models_dirty: false,
         })
     }
 
@@ -1147,10 +1179,27 @@ impl<'a> SegmentWriter<'a> {
         }
     }
 
+    /// Record the models that answered the segment so far. Written into the
+    /// entry now; committed with the next [`Self::sync`] or [`Self::finish`].
+    pub fn set_models(&mut self, models: &[AnsweredModel]) -> Result<(), DocError> {
+        if self.models == models {
+            return Ok(());
+        }
+        self.entry_map()?.insert(
+            "models",
+            loro_value_from_json(&serde_json::to_value(models)?),
+        )?;
+        self.models = models.to_vec();
+        self.models_dirty = true;
+        Ok(())
+    }
+
     /// Diff `folded` (the full folded segment so far) into the doc.
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
         let parts = self.parts_list()?;
-        let mut dirty = false;
+        // A models change alone may wait for the next eager commit, like
+        // thinking growth: it labels the turn, which settles with `finish`.
+        let mut dirty = std::mem::take(&mut self.models_dirty);
         // Any change other than thinking growth: the commit must reach other
         // devices on the normal cadence (see `local_commit_is_deferrable`).
         let mut eager = false;
@@ -1426,6 +1475,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         }
     }
 
@@ -1510,6 +1560,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -1984,6 +2035,7 @@ mod tests {
             continuation_of: None,
             completed_at: None,
             comments: Vec::new(),
+            models: Vec::new(),
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();
@@ -2072,6 +2124,70 @@ mod tests {
         live_tail.completed_at = None;
         let joined = join_continuation_entries(vec![root, live_tail]);
         assert_eq!(joined[0].completed_at, None, "still being written");
+    }
+
+    fn answered(model: &str, requested: Option<&str>) -> AnsweredModel {
+        AnsweredModel {
+            model: model.into(),
+            requested: requested.map(str::to_owned),
+        }
+    }
+
+    /// The models a segment's writer records survive a reload of the doc,
+    /// and an entry without any carries none.
+    #[test]
+    fn segment_models_round_trip() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let folded = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "hello".into(),
+            agent_text: None,
+        }];
+        let mut writer = SegmentWriter::begin(&doc, "m1", "dev", 1_000).unwrap();
+        writer.sync(&folded).unwrap();
+        let models = vec![
+            answered("gpt-5.4", Some("gpt-6-astra")),
+            answered("gpt-6-astra", None),
+        ];
+        writer.set_models(&models).unwrap();
+        // A models change alone still lands, with no new parts to sync.
+        writer.sync(&folded).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].models, models);
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        SegmentWriter::begin(&doc, "m2", "dev", 2_000)
+            .unwrap()
+            .finish(&folded, MessageStatus::Complete)
+            .unwrap();
+
+        let reopened = LoroDoc::new();
+        reopened.import(&doc.export_snapshot().unwrap()).unwrap();
+        let entries = SessionDoc::from_doc(reopened).read_entries().unwrap();
+        assert_eq!(entries[0].models, models);
+        assert!(entries[1].models.is_empty());
+    }
+
+    /// A joined entry carries every model that answered any of its
+    /// segments, once each, in order.
+    #[test]
+    fn continuation_join_merges_the_segments_models() {
+        let mut root = user_entry("m1", "a");
+        root.role = MessageRole::Assistant;
+        root.models = vec![answered("gpt-6-astra", None)];
+        let mut tail = user_entry("m1#c1", "b");
+        tail.role = MessageRole::Assistant;
+        tail.continuation_of = Some("m1".into());
+        tail.models = vec![
+            answered("gpt-6-astra", None),
+            answered("gpt-5.4", Some("gpt-6-astra")),
+        ];
+        let joined = join_continuation_entries(vec![root, tail]);
+        assert_eq!(
+            joined[0].models,
+            vec![
+                answered("gpt-6-astra", None),
+                answered("gpt-5.4", Some("gpt-6-astra")),
+            ]
+        );
     }
 
     #[test]
