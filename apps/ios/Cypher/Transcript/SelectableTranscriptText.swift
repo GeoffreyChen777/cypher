@@ -253,10 +253,7 @@ final class TranscriptTextLayoutManager: NSLayoutManager {
                     withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                     in: container) { rect, _ in
                     // The native text view's glyph bounds place this wash
-                    // slightly above the visible ink. Unlike the SwiftUI
-                    // renderer, this path is used by the actual transcript
-                    // (including selectable Markdown), so keep the correction
-                    // here as well.
+                    // slightly above the visible ink; nudge it down.
                     let rect = rect.offsetBy(dx: origin.x, dy: origin.y + 2.5)
                         .insetBy(dx: -2, dy: 2)
                     color.setFill()
