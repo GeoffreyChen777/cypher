@@ -154,9 +154,10 @@ epoch rebuild that converted fat s2 docs during the cutover was removed after 0.
 together with the s2 rooms themselves.
 
 **M2. Room generation.** Registry chat rows carry a `roomGen` field (per-field HLC LWW
-like everything else). Every chat is created with `roomGen: 2`; iOS connects a chat's
-room only when the row says 2. Desktop hosts open every chat as chat2, including rows
-that still say 1 or have no row yet.
+like everything else). Desktop hosts and current iOS builds open every chat as chat2,
+whatever the row says. Every chat is still created with `roomGen: 2` because iOS builds
+through 0.2.0 (24) dial a chat's room only when the row says 2; the field can stop being
+written once those builds are gone (TestFlight builds expire 90 days after upload).
 
 **M3. Rebuild-vs-lineage on other devices.** A device opening a chat whose local doc
 has `epoch < 2` discards that doc **after** re-queueing any of its own unresolved

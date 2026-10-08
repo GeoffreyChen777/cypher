@@ -6,12 +6,11 @@
 // client-minted message id until the host writes the real entry with the
 // same id.
 //
-// The registry names the room generation (M2): the store connects only once
-// the chat row says roomGen 2; a gen-1 row (a pre-chat2 chat that was never
-// migrated) renders nothing. The local doc is always the chat2 lineage; a
-// cached pre-chat2 snapshot is never imported (unrelated Loro histories would
-// duplicate every message), only mined for our own pending commands (M3) and
-// left on disk as rollback.
+// Every chat syncs through its chat2 room, whatever the registry row's
+// `roomGen` says. The local doc is always the chat2 lineage; a cached pre-chat2
+// snapshot is never imported (unrelated Loro histories would duplicate every
+// message), only mined for our own pending commands (M3) and left on disk as
+// rollback.
 
 import Foundation
 import Loro
@@ -54,9 +53,6 @@ final class SessionStore {
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
     private let config: AppConfig
-    /// Registry roomGen for this chat (M2): connect only at >= 2. One-way —
-    /// the registry never walks a chat back to s2.
-    @ObservationIgnored private var roomGen = 1
     @ObservationIgnored private var started = false
 
     /// Demo mode: no room, entries driven externally.
@@ -152,16 +148,8 @@ final class SessionStore {
         project()
     }
 
-    /// Registry projection hook (AppModel forwards the chat row's roomGen).
-    /// A gen-1 store connects if the row is ever raised to 2.
-    func updateRoomGen(_ gen: Int?) {
-        let gen = gen ?? 1
-        if gen > roomGen { roomGen = gen }
-        connectIfReady()
-    }
-
     private func connectIfReady() {
-        guard started, !offline, chatRoom == nil, roomGen >= 2 else { return }
+        guard started, !offline, chatRoom == nil else { return }
         let delegate = ChatRoomClient.Delegate(
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
@@ -246,8 +234,8 @@ final class SessionStore {
         chatRoom = client
         // First contact with the room (cursor 0): everything committed
         // BEFORE the local-update subscription saw a client — an adopt's
-        // requeued commands, sends queued while waiting for the roomGen
-        // flip — is invisible to the push path, yet every later commit
+        // requeued commands, sends queued while offline — is invisible to
+        // the push path, yet every later commit
         // causally depends on it (doc_host.rs first-contact rule; rows built
         // on unpushed deps sit in peers' pending-dep buffers forever). Push
         // the doc's full update log as the join's first batch; once acked
@@ -302,8 +290,7 @@ final class SessionStore {
     }
 
     /// Foreground hook: revive the room after a suspension (see
-    /// ChatRoomClient.kick). Also the catch-all re-check for a roomGen flip
-    /// that landed while this store had no open view.
+    /// ChatRoomClient.kick), or dial it if it never started.
     func kickRoom() {
         connectIfReady()
         guard let chatRoom else { return }

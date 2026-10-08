@@ -234,7 +234,6 @@ final class WorkspaceStore {
                         createdAt: f["createdAt"]?.int64Value ?? 0,
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        roomGen: f["roomGen"]?.int64Value.map(Int.init),
                         child: child)
         }
 
@@ -465,8 +464,8 @@ final class WorkspaceStore {
             "cwd": .string(cwd ?? space.path),
             "spaceId": .string(space.id),
             "createdAt": .int(nowMs()),
-            // Born on chat2 (workspace_host.rs create_chat): a brand-new
-            // chat has an empty doc — nothing to seed, no migration race.
+            // iOS builds through 0.2.0 (24) dial a chat's room only once its
+            // row says roomGen 2 (docs/chat2-sync.md M2).
             "roomGen": .int(2),
         ]
         if let branch {
@@ -598,7 +597,7 @@ final class WorkspaceStore {
             "archived": .bool(false),
             "cwd": .string(cwd),
             "createdAt": .int(nowMs()),
-            "roomGen": .int(2),
+            "roomGen": .int(2),  // see createChat
         ]
         if let cfg = JSONValue(encodable: chatConfig) {
             set["config"] = cfg

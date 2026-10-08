@@ -998,7 +998,8 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
-                // Born on chat2. Peers (iOS) gate on `roomGen >= 2`.
+                // Nothing on desktop reads it; iOS builds through 0.2.0 (24)
+                // dial a chat's room only at `roomGen >= 2`.
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),

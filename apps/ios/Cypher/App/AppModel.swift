@@ -779,13 +779,6 @@ final class AppModel {
 
     private func kickAllRooms() {
         workspace?.kickRoom()
-        // Deliver any roomGen flips that landed while the store had no open
-        // view, then kick every room.
-        if let workspace {
-            for chat in workspace.chats {
-                sessionStores[chat.id]?.updateRoomGen(chat.roomGen)
-            }
-        }
         sessionStores.values.forEach { $0.kickRoom() }
     }
 
@@ -837,10 +830,6 @@ final class AppModel {
         guard let config else { return nil }
         if let existing = sessionStores[chat.id] {
             existing.hostDeviceId = chat.deviceId
-            // The registry flip to chat2 can land while the store is open —
-            // views re-derive `chat` from the registry on every change, so
-            // this accessor is the flip's delivery path.
-            existing.updateRoomGen(chat.roomGen)
             return existing
         }
         let store = SessionStore(chatId: chat.id, config: config)
@@ -848,7 +837,6 @@ final class AppModel {
         sessionStores[chat.id] = store
         if !recentSessionIds.contains(chat.id) { recentSessionIds.append(chat.id) }
         store.start()
-        store.updateRoomGen(chat.roomGen)
         return store
     }
 
