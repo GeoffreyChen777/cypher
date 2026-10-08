@@ -589,6 +589,20 @@ pub enum RowKind {
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
+        /// Part of an [`RowKind::Activity`]: no header of its own, the chips
+        /// always shown on the activity's rail.
+        nested: bool,
+    },
+    /// The toggle over a run of work that mixed tool calls with thinking —
+    /// one row instead of alternating "Thought" and "Ran N commands" rows.
+    /// The `rows` that follow are the run in order (its tool groups, its
+    /// thoughts and their blocks, all `nested`); they are dropped while the
+    /// toggle is closed (see [`fold_closed_toggles`]). Open by default only
+    /// while the run is the streaming tail, like a tool group.
+    Activity {
+        rows: usize,
+        summary: SharedString,
+        auto_open: bool,
     },
     /// The settled turn's work rule: a hairline labelled "Worked for 1m 32s",
     /// sitting between the turn's tool/chip activity and the answer text it
@@ -625,6 +639,11 @@ pub enum RowKind {
     Thought {
         blocks: usize,
         live: bool,
+        /// Inside an [`RowKind::Activity`]: drawn as a chip on its rail,
+        /// labelled with `preview`.
+        nested: bool,
+        /// The thought's first line, markup stripped.
+        preview: SharedString,
     },
     /// One top-level markdown block of a reasoning part, painted muted.
     /// `live` blocks fade in like [`RowKind::LiveMarkdown`].
@@ -632,7 +651,19 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
         live: bool,
+        /// Inside an [`RowKind::Activity`]: indented on its rail.
+        nested: bool,
     },
+}
+
+/// Rows that belong to an [`RowKind::Activity`] run.
+fn is_nested(kind: &RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::ToolGroup { nested: true, .. }
+            | RowKind::Thought { nested: true, .. }
+            | RowKind::ThoughtBlock { nested: true, .. }
+    )
 }
 
 /// Rows whose text streams in under a fade veil.
@@ -703,6 +734,7 @@ fn row_match_count(row: &Row, query: &str) -> u32 {
         // Thinking is not searched: a hit inside a collapsed thought could
         // not be shown.
         RowKind::ToolGroup { .. }
+        | RowKind::Activity { .. }
         | RowKind::Worked { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
@@ -1258,6 +1290,7 @@ pub fn rows_for_entry(
             kind: RowKind::ToolGroup {
                 tools: Arc::new(tools),
                 auto_open,
+                nested: false,
             },
             entry_id: entry.id.clone().into(),
             role: entry.role,
@@ -1265,6 +1298,10 @@ pub fn rows_for_entry(
         });
         *group_ix += 1;
     };
+    // The open work run: where its rows start and the part that opened it
+    // (the Activity row's id). Tool calls and thoughts extend it; anything
+    // the reader sees between them (answer text, a chip) closes it.
+    let mut run: Option<(usize, String)> = None;
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
@@ -1281,6 +1318,9 @@ pub fn rows_for_entry(
                 diff_stats,
                 ..
             } => {
+                // Nothing is pushed until the group flushes, so the run's
+                // rows start here.
+                run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 pending_group.push((
                     part_id.clone(),
                     ToolItem {
@@ -1303,21 +1343,35 @@ pub fn rows_for_entry(
                 group_last_part_ix = part_ix;
             }
             other => {
+                // A part that renders nothing (an empty text or thought, a
+                // question still in the composer) splits nothing either.
+                let silent = match other {
+                    MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                        text.trim().is_empty()
+                    }
+                    MessagePart::Input { resolved, .. } => !*resolved,
+                    MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
+                };
+                if silent {
+                    continue;
+                }
                 flush_group(
                     &mut rows,
                     &mut pending_group,
                     &mut group_ix,
                     group_last_part_ix,
                 );
+                if !matches!(other, MessagePart::Reasoning { .. })
+                    && let Some((start, first_part)) = run.take()
+                {
+                    fold_work_run(&mut rows, start, &first_part, entry, false);
+                }
                 match other {
                     MessagePart::Text {
                         id: part_id,
                         text,
                         agent_text,
                     } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
                         // Block rows keep their ids either way (quotes map
@@ -1374,16 +1428,16 @@ pub fn rows_for_entry(
                         }
                     }
                     MessagePart::Reasoning { id: part_id, text } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
+                        run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
                         // Still thinking: the reasoning is the live tail.
                         let live = streaming && part_ix == last_part_ix;
+                        let preview = thought_preview(text);
                         rows.push(Row {
                             id: format!("{key}.thought").into(),
-                            version: (tree.blocks.len() as u64) << 1 | live as u64,
+                            version: ((tree.blocks.len() as u64) << 1 | live as u64)
+                                ^ fnv1a(preview.as_bytes()) << 8,
                             turn_start: false,
                             entry_id: entry_id.clone(),
                             role: entry.role,
@@ -1391,6 +1445,8 @@ pub fn rows_for_entry(
                             kind: RowKind::Thought {
                                 blocks: tree.blocks.len(),
                                 live,
+                                nested: false,
+                                preview: preview.into(),
                             },
                         });
                         // Same ids and content-hash versions as answer blocks,
@@ -1413,6 +1469,7 @@ pub fn rows_for_entry(
                                     tree: tree.clone(),
                                     block_ix,
                                     live,
+                                    nested: false,
                                 },
                             });
                         }
@@ -1424,12 +1481,10 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        if !*resolved {
-                            // The composer wizard is the interaction. A pending
-                            // "Awaiting your answer…" chip makes slash-command
-                            // settings read as the model asking a question.
-                            continue;
-                        }
+                        // Only resolved questions get here (`silent`): the
+                        // composer wizard is the interaction, and a pending
+                        // "Awaiting your answer…" chip made slash-command
+                        // settings read as the model asking a question.
                         // Model-generated header onto the one-line chip.
                         let header: SharedString = single_line(
                             &questions
@@ -1481,6 +1536,10 @@ pub fn rows_for_entry(
         &mut group_ix,
         group_last_part_ix,
     );
+    if let Some((start, first_part)) = run.take() {
+        // Still the tail of a streaming reply: open, like a live tool group.
+        fold_work_run(&mut rows, start, &first_part, entry, streaming);
+    }
 
     // The work rule goes in BEFORE the turn-start/timestamp bookkeeping: it is
     // never the entry's first or last row (it separates work from the answer
@@ -1515,6 +1574,79 @@ pub fn rows_for_entry(
         last.version ^= 1 << 62;
     }
     rows
+}
+
+/// Fold a closed work run — `rows[start..]`, opened by part `first_part` —
+/// behind one [`RowKind::Activity`] row when it mixed tool calls with
+/// thinking. A run of only tools is one group already and a lone thought its
+/// own toggle; both stay as they are.
+fn fold_work_run(
+    rows: &mut Vec<Row>,
+    start: usize,
+    first_part: &str,
+    entry: &SessionMessageEntry,
+    auto_open: bool,
+) {
+    let mut thoughts = 0usize;
+    let mut tools: Vec<(ToolCall, bool)> = Vec::new();
+    for row in &rows[start..] {
+        match &row.kind {
+            RowKind::Thought { .. } => thoughts += 1,
+            RowKind::ToolGroup { tools: group, .. } => {
+                tools.extend(group.iter().map(|t| (t.call.clone(), t.is_error)));
+            }
+            _ => {}
+        }
+    }
+    if thoughts == 0 || tools.is_empty() {
+        return;
+    }
+    for row in &mut rows[start..] {
+        if let RowKind::ToolGroup { nested, .. }
+        | RowKind::Thought { nested, .. }
+        | RowKind::ThoughtBlock { nested, .. } = &mut row.kind
+        {
+            *nested = true;
+            // A thought that gains its first tool call redraws as a chip.
+            row.version ^= 1 << 61;
+        }
+    }
+    let summary = cypher_proto::view::work_summary(&tools, thoughts);
+    let count = rows.len() - start;
+    rows.insert(
+        start,
+        Row {
+            id: format!("{}#{}.activity", entry.id, first_part).into(),
+            version: (fnv1a(summary.as_bytes()) ^ count as u64) << 1 | auto_open as u64,
+            turn_start: false,
+            kind: RowKind::Activity {
+                rows: count,
+                summary: summary.into(),
+                auto_open,
+            },
+            entry_id: entry.id.clone().into(),
+            role: entry.role,
+            timestamp: None,
+        },
+    );
+}
+
+/// A thought's label in a work run: its first line, without the heading or
+/// emphasis markers models often title a thought with ("**Planning**").
+fn thought_preview(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut line = line.trim_start_matches('#').trim_start();
+    for marker in ["**", "__", "*", "_"] {
+        if line.len() > marker.len() * 2 && line.starts_with(marker) && line.ends_with(marker) {
+            line = &line[marker.len()..line.len() - marker.len()];
+            break;
+        }
+    }
+    single_line(line)
 }
 
 /// Order a tool group so each call made from inside another call's run
@@ -1583,11 +1715,32 @@ fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree) -> Option
         .then_some(rule + 1)
 }
 
-/// Drop the rows each CLOSED toggle covers — a translation's original or a
-/// thought. `open` holds the ids of toggles the user expanded; every other
-/// toggle stays collapsed. A folded row's timestamp (a reply that ended while
-/// thinking) moves onto its toggle, so the entry keeps its strip.
-pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet<SharedString>) {
+/// The rows a toggle covers and whether it starts open: a translation's
+/// original and a thought start closed, a work run only while it streams.
+fn toggle_span(kind: &RowKind) -> Option<(usize, bool)> {
+    match kind {
+        RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } => {
+            Some((*blocks, false))
+        }
+        RowKind::Activity {
+            rows, auto_open, ..
+        } => Some((*rows, *auto_open)),
+        _ => None,
+    }
+}
+
+/// Whether the toggle `row` is open: the user's click (`pins`, by row id)
+/// wins, else the toggle's default.
+fn toggle_open(row: &Row, pins: &HashMap<SharedString, bool>) -> bool {
+    toggle_span(&row.kind).is_some_and(|(_, default)| pins.get(&row.id).copied().unwrap_or(default))
+}
+
+/// Drop the rows each CLOSED toggle covers — a translation's original, a
+/// thought, a work run. `pins` holds the toggles the user clicked, by row id;
+/// every other toggle keeps its default ([`toggle_span`]). A folded row's
+/// timestamp (a reply that ended while thinking) moves onto its toggle, so
+/// the entry keeps its strip.
+pub fn fold_closed_toggles(rows: &mut Vec<Row>, pins: &HashMap<SharedString, bool>) {
     let mut hide = 0usize;
     let mut folded: Vec<Row> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
@@ -1599,10 +1752,10 @@ pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet
             }
             continue;
         }
-        if let RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } = row.kind
-            && !open.contains(&row.id)
+        if let Some((covered, _)) = toggle_span(&row.kind)
+            && !toggle_open(&row, pins)
         {
-            hide = blocks;
+            hide = covered;
         }
         folded.push(row);
     }
@@ -1737,6 +1890,9 @@ fn top_gap_for_style(prev: Option<&Row>, row: &Row, message_gap: f32, paragraph_
     if row.turn_start {
         return message_gap;
     }
+    if is_nested(&row.kind) {
+        return nested_gap(prev, row, paragraph_gap);
+    }
     let is_md = |k: &RowKind| {
         matches!(
             k,
@@ -1750,6 +1906,26 @@ fn top_gap_for_style(prev: Option<&Row>, row: &Row, message_gap: f32, paragraph_
         paragraph_gap
     } else {
         GAP_BLOCK
+    }
+}
+
+/// The gap above a row of a work run (drawn on the run's rail): chips stack
+/// like a tool group's — their cards carry their own margins — a thought's
+/// text sits just under its chip, and the chip after it gets some air.
+fn nested_gap(prev: Option<&Row>, row: &Row, paragraph_gap: f32) -> f32 {
+    let Some(prev) = prev else {
+        return 0.0;
+    };
+    match (&row.kind, &prev.kind) {
+        (_, RowKind::Activity { .. }) => CHIPS_TOP_PAD,
+        (RowKind::ThoughtBlock { .. }, RowKind::ThoughtBlock { .. })
+            if part_prefix(&prev.id) == part_prefix(&row.id) =>
+        {
+            paragraph_gap
+        }
+        (RowKind::ThoughtBlock { .. }, _) => 2.0,
+        (_, RowKind::ThoughtBlock { .. }) => 6.0,
+        _ => 0.0,
     }
 }
 
@@ -2226,10 +2402,11 @@ pub struct Transcript {
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
     tool_overflow: std::collections::HashSet<SharedString>,
-    /// Toggles the user opened (an append-mode translation's original, a
-    /// thought), by row id; every other one stays folded
-    /// ([`fold_closed_toggles`]). Render-local like `folds`.
-    open_toggles: std::collections::HashSet<SharedString>,
+    /// Toggles the user clicked (an append-mode translation's original, a
+    /// thought, a work run) and the state they left them in, by row id;
+    /// every other one keeps its default ([`fold_closed_toggles`]).
+    /// Render-local like `folds`.
+    toggle_pins: HashMap<SharedString, bool>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -2498,7 +2675,7 @@ impl Transcript {
             folds: HashMap::new(),
             tool_details: HashMap::new(),
             tool_overflow: std::collections::HashSet::new(),
-            open_toggles: std::collections::HashSet::new(),
+            toggle_pins: HashMap::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -3589,7 +3766,7 @@ impl Transcript {
             self.tree_cache.clear();
             self.folds.clear();
             self.tool_overflow.clear();
-            self.open_toggles.clear();
+            self.toggle_pins.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -3615,7 +3792,7 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            fold_closed_toggles(&mut rows, &self.open_toggles);
+            fold_closed_toggles(&mut rows, &self.toggle_pins);
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {
@@ -4520,15 +4697,41 @@ impl Transcript {
                 tree,
                 block_ix,
                 live,
+                nested,
             } => {
                 // Thinking reads as the answer's quieter companion: the same
                 // blocks, in the muted text tone.
                 let mut muted = theme.clone();
                 muted.text = theme.text_muted;
-                self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx)
+                let block =
+                    self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx);
+                if *nested {
+                    // Under its chip, on the run's rail.
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .child(guide_rail())
+                        .child(
+                            div()
+                                .ml(px(NESTED_THOUGHT_INSET))
+                                .min_w_0()
+                                .flex_1()
+                                .child(block),
+                        )
+                        .into_any_element()
+                } else {
+                    block
+                }
             }
-            RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
+            RowKind::ToolGroup {
+                tools,
+                auto_open,
+                nested,
+            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, &theme, cx),
+            RowKind::Activity { summary, .. } => {
+                let open = toggle_open(&row, &self.toggle_pins);
+                self.render_fold_toggle(&row.id, open, summary.clone(), &theme, cx)
             }
             RowKind::InputChip {
                 header, resolved, ..
@@ -4536,12 +4739,42 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::Worked { label } => worked_rule(label.clone(), &theme),
             RowKind::TranslationOriginal { .. } => {
-                self.render_fold_toggle(&row.id, ("Show original", "Hide original"), &theme, cx)
+                let open = toggle_open(&row, &self.toggle_pins);
+                let label = if open {
+                    "Hide original"
+                } else {
+                    "Show original"
+                };
+                self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
             }
-            RowKind::Thought { live, .. } => {
-                let label = if *live { "Thinking…" } else { "Thought" };
-                self.render_fold_toggle(&row.id, (label, label), &theme, cx)
+            RowKind::Thought {
+                live,
+                nested,
+                preview,
+                ..
+            } => {
+                let open = toggle_open(&row, &self.toggle_pins);
+                if *nested {
+                    self.render_thought_chip(&row.id, open, *live, preview.clone(), &theme, cx)
+                } else {
+                    let label = if *live { "Thinking…" } else { "Thought" };
+                    self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
+                }
             }
+        };
+        // A work run's rows keep its rail unbroken: the gap above each one is
+        // drawn inside the row, rail and all, instead of as bare padding.
+        let (top_gap, inner) = if is_nested(&row.kind) && top_gap > 0.0 {
+            let spaced = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(top_gap)).flex().child(guide_rail()))
+                .child(inner)
+                .into_any_element();
+            (0.0, spaced)
+        } else {
+            (top_gap, inner)
         };
 
         // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
@@ -5254,18 +5487,18 @@ impl Transcript {
         el
     }
 
-    /// The toggle over folded rows (a translation's original, a thought): a
-    /// chevron tile and a quiet label, styled like a tool group's header.
-    /// Clicking rebuilds the rows, which shows or hides the blocks below it.
-    /// `labels` are (closed, open).
+    /// The toggle over folded rows (a translation's original, a thought, a
+    /// work run): a chevron tile and a quiet label, styled like a tool
+    /// group's header. Clicking pins the other state and rebuilds the rows,
+    /// which shows or hides the rows below it.
     fn render_fold_toggle(
         &self,
         row_id: &SharedString,
-        labels: (&'static str, &'static str),
+        open: bool,
+        label: SharedString,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.open_toggles.contains(row_id);
         let key = row_id.clone();
         div()
             .w_full()
@@ -5284,9 +5517,7 @@ impl Transcript {
                     .text_color(theme.text_muted)
                     .hover(|s| s.text_color(theme.text))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.open_toggles.remove(&key) {
-                            this.open_toggles.insert(key.clone());
-                        }
+                        this.toggle_pins.insert(key.clone(), !open);
                         // A local fold change: rebuild despite an unchanged
                         // state revision.
                         this.synced_revision = None;
@@ -5306,21 +5537,134 @@ impl Transcript {
                             .text_color(theme.text_muted.opacity(0.7))
                             .child(SharedString::from(if open { "▾" } else { "▸" })),
                     )
-                    .child(SharedString::from(if open { labels.1 } else { labels.0 })),
+                    .child(div().min_w_0().truncate().child(label)),
             )
             .into_any_element()
     }
 
+    /// A thought inside a work run: a chip on the run's rail like the tool
+    /// calls around it — the bulb, "Thought" and the thought's first line, a
+    /// spinner while it streams. Clicking shows or hides its text below.
+    fn render_thought_chip(
+        &self,
+        row_id: &SharedString,
+        open: bool,
+        live: bool,
+        preview: SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = row_id.clone();
+        let header = div()
+            .h(px(CHIP_CARD_HEIGHT))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::LIGHTBULB)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(if live {
+                        "Thinking…"
+                    } else {
+                        "Thought"
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text.opacity(0.85))
+                    .child(preview),
+            )
+            .when(live, |row| {
+                row.child(tool_status_icon(
+                    ToolStatus::Running,
+                    SharedString::from(format!("{row_id}-status")),
+                    theme,
+                ))
+            })
+            .child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.0))
+                    .text_color(theme.text_muted.opacity(0.8))
+                    .child(SharedString::from(if open { "▾" } else { "▸" })),
+            );
+        div()
+            .h(px(CHIP_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .child(guide_rail().h_full())
+            .child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-toggle")))
+                    .ml(px(12.0))
+                    .h(px(CHIP_CARD_HEIGHT))
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(crate::theme::hairline(0.07))
+                    .bg(crate::theme::ink(0.03))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_pins.insert(key.clone(), !open);
+                        // A local fold change: rebuild despite an unchanged
+                        // state revision.
+                        this.synced_revision = None;
+                        this.sync(cx);
+                        cx.notify();
+                    }))
+                    .child(header),
+            )
+            .into_any_element()
+    }
+
+    /// A tool group's header and chips. A `nested` group belongs to a work
+    /// run: the run's toggle is its header, so it shows only its chips.
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
         auto_open: bool,
+        nested: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(auto_open);
+        let open = nested || fold.open.unwrap_or(auto_open);
+        // Under a header the chips start just below it; in a run, the row's
+        // own gap places them.
+        let chips_top_pad = if nested { 0.0 } else { CHIPS_TOP_PAD };
         // Cap: an open group renders its LAST `limit` chips, with the older
         // ones behind one "Show N earlier tool calls" row. A long agent run
         // then costs a bounded slice of the transcript instead of pushing the
@@ -5443,7 +5787,7 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
-        let open_height = chips_height(tools.len() - hidden)
+        let open_height = chips_height(tools.len() - hidden) - (CHIPS_TOP_PAD - chips_top_pad)
             + if overflow_row {
                 OVERFLOW_ROW_HEIGHT
             } else {
@@ -5572,7 +5916,7 @@ impl Transcript {
                 )
         });
         let chips = div()
-            .pt(px(CHIPS_TOP_PAD))
+            .pt(px(chips_top_pad))
             .flex()
             .flex_col()
             .gap(px(CHIP_GAP))
@@ -5770,6 +6114,9 @@ impl Transcript {
                 .child(chips)
                 .into_any_element()
         };
+        if nested {
+            return body;
+        }
 
         div()
             .flex()
@@ -6053,6 +6400,21 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
+
+/// The hairline a tool group's chips hang off, centered under its header's
+/// chevron tile. Unsized: it stretches to its row in a flex row.
+fn guide_rail() -> gpui::Div {
+    div()
+        .ml(px(12.0))
+        .w(px(1.0))
+        .flex_none()
+        .bg(crate::theme::ink(0.08))
+}
+
+/// Left inset of a work run's thought text from its rail: the text lines up
+/// with the icons of the chips above and below it (card inset 12px + card
+/// border 1px + header padding 8px).
+const NESTED_THOUGHT_INSET: f32 = 21.0;
 
 /// Left inset of a nested chip's guide rail from the rail before it: the
 /// rail lands under the caller chip's icon (rail 1px + card inset 12px +
@@ -6923,7 +7285,9 @@ mod tests {
             rows[0].kind,
             RowKind::Thought {
                 blocks: 2,
-                live: false
+                live: false,
+                nested: false,
+                ..
             }
         ));
         assert!(rows[0].turn_start);
@@ -6941,7 +7305,7 @@ mod tests {
         assert_eq!(top_gap_for(Some(&folded[0]), &folded[1]), GAP_BLOCK);
 
         let mut open = rows.clone();
-        fold_closed_toggles(&mut open, &["m1#r0.thought".into()].into());
+        fold_closed_toggles(&mut open, &[("m1#r0.thought".into(), true)].into());
         assert_eq!(open.len(), rows.len());
     }
 
@@ -6981,6 +7345,222 @@ mod tests {
         assert_eq!(ids, ["m1#t0.0", "m1#r1.thought"]);
         assert!(folded[1].timestamp.is_some());
         assert_ne!(folded[1].version, rows[1].version);
+    }
+
+    fn ids(rows: &[Row]) -> Vec<&str> {
+        rows.iter().map(|r| r.id.as_ref()).collect()
+    }
+
+    #[test]
+    fn thinking_between_tool_calls_folds_into_one_work_run() {
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                thought_part("r0", "**Look around**\n\nList the files."),
+                tool_part("x1", "ls"),
+                tool_part("x2", "git status"),
+                thought_part("r3", "Now build."),
+                tool_part("x4", "cargo build"),
+                thought_part("r5", "It built."),
+                text_part("t6", "Done."),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(
+            ids(&rows),
+            [
+                "m1#r0.activity",
+                "m1#r0.thought",
+                "m1#r0.0",
+                "m1#r0.1",
+                "m1#g0",
+                "m1#r3.thought",
+                "m1#r3.0",
+                "m1#g1",
+                "m1#r5.thought",
+                "m1#r5.0",
+                "m1#t6.0",
+            ]
+        );
+        let RowKind::Activity {
+            rows: covered,
+            summary,
+            auto_open,
+        } = &rows[0].kind
+        else {
+            panic!("expected the work run's toggle");
+        };
+        assert_eq!(*covered, 9);
+        assert_eq!(summary.as_ref(), "Ran 3 commands · 3 thoughts");
+        assert!(!auto_open);
+        assert!(rows[0].turn_start);
+        assert!(rows[1..10].iter().all(|r| is_nested(&r.kind)));
+        let RowKind::Thought { preview, .. } = &rows[1].kind else {
+            panic!("expected a thought");
+        };
+        assert_eq!(preview.as_ref(), "Look around");
+
+        // Closed, the whole run is one row above the answer.
+        let mut folded = rows.clone();
+        fold_closed_toggles(&mut folded, &Default::default());
+        assert_eq!(ids(&folded), ["m1#r0.activity", "m1#t6.0"]);
+
+        // Open, the run reads in order: chips, and thoughts still folded.
+        let mut open = rows.clone();
+        fold_closed_toggles(&mut open, &[("m1#r0.activity".into(), true)].into());
+        assert_eq!(
+            ids(&open),
+            [
+                "m1#r0.activity",
+                "m1#r0.thought",
+                "m1#g0",
+                "m1#r3.thought",
+                "m1#g1",
+                "m1#r5.thought",
+                "m1#t6.0",
+            ]
+        );
+        // The rail runs on: no bare gap between the run's rows.
+        assert_eq!(top_gap_for(Some(&open[0]), &open[1]), CHIPS_TOP_PAD);
+        assert_eq!(top_gap_for(Some(&open[1]), &open[2]), 0.0);
+        assert_eq!(top_gap_for(Some(&open[5]), &open[6]), GAP_BLOCK);
+    }
+
+    #[test]
+    fn the_mock_work_demo_settles_into_one_row() {
+        // `CYPHER_MOCK_WORK` (scripts/dev-demo-work.sh): sixteen alternating
+        // thought and command rows fold into one above the answer.
+        let mut parts = Vec::new();
+        for event in cypher_harness::mock::work_script() {
+            cypher_doc::fold_event_into_parts(&mut parts, &event);
+        }
+        let answer = cypher_proto::AgentEvent::TextDelta {
+            text: "Here is the pipeline.".into(),
+        };
+        cypher_doc::fold_event_into_parts(&mut parts, &answer);
+        let entry = assistant("m1", MessageStatus::Complete, parts);
+        let mut rows = rows_for_entry(&entry, false, &mut parse);
+        fold_closed_toggles(&mut rows, &Default::default());
+        assert_eq!(rows.len(), 2);
+        let RowKind::Activity { summary, .. } = &rows[0].kind else {
+            panic!("expected the work run's toggle");
+        };
+        assert_eq!(summary.as_ref(), "Ran 10 commands · 8 thoughts · 1 failed");
+    }
+
+    #[test]
+    fn a_work_run_is_open_while_it_streams_and_closes_when_the_answer_starts() {
+        let working = assistant(
+            "m1",
+            MessageStatus::Streaming,
+            vec![tool_part("x0", "ls"), thought_part("r1", "Hmm")],
+        );
+        let rows = rows_for_entry(&working, false, &mut parse);
+        assert!(matches!(
+            rows[0].kind,
+            RowKind::Activity {
+                auto_open: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[2].kind,
+            RowKind::Thought {
+                live: true,
+                nested: true,
+                ..
+            }
+        ));
+        let mut folded = rows.clone();
+        fold_closed_toggles(&mut folded, &Default::default());
+        assert_eq!(folded.len(), 3, "open run, thought still folded");
+        // A click pins it closed.
+        let mut closed = rows.clone();
+        fold_closed_toggles(&mut closed, &[("m1#x0.activity".into(), false)].into());
+        assert_eq!(ids(&closed), ["m1#x0.activity"]);
+
+        let answering = assistant(
+            "m1",
+            MessageStatus::Streaming,
+            vec![
+                tool_part("x0", "ls"),
+                thought_part("r1", "Hmm"),
+                text_part("t2", "So"),
+            ],
+        );
+        let mut rows = rows_for_entry(&answering, false, &mut parse);
+        fold_closed_toggles(&mut rows, &Default::default());
+        assert_eq!(ids(&rows), ["m1#x0.activity", "m1#t2.0"]);
+    }
+
+    #[test]
+    fn only_a_run_that_mixes_tools_and_thinking_folds() {
+        // Tools alone: one group, as before.
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("x0", "ls"),
+                text_part("t1", "   "),
+                tool_part("x2", "pwd"),
+                text_part("t3", "Done."),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(ids(&rows), ["m1#g0", "m1#t3.0"]);
+        let RowKind::ToolGroup { tools, nested, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tools.len(), 2, "an empty text part splits nothing");
+        assert!(!nested);
+
+        // Answer text between a thought and the tools: separate runs.
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                thought_part("r0", "Plan"),
+                text_part("t1", "Let me look."),
+                tool_part("x2", "ls"),
+                text_part("t3", "Done."),
+            ],
+        );
+        let mut rows = rows_for_entry(&entry, false, &mut parse);
+        fold_closed_toggles(&mut rows, &Default::default());
+        assert_eq!(ids(&rows), ["m1#r0.thought", "m1#t1.0", "m1#g0", "m1#t3.0"]);
+    }
+
+    #[test]
+    fn a_work_run_still_leads_to_the_worked_rule() {
+        let mut entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                thought_part("r0", "Plan"),
+                tool_part("x1", "ls"),
+                text_part("t2", "Done."),
+            ],
+        );
+        entry.completed_at = Some(90_000);
+        let mut rows = rows_for_entry(&entry, false, &mut parse);
+        fold_closed_toggles(&mut rows, &Default::default());
+        assert_eq!(ids(&rows), ["m1#r0.activity", "m1#worked", "m1#t2.0"]);
+    }
+
+    #[test]
+    fn thought_previews_drop_title_markup() {
+        assert_eq!(
+            thought_preview("**Planning the fix**\n\nFirst…"),
+            "Planning the fix"
+        );
+        assert_eq!(thought_preview("\n## Heading\nbody"), "Heading");
+        assert_eq!(
+            thought_preview("Check `__init__` first"),
+            "Check `__init__` first"
+        );
+        assert_eq!(thought_preview("_Weighing options_"), "Weighing options");
+        assert_eq!(thought_preview(""), "");
     }
 
     #[test]
@@ -7052,7 +7632,7 @@ mod tests {
         assert!(folded.last().unwrap().timestamp.is_some());
 
         let mut open = rows.clone();
-        fold_closed_toggles(&mut open, &["m1#t0.original".into()].into());
+        fold_closed_toggles(&mut open, &[("m1#t0.original".into(), true)].into());
         assert_eq!(open.len(), rows.len());
     }
 
