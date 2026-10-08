@@ -41,9 +41,10 @@ struct TranscriptView: View {
 
     @State private var veils = VeilStore()
     @State private var folds: [String: Bool] = [:]
-    /// Toggles the reader opened (a translation's original, a thought);
-    /// every other one stays folded (transcript.rs `open_toggles`).
-    @State private var openToggles: Set<String> = []
+    /// Toggles the reader tapped (a translation's original, a thought, a
+    /// work run) and the state they left them in; every other one keeps its
+    /// default (transcript.rs `toggle_pins`).
+    @State private var togglePins: [String: Bool] = [:]
     /// Per tool group row: the part ids of chips whose detail is open.
     @State private var openChips: [String: Set<String>] = [:]
     @State private var turns = TurnTracker()
@@ -463,7 +464,7 @@ struct TranscriptView: View {
     /// rounds, jumps) is into this array.
     private func transcriptRows() -> [TranscriptRow] {
         store.transcriptCache.rows(revision: store.revision, entries: store.entries,
-                                   pendingSends: store.pendingSends, openToggles: openToggles)
+                                   pendingSends: store.pendingSends, togglePins: togglePins)
     }
 
     private func windowStart(of rows: [TranscriptRow]) -> Int {
@@ -638,7 +639,8 @@ struct TranscriptView: View {
 
             case .toolGroup(let tools, let autoOpen):
                 ToolGroupView(tools: tools,
-                              open: folds[row.id] ?? autoOpen,
+                              open: row.nested || (folds[row.id] ?? autoOpen),
+                              nested: row.nested,
                               userToggled: folds[row.id] != nil,
                               openChips: openChips[row.id] ?? [],
                               toggleChip: { partId in
@@ -658,19 +660,37 @@ struct TranscriptView: View {
                 ErrorChipView(message: message)
 
             case .translationOriginal:
-                FoldToggle(open: openToggles.contains(row.id), closedLabel: "Show original",
+                let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
+                FoldToggle(open: open, closedLabel: "Show original",
                            openLabel: "Hide original", identifier: "translation-original-toggle") {
-                    openToggles.formSymmetricDifference([row.id])
+                    togglePins[row.id] = !open
                 }
 
-            case .thought(_, let live):
-                let label = live ? "Thinking…" : "Thought"
-                FoldToggle(open: openToggles.contains(row.id), closedLabel: label,
-                           openLabel: label, identifier: "thought-toggle") {
-                    openToggles.formSymmetricDifference([row.id])
+            case .activity(_, let summary, _):
+                let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
+                FoldToggle(open: open, closedLabel: summary, openLabel: summary,
+                           identifier: "activity-toggle") {
+                    togglePins[row.id] = !open
+                }
+
+            case .thought(_, let live, let preview):
+                let open = TranscriptRowBuilder.isOpen(row, pins: togglePins)
+                if row.nested {
+                    ThoughtChipRow(live: live, preview: preview, open: open) {
+                        togglePins[row.id] = !open
+                    }
+                } else {
+                    let label = live ? "Thinking…" : "Thought"
+                    FoldToggle(open: open, closedLabel: label,
+                               openLabel: label, identifier: "thought-toggle") {
+                        togglePins[row.id] = !open
+                    }
                 }
             }
         }
+        // A work run's thought text sits under its chip, lined up with the
+        // chips' icons.
+        .padding(.leading, row.nested && row.partKey != nil ? ThoughtChipRow.textInset : 0)
         .padding(.top, row.topGap)
         .padding(.horizontal, 16)
         .environment(\.transcriptEntry, TranscriptEntryContext(entryId: row.entryId, role: row.role,
@@ -751,8 +771,8 @@ final class TranscriptBuilderCache {
     private var completed: [String: CompletedParse] = [:]
     private var cachedRevision: UInt64?
     private var builtRows: [TranscriptRow] = []
-    /// The open toggles `cachedRows` was folded for; nil forces a refold.
-    private var foldedFor: Set<String>?
+    /// The toggle pins `cachedRows` was folded for; nil forces a refold.
+    private var foldedFor: [String: Bool]?
     private var cachedRows: [TranscriptRow] = []
     private var prewarming = false
     /// The conversation's rounds, for the turn scrubber — rebuilt with the
@@ -761,22 +781,23 @@ final class TranscriptBuilderCache {
     /// Round index by the id of the row that starts it.
     private(set) var roundIndex: [String: Int] = [:]
 
-    /// Rows for the store's current `revision`, with the toggles not in
-    /// `openToggles` folded away. Rows only change when the doc or the open
-    /// set does — gate on both and hand back the same array.
+    /// Rows for the store's current `revision`, with the closed toggles
+    /// (`togglePins` over each toggle's default) folded away. Rows only
+    /// change when the doc or the pins do — gate on both and hand back the
+    /// same array.
     func rows(revision: UInt64,
               entries: [MessageEntry],
               pendingSends: [PendingSend],
-              openToggles: Set<String>) -> [TranscriptRow] {
+              togglePins: [String: Bool]) -> [TranscriptRow] {
         if cachedRevision != revision {
             builtRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
                                                   parsers: &parsers, completed: &completed)
             cachedRevision = revision
             foldedFor = nil
         }
-        if foldedFor == openToggles { return cachedRows }
-        cachedRows = TranscriptRowBuilder.foldClosedToggles(builtRows, open: openToggles)
-        foldedFor = openToggles
+        if foldedFor == togglePins { return cachedRows }
+        cachedRows = TranscriptRowBuilder.foldClosedToggles(builtRows, pins: togglePins)
+        foldedFor = togglePins
         let rounds = TranscriptRound.rounds(in: cachedRows)
         if rounds != self.rounds {
             self.rounds = rounds
@@ -938,6 +959,9 @@ struct ProseRowView: View {
 struct ToolGroupView: View {
     let tools: [ToolItem]
     let open: Bool
+    /// Part of a work run: the run's toggle is the header, so only the
+    /// chips show.
+    var nested = false
     let userToggled: Bool
     /// Part ids of the chips whose detail is open.
     let openChips: Set<String>
@@ -947,24 +971,7 @@ struct ToolGroupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header stays quiet even on failure — chips carry the red.
-            Button(action: toggle) {
-                HStack(spacing: 8) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Theme.textMuted)
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .frame(width: 18, height: 18)
-                        .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 5))
-                    Text(toolGroupSummary(tools))
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .frame(height: 26)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PressWashButtonStyle(cornerRadius: 6))
+            if !nested { header }
 
             if open {
                 VStack(alignment: .leading, spacing: 0) {
@@ -974,9 +981,82 @@ struct ToolGroupView: View {
                         }
                     }
                 }
-                .padding(.top, 2)
+                .padding(.top, nested ? 0 : 2)
             }
         }
+    }
+
+    private var header: some View {
+        Button(action: toggle) {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 18, height: 18)
+                    .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 5))
+                Text(toolGroupSummary(tools))
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressWashButtonStyle(cornerRadius: 6))
+    }
+}
+
+/// A thought inside a work run (transcript.rs `render_thought_chip`): a chip
+/// like the tool calls around it — the bulb, "Thought" and the thought's
+/// first line, a spinner while it streams. Tapping shows or hides its text
+/// below.
+struct ThoughtChipRow: View {
+    let live: Bool
+    let preview: String
+    let open: Bool
+    let toggle: () -> Void
+
+    /// The thought's text lines up with the chips' icons (card inset 12 +
+    /// header padding 8).
+    static let textInset: CGFloat = 20
+    private static let radius: CGFloat = 9
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 18, height: 18)
+                Text(live ? "Thinking…" : "Thought")
+                    .font(Theme.sans(12, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                Text(preview)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.text.opacity(0.85))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if live { ToolStatusIcon(status: .running) }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted.opacity(0.8))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 18, height: 18)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressWashButtonStyle(cornerRadius: Self.radius))
+        .background(whiteAlpha(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius).strokeBorder(whiteAlpha(0.05), lineWidth: 1))
+        .padding(.leading, 12)
+        .padding(.vertical, 4)
+        .accessibilityValue(open ? "Expanded" : "Collapsed")
+        .accessibilityIdentifier("thought-chip")
     }
 }
 

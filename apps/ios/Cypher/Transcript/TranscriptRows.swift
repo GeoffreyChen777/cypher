@@ -17,6 +17,13 @@ enum RowKind {
     /// A block with a view of its own: a code block, table, quote or rule.
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
+    /// The toggle over a run of work that mixed tool calls with thinking —
+    /// one row instead of alternating "Thought" and "Ran N commands" rows
+    /// (transcript.rs `Activity`). The `rows` that follow are the run in
+    /// order (its tool groups, its thoughts and their blocks, all `nested`);
+    /// they are dropped while it is closed. Open by default only while the
+    /// run is the streaming tail, like a tool group.
+    case activity(rows: Int, summary: String, autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
     case errorChip(message: String)
     /// The toggle over an append-mode translation's original answer. The
@@ -27,8 +34,9 @@ enum RowKind {
     /// The toggle over a reasoning part: "Thinking…" while it streams,
     /// "Thought" once settled. The `rows` that follow — the thought's blocks,
     /// `muted` — are dropped while it is closed, the default (transcript.rs
-    /// `Thought`).
-    case thought(rows: Int, live: Bool)
+    /// `Thought`). In a work run it is a chip labelled with `preview`, the
+    /// thought's first line.
+    case thought(rows: Int, live: Bool, preview: String)
 }
 
 /// What an append-mode translation puts between the agent's answer and its
@@ -80,6 +88,9 @@ struct TranscriptRow: Identifiable {
     var role: MessageRole = .assistant
     /// A block of the model's thinking: painted in the muted tone.
     var muted = false
+    /// Part of a work run (`activity`): a tool group shows only its chips, a
+    /// thought is a chip, and a thought's blocks sit indented under it.
+    var nested = false
 }
 
 /// A settled part's parse, keyed by content so a completed block is parsed
@@ -141,9 +152,23 @@ enum TranscriptRowBuilder {
             return isSteer ? TranscriptView.gapTurn : TranscriptView.gapExchange
         }
         if row.turnStart { return TranscriptView.gapTurn }
+        if row.nested { return nestedGap(for: row, previous: previous) }
         // Same part ⇒ these are sibling markdown blocks, not a new turn.
         if let key = row.partKey, key == previous?.partKey { return MD.blockGap }
         return TranscriptView.gapBlock
+    }
+
+    /// transcript.rs `nested_gap`: chips in a work run stack like a tool
+    /// group's (their cards carry their own margins), a thought's text sits
+    /// just under its chip, and the chip after it gets some air.
+    private static func nestedGap(for row: TranscriptRow, previous: TranscriptRow?) -> CGFloat {
+        guard let previous else { return 0 }
+        if case .activity = previous.kind { return 2 }
+        let isBlock = { (r: TranscriptRow) in r.partKey != nil }
+        if isBlock(row) {
+            return row.partKey == previous.partKey ? MD.blockGap : 2
+        }
+        return isBlock(previous) ? 6 : 0
     }
 
     private static func rowsForEntry(_ entry: MessageEntry,
@@ -172,6 +197,47 @@ enum TranscriptRowBuilder {
         var pendingTools: [ToolItem] = []
         var groupIx = 0
         let lastPartIx = entry.parts.indices.last
+        // The open work run: where its rows start and the part that opened
+        // it (the activity row's id). Tool calls and thoughts extend it;
+        // anything the reader sees between them closes it.
+        var run: (start: Int, firstPart: String)?
+
+        func openRun(_ partId: String) {
+            if run == nil { run = (rows.count, partId) }
+        }
+
+        /// transcript.rs `fold_work_run`: a run that mixed tool calls with
+        /// thinking folds behind one activity row. A run of only tools is one
+        /// group already and a lone thought its own toggle.
+        func closeRun(autoOpen: Bool) {
+            guard let open = run else { return }
+            run = nil
+            let start = open.start
+            var thoughts = 0
+            var tools: [ToolItem] = []
+            for row in rows[start...] {
+                switch row.kind {
+                case .thought: thoughts += 1
+                case .toolGroup(let group, _): tools += group
+                default: break
+                }
+            }
+            guard thoughts > 0, !tools.isEmpty else { return }
+            for ix in start..<rows.count {
+                rows[ix].nested = true
+                // A thought that gains its first tool call redraws as a chip.
+                rows[ix].version ^= 1 << 61
+            }
+            let summary = toolGroupSummary(tools, thoughts: thoughts)
+            let count = rows.count - start
+            let activity = TranscriptRow(id: "\(entry.id)#\(open.firstPart).activity",
+                                         version: (fnv1a(summary) ^ UInt64(count)) << 1 | (autoOpen ? 1 : 0),
+                                         turnStart: rows[start].turnStart,
+                                         kind: .activity(rows: count, summary: summary, autoOpen: autoOpen),
+                                         entryId: entry.id, timestamp: nil, partKey: nil)
+            rows[start].turnStart = false
+            rows.insert(activity, at: start)
+        }
 
         func flushTools(lastIx: Int?) {
             guard !pendingTools.isEmpty else { return }
@@ -224,12 +290,17 @@ enum TranscriptRowBuilder {
         for (ix, part) in entry.parts.enumerated() {
             switch part {
             case .tool(let partId, let call, let isError, let resolved):
+                // Nothing is appended until the group flushes, so the run's
+                // rows start here.
+                openRun(partId)
                 pendingTools.append(ToolItem(id: partId, call: call, isError: isError, resolved: resolved))
                 if ix == lastPartIx { flushTools(lastIx: ix) }
 
             case .text(let partId, let text, let agentText):
+                // An empty text part renders nothing, so it splits nothing.
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 flushTools(lastIx: ix - 1)
-                guard !text.isEmpty else { continue }
+                closeRun(autoOpen: false)
                 let key = "\(entry.id)#\(partId)"
                 live.insert(key)
                 let isLiveTail = streaming && ix == lastPartIx
@@ -252,8 +323,9 @@ enum TranscriptRowBuilder {
                                 liveTail: isLiveTail, muted: false)
 
             case .reasoning(let partId, let text):
-                flushTools(lastIx: ix - 1)
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                flushTools(lastIx: ix - 1)
+                openRun(partId)
                 let key = "\(entry.id)#\(partId)"
                 live.insert(key)
                 // Still thinking: the reasoning is the live tail.
@@ -261,10 +333,12 @@ enum TranscriptRowBuilder {
                 let blocks = parse(text: text, key: key, streaming: isLiveTail,
                                    parsers: &parsers, completed: &completed)
                 let runs = proseRuns(blocks, liveTail: isLiveTail)
+                let preview = thoughtPreview(text)
                 rows.append(TranscriptRow(id: "\(key).thought",
-                                          version: UInt64(runs.count) << 1 | (isLiveTail ? 1 : 0),
+                                          version: (UInt64(runs.count) << 1 | (isLiveTail ? 1 : 0))
+                                              ^ fnv1a(preview) << 8,
                                           turnStart: first,
-                                          kind: .thought(rows: runs.count, live: isLiveTail),
+                                          kind: .thought(rows: runs.count, live: isLiveTail, preview: preview),
                                           entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
                 appendBlockRows(key: key, blocks: blocks, runs: runs, partIx: ix,
@@ -272,6 +346,7 @@ enum TranscriptRowBuilder {
 
             case .input(let partId, _, let questions, let resolved):
                 flushTools(lastIx: ix - 1)
+                closeRun(autoOpen: false)
                 let header = questions.first.map { QuestionPresentation($0).header } ?? "Question"
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
                                           version: (fnv1a(header) << 1) | (resolved ? 1 : 0),
@@ -282,6 +357,7 @@ enum TranscriptRowBuilder {
 
             case .error(let partId, let message):
                 flushTools(lastIx: ix - 1)
+                closeRun(autoOpen: false)
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: fnv1a(message),
                                           turnStart: first,
                                           kind: .errorChip(message: message),
@@ -290,6 +366,25 @@ enum TranscriptRowBuilder {
             }
         }
         flushTools(lastIx: lastPartIx)
+        // Still the tail of a streaming reply: open, like a live tool group.
+        closeRun(autoOpen: streaming)
+    }
+
+    /// transcript.rs `thought_preview`: a thought's label in a work run — its
+    /// first line, without the heading or emphasis markers models often
+    /// title a thought with ("**Planning**").
+    static func thoughtPreview(_ text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline)
+            .lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+        var title = Substring(line.drop { $0 == "#" }.drop { $0 == " " })
+        for marker in ["**", "__", "*", "_"]
+        where title.count > marker.count * 2 && title.hasPrefix(marker) && title.hasSuffix(marker) {
+            title = title.dropFirst(marker.count).dropLast(marker.count)
+            break
+        }
+        return title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// transcript.rs `appended_original_blocks`: how many top-level blocks of
@@ -311,22 +406,31 @@ enum TranscriptRowBuilder {
         return rule + 1
     }
 
-    /// The rows a toggle covers, if `kind` is one (a translation's original
-    /// or a thought).
-    static func toggledRows(_ kind: RowKind) -> Int? {
+    /// transcript.rs `toggle_span`: the rows a toggle covers and whether it
+    /// starts open, if `kind` is one. A translation's original and a thought
+    /// start closed, a work run only while it streams.
+    static func toggleSpan(_ kind: RowKind) -> (rows: Int, openByDefault: Bool)? {
         switch kind {
-        case .translationOriginal(let rows), .thought(let rows, _): return rows
+        case .translationOriginal(let rows), .thought(let rows, _, _): return (rows, false)
+        case .activity(let rows, _, let autoOpen): return (rows, autoOpen)
         default: return nil
         }
     }
 
+    /// Whether the toggle `row` is open: the reader's tap (`pins`, by row
+    /// id) wins, else the toggle's default.
+    static func isOpen(_ row: TranscriptRow, pins: [String: Bool]) -> Bool {
+        guard let span = toggleSpan(row.kind) else { return false }
+        return pins[row.id] ?? span.openByDefault
+    }
+
     /// transcript.rs `fold_closed_toggles`: drop the rows each CLOSED toggle
-    /// covers. `open` holds the ids of toggles the user expanded; every other
-    /// toggle stays collapsed. The row after a fold re-takes its gap from the
-    /// toggle it now follows, and a folded row's timestamp (a reply that
+    /// covers. `pins` holds the toggles the reader tapped; every other
+    /// toggle keeps its default. The row after a fold re-takes its gap from
+    /// the toggle it now follows, and a folded row's timestamp (a reply that
     /// ended while thinking) moves onto its toggle.
-    static func foldClosedToggles(_ rows: [TranscriptRow], open: Set<String>) -> [TranscriptRow] {
-        guard rows.contains(where: { toggledRows($0.kind) != nil }) else { return rows }
+    static func foldClosedToggles(_ rows: [TranscriptRow], pins: [String: Bool]) -> [TranscriptRow] {
+        guard rows.contains(where: { toggleSpan($0.kind) != nil }) else { return rows }
         var folded: [TranscriptRow] = []
         folded.reserveCapacity(rows.count)
         var hide = 0
@@ -345,9 +449,9 @@ enum TranscriptRowBuilder {
                 regap = false
             }
             folded.append(row)
-            if let hidden = toggledRows(row.kind), !open.contains(row.id) {
-                hide = hidden
-                regap = hidden > 0
+            if let span = toggleSpan(row.kind), !isOpen(row, pins: pins) {
+                hide = span.rows
+                regap = span.rows > 0
             }
         }
         return folded
@@ -651,8 +755,9 @@ extension RenderToolCall {
 }
 
 /// "Ran 3 commands · edited 2 files · 1 failed" (transcript.rs
-/// tool_group_summary).
-func toolGroupSummary(_ tools: [ToolItem]) -> String {
+/// tool_group_summary). A work run counts its thoughts before any failures
+/// (view.rs `work_summary`).
+func toolGroupSummary(_ tools: [ToolItem], thoughts: Int = 0) -> String {
     var segments: [String] = []
     let runs = tools.filter { $0.call.tag == "exec" }.count
     let scripts = tools.filter(\.call.isScript).count
@@ -671,6 +776,7 @@ func toolGroupSummary(_ tools: [ToolItem]) -> String {
     if searches > 0 { segments.append(searches == 1 ? "1 search" : "\(searches) searches") }
     let other = tools.count - runs - scripts - edits - reads - searches
     if other > 0 { segments.append(other == 1 ? "1 tool" : "\(other) tools") }
+    if thoughts > 0 { segments.append(thoughts == 1 ? "1 thought" : "\(thoughts) thoughts") }
     let failed = tools.filter(\.isError).count
     if failed > 0 { segments.append("\(failed) failed") }
     guard var summary = segments.first else { return "\(tools.count) tools" }
