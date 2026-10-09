@@ -6,24 +6,20 @@ import { defaultNotificationSettings } from "../../src/notifications-model";
 import type { BadgeSnapshot, PushMessage } from "../../src/apns";
 import type { Env } from "../../src/env";
 import type { Row } from "../../src/registry-core";
+import { pushEnv, row } from "./support";
 
 function fixture(state: DurableObjectState) {
   const rows = new Map<string, Row>();
-  const row = (kind: string, id: string, fields: Row["fields"]): Row =>
-    ({ kind, id, seq: 1, deleted: false, fields, clocks: {} });
   for (const id of ["one", "two"]) rows.set(`chats/${id}`, row("chats", id, { spaceId: "project", deviceId: "host" }));
   rows.set("spaces/project", row("spaces", "project", {}));
   const calls: PushMessage[] = [];
   let sendHook: ((message: PushMessage) => Promise<void>) | undefined;
-  const config = { NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
-    APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test", PUSH_DEVICES: {
-      idFromString: (id: string) => id, get: () => ({ fetch: async (r: Request) => {
-        const body = await r.json() as { message: PushMessage };
-        calls.push(body.message);
-        await sendHook?.(body.message);
-        return Response.json({ sent: true });
-      } })
-    } } as unknown as Env;
+  const config = pushEnv(async r => {
+    const body = await r.json() as { message: PushMessage };
+    calls.push(body.message);
+    await sendHook?.(body.message);
+    return Response.json({ sent: true });
+  });
   const make = () => new Notifications(state, config, (kind, id) => rows.get(`${kind}/${id}`), () => {});
   let service = make();
   state.storage.sql.exec("INSERT INTO notify_kv(key,value) VALUES('recipients',?)", JSON.stringify([

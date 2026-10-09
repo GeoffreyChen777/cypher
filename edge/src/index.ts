@@ -2,7 +2,7 @@
  * Cypher-native edge Worker (design §2, ARCHITECTURE §6): JWT auth at the
  * edge, then forwarding into per-chat, per-user registry, and per-device
  * Durable Objects. Also serves content-addressed R2 attachments (§1.2) and
- * the absorbed WorkOS auth routes (formerly apps/server).
+ * the WorkOS auth routes (auth-routes.ts).
  *
  * Routes:
  *   GET  /health
@@ -34,7 +34,7 @@
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, json, type Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
@@ -60,12 +60,6 @@ const safeDecode = (segment: string): string | undefined => {
  * wider than ID_RE but still no slashes, so a part id can't traverse keys. */
 const PART_RE = /^[A-Za-z0-9._:#~-]{1,200}$/;
 const MAX_TOOL_BLOB_BYTES = 1024 * 1024;
-
-const json = (value: unknown, status = 200): Response =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" }
-  });
 
 /** Forward into a DO with the verified user stamped on the request. */
 const forward = (

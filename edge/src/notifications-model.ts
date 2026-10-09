@@ -4,7 +4,7 @@ export const ACTIVITY_LEASE_MS = 45_000;
 /** Clock tolerance between the device that stamped a chat's synced seen
  * marker and the host that stamped the event (both are device clocks). */
 export const SEEN_SLACK_MS = 2_000;
-export const INTERACTION_MS = 120_000;
+const INTERACTION_MS = 120_000;
 export const SHORT_RUN_MS = 30_000;
 export const ID = /^[A-Za-z0-9_-]{1,128}$/;
 export type NoticeKind = "completed" | "failed" | "input";

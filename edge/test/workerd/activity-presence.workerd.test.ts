@@ -16,29 +16,9 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vitest";
 import { RegistryRoom } from "../../src/registry-room";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
+import { APNS_TEST_ENV, peer } from "./support";
 
-// notificationsAvailable() gates the whole path; it needs a complete APNs
-// config, not just the flag. Public test values, never used outside workerd.
-const ENV = {
-  NOTIFICATIONS_ENABLED: "true", APNS_TEAM_ID: "TEAM123456",
-  APNS_KEY_ID: "TESTKEY001", APNS_PRIVATE_KEY: "test",
-  PUSH_DEVICES: {} as DurableObjectNamespace
-} as unknown as Env;
-
-/** A socket the room treats as a joined peer. */
-function peer(device: string) {
-  let attachment: unknown = { userId: "u", device, ready: true };
-  const frames: string[] = [];
-  return {
-    frames,
-    ws: {
-      deserializeAttachment: () => attachment,
-      serializeAttachment: (v: unknown) => { attachment = v; },
-      send: (s: string) => frames.push(s),
-      close: () => {}
-    } as unknown as WebSocket
-  };
-}
+const ENV = { ...APNS_TEST_ENV, PUSH_DEVICES: {} as DurableObjectNamespace } as unknown as Env;
 
 const activity = (over: Record<string, unknown> = {}) => ({
   clientId: "desktop-1", sequence: 1, platform: "desktop",

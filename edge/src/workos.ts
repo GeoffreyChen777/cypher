@@ -1,7 +1,6 @@
 /**
- * Minimal WorkOS User Management REST client — the fetch-based port of the
- * old apps/server `WorkOsAuth` service (which used @workos-inc/node; the
- * Worker keeps it SDK-free). This is the one place that holds the WorkOS
+ * Minimal WorkOS User Management REST client — fetch-based, so the Worker
+ * stays SDK-free. This is the one place that holds the WorkOS
  * **API key** (a Worker secret). Device backends build the public authorize
  * URL themselves and delegate the secret-bearing steps here, so the key never
  * lands on a device.
@@ -16,7 +15,7 @@ const API = "https://api.workos.com";
 /** Stable machine-readable codes carried by [`WorkOsAuthError`]. Devices key
  * session-revocation off `invalid_grant` ALONE — every other code is
  * retryable, so a transient WorkOS/network hiccup can never clear a session. */
-export type WorkOsErrorCode = "invalid_grant" | "rate_limited" | "network" | "upstream";
+type WorkOsErrorCode = "invalid_grant" | "rate_limited" | "network" | "upstream";
 
 /** Typed WorkOS failure. Replaces the old blanket `WorkOsAuthFailed` → 401
  * mapping: carries the HTTP status to surface, a stable machine-readable
@@ -53,7 +52,7 @@ export class WorkOsEmailVerificationRequired extends Error {
   }
 }
 
-export interface ExchangeResult {
+interface ExchangeResult {
   readonly user: {
     readonly id: string;
     readonly email: string;
@@ -66,7 +65,7 @@ export interface ExchangeResult {
   readonly refreshToken: string;
 }
 
-export interface RefreshResult {
+interface RefreshResult {
   readonly accessToken: string;
   readonly refreshToken: string;
   /** The user WorkOS returned with the refresh, when it did. `user` ABSENT
@@ -82,7 +81,7 @@ export interface RefreshResult {
   };
 }
 
-export interface OrgMembership {
+interface OrgMembership {
   readonly id: string;
   readonly organizationId: string;
   readonly name: string;

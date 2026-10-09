@@ -20,7 +20,7 @@ export const MAX_ROW_BYTES = 1024 * 1024;
 export const CHECKPOINT_BLOB = "checkpoint";
 export const FRONTIER_BLOB = "checkpoint-frontier";
 
-export interface LogRow {
+interface LogRow {
   seq: number;
   device: string;
   batchId: string;
@@ -53,7 +53,7 @@ export const headSeq = (sql: SqlStorage): number => Number(getMeta(sql, "headSeq
  * below the floor must load the checkpoint before requesting rows. */
 export const seqFloor = (sql: SqlStorage): number => Number(getMeta(sql, "seqFloor") ?? "0");
 
-export type AppendOutcome =
+type AppendOutcome =
   | { ok: true; seq: number; dup: boolean }
   | { ok: false; error: "too_large" | "empty" };
 
@@ -112,7 +112,7 @@ export function* rowsAfter(
   }
 }
 
-export type CheckpointOutcome =
+type CheckpointOutcome =
   | { ok: true; seqFloor: number; pruned: number }
   | { ok: false; error: "floor_regression" | "ahead_of_head" | "empty" };
 
@@ -151,7 +151,7 @@ export const commitCheckpoint = (
 const rowCount = (sql: SqlStorage): number =>
   [...sql.exec("SELECT COUNT(*) AS n FROM rows")][0]?.n as number;
 
-export interface LogStats {
+interface LogStats {
   headSeq: number;
   seqFloor: number;
   rowCount: number;

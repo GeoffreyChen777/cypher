@@ -142,8 +142,7 @@ const until = async (fn, what, ms = 8000) => {
 
 // ── absorbed auth routes ──────────────────────────────────────────────────
 {
-  // Dev instances have no WORKOS_API_KEY: secret-bearing routes answer 501
-  // (matching the old apps/server behavior when WorkOS is unconfigured).
+  // Dev instances have no WORKOS_API_KEY: secret-bearing routes answer 501.
   const exchange = await fetch(`${base}/auth/exchange`, {
     method: "POST",
     headers: { "content-type": "application/json" },
