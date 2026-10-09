@@ -968,10 +968,8 @@ impl Render for Composer {
         });
 
         // Turn-boundary steering notice: for agents without mid-turn
-        // injection (Grok over ACP today), a "steer" is queued and applies
-        // when the current turn finishes. Without this hint the queue read
-        // as a dropped steer (user report: "my steer didn't apply until
-        // grok already finished").
+        // injection, a "steer" is queued and applies when the current turn
+        // finishes. Without this hint the queue reads as a dropped steer.
         let steer_queues = mode == SendButtonMode::Steer
             && self.pickers.read(cx).resolved_steering_mode(cx)
                 == Some(cypher_proto::SteeringMode::TurnBoundary);

@@ -61,7 +61,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     let helper = cypher_harness::resolve_cli("helper-cli")
         .expect("helper-cli resolves via login-shell PATH");
     assert_eq!(helper, shell_bin.join("helper-cli"), "{helper:?}");
-    // The native pi harness resolves the pi CLI itself (no pi-acp adapter).
+    // The native pi harness resolves the pi CLI itself.
     let pi = PiHarness::new(dir.path().join("agent-sessions"))
         .launch_program()
         .expect("pi resolves via login-shell PATH");
