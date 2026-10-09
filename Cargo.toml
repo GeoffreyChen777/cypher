@@ -92,6 +92,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+getrandom = "0.4"
+# Already in the graph via gpui (same version/features): re-encodes pasted
+# TIFF/BMP images as PNG before upload.
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
+objc = "0.2"
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
