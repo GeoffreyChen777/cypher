@@ -150,7 +150,7 @@ existing files rather than overwriting them. See
    A local-only packaging override is also available:
 
    ```bash
-   PI_RUNTIME_VERSION=0.85.1.2 scripts/package-pi-runtime.sh
+   PI_RUNTIME_VERSION=1.0.1.4 scripts/package-pi-runtime.sh
    ```
 
 4. Test the generated archive under `target/package/`.
