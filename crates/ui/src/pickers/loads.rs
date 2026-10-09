@@ -71,7 +71,9 @@ impl Pickers {
         };
         // The committed chat's harness may be outside the offered set (e.g.
         // disabled after the chat was created) — its models still matter.
+        // Retired harnesses have no driver to list models from.
         if let Some(effective) = self.effective_harness(cx)
+            && matches!(effective, HarnessId::Pi | HarnessId::Mock)
             && !targets.contains(&effective)
         {
             targets.push(effective);
@@ -158,7 +160,7 @@ impl Pickers {
                         // Display hygiene for catalogs from older engines
                         // (`default` alias rows, orphan `[1m]` variants,
                         // version-less alias labels).
-                        Ok(models) => Loadable::Ready(normalize_model_rows(harness, models)),
+                        Ok(models) => Loadable::Ready(normalize_model_rows(models)),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),

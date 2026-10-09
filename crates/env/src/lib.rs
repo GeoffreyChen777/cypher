@@ -91,14 +91,6 @@ pub fn worktrees_dir() -> PathBuf {
     home_dir().join(".cypher").join("worktrees")
 }
 
-/// Adapters prefix: explicit `CYPHER_ADAPTERS_DIR`, else `~/.cypher/adapters`.
-pub fn adapters_dir() -> Option<PathBuf> {
-    if let Some(dir) = var_os("ADAPTERS_DIR").filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    Some(home_dir().join(".cypher").join("adapters"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,21 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_and_adapters_are_cypher_only() {
+    fn worktrees_are_cypher_only() {
         set("CYPHER_WORKTREES_DIR", Some("/tmp/wt"));
         assert_eq!(worktrees_dir(), PathBuf::from("/tmp/wt"));
         set("CYPHER_WORKTREES_DIR", None);
         assert_eq!(
             worktrees_dir(),
             home_dir().join(".cypher").join("worktrees")
-        );
-
-        set("CYPHER_ADAPTERS_DIR", Some("/tmp/ad"));
-        assert_eq!(adapters_dir(), Some(PathBuf::from("/tmp/ad")));
-        set("CYPHER_ADAPTERS_DIR", None);
-        assert_eq!(
-            adapters_dir(),
-            Some(home_dir().join(".cypher").join("adapters"))
         );
     }
 }

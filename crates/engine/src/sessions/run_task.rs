@@ -47,9 +47,9 @@ pub(super) fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
 
 /// The effective prompt as `harness` may receive it. A quote selected from a
 /// displayed translation carries alignment input holding that translation;
-/// only Pi runs the extension that resolves and removes it, so every other
-/// agent gets it stripped here and reads the original passage the quote
-/// already holds.
+/// only Pi runs the extension that resolves and removes it, so any other
+/// harness (the mock) gets it stripped here and reads the original passage
+/// the quote already holds.
 pub(crate) fn agent_prompt_for(harness: HarnessId, agent_prompt: Option<String>) -> Option<String> {
     match harness {
         HarnessId::Pi => agent_prompt,
@@ -1009,13 +1009,11 @@ mod agent_prompt_tests {
             agent_prompt_for(HarnessId::Pi, Some(prompt.clone())).as_deref(),
             Some(prompt.as_str())
         );
-        for harness in [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Mock] {
-            let sent = agent_prompt_for(harness, Some(prompt.clone())).unwrap();
-            assert!(
-                !sent.contains("译文") && sent.contains("Original passage."),
-                "{sent}"
-            );
-        }
-        assert_eq!(agent_prompt_for(HarnessId::Codex, None), None);
+        let sent = agent_prompt_for(HarnessId::Mock, Some(prompt.clone())).unwrap();
+        assert!(
+            !sent.contains("译文") && sent.contains("Original passage."),
+            "{sent}"
+        );
+        assert_eq!(agent_prompt_for(HarnessId::Mock, None), None);
     }
 }

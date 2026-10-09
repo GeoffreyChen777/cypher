@@ -682,7 +682,7 @@ fn classify_backend_error(
     match err {
         // The hosting device lacks/needs a newer Pi CLI — actionable update/
         // install guidance, not a boundary problem.
-        HarnessError::NotInstalled(_) | HarnessError::Install(_) => Ok(unavail(
+        HarnessError::NotInstalled(_) => Ok(unavail(
             SessionForkUnavailableReason::Unsupported,
             &format!(
                 "{} requires the Pi CLI on the device hosting the session. \
@@ -726,7 +726,7 @@ fn classify_backend_error(
         // A slow/hung helper is an infrastructure problem: surface as a real
         // error (the UI retry keeps the same request id, so a late-created
         // fork is still recovered idempotently).
-        HarnessError::Protocol(_) | HarnessError::Io(_) => {
+        HarnessError::Protocol(_) | HarnessError::Io(_) | HarnessError::Unsupported(_) => {
             Err(EngineError::Other(format!("pi session fork failed: {err}")))
         }
     }

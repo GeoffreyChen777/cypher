@@ -1024,10 +1024,6 @@ impl Engine {
         pi_runtime.enable_cleanup();
         core.set_pi_runtime(pi_runtime);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
-        // Managed ACP adapters install in the background at boot (agents
-        // whose CLI is present but whose adapter isn't yet), so a first chat
-        // never waits on — or dies inside — an npm run.
-        cypher_harness::acp::prewarm_managed_adapters();
         // First `/` in the composer waits on a short-lived `pi --mode rpc`
         // that loads every extension. Kick that probe off at boot so the
         // popup is a cache hit.

@@ -549,7 +549,7 @@ async fn non_pi_source_is_unavailable() {
         &rig.core,
         SOURCE,
         rig.core.device_id.as_str(),
-        HarnessId::ClaudeCode,
+        HarnessId::Mock,
     );
     let response = fork(&rig.core, "fork-x", "m1").await;
     assert_unavailable(&response, SessionForkUnavailableReason::NonPi);

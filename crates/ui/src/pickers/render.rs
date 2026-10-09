@@ -21,10 +21,7 @@ impl Pickers {
             state.indicator_for(chat_id, chrono::Utc::now()),
             crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
         );
-        let compactable = matches!(
-            self.effective_harness(cx),
-            Some(HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Pi)
-        );
+        let compactable = matches!(self.effective_harness(cx), Some(HarnessId::Pi));
         Some(crate::context_ring::RingReading {
             usage,
             compactable,

@@ -284,9 +284,7 @@ pub(super) fn mcp_tool_parts(name: &str, servers: &[String]) -> Option<(String, 
 /// maps onto the typed [`ToolCall`] cypher renders, extracting the known arg
 /// names; so do Pi's MCP tools (`mcp__{server}__{tool}`, named against the
 /// run's `mcp_servers`) and pi-web-search's `web_search`. Other extension
-/// tools fall through to [`ToolCall::Unknown`] with the raw args. This is the
-/// pi-flavored counterpart of `acp/normalize.rs`'s `typed_call` (ACP keys by
-/// `kind`, pi by tool name).
+/// tools fall through to [`ToolCall::Unknown`] with the raw args.
 pub(super) fn pi_typed_call(name: &str, args: &Value, mcp_servers: &[String]) -> ToolCall {
     let arg = |key: &str| -> Option<String> {
         args.get(key)
@@ -363,7 +361,7 @@ pub(super) fn without_codemode_header(result: &Value) -> Value {
 }
 
 /// The joined text of a pi tool result's `content` blocks (`{type: "text",
-/// text}`), capped like the ACP tool-output path.
+/// text}`), capped at [`OUTPUT_CAP`](crate::OUTPUT_CAP).
 pub(super) fn tool_output_text(result: &Value) -> Option<String> {
     let parts: Vec<&str> = result
         .get("content")

@@ -292,39 +292,14 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&cypher_proto::FolderEntry> 
 /// Display-side model-list hygiene, mirroring the engine's discovery-side
 /// fold (`models_from_session`) for catalogs served by OLDER engines (the
 /// space's device may run any version): the `default` alias row drops when a
-/// real row exists, an orphan `<model>[1m]` variant presents as its base id
-/// with the Context Window trait pinned to 1M, and Claude rows adopt the
-/// curated catalog's labels so the version number always shows ("Opus 5",
-/// not the wire's terse "Opus" alias — user request). Idempotent over
+/// real row exists, and an orphan `<model>[1m]` variant presents as its base
+/// id with the Context Window trait pinned to 1M. Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
-pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
+pub(crate) fn normalize_model_rows(models: Vec<Model>) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
     }
-    fn norm(id: &str) -> String {
-        id.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase()
-    }
-    let catalog = match harness {
-        HarnessId::ClaudeCode => cypher_harness::claude::catalog::static_models(),
-        _ => Vec::new(),
-    };
-    // Curated label for an id: exact normalized match, else — for bare
-    // alphabetic aliases like `opus` — the first (flagship-ordered) family
-    // row. Versioned foreign ids never fuzzy-match.
-    let curated_label = |id: &str| -> Option<String> {
-        let id_norm = norm(id);
-        if let Some(row) = catalog.iter().find(|m| norm(&m.id) == id_norm) {
-            return Some(row.label.clone());
-        }
-        (!id_norm.is_empty() && id_norm.chars().all(|c| c.is_ascii_alphabetic()))
-            .then(|| catalog.iter().find(|m| norm(&m.id).contains(&id_norm)))
-            .flatten()
-            .map(|m| m.label.clone())
-    };
     let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
     let has_real = ids.iter().any(|id| !id.eq_ignore_ascii_case("default"));
     models
@@ -367,9 +342,6 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                     });
                 }
             }
-            if let Some(label) = curated_label(&model.id) {
-                model.label = label;
-            }
             Some(model)
         })
         .collect()
@@ -382,11 +354,8 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
             Some(crate::icons::claude_brand()),
         ),
         HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-        HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-        // Monochrome mark, tinted by the surface like OpenAI's.
-        HarnessId::Grok => (crate::icons::GROK_MARK, None),
-        // Nous Research's mark (the Hermes product icon), monochrome.
-        HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
+        // Retired harnesses without a brand asset (legacy chats only).
+        HarnessId::Cursor | HarnessId::Grok | HarnessId::Hermes => (crate::icons::GLOBAL, None),
         HarnessId::Pi => (crate::icons::PI_MARK, None),
     }
 }

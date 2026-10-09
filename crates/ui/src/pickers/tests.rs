@@ -8,7 +8,7 @@ fn runtime_install_errors_support_old_and_new_engines_without_hiding_other_error
         "harness binary not found: Cypher Pi Runtime is not installed (/isolated/current/bin/pi)",
     ] {
         assert!(missing_pi_runtime(Some(HarnessId::Pi), message));
-        assert!(!missing_pi_runtime(Some(HarnessId::Codex), message));
+        assert!(!missing_pi_runtime(Some(HarnessId::Mock), message));
     }
     assert!(!missing_pi_runtime(
         Some(HarnessId::Pi),
@@ -185,17 +185,13 @@ fn revalidation_keeps_usable_rows_and_only_reanchors_on_change() {
 #[test]
 fn normalize_drops_default_alias_and_folds_orphan_1m_rows() {
     // The shape an OLDER engine serves: a `default` alias row plus
-    // 1M-pinned variants with no bare base. A non-claude harness keeps
-    // wire labels (no curated catalog to borrow from).
-    let models = normalize_model_rows(
-        HarnessId::Codex,
-        vec![
-            bare_model("default", "Default (recommended)"),
-            bare_model("titan[1m]", "Titan (1M context)"),
-            bare_model("gpt-x-9[1m]", "GPT X-9"),
-            bare_model("nano", "Nano"),
-        ],
-    );
+    // 1M-pinned variants with no bare base. Wire labels are kept.
+    let models = normalize_model_rows(vec![
+        bare_model("default", "Default (recommended)"),
+        bare_model("titan[1m]", "Titan (1M context)"),
+        bare_model("gpt-x-9[1m]", "GPT X-9"),
+        bare_model("nano", "Nano"),
+    ]);
     assert_eq!(
         models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         vec!["titan", "gpt-x-9", "nano"]
@@ -212,52 +208,22 @@ fn normalize_drops_default_alias_and_folds_orphan_1m_rows() {
     assert!(models[2].options.is_empty());
 
     // A `default`-only list survives (nothing real to prefer).
-    let only_default =
-        normalize_model_rows(HarnessId::Codex, vec![bare_model("default", "Default")]);
+    let only_default = normalize_model_rows(vec![bare_model("default", "Default")]);
     assert_eq!(only_default.len(), 1);
 
     // A base-plus-variant pair (already folded by a NEWER engine — the
     // variant never reaches us; belt-and-braces if it does): variant
     // drops, base is untouched.
-    let paired = normalize_model_rows(
-        HarnessId::Codex,
-        vec![
-            bare_model("titan-5", "Titan 5"),
-            bare_model("titan-5[1m]", "Titan 5 (1M)"),
-        ],
-    );
+    let paired = normalize_model_rows(vec![
+        bare_model("titan-5", "Titan 5"),
+        bare_model("titan-5[1m]", "Titan 5 (1M)"),
+    ]);
     assert_eq!(paired.len(), 1);
     assert_eq!(paired[0].id, "titan-5");
 
     // Idempotent over a clean list.
     let clean = vec![bare_model("titan-5", "Titan 5")];
-    assert_eq!(normalize_model_rows(HarnessId::Codex, clean.clone()), clean);
-}
-
-#[test]
-fn normalize_gives_claude_rows_their_versioned_catalog_labels() {
-    // The real prod shape: alias values with terse names. Claude rows
-    // adopt the curated labels so the version number always shows
-    // (user request), exact ids included; foreign ids pass through.
-    let models = normalize_model_rows(
-        HarnessId::ClaudeCode,
-        vec![
-            bare_model("default", "Default (recommended)"),
-            bare_model("opus[1m]", "Opus (1M context)"),
-            bare_model("claude-fable-5[1m]", "Fable"),
-            bare_model("sonnet", "Sonnet"),
-            bare_model("haiku", "Haiku"),
-            bare_model("claude-nova-1", "Nova 1"),
-        ],
-    );
-    assert_eq!(
-        models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-        vec!["Opus 5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
-    );
-    assert_eq!(
-        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        vec!["opus", "claude-fable-5", "sonnet", "haiku", "claude-nova-1"]
-    );
+    assert_eq!(normalize_model_rows(clean.clone()), clean);
 }
 
 #[test]
@@ -450,11 +416,11 @@ fn browser_navigation_reducer() {
 fn resolved_chat_config_requires_harness() {
     let mut resolved = ResolvedRunConfig::default();
     assert!(resolved.chat_config().is_none());
-    resolved.harness = Some(HarnessId::ClaudeCode);
+    resolved.harness = Some(HarnessId::Mock);
     resolved.model = Some("opus".into());
     resolved.reasoning = Some(ReasoningLevel::High);
     let config = resolved.chat_config().expect("harness set");
-    assert_eq!(config.harness, HarnessId::ClaudeCode);
+    assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("opus"));
     assert_eq!(config.sandbox, SandboxLevel::WorkspaceWrite);
 }

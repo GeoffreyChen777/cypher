@@ -1563,7 +1563,7 @@ fn session_context_forwards_config_and_seen_to_main(cx: &mut gpui::TestAppContex
     assert!(!ctx.read_with(cx, |c, _| c.chats[0].unseen()));
 
     let config = cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: None,
         model_options: serde_json::Map::new(),
@@ -1703,7 +1703,7 @@ fn apply_chat_config_stamps_the_row() {
     let mut state = AppState::new();
     state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
     let config = cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: Some(cypher_proto::ReasoningLevel::XHigh),
         model_options: serde_json::Map::new(),
@@ -1727,7 +1727,7 @@ fn apply_chat_config_stamps_the_row() {
     state.apply_chat_config(
         "missing",
         cypher_proto::ChatConfig {
-            harness: HarnessId::ClaudeCode,
+            harness: HarnessId::Pi,
             model: None,
             reasoning: None,
             model_options: serde_json::Map::new(),
@@ -1750,7 +1750,7 @@ fn side_chat_synthetic_row_inherits_parent_context() {
     parent.checkout_id = Some("co-1".into());
     parent.space_id = Some("s1".into());
     parent.config = Some(cypher_proto::ChatConfig {
-        harness: HarnessId::ClaudeCode,
+        harness: HarnessId::Pi,
         model: Some("claude-fable-5".into()),
         reasoning: Some(cypher_proto::ReasoningLevel::High),
         model_options: serde_json::Map::new(),

@@ -93,7 +93,7 @@ fn side_chat_run_request_inherits_config() {
     let request = ComposerSideChat::run_request(
         "fix it".into(),
         "/home/w/dev/cypher".into(),
-        Some(HarnessId::ClaudeCode),
+        Some(HarnessId::Pi),
         Some("claude-fable-5".into()),
         Some(ReasoningLevel::High),
         serde_json::Map::new(),
@@ -102,7 +102,7 @@ fn side_chat_run_request_inherits_config() {
     );
     assert_eq!(request.prompt, "fix it");
     assert_eq!(request.cwd, "/home/w/dev/cypher");
-    assert_eq!(request.harness, Some(HarnessId::ClaudeCode));
+    assert_eq!(request.harness, Some(HarnessId::Pi));
     assert_eq!(request.model.as_deref(), Some("claude-fable-5"));
     assert_eq!(request.reasoning, Some(ReasoningLevel::High));
     assert_eq!(request.sandbox, SandboxLevel::WorkspaceWrite);

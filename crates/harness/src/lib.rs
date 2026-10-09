@@ -1,12 +1,6 @@
-//! cypher-harness — one interface over coding agents, all driven through the
-//! Agent Client Protocol (and a mock for tests).
-//!
-//! Every production harness is the shared [`AcpHarness`] with a per-agent
-//! spec: Claude Code via the org-maintained `claude-agent-acp` adapter, Codex
-//! via `codex-acp`, Cursor, Grok Build and Hermes natively — and pi via its
-//! OWN RPC protocol (`pi --mode rpc`, the [`pi`] harness), not an adapter.
-//! Decision records: docs/research/acp.md (ACP + the pi migration note),
-//! docs/research/pi-rpc.md (the native pi harness).
+//! cypher-harness — one interface over coding agents: the native Pi harness
+//! (`pi --mode rpc`, the [`pi`] module) and a mock for tests and dev rigs.
+//! Decision record: docs/research/pi-rpc.md.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -22,12 +16,12 @@ use cypher_proto::{
 pub enum HarnessError {
     #[error("harness binary not found: {0}")]
     NotInstalled(String),
+    /// The harness exists only as a decode-compatible id (a retired driver);
+    /// the message is user-facing as-is.
+    #[error("{0}")]
+    Unsupported(String),
     #[error("harness protocol error: {0}")]
     Protocol(String),
-    /// A managed adapter install (npm) failed; carries npm's own output so
-    /// the cause is diagnosable from the chat error alone.
-    #[error("adapter install failed: {0}")]
-    Install(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -116,7 +110,7 @@ pub trait Harness: Send + Sync {
         true
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
-    /// Slash commands the agent advertises (ACP `availableCommands`); empty
+    /// Slash commands the agent advertises; empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
@@ -154,8 +148,7 @@ pub trait Harness: Send + Sync {
     /// source session file or any live client. The result's session path is
     /// `None` for an EMPTY-CONTEXT fork before the first user (pi persists
     /// that file only when the first user message lands). The default
-    /// implementation answers Unsupported: every non-Pi harness keeps this
-    /// response.
+    /// implementation answers Unsupported.
     async fn fork_session(
         &self,
         _request: cypher_proto::PiSessionForkRequest,
@@ -166,11 +159,6 @@ pub trait Harness: Send + Sync {
     }
 }
 
-pub mod acp;
-pub(crate) mod adapter_install;
-pub mod claude;
-pub mod codex;
-pub(crate) mod jsonrpc;
 pub mod mock;
 pub mod pi;
 pub mod shell_env;
@@ -235,7 +223,37 @@ pub(crate) fn well_known_cli_dirs() -> Vec<std::path::PathBuf> {
 /// PATH snapshot (zshrc/zprofile, including pnpm), well-known npm-global
 /// bins, and node version-manager bins (fnm/nvm/volta/pnpm/bun).
 pub fn resolve_cli(name: &str) -> Option<std::path::PathBuf> {
-    crate::acp::find_on_paths(name, crate::acp::npm_global_bins(name))
+    find_on_paths(name, npm_global_bins(name))
+}
+
+/// PATH + login-shell + extra dirs + node-version-manager scan for a binary.
+fn find_on_paths(exe: &str, extra: Vec<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.join(exe))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(shell_path) = shell_env::login_shell_path() {
+        candidates.extend(
+            std::env::split_paths(shell_path)
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.join(exe)),
+        );
+    }
+    candidates.extend(extra);
+    candidates.extend(node_version_manager_bins().into_iter().map(|d| d.join(exe)));
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// `exe` inside each of the [`well_known_cli_dirs`].
+fn npm_global_bins(exe: &str) -> Vec<std::path::PathBuf> {
+    well_known_cli_dirs()
+        .into_iter()
+        .map(|dir| dir.join(exe))
+        .collect()
 }
 
 /// Compose the child's PATH: the resolved executable's directory first, then
@@ -337,10 +355,53 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use acp::AcpHarness;
+/// Byte cap applied to tool output text at the harness boundary. The doc-side
+/// fold applies its own (smaller) cap before anything persists; this one only
+/// bounds what crosses the event stream.
+pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
+
+/// Truncate on a char boundary, marking the cut so the UI can say "truncated".
+pub(crate) fn cap_text(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_owned();
+    }
+    let mut end = cap;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_owned();
+    out.push_str("\n… [truncated]");
+    out
+}
+
+/// Decode a slash-command array (`{name, description, input: {hint}}`);
+/// nameless entries are dropped.
+pub(crate) fn parse_commands(value: Option<&serde_json::Value>) -> Vec<SlashCommand> {
+    use serde_json::Value;
+    let str_field =
+        |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|c| {
+            let name = str_field(c, "name");
+            (!name.is_empty()).then(|| SlashCommand {
+                name,
+                description: str_field(c, "description"),
+                input_hint: c
+                    .get("input")
+                    .and_then(|i| i.get("hint"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
-// Child lifecycle (shared by the codex and ACP harnesses)
+// Child lifecycle
 // ---------------------------------------------------------------------------
 
 /// Reap the child: graceful SIGTERM first, SIGKILL after `kill_grace`.
@@ -383,4 +444,34 @@ pub(crate) fn send_signal(pid: u32, signal: Signal) {
 #[cfg(not(unix))]
 pub(crate) fn send_signal(_pid: u32, _signal: Signal) {
     // No SIGTERM off unix; `start_kill`/`kill_on_drop` handle termination.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_parse_with_hint() {
+        let commands = serde_json::json!([
+            { "name": "compact", "description": "Compact the session" },
+            { "name": "goal", "description": "Set a goal", "input": { "hint": "the goal" } },
+            { "description": "nameless is dropped" },
+        ]);
+        assert_eq!(
+            parse_commands(Some(&commands)),
+            vec![
+                SlashCommand {
+                    name: "compact".into(),
+                    description: "Compact the session".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "goal".into(),
+                    description: "Set a goal".into(),
+                    input_hint: Some("the goal".into()),
+                },
+            ]
+        );
+        assert!(parse_commands(None).is_empty());
+    }
 }
