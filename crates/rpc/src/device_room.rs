@@ -34,7 +34,7 @@ pub const RELAY_KIND: &str = " relay";
 /// Durable command nudge frames (§7 cold-chat delivery): payload `{chatId}`.
 pub const NUDGE_KIND: &str = "nudge";
 /// The RPC stream over the relay: both `s` (stream id) and `k` (kind) are `"rpc"`.
-pub const RPC_KIND: &str = "rpc";
+pub(crate) const RPC_KIND: &str = "rpc";
 
 /// Relay error codes (payload `{"error": code}` on [`RELAY_KIND`] frames).
 pub const HOST_OFFLINE: &str = "host_offline";
@@ -154,7 +154,7 @@ pub fn decode_device_frame(bytes: &[u8]) -> Result<(DeviceFrameHeader, Vec<u8>),
 }
 
 /// Extract the error code from a relay control payload (`{"error": code}`).
-pub fn relay_error_code(payload: &[u8]) -> Option<String> {
+pub(crate) fn relay_error_code(payload: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
     struct RelayError {
         error: String,

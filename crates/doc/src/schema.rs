@@ -316,7 +316,7 @@ impl SessionDoc {
 
     /// Stage metadata in the same transaction as the writer's text/status.
     /// No commit here: callers must not acknowledge a marker without its text.
-    pub fn stage_preview_coverage(
+    pub(crate) fn stage_preview_coverage(
         &self,
         coverage: &crate::PreviewCoverage,
     ) -> Result<bool, DocError> {
@@ -754,29 +754,6 @@ impl SessionDoc {
             _ => String::new(),
         };
         Ok(Some((path, file_name)))
-    }
-
-    /// Every sealed attachment as `(upload_id, path, file_name)` — rebuild
-    /// copy and diagnostics.
-    pub fn sealed_attachments(&self) -> Result<Vec<(String, String, String)>, DocError> {
-        let mut out = Vec::new();
-        self.doc
-            .get_map("sealedAttachments")
-            .for_each(|key, value| {
-                let loro::ValueOrContainer::Container(loro::Container::Map(entry)) = value else {
-                    return;
-                };
-                let path = match entry.get("path") {
-                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
-                    _ => return,
-                };
-                let file_name = match entry.get("fileName") {
-                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
-                    _ => String::new(),
-                };
-                out.push((key.to_string(), path, file_name));
-            });
-        Ok(out)
     }
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.

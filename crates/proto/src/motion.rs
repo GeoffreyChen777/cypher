@@ -49,16 +49,6 @@ pub fn gspin_opacity(t: f32, dim: f32) -> f32 {
     }
 }
 
-/// The phase offset of a `(row, col)` cell in the 3×3 gradient spinner: the
-/// pulse enters at the bottom edge and converges toward the top-centre cell, so
-/// the wave reads as travelling upward.
-pub fn gspin_cell_phase(row: usize, col: usize) -> f32 {
-    let centre = (MATRIX_SIDE as f32 - 1.0) / 2.0;
-    let max = MATRIX_SIDE as f32 - 1.0 + centre;
-    let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - centre).abs();
-    if max == 0.0 { 0.0 } else { d / (max + 1.0) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,16 +99,5 @@ mod tests {
             let value = gspin_opacity(step as f32 / 100.0, GSPIN_DIM);
             assert!((GSPIN_DIM..=1.0).contains(&value), "{step} -> {value}");
         }
-    }
-
-    #[test]
-    fn the_gradient_wave_travels_upward() {
-        // The bottom row leads and the top-centre cell trails, which is what
-        // makes the pulse read as rising.
-        let bottom = gspin_cell_phase(MATRIX_SIDE - 1, 1);
-        let top = gspin_cell_phase(0, 1);
-        assert!(bottom < top, "bottom {bottom} should lead top {top}");
-        // Symmetric about the centre column.
-        close(gspin_cell_phase(1, 0), gspin_cell_phase(1, 2), "symmetry");
     }
 }

@@ -200,7 +200,7 @@ impl PreviewLink {
         drop(s);
         self.changed();
     }
-    pub fn send_failed(&self) {
+    pub(crate) fn send_failed(&self) {
         let mut s = self.lock();
         s.snapshot = true;
         s.sent = None;
@@ -393,7 +393,7 @@ impl PreviewLink {
             s.controls.push_back(bytes);
         }
     }
-    pub fn next_frame(&self, cursor: u64) -> Option<Vec<u8>> {
+    pub(crate) fn next_frame(&self, cursor: u64) -> Option<Vec<u8>> {
         let mut s = self.lock();
         if let Some(bytes) = s.controls.pop_front() {
             if !s.controls.is_empty() {

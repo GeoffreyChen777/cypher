@@ -73,7 +73,7 @@ fn socket_metadata(path: &Path) -> io::Result<std::fs::Metadata> {
     Ok(meta)
 }
 
-pub fn check_peer(stream: &UnixStream) -> io::Result<()> {
+pub(crate) fn check_peer(stream: &UnixStream) -> io::Result<()> {
     if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } {
         return Err(denied("IPC peer belongs to a different user"));
     }

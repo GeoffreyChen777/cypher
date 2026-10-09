@@ -328,14 +328,14 @@ pub(super) fn running_versions(app_root: &Path) -> std::collections::BTreeSet<St
 }
 
 /// The managed layout every Linux install converges on: `~/.cypher/app`.
-pub fn managed_app_root(home: &Path) -> PathBuf {
+pub(crate) fn managed_app_root(home: &Path) -> PathBuf {
     home.join(".cypher").join("app")
 }
 
 /// Point `~/.local/bin/cypher` at `<app_root>/current/cypher`, replacing an
 /// existing file or link atomically (the installer's own layout). A directory
 /// at that path is left alone and reported.
-pub fn link_command(home: &Path, app_root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn link_command(home: &Path, app_root: &Path) -> anyhow::Result<PathBuf> {
     #[cfg(unix)]
     {
         let bin = home.join(".local").join("bin");

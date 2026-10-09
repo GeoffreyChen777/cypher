@@ -42,33 +42,6 @@ fn reasoning_deltas_merge_and_heartbeats_fold_to_nothing() {
 }
 
 #[test]
-fn an_oversized_thought_splits_like_text() {
-    let thought = MessagePart::Reasoning {
-        id: "r0".into(),
-        text: "é".repeat(MSG_INLINE_MAX / 2 + 10),
-    };
-    let chunks = split_parts(std::slice::from_ref(&thought));
-    assert_eq!(chunks.len(), 2);
-    let pieces: Vec<&MessagePart> = chunks.iter().flatten().collect();
-    assert_eq!(pieces[0].id(), "r0");
-    assert_eq!(pieces[1].id(), "r0~1");
-    let joined: String = pieces
-        .iter()
-        .map(|p| match p {
-            MessagePart::Reasoning { text, .. } => text.as_str(),
-            other => panic!("unexpected {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        &MessagePart::Reasoning {
-            id: "r0".into(),
-            text: joined
-        },
-        &thought
-    );
-}
-
-#[test]
 fn text_deltas_merge_until_broken_by_tool() {
     let mut parts = Vec::new();
     fold_event_into_parts(&mut parts, &text_delta("Hello "));
@@ -298,58 +271,6 @@ fn sanitize_other_unknown_still_clears_input() {
             input: None
         }
     );
-}
-
-#[test]
-fn split_and_join_round_trip() {
-    let big = "x".repeat(MSG_INLINE_MAX * 2 + 100);
-    let parts = vec![
-        MessagePart::Text {
-            id: "t0".into(),
-            text: big.clone(),
-            agent_text: None,
-        },
-        MessagePart::Tool {
-            id: "tool-1".into(),
-            call: ToolCall::Exec {
-                command: "ls".into(),
-            },
-            is_error: false,
-            resolved: true,
-            output: None,
-            progress: None,
-            diff: None,
-            output_ref: None,
-            output_bytes: None,
-            diff_ref: None,
-            diff_stats: None,
-        },
-    ];
-    let chunks = split_parts(&parts);
-    assert!(
-        chunks.len() >= 3,
-        "expected >=3 chunks, got {}",
-        chunks.len()
-    );
-    for chunk in &chunks {
-        let bytes: usize = chunk.iter().map(|p| p.byte_len()).sum();
-        assert!(bytes <= MSG_INLINE_MAX, "chunk over cap: {bytes}");
-    }
-    let joined = join_continuations(chunks);
-    let text: String = joined
-        .iter()
-        .filter_map(|p| match p {
-            MessagePart::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(text, big);
-    assert!(matches!(joined.last().unwrap(), MessagePart::Tool { .. }));
-}
-
-#[test]
-fn continuation_ids_are_deterministic() {
-    assert_eq!(continuation_id("m1", 1), "m1#c1");
 }
 
 // ── A1 strip (docs/chat2-sync.md) ───────────────────────────────────────

@@ -14,5 +14,5 @@ pub struct PreviewCoverage {
     pub complete: bool,
 }
 
-pub type PreviewCommitHook =
+pub(crate) type PreviewCommitHook =
     Arc<dyn Fn(&str, &[MessagePart], bool) -> Option<PreviewCoverage> + Send + Sync>;

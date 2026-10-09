@@ -60,7 +60,7 @@ const QUOTA_RETRY: Duration = Duration::from_secs(5);
 /// batchId to retire) — the silent replay-forever wedge, again. Enforced at
 /// enqueue: a batch the server can never accept must not enter the replay
 /// queue.
-pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
+pub(crate) const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
 /// Upper bound for a buffered HTTPS pull response. The Edge endpoint itself
 /// truncates at 4 MiB; this larger client guard protects against a buggy or
 /// incompatible server before frame parsing allocates more state.
@@ -602,7 +602,7 @@ impl ChatClient {
     /// Resolves once hello/state lands AND the initial catch-up (checkpoint
     /// if needed + row backfill) completes; first-attempt failures are `Err`
     /// (callers own the initial-join retry). After that it reconnects itself.
-    pub async fn connect_via(
+    pub(crate) async fn connect_via(
         provider: Arc<dyn UrlProvider>,
         sink: Arc<dyn ChatDocSink>,
         fetcher: Arc<dyn CheckpointFetcher>,

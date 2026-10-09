@@ -30,7 +30,7 @@ impl Drop for AbortPump {
 
 /// Serve one connection: read client frames from `inbound`, write server frames to `out`.
 /// Returns when `inbound` closes; all in-flight request tasks are aborted on exit.
-pub async fn serve_connection(
+pub(crate) async fn serve_connection(
     service: Arc<dyn RpcService>,
     out: mpsc::Sender<String>,
     mut inbound: mpsc::Receiver<String>,
