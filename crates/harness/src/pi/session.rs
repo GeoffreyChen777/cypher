@@ -608,6 +608,142 @@ async fn select_requested_model(
     }
 }
 
+/// Handshake + session setup: resume the engine-provided session file, then
+/// make the live model and thinking level match the request. Returns the
+/// session file and the model's display name.
+async fn setup_session(
+    client: &PiClient,
+    request: &RunRequest,
+    model_catalog_wait: Duration,
+) -> Result<(String, String), HarnessError> {
+    // Resume: switch to the engine-provided session file. Loud failure:
+    // a stale/missing path must never silently start fresh.
+    if let Some(path) = &request.resume {
+        let mut params = Map::new();
+        params.insert("sessionPath".into(), Value::String(path.clone()));
+        if let Err(e) = client.request("switch_session", params).await {
+            return Err(HarnessError::Protocol(format!(
+                "pi session resume failed: {e} ({path})"
+            )));
+        }
+    }
+    // Fresh runs already launched with --model/--thinking, so there is no
+    // default-model initialization followed by an unconditional switch.
+    // A resumed session may restore its historical model; detect that
+    // exact case and re-select, waiting out Pi's cold catalog snapshot.
+    let mut state = client.request("get_state", Map::new()).await?;
+    if let Some(requested) = request
+        .model
+        .as_deref()
+        .filter(|model| concrete_model(model))
+        && !state_uses_model(&state, requested)
+    {
+        select_requested_model(client, requested, model_catalog_wait).await?;
+        state = client.request("get_state", Map::new()).await?;
+        if !state_uses_model(&state, requested) {
+            let actual = state_model_key(&state).unwrap_or_else(|| "<none>".into());
+            return Err(HarnessError::Protocol(format!(
+                "pi selected {actual} instead of requested model {requested}"
+            )));
+        }
+    }
+    if let Some(level) = request.reasoning
+        && state_model_key(&state)
+            .as_deref()
+            .is_some_and(concrete_model)
+    {
+        let requested = thinking_level(level);
+        if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
+            let mut params = Map::new();
+            params.insert("level".into(), Value::String(requested.into()));
+            client.request("set_thinking_level", params).await?;
+            state = client.request("get_state", Map::new()).await?;
+            let actual_level = state.get("thinkingLevel").and_then(Value::as_str);
+            // Older pi runtimes (and some provider adapters) normalize the
+            // lowest setting from `minimal` to `low`.  That is a compatible
+            // downgrade, not a protocol failure: rejecting it makes
+            // best-effort jobs such as automatic chat titling fail even
+            // though the model is ready to run.
+            let compatible = actual_level == Some(requested)
+                || (level == ReasoningLevel::Minimal && actual_level == Some("low"));
+            if !compatible {
+                let actual = actual_level.unwrap_or("<none>");
+                return Err(HarnessError::Protocol(format!(
+                    "pi selected thinking level {actual} instead of requested {requested}"
+                )));
+            }
+        }
+    }
+    let session_file = state
+        .get("sessionFile")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let model_name = state
+        .get("model")
+        .and_then(|m| m.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok((session_file, model_name))
+}
+
+/// The structured live projection a cypher `setStatus` key carries. Strictly
+/// validated: any other key — or an invalid snapshot — stays TUI furniture
+/// (ignored).
+fn status_event(key: &str, text: &str) -> Option<AgentEvent> {
+    match key {
+        SUBAGENTS_STATUS_KEY => {
+            parse_subagent_status(text).map(|runs| AgentEvent::SubagentStatus { runs })
+        }
+        TRANSLATION_STATUS_KEY => {
+            parse_translation_status(text).map(|text| AgentEvent::Translation { text })
+        }
+        INPUT_TRANSLATION_STATUS_KEY => parse_input_translation_status(text)
+            .map(|(source, text)| AgentEvent::InputTranslation { source, text }),
+        _ => None,
+    }
+}
+
+/// Close the current turn: confirm the routed messages an extension
+/// consumed, requeue steers pi only queued (retried after the park), then
+/// send the turn's Done. False once the consumer has hung up.
+#[allow(clippy::too_many_arguments)]
+async fn park_turn(
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    client: &PiClient,
+    assistant_message_id: &mut String,
+    handled_steers: &mut usize,
+    steers_queued: &mut VecDeque<String>,
+    prompt_backlog: &mut VecDeque<NextTurn>,
+    last_assistant_text: &str,
+    status: DoneStatus,
+    error: Option<String>,
+    session_file: &str,
+) -> bool {
+    if !emit_boundaries(
+        event_tx,
+        assistant_message_id,
+        std::mem::take(handled_steers),
+    )
+    .await
+    {
+        return false;
+    }
+    requeue_stranded(client, steers_queued, prompt_backlog);
+    let result = (!last_assistant_text.is_empty()).then(|| last_assistant_text.to_owned());
+    send(
+        event_tx,
+        AgentEvent::Done {
+            status,
+            result,
+            error,
+            session_id: Some(session_file.to_owned()),
+        },
+    )
+    .await
+}
+
 /// The per-run event loop: one task multiplexing agent events, the steering
 /// mailbox, the interrupt token, and consumer liveness.
 pub(super) async fn run_session(session: Session) {
@@ -641,78 +777,7 @@ pub(super) async fn run_session(session: Session) {
     let agent_name = "pi";
 
     // ---- handshake + session setup (interruptible) -------------------------
-    let setup = async {
-        // Resume: switch to the engine-provided session file. Loud failure:
-        // a stale/missing path must never silently start fresh.
-        if let Some(path) = &request.resume {
-            let mut params = Map::new();
-            params.insert("sessionPath".into(), Value::String(path.clone()));
-            if let Err(e) = client.request("switch_session", params).await {
-                return Err(HarnessError::Protocol(format!(
-                    "pi session resume failed: {e} ({path})"
-                )));
-            }
-        }
-        // Fresh runs already launched with --model/--thinking, so there is no
-        // default-model initialization followed by an unconditional switch.
-        // A resumed session may restore its historical model; detect that
-        // exact case and re-select, waiting out Pi's cold catalog snapshot.
-        let mut state = client.request("get_state", Map::new()).await?;
-        if let Some(requested) = request
-            .model
-            .as_deref()
-            .filter(|model| concrete_model(model))
-            && !state_uses_model(&state, requested)
-        {
-            select_requested_model(&client, requested, model_catalog_wait).await?;
-            state = client.request("get_state", Map::new()).await?;
-            if !state_uses_model(&state, requested) {
-                let actual = state_model_key(&state).unwrap_or_else(|| "<none>".into());
-                return Err(HarnessError::Protocol(format!(
-                    "pi selected {actual} instead of requested model {requested}"
-                )));
-            }
-        }
-        if let Some(level) = request.reasoning
-            && state_model_key(&state)
-                .as_deref()
-                .is_some_and(concrete_model)
-        {
-            let requested = thinking_level(level);
-            if state.get("thinkingLevel").and_then(Value::as_str) != Some(requested) {
-                let mut params = Map::new();
-                params.insert("level".into(), Value::String(requested.into()));
-                client.request("set_thinking_level", params).await?;
-                state = client.request("get_state", Map::new()).await?;
-                let actual_level = state.get("thinkingLevel").and_then(Value::as_str);
-                // Older pi runtimes (and some provider adapters) normalize the
-                // lowest setting from `minimal` to `low`.  That is a compatible
-                // downgrade, not a protocol failure: rejecting it makes
-                // best-effort jobs such as automatic chat titling fail even
-                // though the model is ready to run.
-                let compatible = actual_level == Some(requested)
-                    || (level == ReasoningLevel::Minimal && actual_level == Some("low"));
-                if !compatible {
-                    let actual = actual_level.unwrap_or("<none>");
-                    return Err(HarnessError::Protocol(format!(
-                        "pi selected thinking level {actual} instead of requested {requested}"
-                    )));
-                }
-            }
-        }
-        let session_file = state
-            .get("sessionFile")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let model_name = state
-            .get("model")
-            .and_then(|m| m.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        Ok::<(String, String), HarnessError>((session_file, model_name))
-    };
+    let setup = setup_session(&client, &request, model_catalog_wait);
     let (session_file, model_name) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| Err(HarnessError::Protocol(format!(
@@ -1291,23 +1356,6 @@ pub(super) async fn run_session(session: Session) {
                             // supersedes any per-message one that raced a
                             // session write.
                             refresh_context_usage(&client, &event_tx, None);
-                            // Messages an extension consumed confirm before
-                            // the Done (the last segment then ends empty).
-                            if !emit_boundaries(
-                                &event_tx,
-                                &mut assistant_message_id,
-                                std::mem::take(&mut handled_steers),
-                            )
-                            .await
-                            {
-                                break 'main;
-                            }
-                            // Steers pi queued but never delivered (the turn
-                            // settled before the steer reply streamed) are
-                            // stranded — an idle pi only QUEUES steers. Retry
-                            // them as idle prompts after the park, never
-                            // dropped.
-                            requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
                             done_sent = true;
                             let (status, error) = if interrupted {
                                 (DoneStatus::Interrupted, None)
@@ -1332,16 +1380,24 @@ pub(super) async fn run_session(session: Session) {
                                     _ => (DoneStatus::Completed, None),
                                 }
                             };
-                            let result = (!last_assistant_text.is_empty())
-                                .then(|| last_assistant_text.clone());
-                            if !send(
+                            // Messages an extension consumed confirm before
+                            // the Done (the last segment then ends empty).
+                            // Steers pi queued but never delivered (the turn
+                            // settled before the steer reply streamed) are
+                            // stranded — an idle pi only QUEUES steers. They
+                            // retry as idle prompts after the park, never
+                            // dropped.
+                            if !park_turn(
                                 &event_tx,
-                                AgentEvent::Done {
-                                    status,
-                                    result,
-                                    error,
-                                    session_id: Some(session_file.clone()),
-                                },
+                                &client,
+                                &mut assistant_message_id,
+                                &mut handled_steers,
+                                &mut steers_queued,
+                                &mut prompt_backlog,
+                                &last_assistant_text,
+                                status,
+                                error,
+                                &session_file,
                             )
                             .await
                             {
@@ -1400,28 +1456,19 @@ pub(super) async fn run_session(session: Session) {
                                     // inert one (command output, no agent run)
                                     // — any run's settle would have preceded
                                     // this response. Close it as its grace would.
-                                    if !emit_boundaries(
-                                        &event_tx,
-                                        &mut assistant_message_id,
-                                        std::mem::take(&mut handled_steers),
-                                    )
-                                    .await
-                                    {
-                                        break 'main;
-                                    }
-                                    requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
                                     in_turn = false;
                                     done_sent = true;
-                                    let result = (!last_assistant_text.is_empty())
-                                        .then(|| last_assistant_text.clone());
-                                    if !send(
+                                    if !park_turn(
                                         &event_tx,
-                                        AgentEvent::Done {
-                                            status: DoneStatus::Completed,
-                                            result,
-                                            error: None,
-                                            session_id: Some(session_file.clone()),
-                                        },
+                                        &client,
+                                        &mut assistant_message_id,
+                                        &mut handled_steers,
+                                        &mut steers_queued,
+                                        &mut prompt_backlog,
+                                        &last_assistant_text,
+                                        DoneStatus::Completed,
+                                        None,
+                                        &session_file,
                                     )
                                     .await
                                     {
@@ -1516,45 +1563,15 @@ pub(super) async fn run_session(session: Session) {
                                 .get("statusKey")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
-                            if key == SUBAGENTS_STATUS_KEY {
-                                let text = payload
-                                    .get("statusText")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default();
-                                if let Some(runs) = parse_subagent_status(text)
-                                    && !send(&event_tx, AgentEvent::SubagentStatus { runs })
-                                        .await
-                                {
-                                    break 'main;
-                                }
+                            let text = payload
+                                .get("statusText")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if let Some(event) = status_event(key, text)
+                                && !send(&event_tx, event).await
+                            {
+                                break 'main;
                             }
-                            if key == TRANSLATION_STATUS_KEY {
-                                let text = payload
-                                    .get("statusText")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default();
-                                if let Some(text) = parse_translation_status(text)
-                                    && !send(&event_tx, AgentEvent::Translation { text }).await
-                                {
-                                    break 'main;
-                                }
-                            }
-                            if key == INPUT_TRANSLATION_STATUS_KEY {
-                                let text = payload
-                                    .get("statusText")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default();
-                                if let Some((source, text)) = parse_input_translation_status(text)
-                                    && !send(
-                                        &event_tx,
-                                        AgentEvent::InputTranslation { source, text },
-                                    )
-                                    .await
-                                {
-                                    break 'main;
-                                }
-                            }
-                            // Any other key stays TUI furniture (ignored).
                         }
                         // Deliberate: setWidget/setTitle/set_editor_text (and
                         // any non-cypher setStatus) are transient TUI furniture
@@ -1668,26 +1685,17 @@ pub(super) async fn run_session(session: Session) {
                 // The turn's routed messages settle exactly as at
                 // `agent_settled`: consumed ones confirm, and a steer an idle
                 // pi only queued retries after the park.
-                if !emit_boundaries(
+                if !park_turn(
                     &event_tx,
+                    &client,
                     &mut assistant_message_id,
-                    std::mem::take(&mut handled_steers),
-                )
-                .await
-                {
-                    break 'main;
-                }
-                requeue_stranded(&client, &mut steers_queued, &mut prompt_backlog);
-                let result = (!last_assistant_text.is_empty())
-                    .then(|| last_assistant_text.clone());
-                if !send(
-                    &event_tx,
-                    AgentEvent::Done {
-                        status: DoneStatus::Completed,
-                        result,
-                        error: None,
-                        session_id: Some(session_file.clone()),
-                    },
+                    &mut handled_steers,
+                    &mut steers_queued,
+                    &mut prompt_backlog,
+                    &last_assistant_text,
+                    DoneStatus::Completed,
+                    None,
+                    &session_file,
                 )
                 .await
                 {
