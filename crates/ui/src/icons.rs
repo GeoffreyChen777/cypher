@@ -134,6 +134,8 @@ icon_assets![
     // Hand-drawn `</>` in the Solar Linear style — the script chip (Pi
     // codemode); the embedded set has no code glyph.
     (CODE, "code"),
+    // Solar `lightbulb-minimalistic` (Linear) — a thought in a work timeline.
+    (LIGHTBULB, "lightbulb-minimalistic"),
     // Hand-drawn in the Solar Linear style for the `/` menu's commands (the
     // embedded set has none of these): Fast mode, a goal, delegating to
     // subagents, the subagents themselves, live activity, a skill.

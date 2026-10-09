@@ -21,6 +21,8 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
         completed_at: Option<i64>,
         #[serde(default)]
         comments: Vec<MessageComment>,
+        #[serde(default)]
+        models: Vec<AnsweredModel>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -33,6 +35,7 @@ pub(super) fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntr
             continuation_of: raw.continuation_of,
             completed_at: raw.completed_at,
             comments: raw.comments,
+            models: raw.models,
         }),
         // A missing field must cost AT MOST what the field carried — never
         // the entry, never the transcript. Rooms merge writes from every
@@ -99,6 +102,10 @@ fn salvage_entry(
         comments: obj
             .get("comments")
             .and_then(|c| serde_json::from_value(c.clone()).ok())
+            .unwrap_or_default(),
+        models: obj
+            .get("models")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_default(),
     })
 }

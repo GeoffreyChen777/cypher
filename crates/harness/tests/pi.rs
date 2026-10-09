@@ -15,7 +15,8 @@ use cypher_harness::{
     CancellationToken, Harness, HarnessError, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SteeringMode, ToolCall,
+    AgentEvent, AnsweredModel, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SteeringMode,
+    ToolCall,
 };
 
 /// The session file the fake pi reports by default: it now derives its
@@ -485,11 +486,29 @@ async fn happy_path_maps_deltas_tools_errors_and_settles_completed() {
 
     // Two assistant messages → two journal boundaries; the toolResult
     // messages must NOT emit one.
-    let completed = events
+    // Each carries the model that answered it: the provider's
+    // `responseModel` (with the requested one beside it), else `model`.
+    let completed: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, AgentEvent::AssistantMessageCompleted { .. }))
-        .count();
-    assert_eq!(completed, 2, "{events:?}");
+        .filter_map(|e| match e {
+            AgentEvent::AssistantMessageCompleted { model, .. } => Some(model.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completed,
+        vec![
+            Some(AnsweredModel {
+                model: "gpt-5.4".into(),
+                requested: Some("gpt-6-astra".into()),
+            }),
+            Some(AnsweredModel {
+                model: "gpt-6-astra".into(),
+                requested: None,
+            }),
+        ],
+        "{events:?}"
+    );
 
     // Extension error surfaces; the fire-and-forget notify never reaches the
     // input bridge.

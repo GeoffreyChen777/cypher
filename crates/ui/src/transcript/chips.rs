@@ -55,16 +55,13 @@ pub const OVERFLOW_ROW_HEIGHT: f32 = 26.0;
 
 /// How many leading chips a group folds away: the cap keeps the LAST `limit`
 /// calls (the ones the agent just ran), `limit == 0` keeps every call, and a
-/// revealed group (`revealed`) hides nothing. One chip is never worth a row of
-/// its own — folding it would trade 38px of content for 26px of button.
+/// revealed group (`revealed`) hides nothing. The cap is strict — one call
+/// over it folds too, so a group never shows more calls than the setting.
 pub fn hidden_tool_count(total: usize, limit: u32, revealed: bool) -> usize {
     if revealed || limit == 0 {
         return 0;
     }
-    match total.saturating_sub(limit as usize) {
-        1 => 0,
-        hidden => hidden,
-    }
+    total.saturating_sub(limit as usize)
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —

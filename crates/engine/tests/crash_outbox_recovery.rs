@@ -38,6 +38,7 @@ fn entry(id: &str) -> SessionMessageEntry {
         continuation_of: None,
         completed_at: None,
         comments: Vec::new(),
+        models: Vec::new(),
     }
 }
 fn contains(doc: &SessionDoc) -> bool {

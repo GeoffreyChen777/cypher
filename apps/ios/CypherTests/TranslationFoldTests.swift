@@ -43,14 +43,14 @@ final class TranslationFoldTests: XCTestCase {
 
         // Collapsed by default: the translation keeps its block ids and the
         // reply's timestamp; everything before it is folded away.
-        let folded = TranscriptRowBuilder.foldClosedToggles(built, open: [])
+        let folded = TranscriptRowBuilder.foldClosedToggles(built, pins: [:])
         XCTAssertEqual(folded.map(\.id), ["m1#t0.original", "m1#t0.3"])
         XCTAssertNotNil(folded.last?.timestamp)
         // It now follows the toggle, not the rule: a block gap, not a
         // same-part one.
         XCTAssertEqual(folded[1].topGap, TranscriptView.gapBlock)
 
-        let open = TranscriptRowBuilder.foldClosedToggles(built, open: ["m1#t0.original"])
+        let open = TranscriptRowBuilder.foldClosedToggles(built, pins: ["m1#t0.original": true])
         XCTAssertEqual(open.map(\.id), built.map(\.id))
     }
 
@@ -82,9 +82,9 @@ final class TranslationFoldTests: XCTestCase {
                              agentText: original),
                        user("u2")]
         let cache = TranscriptBuilderCache()
-        for open: Set<String> in [[], ["a1#t0.original"], []] {
+        for open: [String: Bool] in [[:], ["a1#t0.original": true], [:]] {
             let rendered = cache.rows(revision: 1, entries: entries, pendingSends: [],
-                                      openToggles: open)
+                                      togglePins: open)
             XCTAssertEqual(rendered.count, open.isEmpty ? 4 : 6)
             for round in cache.rounds {
                 XCTAssertEqual(rendered[round.rowIndex].id, round.rowId)

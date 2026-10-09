@@ -12,6 +12,100 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+/// The scripted work for the `CYPHER_MOCK_WORK` variant: thinking between
+/// every few commands, the way real models work — eight thoughts around ten
+/// commands, one of them failing. The transcript folds the whole run behind
+/// one "Ran 10 commands · 8 thoughts · 1 failed" row instead of sixteen
+/// alternating "Thought" / "Ran N commands" rows.
+pub fn work_script() -> Vec<AgentEvent> {
+    // A thought's title and body, then the commands it led to (and whether
+    // each failed).
+    type Step = (&'static str, &'static str, &'static [(&'static str, bool)]);
+    let steps: [Step; 8] = [
+        (
+            "**Locating the fold**\n\n",
+            "Events fold into parts before anything syncs. Find that entry point and the writer behind it.",
+            &[
+                ("rg -n \"fn fold_event_into_parts\" crates", false),
+                ("rg -ln \"SegmentWriter\" crates", false),
+            ],
+        ),
+        (
+            "**Reading the writer**\n\n",
+            "The writer appends into `LoroText`. Check how it batches commits.",
+            &[("sed -n '1,80p' crates/doc/src/writer.rs", false)],
+        ),
+        (
+            "**Checking the commit cadence**\n\n",
+            "The 120ms coalescing is the claim to verify — look for the timer.",
+            &[("rg -n \"120\" crates/doc/src", false)],
+        ),
+        (
+            "**Running the fold tests**\n\n",
+            "Before explaining the path, make sure it is green.",
+            &[
+                ("cargo test -p cypher-doc fold", false),
+                ("cargo test -p cypher-doc writer", true),
+            ],
+        ),
+        (
+            "**A flaky writer test**\n\n",
+            "One writer test failed on a timing assertion. Re-run it alone and see when it last changed.",
+            &[
+                (
+                    "cargo test -p cypher-doc writer::coalesces -- --nocapture",
+                    false,
+                ),
+                ("git log -3 --oneline -- crates/doc/src/writer.rs", false),
+            ],
+        ),
+        (
+            "**Tracing the relay**\n\n",
+            "Commits leave through the session room; confirm the fan-out.",
+            &[("rg -n \"SessionRoom\" edge/src", false)],
+        ),
+        (
+            "**Confirming the device side**\n\n",
+            "Each device folds the same commits back into transcript rows.",
+            &[("rg -n \"fn rows_for_entry\" crates/ui/src", false)],
+        ),
+        (
+            "**Writing it up**\n\n",
+            "Enough to walk the pipeline in order: command, host, fold, relay.",
+            &[],
+        ),
+    ];
+    let mut events = Vec::new();
+    let mut call = 0;
+    for (title, body, commands) in steps {
+        // Two deltas per thought, so `CYPHER_MOCK_DELAY_MS` shows it stream.
+        for text in [title, body] {
+            events.push(AgentEvent::ReasoningDelta { text: text.into() });
+        }
+        for &(command, is_error) in commands {
+            call += 1;
+            let id = format!("mock-work-{call}");
+            events.push(AgentEvent::ToolCall {
+                id: id.clone(),
+                call: cypher_proto::ToolCall::Exec {
+                    command: command.into(),
+                },
+            });
+            events.push(AgentEvent::ToolResult {
+                id,
+                is_error,
+                output: is_error.then(|| {
+                    "test writer::coalesces ... FAILED\n\
+                     assertion failed: commits <= 2 (got 3 within 120ms)"
+                        .into()
+                }),
+                diff: None,
+            });
+        }
+    }
+    events
+}
+
 #[async_trait]
 impl Harness for MockHarness {
     fn id(&self) -> HarnessId {
@@ -91,6 +185,12 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `CYPHER_MOCK_WORK=1` opens the reply (after any
+        // `CYPHER_MOCK_THINK` thinking) with a run of thoughts between tool
+        // calls ([`work_script`]) — the data-side way to put the merged work
+        // row on screen. The scripted answer that follows closes the run.
+        let mock_work = cypher_env::var("MOCK_WORK").is_some_and(|v| !v.is_empty() && v != "0");
+        let work_events = mock_work.then(work_script).into_iter().flatten();
         // Thinking follows a leading SessionStarted, which resets the fold.
         let lead = body
             .iter()
@@ -100,6 +200,7 @@ impl Harness for MockHarness {
             .iter()
             .cloned()
             .chain(think_events)
+            .chain(work_events)
             .chain(body[lead..].iter().cloned())
             .chain(tail.iter().cloned())
             .map(Ok)

@@ -345,6 +345,32 @@ pub enum RowKind {
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
+        /// Part of an [`RowKind::Activity`]: no header of its own, the chips
+        /// always shown on the activity's rail.
+        nested: bool,
+        /// Leading chips its run's cap folds away ([`cap_work_runs`]); 0
+        /// outside a run, where the group caps itself.
+        skip: usize,
+    },
+    /// Stands in for the start of an open work run that the tool call cap
+    /// folds away — "Show 6 earlier tool calls and 3 thoughts" — or, once
+    /// the user revealed it (`tools == 0`), folds it back. Keyed by the run's
+    /// [`RowKind::Activity`] row id (`run`).
+    RunOverflow {
+        run: SharedString,
+        tools: usize,
+        thoughts: usize,
+    },
+    /// The toggle over a run of work that mixed tool calls with thinking —
+    /// one row instead of alternating "Thought" and "Ran N commands" rows.
+    /// The `rows` that follow are the run in order (its tool groups, its
+    /// thoughts and their blocks, all `nested`); they are dropped while the
+    /// toggle is closed (see [`fold_closed_toggles`]). Open by default only
+    /// while the run is the streaming tail, like a tool group.
+    Activity {
+        rows: usize,
+        summary: SharedString,
+        auto_open: bool,
     },
     /// The settled turn's work rule: a hairline labelled "Worked for 1m 32s",
     /// sitting between the turn's tool/chip activity and the answer text it
@@ -381,6 +407,11 @@ pub enum RowKind {
     Thought {
         blocks: usize,
         live: bool,
+        /// Inside an [`RowKind::Activity`]: drawn as a chip on its rail,
+        /// labelled with `preview`.
+        nested: bool,
+        /// The thought's first line, markup stripped.
+        preview: SharedString,
     },
     /// One top-level markdown block of a reasoning part, painted muted.
     /// `live` blocks fade in like [`RowKind::LiveMarkdown`].
@@ -388,7 +419,20 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
         live: bool,
+        /// Inside an [`RowKind::Activity`]: indented on its rail.
+        nested: bool,
     },
+}
+
+/// Rows that belong to an [`RowKind::Activity`] run.
+pub(super) fn is_nested(kind: &RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::ToolGroup { nested: true, .. }
+            | RowKind::Thought { nested: true, .. }
+            | RowKind::ThoughtBlock { nested: true, .. }
+            | RowKind::RunOverflow { .. }
+    )
 }
 
 /// Rows whose text streams in under a fade veil.
@@ -417,6 +461,47 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+    /// The model(s) that wrote the answer, revealed after the timestamp in
+    /// the same hover strip. Travels with `timestamp`; set only on settled
+    /// assistant entries whose harness reported the model (pi).
+    pub answered: Option<AnsweredLabel>,
+}
+
+/// What a settled answer's strip says about the model(s) that wrote it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnsweredLabel {
+    /// The answering model ids, in the order they first answered.
+    pub text: SharedString,
+    /// A model answered that wasn't the one requested: the strip highlights
+    /// the label and this explains it on hover.
+    pub substituted: Option<SharedString>,
+}
+
+/// The strip label for an entry's answering models; `None` when the entry
+/// records none (another harness, or written before models were recorded).
+pub fn answered_label(models: &[AnsweredModel]) -> Option<AnsweredLabel> {
+    let mut served: Vec<&str> = Vec::new();
+    let mut swaps: Vec<String> = Vec::new();
+    for answered in models {
+        if !served.contains(&answered.model.as_str()) {
+            served.push(&answered.model);
+        }
+        if answered.substituted()
+            && let Some(requested) = &answered.requested
+        {
+            let swap = format!("Requested {requested}, answered by {}", answered.model);
+            if !swaps.contains(&swap) {
+                swaps.push(swap);
+            }
+        }
+    }
+    if served.is_empty() {
+        return None;
+    }
+    Some(AnsweredLabel {
+        text: served.join(", ").into(),
+        substituted: (!swaps.is_empty()).then(|| swaps.join("\n").into()),
+    })
 }
 
 /// Whether a user row renders as the quiet slash-command action chip rather
@@ -459,6 +544,8 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
         // Thinking is not searched: a hit inside a collapsed thought could
         // not be shown.
         RowKind::ToolGroup { .. }
+        | RowKind::Activity { .. }
+        | RowKind::RunOverflow { .. }
         | RowKind::Worked { .. }
         | RowKind::InputChip { .. }
         | RowKind::ErrorChip { .. }
@@ -987,6 +1074,7 @@ pub fn rows_for_entry(
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
+            answered: None,
         }];
     }
 
@@ -1014,13 +1102,20 @@ pub fn rows_for_entry(
             kind: RowKind::ToolGroup {
                 tools: Arc::new(tools),
                 auto_open,
+                nested: false,
+                skip: 0,
             },
             entry_id: entry.id.clone().into(),
             role: entry.role,
             timestamp: None,
+            answered: None,
         });
         *group_ix += 1;
     };
+    // The open work run: where its rows start and the part that opened it
+    // (the Activity row's id). Tool calls and thoughts extend it; anything
+    // the reader sees between them (answer text, a chip) closes it.
+    let mut run: Option<(usize, String)> = None;
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
@@ -1037,6 +1132,9 @@ pub fn rows_for_entry(
                 diff_stats,
                 ..
             } => {
+                // Nothing is pushed until the group flushes, so the run's
+                // rows start here.
+                run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                 pending_group.push((
                     part_id.clone(),
                     ToolItem {
@@ -1059,21 +1157,35 @@ pub fn rows_for_entry(
                 group_last_part_ix = part_ix;
             }
             other => {
+                // A part that renders nothing (an empty text or thought, a
+                // question still in the composer) splits nothing either.
+                let silent = match other {
+                    MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                        text.trim().is_empty()
+                    }
+                    MessagePart::Input { resolved, .. } => !*resolved,
+                    MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
+                };
+                if silent {
+                    continue;
+                }
                 flush_group(
                     &mut rows,
                     &mut pending_group,
                     &mut group_ix,
                     group_last_part_ix,
                 );
+                if !matches!(other, MessagePart::Reasoning { .. })
+                    && let Some((start, first_part)) = run.take()
+                {
+                    fold_work_run(&mut rows, start, &first_part, entry, false);
+                }
                 match other {
                     MessagePart::Text {
                         id: part_id,
                         text,
                         agent_text,
                     } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
                         // Block rows keep their ids either way (quotes map
@@ -1090,6 +1202,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: RowKind::TranslationOriginal { blocks },
                             });
                         }
@@ -1115,6 +1228,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -1130,23 +1244,26 @@ pub fn rows_for_entry(
                         }
                     }
                     MessagePart::Reasoning { id: part_id, text } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
+                        run.get_or_insert_with(|| (rows.len(), part_id.clone()));
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
                         // Still thinking: the reasoning is the live tail.
                         let live = streaming && part_ix == last_part_ix;
+                        let preview = thought_preview(text);
                         rows.push(Row {
                             id: format!("{key}.thought").into(),
-                            version: (tree.blocks.len() as u64) << 1 | live as u64,
+                            version: ((tree.blocks.len() as u64) << 1 | live as u64)
+                                ^ fnv1a(preview.as_bytes()) << 8,
                             turn_start: false,
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                             kind: RowKind::Thought {
                                 blocks: tree.blocks.len(),
                                 live,
+                                nested: false,
+                                preview: preview.into(),
                             },
                         });
                         // Same ids and content-hash versions as answer blocks,
@@ -1165,10 +1282,12 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 role: entry.role,
                                 timestamp: None,
+                                answered: None,
                                 kind: RowKind::ThoughtBlock {
                                     tree: tree.clone(),
                                     block_ix,
                                     live,
+                                    nested: false,
                                 },
                             });
                         }
@@ -1180,12 +1299,10 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        if !*resolved {
-                            // The composer wizard is the interaction. A pending
-                            // "Awaiting your answer…" chip makes slash-command
-                            // settings read as the model asking a question.
-                            continue;
-                        }
+                        // Only resolved questions get here (`silent`): the
+                        // composer wizard is the interaction, and a pending
+                        // "Awaiting your answer…" chip made slash-command
+                        // settings read as the model asking a question.
                         // Model-generated header onto the one-line chip.
                         let header: SharedString = single_line(
                             &questions
@@ -1206,6 +1323,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                         });
                     }
                     MessagePart::Error {
@@ -1223,6 +1341,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             role: entry.role,
                             timestamp: None,
+                            answered: None,
                         });
                     }
                     // Tools are grouped by the outer arm; nothing reaches here.
@@ -1237,6 +1356,10 @@ pub fn rows_for_entry(
         &mut group_ix,
         group_last_part_ix,
     );
+    if let Some((start, first_part)) = run.take() {
+        // Still the tail of a streaming reply: open, like a live tool group.
+        fold_work_run(&mut rows, start, &first_part, entry, streaming);
+    }
 
     // The work rule goes in BEFORE the turn-start/timestamp bookkeeping: it is
     // never the entry's first or last row (it separates work from the answer
@@ -1255,6 +1378,7 @@ pub fn rows_for_entry(
                 entry_id: entry_id.clone(),
                 role: entry.role,
                 timestamp: None,
+                answered: None,
             },
         );
     }
@@ -1269,8 +1393,89 @@ pub fn rows_for_entry(
     if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
         last.version ^= 1 << 62;
+        if entry.role == MessageRole::Assistant
+            && let Some(label) = answered_label(&entry.models)
+        {
+            last.version ^= fnv1a(label.text.as_bytes()).rotate_left(1)
+                ^ u64::from(label.substituted.is_some());
+            last.answered = Some(label);
+        }
     }
     rows
+}
+
+/// Fold a closed work run — `rows[start..]`, opened by part `first_part` —
+/// behind one [`RowKind::Activity`] row when it mixed tool calls with
+/// thinking. A run of only tools is one group already and a lone thought its
+/// own toggle; both stay as they are.
+fn fold_work_run(
+    rows: &mut Vec<Row>,
+    start: usize,
+    first_part: &str,
+    entry: &SessionMessageEntry,
+    auto_open: bool,
+) {
+    let mut thoughts = 0usize;
+    let mut tools: Vec<(ToolCall, bool)> = Vec::new();
+    for row in &rows[start..] {
+        match &row.kind {
+            RowKind::Thought { .. } => thoughts += 1,
+            RowKind::ToolGroup { tools: group, .. } => {
+                tools.extend(group.iter().map(|t| (t.call.clone(), t.is_error)));
+            }
+            _ => {}
+        }
+    }
+    if thoughts == 0 || tools.is_empty() {
+        return;
+    }
+    for row in &mut rows[start..] {
+        if let RowKind::ToolGroup { nested, .. }
+        | RowKind::Thought { nested, .. }
+        | RowKind::ThoughtBlock { nested, .. } = &mut row.kind
+        {
+            *nested = true;
+            // A thought that gains its first tool call redraws as a chip.
+            row.version ^= 1 << 61;
+        }
+    }
+    let summary = cypher_proto::view::work_summary(&tools, thoughts);
+    let count = rows.len() - start;
+    rows.insert(
+        start,
+        Row {
+            id: format!("{}#{}.activity", entry.id, first_part).into(),
+            version: (fnv1a(summary.as_bytes()) ^ count as u64) << 1 | auto_open as u64,
+            turn_start: false,
+            kind: RowKind::Activity {
+                rows: count,
+                summary: summary.into(),
+                auto_open,
+            },
+            entry_id: entry.id.clone().into(),
+            role: entry.role,
+            timestamp: None,
+            answered: None,
+        },
+    );
+}
+
+/// A thought's label in a work run: its first line, without the heading or
+/// emphasis markers models often title a thought with ("**Planning**").
+pub(super) fn thought_preview(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let mut line = line.trim_start_matches('#').trim_start();
+    for marker in ["**", "__", "*", "_"] {
+        if line.len() > marker.len() * 2 && line.starts_with(marker) && line.ends_with(marker) {
+            line = &line[marker.len()..line.len() - marker.len()];
+            break;
+        }
+    }
+    single_line(line)
 }
 
 /// Order a tool group so each call made from inside another call's run
@@ -1339,11 +1544,32 @@ fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree) -> Option
         .then_some(rule + 1)
 }
 
-/// Drop the rows each CLOSED toggle covers — a translation's original or a
-/// thought. `open` holds the ids of toggles the user expanded; every other
-/// toggle stays collapsed. A folded row's timestamp (a reply that ended while
-/// thinking) moves onto its toggle, so the entry keeps its strip.
-pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet<SharedString>) {
+/// The rows a toggle covers and whether it starts open: a translation's
+/// original and a thought start closed, a work run only while it streams.
+fn toggle_span(kind: &RowKind) -> Option<(usize, bool)> {
+    match kind {
+        RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } => {
+            Some((*blocks, false))
+        }
+        RowKind::Activity {
+            rows, auto_open, ..
+        } => Some((*rows, *auto_open)),
+        _ => None,
+    }
+}
+
+/// Whether the toggle `row` is open: the user's click (`pins`, by row id)
+/// wins, else the toggle's default.
+pub(super) fn toggle_open(row: &Row, pins: &HashMap<SharedString, bool>) -> bool {
+    toggle_span(&row.kind).is_some_and(|(_, default)| pins.get(&row.id).copied().unwrap_or(default))
+}
+
+/// Drop the rows each CLOSED toggle covers — a translation's original, a
+/// thought, a work run. `pins` holds the toggles the user clicked, by row id;
+/// every other toggle keeps its default ([`toggle_span`]). A folded row's
+/// timestamp (a reply that ended while thinking) moves onto its toggle, so
+/// the entry keeps its strip.
+pub fn fold_closed_toggles(rows: &mut Vec<Row>, pins: &HashMap<SharedString, bool>) {
     let mut hide = 0usize;
     let mut folded: Vec<Row> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
@@ -1352,17 +1578,120 @@ pub fn fold_closed_toggles(rows: &mut Vec<Row>, open: &std::collections::HashSet
             if let (Some(stamp), Some(toggle)) = (row.timestamp, folded.last_mut()) {
                 toggle.timestamp = Some(stamp);
                 toggle.version ^= 1 << 62;
+                if let Some(label) = row.answered {
+                    toggle.version ^= fnv1a(label.text.as_bytes()).rotate_left(1)
+                        ^ u64::from(label.substituted.is_some());
+                    toggle.answered = Some(label);
+                }
             }
             continue;
         }
-        if let RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } = row.kind
-            && !open.contains(&row.id)
+        if let Some((covered, _)) = toggle_span(&row.kind)
+            && !toggle_open(&row, pins)
         {
-            hide = blocks;
+            hide = covered;
         }
         folded.push(row);
     }
     *rows = folded;
+}
+
+/// Cap each open work run the way a tool group caps its chips: keep the
+/// run's LAST `limit` tool calls ([`hidden_tool_count`]) and fold everything
+/// before them — earlier calls and thoughts alike — behind one
+/// [`RowKind::RunOverflow`] row. The cut lands right after the last hidden
+/// call, so the thinking that led into the first kept one stays; a cut inside
+/// a tool group hides that group's leading chips (`skip`). `revealed` holds
+/// the runs the user unfolded, by [`RowKind::Activity`] row id: they show
+/// whole, under a row that folds them back.
+///
+/// Runs after [`fold_closed_toggles`]: a closed run has no rows left to cap.
+pub fn cap_work_runs(
+    rows: &mut Vec<Row>,
+    limit: u32,
+    revealed: &std::collections::HashSet<SharedString>,
+) {
+    let mut ix = 0;
+    while ix < rows.len() {
+        if !matches!(rows[ix].kind, RowKind::Activity { .. }) {
+            ix += 1;
+            continue;
+        }
+        let run = rows[ix].id.clone();
+        let start = ix + 1;
+        let end = start
+            + rows[start..]
+                .iter()
+                .take_while(|row| is_nested(&row.kind))
+                .count();
+        let total: usize = rows[start..end]
+            .iter()
+            .map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => tools.len(),
+                _ => 0,
+            })
+            .sum();
+        let is_revealed = revealed.contains(&run);
+        let hidden = hidden_tool_count(total, limit, is_revealed);
+        if hidden == 0 && !(is_revealed && hidden_tool_count(total, limit, false) > 0) {
+            ix = end;
+            continue;
+        }
+        // `rows[start..cut]` fold away whole; `skip` chips of `rows[cut]` too.
+        let (mut cut, mut left, mut skip, mut thoughts) = (start, hidden, 0, 0);
+        while left > 0 {
+            match &rows[cut].kind {
+                RowKind::ToolGroup { tools, .. } if tools.len() > left => {
+                    skip = left;
+                    break;
+                }
+                RowKind::ToolGroup { tools, .. } => left -= tools.len(),
+                RowKind::Thought { .. } => thoughts += 1,
+                _ => {}
+            }
+            cut += 1;
+        }
+        let group = &mut rows[cut];
+        if let RowKind::ToolGroup {
+            skip: group_skip, ..
+        } = &mut group.kind
+            && skip > 0
+        {
+            *group_skip = skip;
+            group.version ^= (skip as u64) << 48;
+        }
+        let overflow = Row {
+            id: format!("{run}.overflow").into(),
+            version: (hidden as u64) << 32 | thoughts as u64,
+            turn_start: false,
+            kind: RowKind::RunOverflow {
+                run,
+                tools: hidden,
+                thoughts,
+            },
+            entry_id: rows[ix].entry_id.clone(),
+            role: rows[ix].role,
+            timestamp: None,
+            answered: None,
+        };
+        rows.splice(start..cut, [overflow]);
+        ix = end - (cut - start) + 1;
+    }
+}
+
+/// The label of a work run's [`RowKind::RunOverflow`] row: what it folds
+/// away, or — for a revealed run (`tools == 0`) — that it folds it back.
+pub(super) fn run_overflow_label(tools: usize, thoughts: usize) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    match (tools, thoughts) {
+        (0, _) => "Show fewer tool calls".to_string(),
+        (tools, 0) => format!("Show {tools} earlier tool call{}", plural(tools)),
+        (tools, thoughts) => format!(
+            "Show {tools} earlier tool call{} and {thoughts} thought{}",
+            plural(tools),
+            plural(thoughts)
+        ),
+    }
 }
 
 /// How [`parse_for_row`] produced its tree — carries the incremental parser's
@@ -1455,6 +1784,9 @@ pub(super) fn top_gap_for_style(
     if row.turn_start {
         return message_gap;
     }
+    if is_nested(&row.kind) {
+        return nested_gap(prev, row, paragraph_gap);
+    }
     let is_md = |k: &RowKind| {
         matches!(
             k,
@@ -1468,6 +1800,26 @@ pub(super) fn top_gap_for_style(
         paragraph_gap
     } else {
         GAP_BLOCK
+    }
+}
+
+/// The gap above a row of a work run (drawn on the run's rail): chips stack
+/// like a tool group's — their cards carry their own margins — a thought's
+/// text sits just under its chip, and the chip after it gets some air.
+fn nested_gap(prev: Option<&Row>, row: &Row, paragraph_gap: f32) -> f32 {
+    let Some(prev) = prev else {
+        return 0.0;
+    };
+    match (&row.kind, &prev.kind) {
+        (_, RowKind::Activity { .. }) => CHIPS_TOP_PAD,
+        (RowKind::ThoughtBlock { .. }, RowKind::ThoughtBlock { .. })
+            if part_prefix(&prev.id) == part_prefix(&row.id) =>
+        {
+            paragraph_gap
+        }
+        (RowKind::ThoughtBlock { .. }, _) => 2.0,
+        (_, RowKind::ThoughtBlock { .. }) => 6.0,
+        _ => 0.0,
     }
 }
 

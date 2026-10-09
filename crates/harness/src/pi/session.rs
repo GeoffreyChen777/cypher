@@ -281,6 +281,38 @@ fn message_is_assistant(message: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+/// The model that answered an assistant `message_end`: the provider's
+/// `responseModel` (pi-ai sets it only when the response named a different
+/// model than the request), else the requested `model`. `None` for a message
+/// no model produced — an empty error/abort stand-in for a failed request.
+fn answered_model(message: &Value) -> Option<AnsweredModel> {
+    let text = |key: &str| {
+        message
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let requested = text("model");
+    if let Some(served) = text("responseModel") {
+        return Some(AnsweredModel {
+            model: served.to_owned(),
+            requested: requested.filter(|r| *r != served).map(str::to_owned),
+        });
+    }
+    let produced = message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| !content.is_empty());
+    if !produced {
+        return None;
+    }
+    Some(AnsweredModel {
+        model: requested?.to_owned(),
+        requested: None,
+    })
+}
+
 /// One `extension_ui_request` dialog → the engine's input bridge. The bridge
 /// answers with option labels; the response maps them back per method:
 /// select/input/editor take a `value` (or `cancelled`), confirm a boolean.
@@ -1151,6 +1183,7 @@ pub(super) async fn run_session(session: Session) {
                                     &event_tx,
                                     AgentEvent::AssistantMessageCompleted {
                                         assistant_message_id: completed,
+                                        model: ev.get("message").and_then(answered_model),
                                     },
                                 )
                                 .await

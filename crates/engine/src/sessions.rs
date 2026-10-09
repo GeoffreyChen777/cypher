@@ -33,9 +33,9 @@ use cypher_harness::{
     CancellationToken, ChildRunEnv, Harness, RunControls, RunHostContext, SteerMessage,
 };
 use cypher_proto::{
-    AgentEvent, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel, RunRequest,
-    Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, AnsweredModel, ChatConfig, ContextUsage, DoneStatus, HarnessId, ReasoningLevel,
+    RunRequest, Session, SessionStatus, SubagentRun, SubagentRunStatus, Throughput,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};

@@ -1231,7 +1231,7 @@ pub(super) async fn run_session(session: Session) {
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
                     &event_tx,
-                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev, model: None },
                 )
                 .await
                 {
@@ -1386,7 +1386,7 @@ pub(super) async fn run_session(session: Session) {
                         let (prev, _next) = rotate(&mut assistant_message_id);
                         let _ = send(
                             &event_tx,
-                            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                            AgentEvent::AssistantMessageCompleted { assistant_message_id: prev, model: None },
                         )
                         .await;
                         if let Some(usage) = usage_from_response(&res) {
@@ -1649,7 +1649,7 @@ pub(super) async fn run_session(session: Session) {
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
                     &event_tx,
-                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev, model: None },
                 )
                 .await
                 {

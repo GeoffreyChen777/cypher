@@ -426,7 +426,9 @@ fn a_thought_folds_behind_a_collapsed_toggle() {
         rows[0].kind,
         RowKind::Thought {
             blocks: 2,
-            live: false
+            live: false,
+            nested: false,
+            ..
         }
     ));
     assert!(rows[0].turn_start);
@@ -444,7 +446,7 @@ fn a_thought_folds_behind_a_collapsed_toggle() {
     assert_eq!(top_gap_for(Some(&folded[0]), &folded[1]), GAP_BLOCK);
 
     let mut open = rows.clone();
-    fold_closed_toggles(&mut open, &["m1#r0.thought".into()].into());
+    fold_closed_toggles(&mut open, &[("m1#r0.thought".into(), true)].into());
     assert_eq!(open.len(), rows.len());
 }
 
@@ -484,6 +486,349 @@ fn a_reply_that_ended_thinking_keeps_its_timestamp_on_the_toggle() {
     assert_eq!(ids, ["m1#t0.0", "m1#r1.thought"]);
     assert!(folded[1].timestamp.is_some());
     assert_ne!(folded[1].version, rows[1].version);
+}
+
+fn ids(rows: &[Row]) -> Vec<&str> {
+    rows.iter().map(|r| r.id.as_ref()).collect()
+}
+
+#[test]
+fn thinking_between_tool_calls_folds_into_one_work_run() {
+    let entry = assistant(
+        "m1",
+        MessageStatus::Complete,
+        vec![
+            thought_part("r0", "**Look around**\n\nList the files."),
+            tool_part("x1", "ls"),
+            tool_part("x2", "git status"),
+            thought_part("r3", "Now build."),
+            tool_part("x4", "cargo build"),
+            thought_part("r5", "It built."),
+            text_part("t6", "Done."),
+        ],
+    );
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    assert_eq!(
+        ids(&rows),
+        [
+            "m1#r0.activity",
+            "m1#r0.thought",
+            "m1#r0.0",
+            "m1#r0.1",
+            "m1#g0",
+            "m1#r3.thought",
+            "m1#r3.0",
+            "m1#g1",
+            "m1#r5.thought",
+            "m1#r5.0",
+            "m1#t6.0",
+        ]
+    );
+    let RowKind::Activity {
+        rows: covered,
+        summary,
+        auto_open,
+    } = &rows[0].kind
+    else {
+        panic!("expected the work run's toggle");
+    };
+    assert_eq!(*covered, 9);
+    assert_eq!(summary.as_ref(), "Ran 3 commands · 3 thoughts");
+    assert!(!auto_open);
+    assert!(rows[0].turn_start);
+    assert!(rows[1..10].iter().all(|r| is_nested(&r.kind)));
+    let RowKind::Thought { preview, .. } = &rows[1].kind else {
+        panic!("expected a thought");
+    };
+    assert_eq!(preview.as_ref(), "Look around");
+
+    // Closed, the whole run is one row above the answer.
+    let mut folded = rows.clone();
+    fold_closed_toggles(&mut folded, &Default::default());
+    assert_eq!(ids(&folded), ["m1#r0.activity", "m1#t6.0"]);
+
+    // Open, the run reads in order: chips, and thoughts still folded.
+    let mut open = rows.clone();
+    fold_closed_toggles(&mut open, &[("m1#r0.activity".into(), true)].into());
+    assert_eq!(
+        ids(&open),
+        [
+            "m1#r0.activity",
+            "m1#r0.thought",
+            "m1#g0",
+            "m1#r3.thought",
+            "m1#g1",
+            "m1#r5.thought",
+            "m1#t6.0",
+        ]
+    );
+    // The rail runs on: no bare gap between the run's rows.
+    assert_eq!(top_gap_for(Some(&open[0]), &open[1]), CHIPS_TOP_PAD);
+    assert_eq!(top_gap_for(Some(&open[1]), &open[2]), 0.0);
+    assert_eq!(top_gap_for(Some(&open[5]), &open[6]), GAP_BLOCK);
+}
+
+#[test]
+fn the_mock_work_demo_settles_into_one_row() {
+    // `CYPHER_MOCK_WORK` (scripts/dev-demo-work.sh): sixteen alternating
+    // thought and command rows fold into one above the answer.
+    let mut parts = Vec::new();
+    for event in cypher_harness::mock::work_script() {
+        cypher_doc::fold_event_into_parts(&mut parts, &event);
+    }
+    let answer = cypher_proto::AgentEvent::TextDelta {
+        text: "Here is the pipeline.".into(),
+    };
+    cypher_doc::fold_event_into_parts(&mut parts, &answer);
+    let entry = assistant("m1", MessageStatus::Complete, parts);
+    let mut rows = rows_for_entry(&entry, false, &mut parse);
+    fold_closed_toggles(&mut rows, &Default::default());
+    assert_eq!(rows.len(), 2);
+    let RowKind::Activity { summary, .. } = &rows[0].kind else {
+        panic!("expected the work run's toggle");
+    };
+    assert_eq!(summary.as_ref(), "Ran 10 commands · 8 thoughts · 1 failed");
+}
+
+#[test]
+fn the_tool_call_cap_folds_the_start_of_an_open_work_run() {
+    let entry = assistant(
+        "m1",
+        MessageStatus::Complete,
+        vec![
+            thought_part("r0", "Look around."),
+            tool_part("x1", "ls"),
+            tool_part("x2", "git status"),
+            tool_part("x3", "git log"),
+            thought_part("r4", "Build it."),
+            tool_part("x5", "cargo build"),
+            tool_part("x6", "cargo test"),
+            tool_part("x7", "cargo clippy"),
+            thought_part("r8", "Ship it."),
+            tool_part("x9", "git add ."),
+            tool_part("x10", "git commit"),
+            tool_part("x11", "git push"),
+            text_part("t12", "Done."),
+        ],
+    );
+    let mut open = rows_for_entry(&entry, false, &mut parse);
+    fold_closed_toggles(&mut open, &[("m1#r0.activity".into(), true)].into());
+    let none = Default::default();
+
+    // Nine calls, five kept: the cut falls inside the second group, which
+    // keeps its last two chips.
+    let mut capped = open.clone();
+    cap_work_runs(&mut capped, 5, &none);
+    assert_eq!(
+        ids(&capped),
+        [
+            "m1#r0.activity",
+            "m1#r0.activity.overflow",
+            "m1#g1",
+            "m1#r8.thought",
+            "m1#g2",
+            "m1#t12.0",
+        ]
+    );
+    let RowKind::RunOverflow {
+        run,
+        tools,
+        thoughts,
+    } = &capped[1].kind
+    else {
+        panic!("expected the run's overflow row");
+    };
+    assert_eq!((run.as_ref(), *tools, *thoughts), ("m1#r0.activity", 4, 2));
+    assert_eq!(
+        run_overflow_label(*tools, *thoughts),
+        "Show 4 earlier tool calls and 2 thoughts"
+    );
+    assert!(matches!(capped[2].kind, RowKind::ToolGroup { skip: 1, .. }));
+    assert_ne!(capped[2].version, open[4].version);
+    // On the run's rail, like its chips.
+    assert_eq!(top_gap_for(Some(&capped[0]), &capped[1]), CHIPS_TOP_PAD);
+    assert_eq!(top_gap_for(Some(&capped[1]), &capped[2]), 0.0);
+
+    // A cut between groups keeps the thinking that led into the first
+    // kept call.
+    let mut capped = open.clone();
+    cap_work_runs(&mut capped, 6, &none);
+    assert_eq!(
+        ids(&capped),
+        [
+            "m1#r0.activity",
+            "m1#r0.activity.overflow",
+            "m1#r4.thought",
+            "m1#g1",
+            "m1#r8.thought",
+            "m1#g2",
+            "m1#t12.0",
+        ]
+    );
+    assert!(matches!(capped[3].kind, RowKind::ToolGroup { skip: 0, .. }));
+
+    // Revealed, the run shows whole under a row that folds it back.
+    let mut revealed = open.clone();
+    cap_work_runs(&mut revealed, 5, &["m1#r0.activity".into()].into());
+    assert_eq!(revealed.len(), open.len() + 1);
+    assert!(matches!(
+        revealed[1].kind,
+        RowKind::RunOverflow { tools: 0, .. }
+    ));
+    assert_eq!(&ids(&revealed)[2..], &ids(&open)[1..]);
+    assert_eq!(run_overflow_label(0, 0), "Show fewer tool calls");
+
+    // One call over the cap folds too, with the thinking before it.
+    let mut capped = open.clone();
+    cap_work_runs(&mut capped, 8, &none);
+    assert_eq!(
+        ids(&capped),
+        [
+            "m1#r0.activity",
+            "m1#r0.activity.overflow",
+            "m1#g0",
+            "m1#r4.thought",
+            "m1#g1",
+            "m1#r8.thought",
+            "m1#g2",
+            "m1#t12.0",
+        ]
+    );
+    assert!(matches!(capped[2].kind, RowKind::ToolGroup { skip: 1, .. }));
+    assert!(matches!(
+        capped[1].kind,
+        RowKind::RunOverflow {
+            tools: 1,
+            thoughts: 1,
+            ..
+        }
+    ));
+
+    // "Show all", a cap the run fits, or a closed run: untouched.
+    for limit in [0, 9, 10] {
+        let mut uncapped = open.clone();
+        cap_work_runs(&mut uncapped, limit, &none);
+        assert_eq!(ids(&uncapped), ids(&open));
+    }
+    let mut closed = rows_for_entry(&entry, false, &mut parse);
+    fold_closed_toggles(&mut closed, &Default::default());
+    let before = ids(&closed).join(" ");
+    cap_work_runs(&mut closed, 5, &none);
+    assert_eq!(ids(&closed).join(" "), before);
+}
+
+#[test]
+fn a_work_run_is_open_while_it_streams_and_closes_when_the_answer_starts() {
+    let working = assistant(
+        "m1",
+        MessageStatus::Streaming,
+        vec![tool_part("x0", "ls"), thought_part("r1", "Hmm")],
+    );
+    let rows = rows_for_entry(&working, false, &mut parse);
+    assert!(matches!(
+        rows[0].kind,
+        RowKind::Activity {
+            auto_open: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[2].kind,
+        RowKind::Thought {
+            live: true,
+            nested: true,
+            ..
+        }
+    ));
+    let mut folded = rows.clone();
+    fold_closed_toggles(&mut folded, &Default::default());
+    assert_eq!(folded.len(), 3, "open run, thought still folded");
+    // A click pins it closed.
+    let mut closed = rows.clone();
+    fold_closed_toggles(&mut closed, &[("m1#x0.activity".into(), false)].into());
+    assert_eq!(ids(&closed), ["m1#x0.activity"]);
+
+    let answering = assistant(
+        "m1",
+        MessageStatus::Streaming,
+        vec![
+            tool_part("x0", "ls"),
+            thought_part("r1", "Hmm"),
+            text_part("t2", "So"),
+        ],
+    );
+    let mut rows = rows_for_entry(&answering, false, &mut parse);
+    fold_closed_toggles(&mut rows, &Default::default());
+    assert_eq!(ids(&rows), ["m1#x0.activity", "m1#t2.0"]);
+}
+
+#[test]
+fn only_a_run_that_mixes_tools_and_thinking_folds() {
+    // Tools alone: one group, as before.
+    let entry = assistant(
+        "m1",
+        MessageStatus::Complete,
+        vec![
+            tool_part("x0", "ls"),
+            text_part("t1", "   "),
+            tool_part("x2", "pwd"),
+            text_part("t3", "Done."),
+        ],
+    );
+    let rows = rows_for_entry(&entry, false, &mut parse);
+    assert_eq!(ids(&rows), ["m1#g0", "m1#t3.0"]);
+    let RowKind::ToolGroup { tools, nested, .. } = &rows[0].kind else {
+        panic!("expected a tool group");
+    };
+    assert_eq!(tools.len(), 2, "an empty text part splits nothing");
+    assert!(!nested);
+
+    // Answer text between a thought and the tools: separate runs.
+    let entry = assistant(
+        "m1",
+        MessageStatus::Complete,
+        vec![
+            thought_part("r0", "Plan"),
+            text_part("t1", "Let me look."),
+            tool_part("x2", "ls"),
+            text_part("t3", "Done."),
+        ],
+    );
+    let mut rows = rows_for_entry(&entry, false, &mut parse);
+    fold_closed_toggles(&mut rows, &Default::default());
+    assert_eq!(ids(&rows), ["m1#r0.thought", "m1#t1.0", "m1#g0", "m1#t3.0"]);
+}
+
+#[test]
+fn a_work_run_still_leads_to_the_worked_rule() {
+    let mut entry = assistant(
+        "m1",
+        MessageStatus::Complete,
+        vec![
+            thought_part("r0", "Plan"),
+            tool_part("x1", "ls"),
+            text_part("t2", "Done."),
+        ],
+    );
+    entry.completed_at = Some(90_000);
+    let mut rows = rows_for_entry(&entry, false, &mut parse);
+    fold_closed_toggles(&mut rows, &Default::default());
+    assert_eq!(ids(&rows), ["m1#r0.activity", "m1#worked", "m1#t2.0"]);
+}
+
+#[test]
+fn thought_previews_drop_title_markup() {
+    assert_eq!(
+        thought_preview("**Planning the fix**\n\nFirst…"),
+        "Planning the fix"
+    );
+    assert_eq!(thought_preview("\n## Heading\nbody"), "Heading");
+    assert_eq!(
+        thought_preview("Check `__init__` first"),
+        "Check `__init__` first"
+    );
+    assert_eq!(thought_preview("_Weighing options_"), "Weighing options");
+    assert_eq!(thought_preview(""), "");
 }
 
 #[test]
@@ -555,7 +900,7 @@ fn append_translation_folds_its_original_behind_a_toggle() {
     assert!(folded.last().unwrap().timestamp.is_some());
 
     let mut open = rows.clone();
-    fold_closed_toggles(&mut open, &["m1#t0.original".into()].into());
+    fold_closed_toggles(&mut open, &[("m1#t0.original".into(), true)].into());
     assert_eq!(open.len(), rows.len());
 }
 
@@ -1689,6 +2034,61 @@ fn timestamp_strip_lands_on_the_last_settled_row() {
     assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
 }
 
+fn answered(model: &str, requested: Option<&str>) -> AnsweredModel {
+    AnsweredModel {
+        model: model.into(),
+        requested: requested.map(str::to_owned),
+    }
+}
+
+/// The answering models ride the settled answer's strip, and only a
+/// different model — not a dated snapshot of the requested one — flags it.
+#[test]
+fn the_answering_model_labels_the_settled_strip() {
+    let mut done = assistant(
+        "a1",
+        MessageStatus::Complete,
+        vec![text_part("p1", "one\n\ntwo")],
+    );
+    let plain = rows_for_entry(&done, false, &mut parse);
+    assert!(plain.iter().all(|r| r.answered.is_none()), "none recorded");
+
+    done.models = vec![
+        answered("gpt-6-astra-2026-09-01", Some("gpt-6-astra")),
+        answered("gpt-6-astra", None),
+    ];
+    let rows = rows_for_entry(&done, false, &mut parse);
+    let last = rows.last().unwrap();
+    assert_eq!(
+        last.answered,
+        Some(AnsweredLabel {
+            text: "gpt-6-astra-2026-09-01, gpt-6-astra".into(),
+            substituted: None,
+        })
+    );
+    assert!(rows[..rows.len() - 1].iter().all(|r| r.answered.is_none()));
+    // The diff key changes with the label, or the strip would not repaint.
+    assert_ne!(last.version, plain.last().unwrap().version);
+
+    done.models = vec![
+        answered("gpt-6-astra", None),
+        answered("gpt-5.4-mini", Some("gpt-6-astra")),
+    ];
+    let rows = rows_for_entry(&done, false, &mut parse);
+    assert_eq!(
+        rows.last().unwrap().answered,
+        Some(AnsweredLabel {
+            text: "gpt-6-astra, gpt-5.4-mini".into(),
+            substituted: Some("Requested gpt-6-astra, answered by gpt-5.4-mini".into()),
+        })
+    );
+
+    // Not while the turn is still streaming.
+    done.status = Some(MessageStatus::Streaming);
+    let rows = rows_for_entry(&done, false, &mut parse);
+    assert!(rows.iter().all(|r| r.answered.is_none()));
+}
+
 #[test]
 fn single_line_collapses_all_whitespace_runs() {
     assert_eq!(single_line("a\nb"), "a b");
@@ -1703,8 +2103,8 @@ fn tool_group_cap_keeps_the_last_calls() {
     // Under the cap nothing folds; over it, the LAST `limit` chips stay.
     assert_eq!(hidden_tool_count(5, 5, false), 0);
     assert_eq!(hidden_tool_count(12, 5, false), 7);
-    // Folding a single chip would cost more height than it saves.
-    assert_eq!(hidden_tool_count(6, 5, false), 0);
+    // Strict: one call over the cap folds too.
+    assert_eq!(hidden_tool_count(6, 5, false), 1);
     assert_eq!(hidden_tool_count(7, 5, false), 2);
     // Revealed rows and the "show all" setting hide nothing.
     assert_eq!(hidden_tool_count(12, 5, true), 0);

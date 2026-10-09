@@ -16,6 +16,7 @@ fn user(id: &str, text: &str) -> SessionMessageEntry {
         continuation_of: None,
         completed_at: None,
         comments: Vec::new(),
+        models: Vec::new(),
     }
 }
 
@@ -34,6 +35,7 @@ fn assistant(id: &str, text: &str) -> SessionMessageEntry {
         continuation_of: None,
         completed_at: None,
         comments: Vec::new(),
+        models: Vec::new(),
     }
 }
 

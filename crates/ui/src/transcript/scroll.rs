@@ -783,11 +783,13 @@ impl Transcript {
                 s.transcript_revision(),
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
+                crate::chat_style::settings(cx).tool_call_limit,
             )
         };
         if self.synced_revision.as_ref() == Some(&revision) {
             return;
         }
+        let tool_call_limit = revision.3;
         self.synced_revision = Some(revision);
         let (selected, entries, echoes, steers) = {
             let s = self.state.read(cx);
@@ -835,7 +837,7 @@ impl Transcript {
             self.tree_cache.clear();
             self.folds.clear();
             self.tool_overflow.clear();
-            self.open_toggles.clear();
+            self.toggle_pins.clear();
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -861,7 +863,8 @@ impl Transcript {
                 rows.retain(|r| !matches!(r.kind, RowKind::InputChip { .. }));
             }
             rows.retain(|r| !is_pending_input_duplicate(r, pending_request_id.as_deref()));
-            fold_closed_toggles(&mut rows, &self.open_toggles);
+            fold_closed_toggles(&mut rows, &self.toggle_pins);
+            cap_work_runs(&mut rows, tool_call_limit, &self.tool_overflow);
             new_rows.extend(rows);
         }
         for (echo, pending) in &echoes {

@@ -310,18 +310,18 @@ impl Transcript {
         el
     }
 
-    /// The toggle over folded rows (a translation's original, a thought): a
-    /// chevron tile and a quiet label, styled like a tool group's header.
-    /// Clicking rebuilds the rows, which shows or hides the blocks below it.
-    /// `labels` are (closed, open).
+    /// The toggle over folded rows (a translation's original, a thought, a
+    /// work run): a chevron tile and a quiet label, styled like a tool
+    /// group's header. Clicking pins the other state and rebuilds the rows,
+    /// which shows or hides the rows below it.
     pub(super) fn render_fold_toggle(
         &self,
         row_id: &SharedString,
-        labels: (&'static str, &'static str),
+        open: bool,
+        label: SharedString,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.open_toggles.contains(row_id);
         let key = row_id.clone();
         div()
             .w_full()
@@ -340,9 +340,7 @@ impl Transcript {
                     .text_color(theme.text_muted)
                     .hover(|s| s.text_color(theme.text))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.open_toggles.remove(&key) {
-                            this.open_toggles.insert(key.clone());
-                        }
+                        this.toggle_pins.insert(key.clone(), !open);
                         // A local fold change: rebuild despite an unchanged
                         // state revision.
                         this.synced_revision = None;
@@ -362,32 +360,201 @@ impl Transcript {
                             .text_color(theme.text_muted.opacity(0.7))
                             .child(SharedString::from(if open { "▾" } else { "▸" })),
                     )
-                    .child(SharedString::from(if open { labels.1 } else { labels.0 })),
+                    .child(div().min_w_0().truncate().child(label)),
             )
             .into_any_element()
     }
 
+    /// A thought inside a work run: a chip on the run's rail like the tool
+    /// calls around it — the bulb, "Thought" and the thought's first line, a
+    /// spinner while it streams. Clicking shows or hides its text below.
+    pub(super) fn render_thought_chip(
+        &self,
+        row_id: &SharedString,
+        open: bool,
+        live: bool,
+        preview: SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = row_id.clone();
+        let header = div()
+            .h(px(CHIP_CARD_HEIGHT))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::LIGHTBULB)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(if live {
+                        "Thinking…"
+                    } else {
+                        "Thought"
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text.opacity(0.85))
+                    .child(preview),
+            )
+            .when(live, |row| {
+                row.child(tool_status_icon(
+                    ToolStatus::Running,
+                    SharedString::from(format!("{row_id}-status")),
+                    theme,
+                ))
+            })
+            .child(
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.0))
+                    .text_color(theme.text_muted.opacity(0.8))
+                    .child(SharedString::from(if open { "▾" } else { "▸" })),
+            );
+        div()
+            .h(px(CHIP_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .child(guide_rail().h_full())
+            .child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-toggle")))
+                    .ml(px(12.0))
+                    .h(px(CHIP_CARD_HEIGHT))
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(crate::theme::hairline(0.07))
+                    .bg(crate::theme::ink(0.03))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_pins.insert(key.clone(), !open);
+                        // A local fold change: rebuild despite an unchanged
+                        // state revision.
+                        this.synced_revision = None;
+                        this.sync(cx);
+                        cx.notify();
+                    }))
+                    .child(header),
+            )
+            .into_any_element()
+    }
+
+    /// The row a capped work run folds its start behind, on the run's rail
+    /// like the group's own overflow row. A click reveals the run whole, or
+    /// caps it again.
+    pub(super) fn render_run_overflow(
+        &self,
+        row_id: &SharedString,
+        run: &SharedString,
+        tools: usize,
+        thoughts: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = run.clone();
+        div()
+            .id(SharedString::from(format!("{row_id}-toggle")))
+            .h(px(OVERFLOW_ROW_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .hover(|s| s.text_color(theme.text_muted))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.tool_overflow.remove(&key) {
+                    this.tool_overflow.insert(key.clone());
+                }
+                // The cap is applied when rows are built: rebuild despite an
+                // unchanged state revision.
+                this.synced_revision = None;
+                this.sync(cx);
+                cx.notify();
+            }))
+            .child(guide_rail().h_full())
+            .child(
+                div()
+                    .ml(px(12.0))
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(run_overflow_label(tools, thoughts))),
+            )
+            .into_any_element()
+    }
+
+    /// A tool group's header and chips. A `nested` group belongs to a work
+    /// run: the run's toggle is its header, so it shows only its chips, less
+    /// the `skip` leading ones its run's cap folds away.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_tool_group(
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
         auto_open: bool,
+        nested: bool,
+        skip: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(auto_open);
+        let open = nested || fold.open.unwrap_or(auto_open);
+        // Under a header the chips start just below it; in a run, the row's
+        // own gap places them.
+        let chips_top_pad = if nested { 0.0 } else { CHIPS_TOP_PAD };
         // Cap: an open group renders its LAST `limit` chips, with the older
         // ones behind one "Show N earlier tool calls" row. A long agent run
         // then costs a bounded slice of the transcript instead of pushing the
         // answer off-screen. Revealing is per row and survives re-renders.
-        let revealed = self.tool_overflow.contains(row_id);
-        let limit = crate::chat_style::settings(cx).tool_call_limit;
-        let hidden = hidden_tool_count(tools.len(), limit, revealed);
-        // The row stays after revealing (as "Show fewer") so the same click
-        // target puts the chips back.
-        let overflow_row =
-            hidden > 0 || (revealed && hidden_tool_count(tools.len(), limit, false) > 0);
+        // A work run caps its calls as a whole, under its own overflow row
+        // ([`cap_work_runs`]).
+        let (hidden, overflow_row) = if nested {
+            (skip, false)
+        } else {
+            let revealed = self.tool_overflow.contains(row_id);
+            let limit = crate::chat_style::settings(cx).tool_call_limit;
+            let hidden = hidden_tool_count(tools.len(), limit, revealed);
+            // The row stays after revealing (as "Show fewer") so the same
+            // click target puts the chips back.
+            let overflow_row =
+                hidden > 0 || (revealed && hidden_tool_count(tools.len(), limit, false) > 0);
+            (hidden, overflow_row)
+        };
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -499,7 +666,7 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
-        let open_height = chips_height(tools.len() - hidden)
+        let open_height = chips_height(tools.len() - hidden) - (CHIPS_TOP_PAD - chips_top_pad)
             + if overflow_row {
                 OVERFLOW_ROW_HEIGHT
             } else {
@@ -628,7 +795,7 @@ impl Transcript {
                 )
         });
         let chips = div()
-            .pt(px(CHIPS_TOP_PAD))
+            .pt(px(chips_top_pad))
             .flex()
             .flex_col()
             .gap(px(CHIP_GAP))
@@ -826,6 +993,9 @@ impl Transcript {
                 .child(chips)
                 .into_any_element()
         };
+        if nested {
+            return body;
+        }
 
         div()
             .flex()

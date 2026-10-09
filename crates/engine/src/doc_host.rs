@@ -408,6 +408,7 @@ impl ChatDocHandle {
             continuation_of: None,
             completed_at: None,
             comments: comments.to_vec(),
+            models: Vec::new(),
         })
     }
 

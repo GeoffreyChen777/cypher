@@ -422,15 +422,47 @@ impl Transcript {
                 tree,
                 block_ix,
                 live,
+                nested,
             } => {
                 // Thinking reads as the answer's quieter companion: the same
                 // blocks, in the muted text tone.
                 let mut muted = theme.clone();
                 muted.text = theme.text_muted;
-                self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx)
+                let block =
+                    self.render_markdown_block(&row.id, tree, *block_ix, *live, &muted, window, cx);
+                if *nested {
+                    // Under its chip, on the run's rail.
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .child(guide_rail())
+                        .child(
+                            div()
+                                .ml(px(NESTED_THOUGHT_INSET))
+                                .min_w_0()
+                                .flex_1()
+                                .child(block),
+                        )
+                        .into_any_element()
+                } else {
+                    block
+                }
             }
-            RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
+            RowKind::ToolGroup {
+                tools,
+                auto_open,
+                nested,
+                skip,
+            } => self.render_tool_group(&row.id, tools, *auto_open, *nested, *skip, &theme, cx),
+            RowKind::RunOverflow {
+                run,
+                tools,
+                thoughts,
+            } => self.render_run_overflow(&row.id, run, *tools, *thoughts, &theme, cx),
+            RowKind::Activity { summary, .. } => {
+                let open = toggle_open(&row, &self.toggle_pins);
+                self.render_fold_toggle(&row.id, open, summary.clone(), &theme, cx)
             }
             RowKind::InputChip {
                 header, resolved, ..
@@ -438,12 +470,42 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::Worked { label } => worked_rule(label.clone(), &theme),
             RowKind::TranslationOriginal { .. } => {
-                self.render_fold_toggle(&row.id, ("Show original", "Hide original"), &theme, cx)
+                let open = toggle_open(&row, &self.toggle_pins);
+                let label = if open {
+                    "Hide original"
+                } else {
+                    "Show original"
+                };
+                self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
             }
-            RowKind::Thought { live, .. } => {
-                let label = if *live { "Thinking…" } else { "Thought" };
-                self.render_fold_toggle(&row.id, (label, label), &theme, cx)
+            RowKind::Thought {
+                live,
+                nested,
+                preview,
+                ..
+            } => {
+                let open = toggle_open(&row, &self.toggle_pins);
+                if *nested {
+                    self.render_thought_chip(&row.id, open, *live, preview.clone(), &theme, cx)
+                } else {
+                    let label = if *live { "Thinking…" } else { "Thought" };
+                    self.render_fold_toggle(&row.id, open, label.into(), &theme, cx)
+                }
             }
+        };
+        // A work run's rows keep its rail unbroken: the gap above each one is
+        // drawn inside the row, rail and all, instead of as bare padding.
+        let (top_gap, inner) = if is_nested(&row.kind) && top_gap > 0.0 {
+            let spaced = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(top_gap)).flex().child(guide_rail()))
+                .child(inner)
+                .into_any_element();
+            (0.0, spaced)
+        } else {
+            (top_gap, inner)
         };
 
         // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
@@ -716,6 +778,10 @@ impl Transcript {
                             .text_size(px(11.0))
                             .text_color(theme.text_muted.opacity(0.55))
                             .child(SharedString::from(format_timestamp(ms, &chrono::Local)))
+                            .when_some(row.answered.clone(), |el, label| {
+                                el.child(SharedString::from("·"))
+                                    .child(answered_model_label(row.id.clone(), label, &theme))
+                            })
                             .when_some(fork_button, |el, button| el.child(button))
                             .when_some(rewind_button, |el, button| el.child(button))
                             .when_some(copy_button, |el, button| el.child(button)),
@@ -1007,6 +1073,36 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The answering model in a settled answer's hover strip, after its
+/// timestamp: in the strip's own tone, or in the warning tone — with what was
+/// requested on hover — when another model answered.
+fn answered_model_label(row_id: SharedString, label: AnsweredLabel, theme: &Theme) -> AnyElement {
+    let el = div()
+        .id((row_id, 3usize))
+        .flex_none()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0));
+    match label.substituted {
+        None => el.child(label.text).into_any_element(),
+        Some(tip) => el
+            .text_color(theme.warning.opacity(0.85))
+            .child(
+                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                    .size(px(11.0))
+                    .text_color(theme.warning.opacity(0.85)),
+            )
+            .child(label.text)
+            .tooltip(move |_, cx| {
+                cx.new(|_| MessageActionTooltip { text: tip.clone() })
+                    .into()
+            })
+            .tooltip_show_delay(Duration::from_millis(350))
+            .into_any_element(),
+    }
+}
+
 /// The settled turn's work rule: the "Worked for 1m 32s" label followed by a
 /// hairline that runs out to the content column's edge — the quiet seam
 /// between what the turn DID (tool chips, questions, errors) and the answer it
@@ -1121,6 +1217,21 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
+
+/// The hairline a tool group's chips hang off, centered under its header's
+/// chevron tile. Unsized: it stretches to its row in a flex row.
+pub(super) fn guide_rail() -> gpui::Div {
+    div()
+        .ml(px(12.0))
+        .w(px(1.0))
+        .flex_none()
+        .bg(crate::theme::ink(0.08))
+}
+
+/// Left inset of a work run's thought text from its rail: the text lines up
+/// with the icons of the chips above and below it (card inset 12px + card
+/// border 1px + header padding 8px).
+const NESTED_THOUGHT_INSET: f32 = 21.0;
 
 /// Left inset of a nested chip's guide rail from the rail before it: the
 /// rail lands under the caller chip's icon (rail 1px + card inset 12px +
@@ -1358,7 +1469,7 @@ const STATUS_SPIN_PERIOD: Duration = Duration::from_millis(900);
 /// The chip's status: a check once the call completed, a cross when it
 /// failed, and a rotating arc while it runs (`key` names the rotation; under
 /// reduced motion gpui holds it still). Same 18px slot as the other icons.
-fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Theme) -> AnyElement {
+pub(super) fn tool_status_icon(status: ToolStatus, key: SharedString, theme: &Theme) -> AnyElement {
     let slot = div()
         .size(px(18.0))
         .flex_none()

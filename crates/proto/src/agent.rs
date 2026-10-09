@@ -326,6 +326,67 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
+/// The model that answered one assistant message, as the harness reported it
+/// (pi `message_end`: the provider's `responseModel`, else `model`).
+/// `requested` is the model the harness asked for, present only when the
+/// provider reported a different spelling — a relay substituting a model, a
+/// CLI falling back, or just a dated snapshot of the same model (see
+/// [`AnsweredModel::substituted`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnsweredModel {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+}
+
+impl AnsweredModel {
+    /// Whether a different model answered than the one requested. Spellings
+    /// of the same model don't count: a dated snapshot
+    /// (`gpt-5-2026-09-01`, `claude-opus-5-20261001`, `…@20261001`), a
+    /// context-window variant (`[1m]`), a provider prefix (`anthropic/…`)
+    /// and case.
+    pub fn substituted(&self) -> bool {
+        self.requested
+            .as_deref()
+            .is_some_and(|requested| model_family(requested) != model_family(&self.model))
+    }
+}
+
+/// A model id without the decorations that name the same model.
+fn model_family(id: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    let mut id = id.rsplit('/').next().unwrap_or_default();
+    if id.ends_with(']')
+        && let Some(open) = id.rfind('[')
+    {
+        id = &id[..open];
+    }
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    // `-20261001` / `@20261001`
+    if let Some(at) = id.rfind(['-', '@'])
+        && id.len() - at - 1 == 8
+        && digits(&id[at + 1..])
+    {
+        id = &id[..at];
+    }
+    // `-2026-10-01`
+    if id.len() > 11 && id.is_char_boundary(id.len() - 11) {
+        let (head, date) = id.split_at(id.len() - 11);
+        let b = date.as_bytes();
+        if b[0] == b'-'
+            && b[5] == b'-'
+            && b[8] == b'-'
+            && digits(&date[1..5])
+            && digits(&date[6..8])
+            && digits(&date[9..])
+        {
+            id = head;
+        }
+    }
+    id.strip_suffix("-latest").unwrap_or(id).to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
@@ -379,6 +440,10 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     AssistantMessageCompleted {
         assistant_message_id: String,
+        /// The model that answered this message, when the harness knows it
+        /// (pi). The engine records it on the segment's doc entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<AnsweredModel>,
     },
     ToolCall {
         id: String,
@@ -523,6 +588,64 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn assistant_message_completed_carries_its_model_additively() {
+        let old = r#"{"type":"assistantMessageCompleted","assistantMessageId":"a1"}"#;
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(old).unwrap(),
+            AgentEvent::AssistantMessageCompleted {
+                assistant_message_id: "a1".into(),
+                model: None,
+            }
+        );
+        let ev = AgentEvent::AssistantMessageCompleted {
+            assistant_message_id: "a1".into(),
+            model: Some(AnsweredModel {
+                model: "gpt-5.4".into(),
+                requested: Some("gpt-6-astra".into()),
+            }),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"assistantMessageCompleted","assistantMessageId":"a1","model":{"model":"gpt-5.4","requested":"gpt-6-astra"}}"#
+        );
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
+    }
+
+    #[test]
+    fn a_spelling_of_the_requested_model_is_not_a_substitute() {
+        let answered = |model: &str, requested: Option<&str>| AnsweredModel {
+            model: model.into(),
+            requested: requested.map(str::to_owned),
+        };
+        for (served, requested) in [
+            ("gpt-6-astra-2026-09-01", "gpt-6-astra"),
+            ("claude-opus-5-5-20261001", "claude-opus-5-5"),
+            ("claude-opus-5-5", "claude-opus-5-5[1m]"),
+            ("claude-opus-5-5@20261001", "anthropic/claude-opus-5-5"),
+            ("GPT-5.4", "gpt-5.4"),
+            ("grok-4.6-latest", "grok-4.6"),
+        ] {
+            assert!(
+                !answered(served, Some(requested)).substituted(),
+                "{served} answers {requested}"
+            );
+        }
+        assert!(!answered("gpt-6-astra", None).substituted());
+        for (served, requested) in [
+            ("gpt-5.4-mini", "gpt-6-astra"),
+            ("claude-sonnet-5-20261001", "claude-opus-5-5"),
+            ("gpt-5.4", "gpt-5.4-mini"),
+            ("deepseek-v4", "deepseek-v4-flash-0731"),
+        ] {
+            assert!(
+                answered(served, Some(requested)).substituted(),
+                "{served} substitutes {requested}"
+            );
+        }
     }
 
     #[test]

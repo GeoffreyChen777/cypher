@@ -4,7 +4,7 @@
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
 //! - `messages`: LoroList of LoroMap {
 //!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?, continuationOf?,
-//!   completedAt?, comments?: json }
+//!   completedAt?, comments?: json, models?: json }
 //! - `commands`: LoroList of LoroMap {
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //!
@@ -14,6 +14,8 @@
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
+
+use cypher_proto::AnsweredModel;
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::SESSION_SCHEMA_VERSION;
@@ -70,6 +72,12 @@ pub struct SessionMessageEntry {
     /// writers, and every prompt sent without comments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<MessageComment>,
+    /// The models that answered an assistant segment, distinct and in the
+    /// order they first answered (a turn is one or more model calls). Only
+    /// harnesses that report it (pi) write it, as each call completes.
+    /// Additive: absent on old rows, old writers, and other harnesses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<AnsweredModel>,
 }
 
 /// One comment sent with a user prompt: the quote as the user selected it
@@ -812,6 +820,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
             loro_value_from_json(&serde_json::to_value(&entry.comments)?),
         )?;
     }
+    if !entry.models.is_empty() {
+        map.insert(
+            "models",
+            loro_value_from_json(&serde_json::to_value(&entry.models)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -899,6 +913,11 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
                     // never labelled complete while it is still being written.
                     out[at].completed_at = entry.completed_at;
                     out[at].parts.extend(entry.parts);
+                    for model in entry.models {
+                        if !out[at].models.contains(&model) {
+                            out[at].models.push(model);
+                        }
+                    }
                 } else {
                     // Orphan continuation — surface as its own entry rather than dropping.
                     out.push(entry);

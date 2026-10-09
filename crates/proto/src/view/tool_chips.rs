@@ -199,6 +199,13 @@ pub fn subagent_call_info(call: &crate::ToolCall) -> Option<SubagentCallInfo> {
 /// Takes `(call, is_error)` pairs so each viewport can keep its own row model;
 /// the summary itself is one implementation for both.
 pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
+    work_summary(tools, 0)
+}
+
+/// The summary of a run of work that mixed tool calls with thinking — the
+/// tool group's line with the thoughts counted before any failures:
+/// "Ran 3 commands · 2 thoughts · 1 failed".
+pub fn work_summary(tools: &[(crate::ToolCall, bool)], thoughts: usize) -> String {
     use crate::ToolCall;
     let mut commands = 0usize;
     let mut edited: Vec<&str> = Vec::new();
@@ -269,6 +276,9 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     }
     if segments.is_empty() {
         segments.push(plural(tools.len(), "tool", "tools"));
+    }
+    if thoughts > 0 {
+        segments.push(plural(thoughts, "thought", "thoughts"));
     }
     if failed > 0 {
         segments.push(format!("{failed} failed"));
@@ -398,7 +408,14 @@ mod tests {
             name: TOOL_SEARCH_TOOL.into(),
             input: None,
         };
-        assert_eq!(tool_group_summary(&[(search, false)]), "Searched 1 time");
+        assert_eq!(
+            tool_group_summary(&[(search.clone(), false)]),
+            "Searched 1 time"
+        );
+        assert_eq!(
+            work_summary(&[(search.clone(), false), (search, true)], 2),
+            "Searched 2 times · 2 thoughts · 1 failed"
+        );
     }
 
     #[test]

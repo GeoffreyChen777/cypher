@@ -74,8 +74,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use cypher_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall, UserInputQuestion,
+    AgentEvent, AnsweredModel, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SlashCommand, SteeringMode, SubagentRun, SubagentRunMode, SubagentRunStatus, ToolCall,
+    UserInputQuestion,
 };
 
 use crate::acp::normalize::{OUTPUT_CAP, cap_text, parse_commands};

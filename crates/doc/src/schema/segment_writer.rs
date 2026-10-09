@@ -20,6 +20,9 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     entry_id: String,
+    /// The `models` written so far, and whether a change awaits a commit.
+    models: Vec<AnsweredModel>,
+    models_dirty: bool,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -45,6 +48,7 @@ impl<'a> SegmentWriter<'a> {
                 continuation_of: None,
                 completed_at: None,
                 comments: Vec::new(),
+                models: Vec::new(),
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -54,6 +58,8 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             entry_id: entry_id.to_owned(),
+            models: Vec::new(),
+            models_dirty: false,
         })
     }
 
@@ -74,10 +80,27 @@ impl<'a> SegmentWriter<'a> {
         }
     }
 
+    /// Record the models that answered the segment so far. Written into the
+    /// entry now; committed with the next [`Self::sync`] or [`Self::finish`].
+    pub fn set_models(&mut self, models: &[AnsweredModel]) -> Result<(), DocError> {
+        if self.models == models {
+            return Ok(());
+        }
+        self.entry_map()?.insert(
+            "models",
+            loro_value_from_json(&serde_json::to_value(models)?),
+        )?;
+        self.models = models.to_vec();
+        self.models_dirty = true;
+        Ok(())
+    }
+
     /// Diff `folded` (the full folded segment so far) into the doc.
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
         let parts = self.parts_list()?;
-        let mut dirty = false;
+        // A models change alone may wait for the next eager commit, like
+        // thinking growth: it labels the turn, which settles with `finish`.
+        let mut dirty = std::mem::take(&mut self.models_dirty);
         // Any change other than thinking growth: the commit must reach other
         // devices on the normal cadence (see `local_commit_is_deferrable`).
         let mut eager = false;

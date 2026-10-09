@@ -41,7 +41,7 @@ use gpui::{
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use cypher_proto::view::Indicator;
-use cypher_proto::{Chat, HarnessId, ToolCall};
+use cypher_proto::{AnsweredModel, Chat, HarnessId, ToolCall};
 
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
@@ -194,10 +194,11 @@ pub struct Transcript {
     /// cap itself is a setting (`chat_style::tool_call_limit`); this is the
     /// per-row override, render-local like `folds`.
     tool_overflow: std::collections::HashSet<SharedString>,
-    /// Toggles the user opened (an append-mode translation's original, a
-    /// thought), by row id; every other one stays folded
-    /// ([`fold_closed_toggles`]). Render-local like `folds`.
-    open_toggles: std::collections::HashSet<SharedString>,
+    /// Toggles the user clicked (an append-mode translation's original, a
+    /// thought, a work run) and the state they left them in, by row id;
+    /// every other one keeps its default ([`fold_closed_toggles`]).
+    /// Render-local like `folds`.
+    toggle_pins: HashMap<SharedString, bool>,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -279,8 +280,9 @@ pub struct Transcript {
     /// [`Self::sync`] skips the transcript clone and row rebuild when a
     /// notify changed neither.
     /// (The attachment devices ride along: protected attachments re-key when
-    /// the chat's row or the local device id lands.)
-    synced_revision: Option<(u64, Option<String>, Vec<String>)>,
+    /// the chat's row or the local device id lands; so does the tool call
+    /// cap, which [`cap_work_runs`] applies at build time.)
+    synced_revision: Option<(u64, Option<String>, Vec<String>, u32)>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -447,6 +449,9 @@ impl Transcript {
             cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
                 this.dismiss_comment_ui_and_selection(cx);
                 this.render_cache.borrow_mut().clear();
+                // A new tool call cap re-caps work runs, which are capped at
+                // build time; the revision gate skips every other change.
+                this.sync(cx);
                 // Invalidate measurements without resetting the scroll anchor,
                 // transcript rows, folds, or streamed content.
                 this.list.remeasure_items(0..this.rows.len());
@@ -466,7 +471,7 @@ impl Transcript {
             folds: HashMap::new(),
             tool_details: HashMap::new(),
             tool_overflow: std::collections::HashSet::new(),
-            open_toggles: std::collections::HashSet::new(),
+            toggle_pins: HashMap::new(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,

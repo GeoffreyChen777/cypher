@@ -529,6 +529,7 @@ impl Composer {
             continuation_of: None,
             completed_at: None,
             comments: echo_comments.clone(),
+            models: Vec::new(),
         };
         // Label the echo "Steer" now; the ledger's Steer command confirms it
         // once synced (Side Chat has no steer verb).
@@ -844,6 +845,7 @@ impl Composer {
                         continuation_of: None,
                         completed_at: None,
                         comments: echo_comments.clone(),
+                        models: Vec::new(),
                     };
                     let echo_chat_id = chat_id.clone();
                     this.update(cx, |composer, cx| {
@@ -1086,6 +1088,7 @@ impl Composer {
                                 continuation_of: None,
                                 completed_at: None,
                                 comments: echo_comments.clone(),
+                                models: Vec::new(),
                             };
                             let echo_chat_id = chat_id.clone();
                             this.update(cx, |composer, cx| {
