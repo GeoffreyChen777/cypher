@@ -479,7 +479,6 @@ struct SessionReference: Equatable {
 struct ReferenceEntry: Equatable {
     var id: String
     var role: MessageRole
-    var continuationOf: String?
     var lines: [String]
 }
 
@@ -519,43 +518,11 @@ enum SessionReferences {
     /// never leak (composer.rs `strip_attachment_trailer`); a translated
     /// message reads as the words the agent was actually sent.
     static func entries(root: [String: LoroValue]) -> [ReferenceEntry] {
-        let raw = (root["messages"]?.listValue ?? []).compactMap { value -> ReferenceEntry? in
-            guard let m = value.mapValue, let id = m["id"]?.stringValue,
-                  let role = m["role"]?.stringValue.flatMap(MessageRole.init(rawValue:)) else { return nil }
-            var lines: [String] = []
-            for part in m["parts"]?.listValue ?? [] {
-                guard let p = part.mapValue else { continue }
-                switch p["kind"]?.stringValue {
-                case "text":
-                    var text = p["text"]?.stringValue ?? ""
-                    if role == .user { text = parseUserMessageImages(text).text }
-                    let agentText = p["agentText"]?.stringValue
-                    let line = agentText ?? text
-                    if !isBlank(line) { lines.append(line) }
-                case "tool":
-                    let tag = p["call"]?.mapValue?["kind"]?.stringValue ?? "unknown"
-                    let failed = p["isError"]?.boolValue ?? false
-                    lines.append(failed ? "[tool: \(toolLabel(tag)) failed]" : "[tool: \(toolLabel(tag))]")
-                case "error":
-                    let message = (p["message"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !message.isEmpty { lines.append("[error: \(message)]") }
-                case "input":
-                    for question in p["questions"]?.listValue ?? [] {
-                        let text = (question.mapValue?["question"]?.stringValue ?? "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty { lines.append("[question: \(text)]") }
-                    }
-                default:
-                    continue
-                }
-            }
-            return ReferenceEntry(id: id, role: role, continuationOf: m["continuationOf"]?.stringValue, lines: lines)
-        }
-        return join(raw)
+        entries(SessionStore.decodeEntries(root: root))
     }
 
-    /// The same reduction over already-decoded entries (demo stores, which
-    /// have no doc).
+    /// The same reduction over already-decoded entries (also the demo
+    /// stores, which have no doc).
     static func entries(_ messages: [MessageEntry]) -> [ReferenceEntry] {
         messages.map { entry in
             var lines: [String] = []
@@ -581,22 +548,8 @@ enum SessionReferences {
                     continue
                 }
             }
-            return ReferenceEntry(id: entry.id, role: entry.role, continuationOf: nil, lines: lines)
+            return ReferenceEntry(id: entry.id, role: entry.role, lines: lines)
         }
-    }
-
-    private static func join(_ raw: [ReferenceEntry]) -> [ReferenceEntry] {
-        var roots: [ReferenceEntry] = []
-        var index: [String: Int] = [:]
-        for entry in raw {
-            if let rootId = entry.continuationOf, let ix = index[rootId] {
-                roots[ix].lines.append(contentsOf: entry.lines)
-            } else {
-                index[entry.id] = roots.count
-                roots.append(entry)
-            }
-        }
-        return roots
     }
 
     private static func serialize(_ entry: ReferenceEntry) -> String? {
