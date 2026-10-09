@@ -77,8 +77,6 @@ use workspace_host::WorkspaceHostConfig;
 
 use device_identity::{load_or_create_device_id, local_device_name};
 
-pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
-
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("doc: {0}")]

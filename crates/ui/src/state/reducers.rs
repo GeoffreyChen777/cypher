@@ -215,17 +215,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn apply_devices(&mut self, mut devices: Vec<Device>) {
-        // A local-only workspace has no remote device identity to distinguish.
-        // Keep the engine's legacy sentinel out of the UI while preserving real
-        // hostnames and user-assigned device names.
-        if self.workspace_scope == Some(WorkspaceScope::Local)
-            && let Some(local_id) = self.local_device_id.as_deref()
-            && let Some(device) = devices.iter_mut().find(|device| device.id == local_id)
-            && device.name == "unknown-device"
-        {
-            device.name = "Local".to_string();
-        }
+    pub fn apply_devices(&mut self, devices: Vec<Device>) {
         self.devices = devices;
     }
 

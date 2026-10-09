@@ -112,19 +112,7 @@ pub fn load(paths: &PiRuntimePaths) -> PiTranslationSettings {
     let Some(bytes) = std::fs::read(settings_path(paths)).ok() else {
         return PiTranslationSettings::default();
     };
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return PiTranslationSettings::default();
-    };
-    // Migrate the original single-model field. The old global `enabled`
-    // switch intentionally does not carry over: enablement is now explicit
-    // per session model.
-    if let Some(object) = value.as_object_mut()
-        && object.get("translationModel").is_none()
-        && let Some(model) = object.remove("model")
-    {
-        object.insert("translationModel".into(), model);
-    }
-    serde_json::from_value(value).unwrap_or_default()
+    serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
 pub fn save(

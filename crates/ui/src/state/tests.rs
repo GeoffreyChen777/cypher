@@ -578,24 +578,6 @@ fn device(id: &str, name: &str) -> Device {
 }
 
 #[test]
-fn local_workspace_hides_the_unknown_device_sentinel() {
-    let mut state = AppState::new();
-    state.workspace_scope = Some(WorkspaceScope::Local);
-    state.local_device_id = Some("local".into());
-
-    state.apply_devices(vec![
-        device("local", "unknown-device"),
-        device("remote", "unknown-device"),
-    ]);
-
-    assert_eq!(state.device_name("local"), Some("Local"));
-    assert_eq!(state.device_name("remote"), Some("unknown-device"));
-
-    state.apply_devices(vec![device("local", "José's MacBook Pro")]);
-    assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
-}
-
-#[test]
 fn update_backoff_is_capped_and_restarts_from_zero() {
     // 2 → 4 → 8 → 16 → 30s cap.
     assert_eq!(update_backoff_delay(0), std::time::Duration::from_secs(2));
