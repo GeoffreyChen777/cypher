@@ -1022,335 +1022,88 @@ pub fn rows_for_entry(
     pending: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
-    let mut rows: Vec<Row> = Vec::new();
-    let streaming = entry.status == Some(MessageStatus::Streaming);
-    let entry_id: SharedString = entry.id.clone().into();
-
     if entry.role == MessageRole::User {
-        let raw: String = entry
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        // Attachment refs ride the plain text (the `withAttachments`
-        // transport); split them back out for the thumbnail strip.
-        let parsed = crate::attachments::parse_user_message_attachments(&raw);
-        // File mentions render as chips here too, not just in the composer.
-        // The projection is pure over the text, so the raw-length row version
-        // below stays a valid cache/diff key.
-        let (text, mentions) = match crate::composer::sent_mention_display(&parsed.text) {
-            Some((display, spans)) => (display, spans),
-            None => (parsed.text, Vec::new()),
-        };
-        // Comments are fixed at send, but the echo and the doc frame must
-        // still agree on them for the row cache. Uncommented prompts keep the
-        // plain raw-length key.
-        let comments_key = (!entry.comments.is_empty()).then(|| {
-            let mut acc = Vec::new();
-            for comment in &entry.comments {
-                acc.extend_from_slice(&fnv1a(comment.quote.as_bytes()).to_le_bytes());
-                acc.extend_from_slice(&fnv1a(comment.comment.as_bytes()).to_le_bytes());
-            }
-            fnv1a(&acc)
-        });
-        return vec![Row {
-            id: entry.id.clone().into(),
-            version: ((raw.len() as u64) ^ comments_key.unwrap_or(0)) << 1 | pending as u64,
-            turn_start: true,
-            kind: RowKind::User {
-                text: text.into(),
-                mentions: Arc::new(mentions),
-                attachments: Arc::new(parsed.attachments),
-                comments: Arc::new(entry.comments.clone()),
-                pending,
-                steer: false,
-            },
-            entry_id,
-            role: entry.role,
-            // User rows always carry the strip (chat-view.tsx: whenever
-            // `createdAt` exists — the optimistic echo included).
-            timestamp: Some(entry.created_at),
-            answered: None,
-        }];
+        return vec![user_row(entry, pending)];
     }
 
     // Assistant/system: split parts into block rows, folding consecutive tools.
-    let last_part_ix = entry.parts.len().saturating_sub(1);
+    let cx = EntryRows {
+        entry,
+        entry_id: entry.id.clone().into(),
+        streaming: entry.status == Some(MessageStatus::Streaming),
+        last_part_ix: entry.parts.len().saturating_sub(1),
+    };
+    let mut rows: Vec<Row> = Vec::new();
     let mut group_ix = 0usize;
     // Each tool with its part id, which carries the nesting
     // ([`nest_tool_calls`]).
     let mut pending_group: Vec<(String, ToolItem)> = Vec::new();
     let mut group_last_part_ix = 0usize;
-
-    let flush_group = |rows: &mut Vec<Row>,
-                       group: &mut Vec<(String, ToolItem)>,
-                       group_ix: &mut usize,
-                       last_ix: usize| {
-        if group.is_empty() {
-            return;
-        }
-        let tools = nest_tool_calls(std::mem::take(group));
-        let auto_open = streaming && last_ix == last_part_ix;
-        rows.push(Row {
-            id: format!("{}#g{}", entry.id, group_ix).into(),
-            version: tool_fingerprint(&tools, auto_open),
-            turn_start: false,
-            kind: RowKind::ToolGroup {
-                tools: Arc::new(tools),
-                auto_open,
-                nested: false,
-                skip: 0,
-            },
-            entry_id: entry.id.clone().into(),
-            role: entry.role,
-            timestamp: None,
-            answered: None,
-        });
-        *group_ix += 1;
-    };
     // The open work run: where its rows start and the part that opened it
     // (the Activity row's id). Tool calls and thoughts extend it; anything
     // the reader sees between them (answer text, a chip) closes it.
     let mut run: Option<(usize, String)> = None;
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
+        if let Some((part_id, item)) = tool_item(part) {
+            // Nothing is pushed until the group flushes, so the run's
+            // rows start here.
+            run.get_or_insert_with(|| (rows.len(), part_id.clone()));
+            pending_group.push((part_id, item));
+            group_last_part_ix = part_ix;
+            continue;
+        }
+        // A part that renders nothing (an empty text or thought, a
+        // question still in the composer) splits nothing either.
+        if part_is_silent(part) {
+            continue;
+        }
+        cx.flush_tool_group(
+            &mut rows,
+            &mut pending_group,
+            &mut group_ix,
+            group_last_part_ix,
+        );
+        if !matches!(part, MessagePart::Reasoning { .. })
+            && let Some((start, first_part)) = run.take()
+        {
+            fold_work_run(&mut rows, start, &first_part, entry, false);
+        }
         match part {
-            MessagePart::Tool {
+            MessagePart::Text {
                 id: part_id,
-                call,
-                is_error,
-                resolved,
-                output,
-                diff,
-                output_ref,
-                output_bytes,
-                diff_ref,
-                diff_stats,
-                ..
-            } => {
-                // Nothing is pushed until the group flushes, so the run's
-                // rows start here.
+                text,
+                agent_text,
+            } => cx.push_text_rows(&mut rows, part_id, text, agent_text.as_deref(), parse),
+            MessagePart::Reasoning { id: part_id, text } => {
                 run.get_or_insert_with(|| (rows.len(), part_id.clone()));
-                pending_group.push((
-                    part_id.clone(),
-                    ToolItem {
-                        call: call.clone(),
-                        is_error: *is_error,
-                        resolved: *resolved,
-                        detail: tool_detail(
-                            output.as_deref(),
-                            diff.as_ref(),
-                            diff_stats.as_deref(),
-                        )
-                        .map(Arc::new),
-                        invocation: call_block(call).map(Arc::new),
-                        output_ref: output_ref.clone().map(SharedString::from),
-                        output_bytes: *output_bytes,
-                        diff_ref: diff_ref.clone().map(SharedString::from),
-                        depth: 0,
-                    },
-                ));
-                group_last_part_ix = part_ix;
+                // Still thinking: the reasoning is the live tail.
+                let live = cx.streaming && part_ix == cx.last_part_ix;
+                cx.push_thought_rows(&mut rows, part_id, text, live, parse);
             }
-            other => {
-                // A part that renders nothing (an empty text or thought, a
-                // question still in the composer) splits nothing either.
-                let silent = match other {
-                    MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
-                        text.trim().is_empty()
-                    }
-                    MessagePart::Input { resolved, .. } => !*resolved,
-                    MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
-                };
-                if silent {
-                    continue;
-                }
-                flush_group(
-                    &mut rows,
-                    &mut pending_group,
-                    &mut group_ix,
-                    group_last_part_ix,
-                );
-                if !matches!(other, MessagePart::Reasoning { .. })
-                    && let Some((start, first_part)) = run.take()
-                {
-                    fold_work_run(&mut rows, start, &first_part, entry, false);
-                }
-                match other {
-                    MessagePart::Text {
-                        id: part_id,
-                        text,
-                        agent_text,
-                    } => {
-                        let key = format!("{}#{}", entry.id, part_id);
-                        let tree = parse(&key, text);
-                        // Block rows keep their ids either way (quotes map
-                        // back through them), so the toggle only ever hides
-                        // or shows rows — see `fold_closed_toggles`.
-                        if let Some(blocks) = agent_text
-                            .as_deref()
-                            .and_then(|agent| appended_original_blocks(text, agent, &tree))
-                        {
-                            rows.push(Row {
-                                id: format!("{key}.original").into(),
-                                version: (blocks as u64) << 1,
-                                turn_start: false,
-                                entry_id: entry_id.clone(),
-                                role: entry.role,
-                                timestamp: None,
-                                answered: None,
-                                kind: RowKind::TranslationOriginal { blocks },
-                            });
-                        }
-                        // Live and completed parts split identically — one row
-                        // per top-level block, same ids, so the live→complete
-                        // handoff never changes row identity. The version is a
-                        // content hash of the block's bytes (LSB = streaming),
-                        // so a commit only splices rows whose bytes actually
-                        // changed — the settled prefix of a live reply is
-                        // untouched (and its render caches stay valid).
-                        for block_ix in 0..tree.blocks.len() {
-                            let range = &tree.blocks[block_ix].range;
-                            let end = range.end.min(text.len());
-                            let bytes = text
-                                .as_bytes()
-                                .get(range.start.min(end)..end)
-                                .unwrap_or_default();
-                            let version = (fnv1a(bytes) << 1) | streaming as u64;
-                            rows.push(Row {
-                                id: format!("{key}.{block_ix}").into(),
-                                version,
-                                turn_start: false,
-                                entry_id: entry_id.clone(),
-                                role: entry.role,
-                                timestamp: None,
-                                answered: None,
-                                kind: if streaming {
-                                    RowKind::LiveMarkdown {
-                                        tree: tree.clone(),
-                                        block_ix,
-                                    }
-                                } else {
-                                    RowKind::Markdown {
-                                        tree: tree.clone(),
-                                        block_ix,
-                                    }
-                                },
-                            });
-                        }
-                    }
-                    MessagePart::Reasoning { id: part_id, text } => {
-                        run.get_or_insert_with(|| (rows.len(), part_id.clone()));
-                        let key = format!("{}#{}", entry.id, part_id);
-                        let tree = parse(&key, text);
-                        // Still thinking: the reasoning is the live tail.
-                        let live = streaming && part_ix == last_part_ix;
-                        let preview = thought_preview(text);
-                        rows.push(Row {
-                            id: format!("{key}.thought").into(),
-                            version: ((tree.blocks.len() as u64) << 1 | live as u64)
-                                ^ fnv1a(preview.as_bytes()) << 8,
-                            turn_start: false,
-                            entry_id: entry_id.clone(),
-                            role: entry.role,
-                            timestamp: None,
-                            answered: None,
-                            kind: RowKind::Thought {
-                                blocks: tree.blocks.len(),
-                                live,
-                                nested: false,
-                                preview: preview.into(),
-                            },
-                        });
-                        // Same ids and content-hash versions as answer blocks,
-                        // so a streaming thought only splices its tail.
-                        for block_ix in 0..tree.blocks.len() {
-                            let range = &tree.blocks[block_ix].range;
-                            let end = range.end.min(text.len());
-                            let bytes = text
-                                .as_bytes()
-                                .get(range.start.min(end)..end)
-                                .unwrap_or_default();
-                            rows.push(Row {
-                                id: format!("{key}.{block_ix}").into(),
-                                version: (fnv1a(bytes) << 1) | live as u64,
-                                turn_start: false,
-                                entry_id: entry_id.clone(),
-                                role: entry.role,
-                                timestamp: None,
-                                answered: None,
-                                kind: RowKind::ThoughtBlock {
-                                    tree: tree.clone(),
-                                    block_ix,
-                                    live,
-                                    nested: false,
-                                },
-                            });
-                        }
-                    }
-                    MessagePart::Input {
-                        id: part_id,
-                        request_id,
-                        questions,
-                        resolved,
-                        ..
-                    } => {
-                        // Only resolved questions get here (`silent`): the
-                        // composer wizard is the interaction, and a pending
-                        // "Awaiting your answer…" chip made slash-command
-                        // settings read as the model asking a question.
-                        // Model-generated header onto the one-line chip.
-                        let header: SharedString = single_line(
-                            &questions
-                                .first()
-                                .map(|q| q.header.clone())
-                                .unwrap_or_else(|| "Question".to_string()),
-                        )
-                        .into();
-                        rows.push(Row {
-                            id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
-                            turn_start: false,
-                            kind: RowKind::InputChip {
-                                header,
-                                request_id: request_id.clone().into(),
-                                resolved: *resolved,
-                            },
-                            entry_id: entry_id.clone(),
-                            role: entry.role,
-                            timestamp: None,
-                            answered: None,
-                        });
-                    }
-                    MessagePart::Error {
-                        id: part_id,
-                        message,
-                    } => {
-                        rows.push(Row {
-                            id: format!("{}#{}", entry.id, part_id).into(),
-                            version: message.len() as u64,
-                            turn_start: false,
-                            kind: RowKind::ErrorChip {
-                                // Harness-generated; the chip is one line.
-                                message: single_line(message).into(),
-                            },
-                            entry_id: entry_id.clone(),
-                            role: entry.role,
-                            timestamp: None,
-                            answered: None,
-                        });
-                    }
-                    // Tools are grouped by the outer arm; nothing reaches here.
-                    MessagePart::Tool { .. } => {}
-                }
-            }
+            MessagePart::Input {
+                id: part_id,
+                request_id,
+                questions,
+                resolved,
+                ..
+            } => rows.push(cx.input_chip_row(part_id, request_id, questions, *resolved)),
+            MessagePart::Error {
+                id: part_id,
+                message,
+            } => rows.push(cx.row(
+                format!("{}#{}", entry.id, part_id),
+                message.len() as u64,
+                RowKind::ErrorChip {
+                    // Harness-generated; the chip is one line.
+                    message: single_line(message).into(),
+                },
+            )),
+            // Tools are grouped above; nothing reaches here.
+            MessagePart::Tool { .. } => {}
         }
     }
-    flush_group(
+    cx.flush_tool_group(
         &mut rows,
         &mut pending_group,
         &mut group_ix,
@@ -1358,28 +1111,23 @@ pub fn rows_for_entry(
     );
     if let Some((start, first_part)) = run.take() {
         // Still the tail of a streaming reply: open, like a live tool group.
-        fold_work_run(&mut rows, start, &first_part, entry, streaming);
+        fold_work_run(&mut rows, start, &first_part, entry, cx.streaming);
     }
 
     // The work rule goes in BEFORE the turn-start/timestamp bookkeeping: it is
     // never the entry's first or last row (it separates work from the answer
     // that followed it), so neither marker can land on it.
-    if !streaming
+    if !cx.streaming
         && let Some(at) = worked_rule_at(&rows)
         && let Some(label) = worked_label(entry.created_at, entry.completed_at)
     {
         rows.insert(
             at,
-            Row {
-                id: format!("{}#worked", entry.id).into(),
-                version: fnv1a(label.as_bytes()),
-                turn_start: false,
-                kind: RowKind::Worked { label },
-                entry_id: entry_id.clone(),
-                role: entry.role,
-                timestamp: None,
-                answered: None,
-            },
+            cx.row(
+                format!("{}#worked", entry.id),
+                fnv1a(label.as_bytes()),
+                RowKind::Worked { label },
+            ),
         );
     }
 
@@ -1390,7 +1138,9 @@ pub fn rows_for_entry(
     // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
-    if !streaming && let Some(last) = rows.last_mut() {
+    if !cx.streaming
+        && let Some(last) = rows.last_mut()
+    {
         last.timestamp = Some(entry.created_at);
         last.version ^= 1 << 62;
         if entry.role == MessageRole::Assistant
@@ -1402,6 +1152,287 @@ pub fn rows_for_entry(
         }
     }
     rows
+}
+
+/// The single row of a user entry.
+fn user_row(entry: &SessionMessageEntry, pending: bool) -> Row {
+    let raw: String = entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    // Attachment refs ride the plain text (the `withAttachments`
+    // transport); split them back out for the thumbnail strip.
+    let parsed = crate::attachments::parse_user_message_attachments(&raw);
+    // File mentions render as chips here too, not just in the composer.
+    // The projection is pure over the text, so the raw-length row version
+    // below stays a valid cache/diff key.
+    let (text, mentions) = match crate::composer::sent_mention_display(&parsed.text) {
+        Some((display, spans)) => (display, spans),
+        None => (parsed.text, Vec::new()),
+    };
+    // Comments are fixed at send, but the echo and the doc frame must
+    // still agree on them for the row cache. Uncommented prompts keep the
+    // plain raw-length key.
+    let comments_key = (!entry.comments.is_empty()).then(|| {
+        let mut acc = Vec::new();
+        for comment in &entry.comments {
+            acc.extend_from_slice(&fnv1a(comment.quote.as_bytes()).to_le_bytes());
+            acc.extend_from_slice(&fnv1a(comment.comment.as_bytes()).to_le_bytes());
+        }
+        fnv1a(&acc)
+    });
+    Row {
+        id: entry.id.clone().into(),
+        version: ((raw.len() as u64) ^ comments_key.unwrap_or(0)) << 1 | pending as u64,
+        turn_start: true,
+        kind: RowKind::User {
+            text: text.into(),
+            mentions: Arc::new(mentions),
+            attachments: Arc::new(parsed.attachments),
+            comments: Arc::new(entry.comments.clone()),
+            pending,
+            steer: false,
+        },
+        entry_id: entry.id.clone().into(),
+        role: entry.role,
+        // User rows always carry the strip (chat-view.tsx: whenever
+        // `createdAt` exists — the optimistic echo included).
+        timestamp: Some(entry.created_at),
+        answered: None,
+    }
+}
+
+/// A tool part as its group item, keyed by part id; `None` for other parts.
+fn tool_item(part: &MessagePart) -> Option<(String, ToolItem)> {
+    let MessagePart::Tool {
+        id: part_id,
+        call,
+        is_error,
+        resolved,
+        output,
+        diff,
+        output_ref,
+        output_bytes,
+        diff_ref,
+        diff_stats,
+        ..
+    } = part
+    else {
+        return None;
+    };
+    Some((
+        part_id.clone(),
+        ToolItem {
+            call: call.clone(),
+            is_error: *is_error,
+            resolved: *resolved,
+            detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
+                .map(Arc::new),
+            invocation: call_block(call).map(Arc::new),
+            output_ref: output_ref.clone().map(SharedString::from),
+            output_bytes: *output_bytes,
+            diff_ref: diff_ref.clone().map(SharedString::from),
+            depth: 0,
+        },
+    ))
+}
+
+/// Whether a part renders no row: an empty text or thought, or a question
+/// still pending in the composer.
+fn part_is_silent(part: &MessagePart) -> bool {
+    match part {
+        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+            text.trim().is_empty()
+        }
+        MessagePart::Input { resolved, .. } => !*resolved,
+        MessagePart::Error { .. } | MessagePart::Tool { .. } => false,
+    }
+}
+
+/// The per-entry facts every assistant/system row is built from.
+struct EntryRows<'a> {
+    entry: &'a SessionMessageEntry,
+    entry_id: SharedString,
+    streaming: bool,
+    last_part_ix: usize,
+}
+
+impl EntryRows<'_> {
+    /// A plain row of this entry (no turn-start, timestamp or answer label).
+    fn row(&self, id: impl Into<SharedString>, version: u64, kind: RowKind) -> Row {
+        Row {
+            id: id.into(),
+            version,
+            turn_start: false,
+            kind,
+            entry_id: self.entry_id.clone(),
+            role: self.entry.role,
+            timestamp: None,
+            answered: None,
+        }
+    }
+
+    /// Close the pending run of consecutive tools into one group row.
+    fn flush_tool_group(
+        &self,
+        rows: &mut Vec<Row>,
+        group: &mut Vec<(String, ToolItem)>,
+        group_ix: &mut usize,
+        last_ix: usize,
+    ) {
+        if group.is_empty() {
+            return;
+        }
+        let tools = nest_tool_calls(std::mem::take(group));
+        let auto_open = self.streaming && last_ix == self.last_part_ix;
+        rows.push(self.row(
+            format!("{}#g{}", self.entry.id, group_ix),
+            tool_fingerprint(&tools, auto_open),
+            RowKind::ToolGroup {
+                tools: Arc::new(tools),
+                auto_open,
+                nested: false,
+                skip: 0,
+            },
+        ));
+        *group_ix += 1;
+    }
+
+    /// One row per top-level block of `tree`. The version is a content hash
+    /// of the block's bytes (LSB = `live`), so a commit only splices rows
+    /// whose bytes actually changed — the settled prefix of a live part is
+    /// untouched (and its render caches stay valid).
+    fn push_block_rows(
+        &self,
+        rows: &mut Vec<Row>,
+        key: &str,
+        tree: &Arc<BlockTree>,
+        text: &str,
+        live: bool,
+        kind: impl Fn(usize) -> RowKind,
+    ) {
+        for block_ix in 0..tree.blocks.len() {
+            let range = &tree.blocks[block_ix].range;
+            let end = range.end.min(text.len());
+            let bytes = text
+                .as_bytes()
+                .get(range.start.min(end)..end)
+                .unwrap_or_default();
+            rows.push(self.row(
+                format!("{key}.{block_ix}"),
+                (fnv1a(bytes) << 1) | live as u64,
+                kind(block_ix),
+            ));
+        }
+    }
+
+    fn push_text_rows(
+        &self,
+        rows: &mut Vec<Row>,
+        part_id: &str,
+        text: &str,
+        agent_text: Option<&str>,
+        parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+    ) {
+        let key = format!("{}#{}", self.entry.id, part_id);
+        let tree = parse(&key, text);
+        // Block rows keep their ids either way (quotes map
+        // back through them), so the toggle only ever hides
+        // or shows rows — see `fold_closed_toggles`.
+        if let Some(blocks) =
+            agent_text.and_then(|agent| appended_original_blocks(text, agent, &tree))
+        {
+            rows.push(self.row(
+                format!("{key}.original"),
+                (blocks as u64) << 1,
+                RowKind::TranslationOriginal { blocks },
+            ));
+        }
+        // Live and completed parts split identically — one row per
+        // top-level block, same ids, so the live→complete handoff never
+        // changes row identity.
+        let streaming = self.streaming;
+        self.push_block_rows(rows, &key, &tree, text, streaming, |block_ix| {
+            if streaming {
+                RowKind::LiveMarkdown {
+                    tree: tree.clone(),
+                    block_ix,
+                }
+            } else {
+                RowKind::Markdown {
+                    tree: tree.clone(),
+                    block_ix,
+                }
+            }
+        });
+    }
+
+    fn push_thought_rows(
+        &self,
+        rows: &mut Vec<Row>,
+        part_id: &str,
+        text: &str,
+        live: bool,
+        parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+    ) {
+        let key = format!("{}#{}", self.entry.id, part_id);
+        let tree = parse(&key, text);
+        let preview = thought_preview(text);
+        rows.push(self.row(
+            format!("{key}.thought"),
+            ((tree.blocks.len() as u64) << 1 | live as u64) ^ fnv1a(preview.as_bytes()) << 8,
+            RowKind::Thought {
+                blocks: tree.blocks.len(),
+                live,
+                nested: false,
+                preview: preview.into(),
+            },
+        ));
+        // Same ids and content-hash versions as answer blocks,
+        // so a streaming thought only splices its tail.
+        self.push_block_rows(rows, &key, &tree, text, live, |block_ix| {
+            RowKind::ThoughtBlock {
+                tree: tree.clone(),
+                block_ix,
+                live,
+                nested: false,
+            }
+        });
+    }
+
+    fn input_chip_row(
+        &self,
+        part_id: &str,
+        request_id: &str,
+        questions: &[cypher_proto::UserInputQuestion],
+        resolved: bool,
+    ) -> Row {
+        // Only resolved questions get here (`part_is_silent`): the composer
+        // wizard is the interaction, and a pending "Awaiting your answer…"
+        // chip made slash-command settings read as the model asking a
+        // question. Model-generated header onto the one-line chip.
+        let header: SharedString = single_line(
+            &questions
+                .first()
+                .map(|q| q.header.clone())
+                .unwrap_or_else(|| "Question".to_string()),
+        )
+        .into();
+        self.row(
+            format!("{}#{}", self.entry.id, part_id),
+            fnv1a(header.as_bytes()) << 1 | resolved as u64,
+            RowKind::InputChip {
+                header,
+                request_id: request_id.to_string().into(),
+                resolved,
+            },
+        )
+    }
 }
 
 /// Fold a closed work run — `rows[start..]`, opened by part `first_part` —
