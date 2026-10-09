@@ -30,7 +30,6 @@ use cypher_proto::{
 };
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
-use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
@@ -74,7 +73,6 @@ pub struct EngineRpc {
     terminals: Terminals,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
-    agent_accounts: AgentAccounts,
     side_chats: SideChats,
     session_forks: SessionForks,
     auth: Option<Auth>,
@@ -115,7 +113,6 @@ impl EngineRpc {
         terminals: Terminals,
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
-        agent_accounts: AgentAccounts,
         side_chats: SideChats,
         session_forks: SessionForks,
         workspace_scope: WorkspaceScope,
@@ -133,7 +130,6 @@ impl EngineRpc {
             terminals,
             diff_sync,
             uploads,
-            agent_accounts,
             side_chats,
             session_forks,
             auth: None,
@@ -1005,15 +1001,6 @@ fn forwardable(method: &str) -> bool {
             | methods::WRITE_TERMINAL
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
-            // Agent accounts are per-device CLI logins (the device switcher
-            // retargets which device's logins are shown).
-            | methods::LIST_AGENT_ACCOUNTS
-            | methods::ACTIVATE_AGENT_ACCOUNT
-            | methods::FORGET_AGENT_ACCOUNT
-            | methods::START_AGENT_LOGIN
-            | methods::COMPLETE_AGENT_LOGIN
-            | methods::POLL_AGENT_LOGIN
-            | methods::CANCEL_AGENT_LOGIN
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -2643,65 +2630,6 @@ impl RpcService for EngineRpc {
                 self.terminals
                     .close(&p.terminal_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::LIST_AGENT_ACCOUNTS => {
-                let p: ListAgentAccountsParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
-                    .list(p.force_usage.unwrap_or(false))
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
-            }
-            methods::ACTIVATE_AGENT_ACCOUNT => {
-                let p: AgentAccountParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
-                    .activate(p.harness, &p.account_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
-            }
-            methods::FORGET_AGENT_ACCOUNT => {
-                let p: AgentAccountParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
-                    .forget(p.harness, &p.account_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
-            }
-            methods::START_AGENT_LOGIN => {
-                let p: StartAgentLoginParams = parse_params(params)?;
-                let start = self
-                    .agent_accounts
-                    .start_login(p.harness)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&start)
-            }
-            methods::COMPLETE_AGENT_LOGIN => {
-                let p: CompleteAgentLoginParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
-                    .complete_login(&p.login_id, &p.code)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
-            }
-            methods::POLL_AGENT_LOGIN => {
-                let p: LoginIdParams = parse_params(params)?;
-                let poll = self
-                    .agent_accounts
-                    .poll_login(&p.login_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&poll)
-            }
-            methods::CANCEL_AGENT_LOGIN => {
-                let p: LoginIdParams = parse_params(params)?;
-                self.agent_accounts.cancel_login(&p.login_id);
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::UPLOAD_CHUNK => {

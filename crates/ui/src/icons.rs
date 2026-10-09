@@ -62,7 +62,6 @@ icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (LAPTOP, "laptop"),
-    (SORT_VERTICAL, "sort-vertical"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
@@ -116,7 +115,6 @@ icon_assets![
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
     (RESTART, "restart"),
-    (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
     (PAPERCLIP, "paperclip"),
     (PEN, "pen"),

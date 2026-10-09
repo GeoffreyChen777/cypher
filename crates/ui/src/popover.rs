@@ -369,40 +369,14 @@ fn menu_motion(id: SharedString, exit: Option<f32>, inner: gpui::Div) -> AnyElem
     }
 }
 
-/// Wrap popover content in a floating anchored layer attached to the trigger:
-/// the caller `.child(anchored_menu(...))`s this from the trigger element while
-/// open. Plays `menu-in` (0.14s fade + 2px drop); `closing` (the [`Popup`]
-/// exit phase) swaps in `menu-out`. Dismissal is the caller's
-/// `.on_mouse_down_out` on the content. The layer `.occlude()`s: hitboxes are
-/// paint-order only in gpui, so without it clicks on menu rows would ALSO fire
-/// whatever clickable sits under the floating layer.
-pub fn anchored_menu(
-    id: impl Into<SharedString>,
-    content: AnyElement,
-    closing: Option<std::time::Instant>,
-) -> AnyElement {
-    let exit = closing.map(exit_progress);
-    let content = frosted_menu(exit, content);
-    pinned_layer(
-        gpui::deferred(
-            gpui::anchored()
-                .anchor(Anchor::TopLeft)
-                .snap_to_window_with_margin(px(8.0))
-                .child(menu_motion(
-                    id.into(),
-                    exit,
-                    div().occlude().pt(px(6.0)).child(content),
-                )),
-        )
-        .priority(1)
-        .into_any_element(),
-    )
-}
-
-/// [`anchored_menu`] opening DOWNWARD from the trigger's bottom edge — a
-/// dropdown proper (the composer's picker chips). The default variant pins to
-/// the trigger's top-left, which reads fine for context-style menus but
-/// covers a button-shaped trigger.
+/// Wrap popover content in a floating layer opening DOWNWARD from the
+/// trigger's bottom edge — a dropdown proper (the composer's picker chips).
+/// The caller `.child(...)`s this from the trigger element while open. Plays
+/// `menu-in` (0.14s fade + 2px drop); `closing` (the [`Popup`] exit phase)
+/// swaps in `menu-out`. Dismissal is the caller's `.on_mouse_down_out` on the
+/// content. The layer `.occlude()`s: hitboxes are paint-order only in gpui, so
+/// without it clicks on menu rows would ALSO fire whatever clickable sits
+/// under the floating layer.
 pub fn anchored_menu_below(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -496,7 +470,7 @@ pub fn anchored_menu_below_end(
         .into_any_element()
 }
 
-/// [`anchored_menu`] opening UPWARD from the trigger (composer pickers, the
+/// [`anchored_menu_below`] opening UPWARD from the trigger (composer pickers, the
 /// user menu — anything anchored near the window bottom; Radix flips these
 /// automatically, gpui's `anchored` needs the side picked).
 pub fn anchored_menu_above(
@@ -573,7 +547,7 @@ pub fn anchored_menu_above_end(
 }
 
 /// A floating menu at an explicit window position (context menus). Occludes
-/// like [`anchored_menu`] so row clicks never reach elements underneath.
+/// like [`anchored_menu_below`] so row clicks never reach elements underneath.
 pub fn menu_at(
     id: impl Into<SharedString>,
     position: Point<Pixels>,
