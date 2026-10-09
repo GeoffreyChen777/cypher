@@ -6,7 +6,8 @@
 > edge.letscypher.app).
 
 A ground-up native rewrite of the original zeron web app — a multi-device controller for coding agents
-(Claude Code / Codex) — in Rust, with a gpui UI.
+— in Rust, with a gpui UI. Pi is the only agent harness; chats from the retired Claude Code,
+Codex, Cursor, Grok and Hermes harnesses stay readable but cannot continue.
 
 **Pillars (from the goal):**
 - Optional sync uses Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects; the same docs persist locally when sync is disabled.
@@ -85,7 +86,7 @@ The synced and development store roots preserve the historical cloud layout whil
 
 Older releases wrote every synced and development attachment to `{data_dir}/uploads/`, and persisted those absolute paths in transcripts. On upgrade, the first synced or development account that opens this legacy cache claims it in `{data_dir}/legacy-uploads-owner.json`. That account may read the cache as a compatibility fallback, but all new staging and commits use its account-scoped uploads root; other accounts cannot read or write the legacy cache.
 
-Device identity and machine resources remain device-scoped under the common data directory: `device-id`, repository registration, managed worktrees, agent credentials/accounts, and UI settings. They are available across profiles, but they do not contain or expose another profile's transcripts or attachments.
+Device identity and machine resources remain device-scoped under the common data directory: `device-id`, repository registration, managed worktrees, agent credentials, and UI settings. They are available across profiles, but they do not contain or expose another profile's transcripts or attachments.
 
 #### Privacy boundary and follow-ups
 
@@ -144,13 +145,13 @@ cypher/
     sync/         cypher-sync     # edge room clients (registry rows, chat2 row protocol
                                  # over WS/HTTPS pull-push), ephemeral presence,
                                  # DocsStore (SQLite snapshots + processed-command ledger)
-    harness/      cypher-harness  # Harness trait; agents over the Agent Client Protocol,
-                                 # Pi over its native RPC, mock; steering mailbox,
-                                 # requestInput, models/reasoning/options catalogs
+    harness/      cypher-harness  # Harness trait; Pi over its native RPC, mock;
+                                 # steering mailbox, requestInput,
+                                 # models/reasoning/options catalogs
     engine/       cypher-engine   # sessions engine (pub/sub, run journal, recovery, stall
                                  # watchdog), doc host + command executor, repos/worktrees,
                                  # checkout-diff sync, terminals (portable-pty), uploads,
-                                 # agent accounts (cred swap), auth (WorkOS via edge),
+                                 # auth (WorkOS via edge),
                                  # device-room host/peers, identity
     rpc/          cypher-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
@@ -242,16 +243,13 @@ Direct ports of zeron behaviors:
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Harness**: trait mirroring zeron's `HarnessShape`. Every production harness is the shared
-  ACP harness with a per-agent spec (`docs/research/acp.md`), except Pi, which is driven over
-  its own RPC protocol (`docs/research/pi-rpc.md`); model/reasoning/option catalogs ported from
-  `packages/harness`.
+- **Harness**: trait mirroring zeron's `HarnessShape`. The production harness is Pi, driven
+  over its own RPC protocol (`docs/research/pi-rpc.md`); the mock harness backs tests and
+  demos.
 - **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
   cases); worktrees under `~/.cypher/worktrees`; fs watchers (`notify`) + 2min repair; diff
   capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
   sidecar.
-- **Agent accounts**: credential-slot swap (macOS Keychain via `security-framework`, files
-  elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows.
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 
@@ -269,8 +267,7 @@ per `docs/research/durable-objects-language.md`.
 ## 7. Parity exclusions & deliberate changes
 
 - **Excluded**: token-usage display (profile heatmap, lifetime stats, per-message token columns,
-  `WatchUsage`). Rate-limit meters on agent accounts are *kept* (separate concern; probed from
-  CLIs, not CRDT-synced).
+  `WatchUsage`).
 - **Changed**: Postgres entity sync/server → workspace registry + edge; Electron/React/mugen → gpui with
   ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (zeron
   had already made this move); mobile app → native SwiftUI client (`apps/ios`).
