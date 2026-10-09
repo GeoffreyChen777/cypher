@@ -29,6 +29,9 @@ scripts/dev-app.sh dev        # in another terminal: a UI attached to it over IP
 
 `dev-app.sh` refuses to start unless the matching `dev-engine.sh` engine is
 already listening, so it never embeds a second engine.
+`CYPHER_DEV_INSTANCE=<name>` on both scripts keeps a second checkout's engine
+and UI data in their own `~/.cypher-development/<mode>-engine-<name>` and
+`<mode>-ui-<name>` directories.
 
 `dev-engine.sh dev` and `dev-ios.sh` read the private development env file
 (`CYPHER_DEV_ACCESS_TOKEN`, optionally `CYPHER_DEV_EDGE_URL`) from
