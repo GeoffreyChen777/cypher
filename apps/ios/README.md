@@ -329,8 +329,9 @@ Transcript/
                         ids ({msg}#{part}.{block}, {msg}#g{n}), fingerprint
                         versions, consecutive-tool grouping
   TranscriptView.swift  lazy stack + stick-to-bottom (pin breaks only on user
-                        scroll, 70pt re-engage band, 320pt jump button),
-                        tool-group folds, error/input chips
+                        scroll, 70pt re-engage band, 320pt jump button)
+  TranscriptRowViews.swift  user bubble, prose, tool-group folds, error/input
+                        chips
   Veil.swift            paint-only streaming fade (EMA-tracked duration,
                         1−(1−p)^1.6 curve)
 Composer/               glass pill, Send→Steer→Stop morph, QuestionPanel
