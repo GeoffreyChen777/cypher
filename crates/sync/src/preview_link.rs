@@ -575,7 +575,7 @@ mod tests {
             },
         );
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-            "../../../edge/src/fixtures/preview-reducer-v1.json"
+            "../tests/fixtures/preview-reducer-v1.json"
         ))
         .unwrap();
         for c in cases {

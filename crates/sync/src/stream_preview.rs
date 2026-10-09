@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn shared_vectors() {
         let vectors: Vec<Value> = serde_json::from_str(include_str!(
-            "../../../edge/src/fixtures/stream-preview-v1.json"
+            "../tests/fixtures/stream-preview-v1.json"
         ))
         .unwrap();
         for v in vectors {
