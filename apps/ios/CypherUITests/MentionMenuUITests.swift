@@ -6,13 +6,6 @@ final class MentionMenuUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
     }
 
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     func testAtOpensSessionsAndFilesAndPicksBecomeChipsThatSend() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-route", "chat:chat-tabs"]

@@ -5,15 +5,8 @@ import Loro
 @MainActor
 final class SteerBubbleTests: XCTestCase {
     private func entry(_ id: String, role: MessageRole = .user, steer: Bool = false) -> MessageEntry {
-        MessageEntry(id: id, role: role, parts: [.text(id: "text", text: "Continue")],
-                     createdAt: 10, deviceId: "host", status: .complete, isSteer: steer)
-    }
-
-    private func rows(_ entries: [MessageEntry], pending: [PendingSend] = []) -> [TranscriptRow] {
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var completed: [String: CompletedParse] = [:]
-        return TranscriptRowBuilder.rows(entries: entries, pendingSends: pending,
-                                         parsers: &parsers, completed: &completed)
+        .fixture(id, role: role, parts: [.text(id: "text", text: "Continue")],
+                 createdAt: 10, deviceId: "host", isSteer: steer)
     }
 
     private func message(_ doc: LoroDoc, id: String, role: String = "user") throws {
@@ -76,20 +69,20 @@ final class SteerBubbleTests: XCTestCase {
 
     func testSteerUsesSameTurnGapButNormalMessageStillStartsANewExchange() throws {
         let preceding = entry("reply", role: .assistant)
-        let ordinary = try XCTUnwrap(rows([preceding, entry("user")]).last)
-        let steer = try XCTUnwrap(rows([preceding, entry("user", steer: true)]).last)
+        let ordinary = try XCTUnwrap(buildRows([preceding, entry("user")]).last)
+        let steer = try XCTUnwrap(buildRows([preceding, entry("user", steer: true)]).last)
         XCTAssertEqual(ordinary.topGap, 36)
         XCTAssertEqual(steer.topGap, 14)
         XCTAssertEqual(ordinary.id, steer.id, "Presentation changes must not replace row identity")
         XCTAssertNotEqual(ordinary.version, steer.version, "Late command sync must refresh the presentation")
-        XCTAssertEqual(rows([entry("first", steer: true)]).first?.topGap, TranscriptView.gapTurn + 10)
+        XCTAssertEqual(buildRows([entry("first", steer: true)]).first?.topGap, TranscriptView.gapTurn + 10)
     }
 
     func testOptimisticEchoAndMaterializedSteerKeepIdentityStyleAndGap() throws {
         let pending = PendingSend(messageId: "steer", text: "Continue", at: 10, isSteer: true)
         let preceding = entry("reply", role: .assistant)
-        let optimistic = try XCTUnwrap(rows([preceding], pending: [pending]).last)
-        let materialized = rows([preceding, entry("steer", steer: true)], pending: [pending])
+        let optimistic = try XCTUnwrap(buildRows([preceding], pending: [pending]).last)
+        let materialized = buildRows([preceding, entry("steer", steer: true)], pending: [pending])
         let confirmed = try XCTUnwrap(materialized.last)
         XCTAssertEqual(materialized.count, 2, "Do not render both the echo and host message")
         XCTAssertEqual(optimistic.id, confirmed.id)
@@ -102,7 +95,7 @@ final class SteerBubbleTests: XCTestCase {
             XCTAssertEqual(text, "Continue")
             XCTAssertTrue(isSteer)
         }
-        let normal = try XCTUnwrap(rows([preceding], pending: [
+        let normal = try XCTUnwrap(buildRows([preceding], pending: [
             PendingSend(messageId: "normal", text: "Continue", at: 11)
         ]).last)
         XCTAssertEqual(normal.topGap, 36)

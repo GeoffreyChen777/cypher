@@ -98,21 +98,10 @@ final class AppearanceTests: XCTestCase {
 
     func testNativeSelectionSurvivesLiveAppearanceChanges() async throws {
         let attributed = TranscriptTextStyle.inline([InlineRun(text: "Select this text", style: .plain)])
-        let host = UIHostingController(rootView: SelectableTranscriptText(attributed: attributed))
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previous?.makeKey()
-        }
-        func findText(_ view: UIView) -> TranscriptUITextView? {
-            if let text = view as? TranscriptUITextView { return text }
-            return view.subviews.lazy.compactMap { findText($0) }.first
-        }
+        let hosted = try HostedWindow(SelectableTranscriptText(attributed: attributed))
+        defer { hosted.close() }
+        let host = hosted.host
+        func findText(_ view: UIView) -> TranscriptUITextView? { firstSubview(TranscriptUITextView.self, in: view) }
         for _ in 0..<30 {
             host.view.layoutIfNeeded()
             if findText(host.view) != nil { break }

@@ -23,3 +23,23 @@ extension XCUIElement {
         wait(until: "enabled == true", timeout: timeout)
     }
 }
+
+extension XCTestCase {
+    /// Attaches a screenshot of `app`, kept even when the test passes.
+    func capture(_ app: XCUIApplication, _ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
+
+extension XCUIApplication {
+    /// Launches the app on the in-memory demo dataset with `arguments`.
+    static func launchDemo(_ arguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo"] + arguments
+        app.launch()
+        return app
+    }
+}

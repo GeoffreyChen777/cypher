@@ -11,16 +11,7 @@ final class TranslationFoldTests: XCTestCase {
 
     private func entry(_ id: String, _ text: String, agentText: String?,
                        status: MessageStatus = .complete) -> MessageEntry {
-        MessageEntry(id: id, role: .assistant,
-                     parts: [.text(id: "t0", text: text, agentText: agentText)],
-                     createdAt: 1, deviceId: "d", status: status, continuationOf: nil)
-    }
-
-    private func rows(_ entries: [MessageEntry]) -> [TranscriptRow] {
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var completed: [String: CompletedParse] = [:]
-        return TranscriptRowBuilder.rows(entries: entries, pendingSends: [],
-                                         parsers: &parsers, completed: &completed)
+        .fixture(id, parts: [.text(id: "t0", text: text, agentText: agentText)], status: status)
     }
 
     private func hasToggle(_ rows: [TranscriptRow]) -> Bool {
@@ -31,7 +22,7 @@ final class TranslationFoldTests: XCTestCase {
     }
 
     func testAppendTranslationFoldsItsOriginalBehindAToggle() {
-        let built = rows([entry("m1", "\(original)\(translationAppendSeparator)\(translated)",
+        let built = buildRows([entry("m1", "\(original)\(translationAppendSeparator)\(translated)",
                                 agentText: original)])
         // Toggle, the original's prose run, the rule, the translation's run.
         XCTAssertEqual(built.map(\.id), ["m1#t0.original", "m1#t0.0", "m1#t0.2", "m1#t0.3"])
@@ -57,10 +48,10 @@ final class TranslationFoldTests: XCTestCase {
     func testAppendTranslationShowsWholeUntilTheTranslationStarts() {
         // Replace mode, and an append rendering whose translation is empty.
         for text in ["答案。", "\(original)\(translationAppendSeparator)"] {
-            XCTAssertFalse(hasToggle(rows([entry("m1", text, agentText: original, status: .streaming)])))
+            XCTAssertFalse(hasToggle(buildRows([entry("m1", text, agentText: original, status: .streaming)])))
         }
         // No agent text: an ordinary reply that happens to contain a rule.
-        XCTAssertFalse(hasToggle(rows([entry("m1", "\(original)\(translationAppendSeparator)\(translated)",
+        XCTAssertFalse(hasToggle(buildRows([entry("m1", "\(original)\(translationAppendSeparator)\(translated)",
                                              agentText: nil)])))
     }
 
@@ -69,7 +60,7 @@ final class TranslationFoldTests: XCTestCase {
         // does not split where the original ends.
         let fenced = "Run this:\n\n```sh\nmake test"
         let text = "\(fenced)\(translationAppendSeparator)\(translated)"
-        XCTAssertFalse(hasToggle(rows([entry("m1", text, agentText: fenced)])))
+        XCTAssertFalse(hasToggle(buildRows([entry("m1", text, agentText: fenced)])))
     }
 
     func testFoldStateKeepsRoundIndicesOnTheRenderedRows() {

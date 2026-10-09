@@ -59,17 +59,9 @@ final class ComposerTextInputTests: XCTestCase {
         let focus = ComposerFocus()
         let root = ComposerTextInput(text: draft.binding, focus: focus, editorID: "ime", enabled: true)
             .frame(width: 300, height: 100)
-        let host = UIHostingController(rootView: root)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previous?.makeKey()
-        }
+        let hosted = try HostedWindow(root)
+        defer { hosted.close() }
+        let host = hosted.host
         func editor(_ parent: UIView) -> UITextView? {
             (parent as? UITextView) ?? parent.subviews.lazy.compactMap { editor($0) }.first
         }

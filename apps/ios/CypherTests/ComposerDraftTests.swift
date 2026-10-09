@@ -35,17 +35,9 @@ final class ComposerDraftTests: XCTestCase {
     func testEmptyComposerExpandsOnNativeFocusAndCollapsesOnBlur() async throws {
         let draft = ComposerDraft()
         var height: CGFloat = 0
-        let host = UIHostingController(rootView: FocusComposerFixture(draft: draft) { height = $0 })
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previous?.makeKey()
-        }
+        let hosted = try HostedWindow(FocusComposerFixture(draft: draft) { height = $0 })
+        defer { hosted.close() }
+        let host = hosted.host
         func editor(_ view: UIView) -> UIView? {
             if view is UITextField || view is UITextView { return view }
             return view.subviews.lazy.compactMap { editor($0) }.first
@@ -88,17 +80,9 @@ final class ComposerDraftTests: XCTestCase {
     func testLiveComposerClearsNativeTextWithoutRunStateTransition() async throws {
         let draft = ComposerDraft()
         draft.text = "测试 steer message"
-        let host = UIHostingController(rootView: LiveComposerFixture(draft: draft))
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previous?.makeKey()
-        }
+        let hosted = try HostedWindow(LiveComposerFixture(draft: draft))
+        defer { hosted.close() }
+        let host = hosted.host
         func editors(_ view: UIView) -> [UIView] {
             if view is UITextView || view is UITextField { return [view] }
             return view.subviews.flatMap { editors($0) }

@@ -9,14 +9,6 @@ import SwiftUI
 /// SessionView) against the in-memory demo, in a full-size window.
 @MainActor
 final class NotificationNavigationTests: XCTestCase {
-    private func navigationController(in controller: UIViewController) -> UINavigationController? {
-        if let nav = controller as? UINavigationController { return nav }
-        for child in controller.children {
-            if let nav = navigationController(in: child) { return nav }
-        }
-        return nil
-    }
-
     private func settle(_ what: String, _ condition: () -> Bool) async throws {
         for _ in 0..<150 {
             if condition() { return }
@@ -33,16 +25,6 @@ final class NotificationNavigationTests: XCTestCase {
         return out
     }
 
-    private func host<V: View>(_ view: V) throws -> (UIWindow, UIHostingController<V>, UIWindow?) {
-        let host = UIHostingController(rootView: view)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        return (window, host, previous)
-    }
-
     // MARK: 1. Long draft overlapping the toolbar
 
     func testLongDraftStaysAboveTheComposerToolbar() async throws {
@@ -50,11 +32,12 @@ final class NotificationNavigationTests: XCTestCase {
         model.enterDemoMode()
         let driver = ReproDriver()
         driver.path = [.space("space-cypher"), .chat("chat-veil")]
-        let (window, hostVC, previous) = try host(ReproStack(driver: driver, model: model))
-        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let hosted = try HostedWindow(ReproStack(driver: driver, model: model))
+        defer { hosted.close() }
+        let window = hosted.window, hostVC = hosted.host
         try await settle("chat pushed") {
-            (self.navigationController(in: hostVC)?.viewControllers.count ?? 0) == 3
-                && self.navigationController(in: hostVC)?.transitionCoordinator == nil
+            (navigationController(in: hostVC)?.viewControllers.count ?? 0) == 3
+                && navigationController(in: hostVC)?.transitionCoordinator == nil
         }
         let store = try XCTUnwrap(model.sessionStore(for: XCTUnwrap(model.chat(id: "chat-veil"))))
         try await settle("transcript hydrated") { !store.entries.isEmpty }
@@ -132,9 +115,10 @@ final class NotificationNavigationTests: XCTestCase {
         defer { controller.disconnect() }
         try await settle("scope bound") { controller.scope == scope }
 
-        let (window, hostVC, previous) = try host(HomeView().environment(model))
-        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
-        try await settle("home mounted") { self.navigationController(in: hostVC) != nil }
+        let hosted = try HostedWindow(HomeView().environment(model))
+        defer { hosted.close() }
+        let hostVC = hosted.host
+        try await settle("home mounted") { navigationController(in: hostVC) != nil }
         let nav = try XCTUnwrap(navigationController(in: hostVC))
         try await Task.sleep(for: .milliseconds(300))
 
@@ -236,9 +220,10 @@ extension NotificationNavigationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(controller.pendingNavigation?.chatId, "chat-veil", "deferred tap completes on bind/refresh")
-        let (window, hostVC, previous) = try host(HomeView().environment(model))
-        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
-        try await settle("home mounted") { self.navigationController(in: hostVC) != nil }
+        let hosted = try HostedWindow(HomeView().environment(model))
+        defer { hosted.close() }
+        let hostVC = hosted.host
+        try await settle("home mounted") { navigationController(in: hostVC) != nil }
         let nav = try XCTUnwrap(navigationController(in: hostVC))
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(50))

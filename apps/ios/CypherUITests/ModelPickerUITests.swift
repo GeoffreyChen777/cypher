@@ -3,13 +3,6 @@ import XCTest
 /// The composer's one model chip and the card it opens, by real taps on the
 /// offline demo: providers, models and the thinking level in one place.
 final class ModelPickerUITests: XCTestCase {
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
     }

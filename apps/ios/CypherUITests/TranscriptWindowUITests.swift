@@ -4,9 +4,7 @@ import XCTest
 /// last 200-row window renders on open.
 final class TranscriptWindowUITests: XCTestCase {
     private func launchBig() -> (XCUIApplication, XCUIElement) {
-        let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-route", "chat:chat-veil", "-big"]
-        app.launch()
+        let app = XCUIApplication.launchDemo(["-route", "chat:chat-veil", "-big"])
         let transcript = app.scrollViews.matching(identifier: "chat-transcript").firstMatch
         XCTAssertTrue(transcript.waitForExistence(timeout: 10))
         return (app, transcript)

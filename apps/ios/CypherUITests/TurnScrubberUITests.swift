@@ -3,9 +3,7 @@ import XCTest
 /// The transcript's trailing tick column: a drag jumps round to round.
 final class TurnScrubberUITests: XCTestCase {
     private func launch(turns: Int) -> (XCUIApplication, XCUIElement) {
-        let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-route", "chat:chat-tabs", "-turns", "\(turns)"]
-        app.launch()
+        let app = XCUIApplication.launchDemo(["-route", "chat:chat-tabs", "-turns", "\(turns)"])
         let scrubber = app.descendants(matching: .any)["turn-scrubber"]
         XCTAssertTrue(scrubber.waitForHittable(timeout: 10))
         return (app, scrubber)

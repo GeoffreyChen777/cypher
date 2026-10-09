@@ -33,14 +33,6 @@ private struct NavigationChromeFixture: View {
 
 @MainActor
 final class NavigationChromeTests: XCTestCase {
-    private func navigationController(in controller: UIViewController) -> UINavigationController? {
-        if let nav = controller as? UINavigationController { return nav }
-        for child in controller.children {
-            if let nav = navigationController(in: child) { return nav }
-        }
-        return nil
-    }
-
     private func settle(_ condition: () -> Bool) async throws {
         for _ in 0..<75 {
             if condition() { return }
@@ -56,18 +48,10 @@ final class NavigationChromeTests: XCTestCase {
         let model = AppModel()
         model.enterDemoMode()
         let driver = NavigationDriver()
-        let host = UIHostingController(rootView: NavigationChromeFixture(driver: driver, model: model))
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previousKeyWindow?.makeKey()
-        }
-        try await settle { self.navigationController(in: host) != nil }
+        let hosted = try HostedWindow(NavigationChromeFixture(driver: driver, model: model))
+        defer { hosted.close() }
+        let host = hosted.host
+        try await settle { navigationController(in: host) != nil }
         let nav = try XCTUnwrap(navigationController(in: host))
         driver.path = [.space("space-cypher")]
         try await settle { nav.viewControllers.count == 2 && nav.transitionCoordinator == nil }
@@ -99,18 +83,10 @@ final class NavigationChromeTests: XCTestCase {
         let model = AppModel()
         model.enterDemoMode()
         let driver = NavigationDriver()
-        let host = UIHostingController(rootView: NavigationChromeFixture(driver: driver, model: model))
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previousKeyWindow?.makeKey()
-        }
-        try await settle { self.navigationController(in: host) != nil }
+        let hosted = try HostedWindow(NavigationChromeFixture(driver: driver, model: model))
+        defer { hosted.close() }
+        let host = hosted.host
+        try await settle { navigationController(in: host) != nil }
         let nav = try XCTUnwrap(navigationController(in: host))
 
         driver.path = SessionNavigation.openingNotification("chat-tabs", in: [])

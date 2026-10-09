@@ -98,25 +98,10 @@ final class InlineSelectionTests: XCTestCase {
         let view = SelectableTranscriptText(attributed: TranscriptTextStyle.inline([
             InlineRun(text: String(repeating: "A paragraph with selectable text. ", count: 8), style: .plain),
         ]))
-        let host = UIHostingController(rootView: view.frame(width: 240))
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.frame = CGRect(x: 0, y: 0, width: 300, height: 600)
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-            previousKeyWindow?.makeKey()
-        }
-        func findText(_ view: UIView) -> TranscriptUITextView? {
-            if let text = view as? TranscriptUITextView { return text }
-            for child in view.subviews {
-                if let found = findText(child) { return found }
-            }
-            return nil
-        }
+        let hosted = try HostedWindow(view.frame(width: 240), frame: CGRect(x: 0, y: 0, width: 300, height: 600))
+        defer { hosted.close() }
+        let host = hosted.host
+        func findText(_ view: UIView) -> TranscriptUITextView? { firstSubview(TranscriptUITextView.self, in: view) }
         for _ in 0..<20 {
             host.view.layoutIfNeeded()
             if findText(host.view) != nil { break }

@@ -3,13 +3,6 @@ import XCTest
 /// A drag selection in a reply crosses its paragraphs and list items: they
 /// are one selectable text. Real touches on the offline demo.
 final class ProseSelectionUITests: XCTestCase {
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
     func testADragSelectionCrossesAParagraphIntoAList() {
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-route", "chat:chat-veil"]

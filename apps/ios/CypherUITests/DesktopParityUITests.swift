@@ -3,10 +3,7 @@ import XCTest
 /// Real taps through the desktop-parity features, on the offline demo.
 final class DesktopParityUITests: XCTestCase {
     private func launch(_ args: [String]) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = ["-demo"] + args
-        app.launch()
-        return app
+        .launchDemo(args)
     }
 
     /// The composer in front: a sheet's, not the session's behind it.
@@ -15,13 +12,6 @@ final class DesktopParityUITests: XCTestCase {
             .matching(NSPredicate(format: "identifier BEGINSWITH 'composer-editor-'"))
         _ = editors.firstMatch.waitForExistence(timeout: 10)
         return editors.allElementsBoundByIndex.last { $0.isHittable } ?? editors.firstMatch
-    }
-
-    private func capture(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {

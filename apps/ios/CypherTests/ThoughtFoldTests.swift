@@ -8,15 +8,7 @@ import Loro
 @MainActor
 final class ThoughtFoldTests: XCTestCase {
     private func entry(_ parts: [MessagePart], status: MessageStatus = .complete) -> MessageEntry {
-        MessageEntry(id: "m1", role: .assistant, parts: parts, createdAt: 7, deviceId: "d",
-                     status: status, continuationOf: nil)
-    }
-
-    private func rows(_ entries: [MessageEntry]) -> [TranscriptRow] {
-        var parsers: [String: IncrementalMarkdownParser] = [:]
-        var completed: [String: CompletedParse] = [:]
-        return TranscriptRowBuilder.rows(entries: entries, pendingSends: [],
-                                         parsers: &parsers, completed: &completed)
+        .fixture("m1", parts: parts, createdAt: 7, status: status)
     }
 
     func testTheDocsReasoningPartDecodesFromItsOwnKey() throws {
@@ -39,7 +31,7 @@ final class ThoughtFoldTests: XCTestCase {
     }
 
     func testAThoughtFoldsBehindACollapsedToggle() {
-        let built = rows([entry([.reasoning(id: "r0", text: "Plan.\n\n```sh\nls\n```"),
+        let built = buildRows([entry([.reasoning(id: "r0", text: "Plan.\n\n```sh\nls\n```"),
                                  .text(id: "t1", text: "Done.")])])
         XCTAssertEqual(built.map(\.id), ["m1#r0.thought", "m1#r0.0", "m1#r0.1", "m1#t1.0"])
         guard case .thought(let hidden, let live, _) = built[0].kind else {
@@ -58,16 +50,16 @@ final class ThoughtFoldTests: XCTestCase {
     }
 
     func testAThoughtIsLiveOnlyWhileItIsTheStreamingTail() {
-        let thinking = rows([entry([.reasoning(id: "r0", text: "Hmm")], status: .streaming)])
+        let thinking = buildRows([entry([.reasoning(id: "r0", text: "Hmm")], status: .streaming)])
         guard case .thought(_, true, _) = thinking[0].kind else { return XCTFail("live toggle") }
-        let answering = rows([entry([.reasoning(id: "r0", text: "Hmm"), .text(id: "t1", text: "So")],
+        let answering = buildRows([entry([.reasoning(id: "r0", text: "Hmm"), .text(id: "t1", text: "So")],
                                     status: .streaming)])
         guard case .thought(_, false, _) = answering[0].kind else { return XCTFail("settled toggle") }
         XCTAssertNotEqual(thinking[0].version, answering[0].version)
     }
 
     func testAReplyThatEndedThinkingKeepsItsTimestampOnTheToggle() {
-        let built = rows([entry([.text(id: "t0", text: "Partial"), .reasoning(id: "r1", text: "Then…")],
+        let built = buildRows([entry([.text(id: "t0", text: "Partial"), .reasoning(id: "r1", text: "Then…")],
                                 status: .aborted)])
         XCTAssertEqual(built.last?.timestamp, 7)
         let folded = TranscriptRowBuilder.foldClosedToggles(built, pins: [:])
@@ -77,7 +69,7 @@ final class ThoughtFoldTests: XCTestCase {
     }
 
     func testEmptyThinkingAddsNoRows() {
-        XCTAssertTrue(rows([entry([.reasoning(id: "r0", text: "  \n")])]).isEmpty)
+        XCTAssertTrue(buildRows([entry([.reasoning(id: "r0", text: "  \n")])]).isEmpty)
     }
 
     // MARK: Work runs — transcript.rs `*work_run*` tests, ported.
@@ -88,7 +80,7 @@ final class ThoughtFoldTests: XCTestCase {
     }
 
     func testThinkingBetweenToolCallsFoldsIntoOneWorkRun() {
-        let built = rows([entry([.reasoning(id: "r0", text: "**Look around**\n\nList the files."),
+        let built = buildRows([entry([.reasoning(id: "r0", text: "**Look around**\n\nList the files."),
                                  exec("x1", "ls"),
                                  exec("x2", "git status"),
                                  .reasoning(id: "r3", text: "Now build."),
@@ -124,7 +116,7 @@ final class ThoughtFoldTests: XCTestCase {
     }
 
     func testAWorkRunIsOpenWhileItStreamsAndClosesWhenTheAnswerStarts() {
-        let working = rows([entry([exec("x0", "ls"), .reasoning(id: "r1", text: "Hmm")],
+        let working = buildRows([entry([exec("x0", "ls"), .reasoning(id: "r1", text: "Hmm")],
                                   status: .streaming)])
         guard case .activity(_, _, true) = working[0].kind else { return XCTFail("open while live") }
         guard case .thought(_, true, _) = working[2].kind else { return XCTFail("live thought") }
@@ -133,7 +125,7 @@ final class ThoughtFoldTests: XCTestCase {
         XCTAssertEqual(TranscriptRowBuilder.foldClosedToggles(working, pins: ["m1#x0.activity": false])
             .map(\.id), ["m1#x0.activity"])
 
-        let answering = rows([entry([exec("x0", "ls"), .reasoning(id: "r1", text: "Hmm"),
+        let answering = buildRows([entry([exec("x0", "ls"), .reasoning(id: "r1", text: "Hmm"),
                                      .text(id: "t2", text: "So")], status: .streaming)])
         XCTAssertEqual(TranscriptRowBuilder.foldClosedToggles(answering, pins: [:]).map(\.id),
                        ["m1#x0.activity", "m1#t2.0"])
@@ -141,7 +133,7 @@ final class ThoughtFoldTests: XCTestCase {
 
     func testOnlyARunThatMixesToolsAndThinkingFolds() {
         // Tools alone: one group, and an empty text part splits nothing.
-        let tools = rows([entry([exec("x0", "ls"), .text(id: "t1", text: "  "), exec("x2", "pwd"),
+        let tools = buildRows([entry([exec("x0", "ls"), .text(id: "t1", text: "  "), exec("x2", "pwd"),
                                  .text(id: "t3", text: "Done.")])])
         XCTAssertEqual(tools.map(\.id), ["m1#g0", "m1#t3.0"])
         guard case .toolGroup(let group, _) = tools[0].kind else { return XCTFail("a tool group") }
@@ -149,7 +141,7 @@ final class ThoughtFoldTests: XCTestCase {
         XCTAssertFalse(tools[0].nested)
 
         // Answer text between a thought and the tools: separate runs.
-        let split = rows([entry([.reasoning(id: "r0", text: "Plan"), .text(id: "t1", text: "Let me look."),
+        let split = buildRows([entry([.reasoning(id: "r0", text: "Plan"), .text(id: "t1", text: "Let me look."),
                                  exec("x2", "ls"), .text(id: "t3", text: "Done.")])])
         XCTAssertEqual(TranscriptRowBuilder.foldClosedToggles(split, pins: [:]).map(\.id),
                        ["m1#r0.thought", "m1#t1.0", "m1#g0", "m1#t3.0"])
