@@ -10,9 +10,9 @@
 // order is preserved — the server sends the rows broadcast BEFORE the ack for
 // your own push (apply rows, then retire the pending batch).
 //
-// Liveness discipline is inherited from room.rs and its incidents: the text
-// "ping" elicits a runtime auto-pong that proves NOTHING about the DO
-// (2026-07-30), so room health is judged only by protocol frames — a probe
+// Liveness discipline (shared with the desktop's registry client): the text
+// "ping" elicits a runtime auto-pong that proves NOTHING about the DO, so
+// room health is judged only by protocol frames — a probe
 // unanswered past its deadline tears the session down for a fresh dial.
 
 import Foundation
@@ -291,7 +291,7 @@ actor RegistryClient {
 
         // Hello with the persisted cursor (nil asks for full state). The
         // deadline is armed BEFORE the send — an unanswered hello must never
-        // hang the session (room.rs, 2026-07-30).
+        // hang the session.
         helloSentAt = .now()
         let cursor = await delegate.helloCursor()
         await send(HelloFrame(cursor: cursor, device: device))

@@ -64,11 +64,6 @@ final class RowVeil {
         }
     }
 
-    var isFading: Bool {
-        let now = Date().timeIntervalSince1970 * 1000
-        return spans.contains { now - $0.startMs < $0.durationMs }
-    }
-
     /// Alpha curve: 1 − (1−p)^1.6 — fast attack, soft landing.
     static func opacity(progress: Double) -> Double {
         let p = min(max(progress, 0), 1)

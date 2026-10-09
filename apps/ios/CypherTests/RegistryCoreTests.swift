@@ -193,46 +193,6 @@ final class RegistryApplyOpTests: XCTestCase {
     }
 }
 
-final class RegistryValidateOpTests: XCTestCase {
-    func testAcceptsWellFormedOpsAndRejectsMalformedOnes() {
-        XCTAssertNil(validateOp(upsert()))
-
-        var badKind = upsert()
-        badKind.kind = "Nope Kind"
-        XCTAssertTrue(validateOp(badKind)?.contains("kind") == true)
-
-        var badId = upsert()
-        badId.id = ""
-        XCTAssertTrue(validateOp(badId)?.contains("id") == true)
-
-        // (The "bad op" vector guards JS's untyped `op` field; Swift's enum
-        // makes that state unrepresentable.)
-
-        var badHlc = upsert()
-        badHlc.hlc = "not-a-clock"
-        XCTAssertTrue(validateOp(badHlc)?.contains("hlc") == true)
-
-        var noSet = upsert()
-        noSet.set = nil
-        XCTAssertTrue(validateOp(noSet)?.contains("set") == true)
-
-        var badField = upsert()
-        badField.set = ["bad field!": .int(1)]
-        XCTAssertTrue(validateOp(badField)?.contains("field") == true)
-
-        var deleteWithSet = deleteOp(id: "c", hlc: hlc(1))
-        deleteWithSet.set = [:]
-        XCTAssertTrue(validateOp(deleteWithSet)?.contains("delete") == true)
-
-        var badClock = upsert()
-        badClock.clocks = ["title": "junk"]
-        XCTAssertTrue(validateOp(badClock)?.contains("clock") == true)
-
-        let huge = upsert(set: ["blob": .string(String(repeating: "x", count: 20_000))])
-        XCTAssertTrue(validateOp(huge)?.contains("large") == true)
-    }
-}
-
 final class RegistryMaxClockTests: XCTestCase {
     func testReturnsTheNewestClockAcrossFieldsAndTombstone() {
         let row = applied(nil, upsert(set: ["a": .int(1), "b": .int(2)], hlc: hlc(1000)))

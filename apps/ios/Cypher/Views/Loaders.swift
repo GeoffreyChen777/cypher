@@ -199,15 +199,18 @@ struct HarnessBadge: View {
     let harness: String
     var size: CGFloat = 14
     var dimmed = false
-    /// Color for marks that carry no brand color of their own (codex, cursor).
+    /// Color for marks that carry no brand color of their own (codex, pi).
     /// Claude keeps its orange regardless.
     var neutral: Color = Theme.text
 
     var body: some View {
-        let mark = BrandMark.forHarness(harness)
-        BrandMarkShape(mark: mark)
-            .fill((BrandMark.brandTint(for: harness) ?? neutral).opacity(dimmed ? 0.6 : 0.9),
-                  style: FillStyle(eoFill: mark.evenOddFill))
-            .frame(width: size, height: size)
+        if let mark = BrandMark.forHarness(harness) {
+            BrandMarkShape(mark: mark)
+                .fill((BrandMark.brandTint(for: harness) ?? neutral).opacity(dimmed ? 0.6 : 0.9),
+                      style: FillStyle(eoFill: mark.evenOddFill))
+                .frame(width: size, height: size)
+        } else {
+            Color.clear.frame(width: size, height: size)
+        }
     }
 }
