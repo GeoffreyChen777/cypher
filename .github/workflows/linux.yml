@@ -42,8 +42,10 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     # Do not build on the host's newer libc. No host Rust cache is imported.
+    # Docker's official image via AWS's mirror: Docker Hub's sign-in for
+    # GitHub's runners failed for hours on 2026-10-09 and blocked every pull.
     container:
-      image: ubuntu:20.04
+      image: public.ecr.aws/docker/library/ubuntu:20.04
     defaults:
       run:
         shell: bash

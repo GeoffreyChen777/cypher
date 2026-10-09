@@ -60,7 +60,7 @@ jobs:
             -v "$PWD/target/package:/packages:ro" \
             -v "$PWD/scripts/ci:/ci:ro" \
             -v "$PWD/dist/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
-            ubuntu:20.04 sh -ec '
+            public.ecr.aws/docker/library/ubuntu:20.04 sh -ec '
               mkdir /runtime /agent
               archive=$(find /packages -name "cypher-pi-runtime-*.tar.gz")
               tar -xzf "$archive" -C /runtime --strip-components=1
