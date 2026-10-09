@@ -30,6 +30,11 @@ scripts/dev-app.sh dev        # in another terminal: a UI attached to it over IP
 `dev-app.sh` refuses to start unless the matching `dev-engine.sh` engine is
 already listening, so it never embeds a second engine.
 
+`dev-engine.sh dev` and `dev-ios.sh` read the private development env file
+(`CYPHER_DEV_ACCESS_TOKEN`, optionally `CYPHER_DEV_EDGE_URL`) from
+`~/Documents/cypher-development.env`, or from the path in `CYPHER_DEV_ENV_FILE`;
+they stop with an error naming the path when it is missing.
+
 When that resolved endpoint is loopback, the script sends `dev-user@dev-org`
 rather than the private secret: it is the `user@org` form `AUTH_MODE=dev`
 needs, and it maps to the existing `orgs/dev-org/dev-user` data directory. The
