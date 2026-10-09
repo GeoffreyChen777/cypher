@@ -39,8 +39,11 @@ jobs:
       - run: node --test scripts/test-landing.mjs
       - run: node --test dist/pi-runtime/provider-service.test.mjs
       - run: node --test dist/pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
+      # The extension suites import their .ts sources directly (Node type
+      # stripping) and need no staged runtime.
+      - run: node --test dist/pi-runtime/extensions/cypher-translation.test.mjs dist/pi-runtime/extensions/cypher-fast-mode.test.mjs dist/pi-runtime/extensions/cypher-codemode.test.mjs
       - run: bash scripts/test-check-linux-abi.sh
-      - run: bash -n scripts/package-linux.sh scripts/package-macos.sh scripts/package-pi-runtime.sh scripts/test-macos-icon.sh
+      - run: bash -n scripts/*.sh
       - run: sh -n edge/src/install.sh
 
   edge:
@@ -102,10 +105,7 @@ jobs:
           xcrun swiftc apps/ios/Cypher/Sync/ChatFrames.swift apps/ios/Cypher/Sync/StreamPreview.swift apps/ios/Cypher/Sync/PreviewProjection.swift scripts/tests/stream-preview-vectors.swift -o "$out/preview-vectors"
           "$out/preview-vectors" crates/sync/tests/fixtures/stream-preview-v1.json crates/sync/tests/fixtures/preview-reducer-v1.json
       - name: Runtime and MCP settings UI regressions
-        run: |
-          cargo test --locked -p cypher-ui --lib settings::setup::tests
-          cargo test --locked -p cypher-ui --lib runtime_
-          cargo test --locked -p cypher-ui --lib mcp_
-          cargo test --locked -p cypher-ui --lib state::tests
-          cargo test --locked -p cypher-ui --lib notification_activity::tests
-          cargo test --locked -p cypher-ui --lib unix_engine_directory_does_not_redirect_client_preferences
+        run: >-
+          cargo test --locked -p cypher-ui --lib --
+          settings::setup::tests runtime_ mcp_ state::tests notification_activity::tests
+          unix_engine_directory_does_not_redirect_client_preferences
