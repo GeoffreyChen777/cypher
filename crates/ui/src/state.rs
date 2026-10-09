@@ -254,7 +254,7 @@ pub struct AppState {
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
     pub workspace_scope: Option<WorkspaceScope>,
-    /// Auth stream value; `None` until the engine reports one (M4).
+    /// Auth stream value; `None` until the engine reports one.
     pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
     /// Sorted (see [`sort_spaces`]).

@@ -1,5 +1,5 @@
-//! Constants carried over from zeron `packages/session-doc/src/constants.ts`.
-//! Per the original design these are starting points — re-measure with real heavy sessions.
+//! Session doc cadences and budgets carried over from zeron. These are starting
+//! points — re-measure with real heavy sessions.
 
 /// Host commits streamed assistant segments into the doc at this cadence (ms).
 pub const STREAM_COMMIT_MS: u64 = 120;

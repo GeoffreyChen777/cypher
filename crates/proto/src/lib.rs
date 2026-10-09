@@ -1,6 +1,6 @@
 //! cypher-proto — wire types shared by engine, UI, and RPC.
 //!
-//! Ported from zeron's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
+//! Ported from zeron's control wire and harness types.
 //! Per-turn token accounting is excluded by design; the `Usage` agent event is kept as a
 //! harness-level passthrough (rate-limit meters), never persisted into docs. The one
 //! usage surface is the live context-window gauge ([`ContextUsage`]), which rides the

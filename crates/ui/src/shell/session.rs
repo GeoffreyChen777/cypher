@@ -28,7 +28,7 @@ use crate::workspace::TabKey;
 /// listeners can hold it.
 pub(super) type SlotId = u64;
 
-/// Round-21 Side Chats cap: at most this many temporary side chat tabs per
+/// Side chat cap: at most this many temporary side chat tabs per
 /// chat (they are host-memory engine objects; a runaway count would leak
 /// docs and streams). Further offers are ignored.
 const MAX_SIDE_CHATS_PER_CHAT: usize = 8;
@@ -1246,7 +1246,7 @@ impl Shell {
     /// A successful `StartSideChat` lands here: build the panel, subscribe to
     /// its events, and open the tab.
     ///
-    /// Race guard (round-21 audit): the START round-trip may outlive the
+    /// Race guard: the START round-trip may outlive the
     /// parent's tile (closed, or its context moved to another chat). A side
     /// chat belongs to its source parent's dock — attaching it anywhere else
     /// would mis-scope the tab, so the created temp is disposed immediately

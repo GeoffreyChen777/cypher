@@ -199,7 +199,7 @@ impl AppState {
     /// (the overview recency order, preserved inside each group); empty
     /// spaces are appended deterministically by display name / device / path
     /// / id. Status changes never reorder. Archived and child chats stay
-    /// excluded. Pure — see the tests in [`mod tests`] for the exact rules.
+    /// excluded. Pure — see the state tests for the exact rules.
     #[cfg(test)]
     pub fn sidebar_groups(&self, now: DateTime<Utc>) -> Vec<SidebarGroup<'_>> {
         self.sidebar_groups_with(now, &SidebarView::default())

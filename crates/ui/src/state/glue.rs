@@ -42,8 +42,8 @@ impl AppState {
     }
 
     /// Wire the connected engine: mark Ready and start the standing watches.
-    /// Methods the engine doesn't serve yet (chats/devices/auth land with the
-    /// workspace doc in M4) fail their subscribe and are skipped gracefully.
+    /// Methods the engine doesn't serve fail their subscribe and are skipped
+    /// gracefully.
     /// `owner`: this state bootstrapped the handle, so it also watches the
     /// deferred engine assembly (and shuts the handle down on failure). A
     /// project window's state only borrows the main window's handle.

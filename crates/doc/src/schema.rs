@@ -1,4 +1,4 @@
-//! Session doc schema over `loro` — Rust port of `packages/session-doc/src/schema.ts`.
+//! Session doc schema over `loro`.
 //!
 //! Container layout (MUST stay shape-compatible with the TS edge/tail materializer):
 //! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)

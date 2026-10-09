@@ -350,10 +350,9 @@ impl AppState {
 
     /// Composer send fired: overlay the chat as Working until the host writes
     /// the user message back into the transcript (or the TTL lapses). A remote
-    /// send has no live session row until the host drains the queued command —
-    /// that gap read as "no live run" and flashed the Completed dot, and any
-    /// phantom Working→Idle edge in it rang the done-chime on send (user
-    /// report 2026-08-05).
+    /// send has no live session row until the host drains the queued command,
+    /// and that gap must neither flash the Completed dot nor ring the
+    /// done-chime.
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
         self.pending_sends.borrow_mut().insert(
             chat_id.to_string(),

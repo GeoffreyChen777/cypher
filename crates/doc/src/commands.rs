@@ -1,4 +1,4 @@
-//! Durable command ledger — port of `packages/session-doc/src/commands.ts`.
+//! Durable command ledger.
 //!
 //! Rules (verbatim from zeron's design):
 //! 1. Each device inserts only its own entries; entries are append-only and immutable.

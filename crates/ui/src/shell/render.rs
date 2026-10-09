@@ -1435,11 +1435,10 @@ impl Render for Shell {
         let root = match &render_gate {
             GatePhase::Ready => {
                 // Focus is a sync signal: on the rising edge of window
-                // activation, nudge every open room to verify liveness — a
-                // broadcast-deaf socket (accepted writes, runtime pongs,
-                // nothing delivered; 2026-08-04 incident) then heals within
-                // seconds of the user looking at the app rather than waiting
-                // out the background probe cadence.
+                // activation, nudge every open room to verify liveness, so a
+                // broadcast-deaf socket (accepted writes, pongs, nothing
+                // delivered) heals within seconds of the user looking at the
+                // app rather than waiting out the background probe cadence.
                 let window_active = window.is_window_active();
                 if window_active && !self.was_window_active {
                     self.state.update(cx, |s, cx| s.probe_sync(cx));

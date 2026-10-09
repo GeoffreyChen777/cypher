@@ -1,7 +1,7 @@
 //! Light/dark switching: what the user asked for, what the OS reports, and the
 //! plumbing that turns a change in either into a repaint.
 //!
-//! Three pieces, following the pattern zed uses (`crates/theme/src/theme.rs`
+//! Three pieces, following the pattern zed uses (zed's `crates/theme/src/theme.rs`
 //! `SystemAppearance` + `reload_theme` + `cx.refresh_windows`):
 //!
 //! 1. [`AppearanceMode`] — the persisted user choice: follow the OS, or pin one.
@@ -186,7 +186,7 @@ pub fn apply(cx: &mut App) {
     // is anything but `Blurred`, and nothing puts it back on its own — so a
     // single missed re-apply leaves the sidebar and tab strip permanently
     // opaque, which is exactly how the frost died. zed runs the same loop on
-    // every settings change (`crates/zed/src/main.rs`).
+    // every settings change (zed's `crates/zed/src/main.rs`).
     reapply_window_background(cx);
 }
 

@@ -102,23 +102,16 @@ impl Shell {
         // settings flag — one detector, two outputs, so the banner can never
         // fire where the chime wouldn't.
         //
-        // STALENESS-GATED like the dot (`effective_indicator`), for the same
-        // reason: raw row statuses include the past. A dead turn's Working row
-        // (host killed mid-run, Idle write lost to a wedged room) seeded
-        // prev=Working here, and the moment the old Idle finally synced in —
-        // typically piggybacked on the round-trip of a fresh send — the chime
-        // heard a phantom Working→Idle and rang "done" on send (user report
-        // 2026-07-31). The dot never showed that ghost; the chime must judge
-        // by the identical clock.
+        // STALENESS-GATED like the dot (`effective_indicator`): raw row
+        // statuses include the past, and a dead turn's stale Working row must
+        // not turn a late-synced Idle into a "done" chime. The chime judges by
+        // the dot's clock.
         //
-        // SEND-PENDING-GATED too (`AppState::send_pending`): a send whose
-        // queued command the host hasn't executed yet can still surface a
-        // phantom Working→Idle (a stale Working row crossing the 45s gate on
-        // the send's own re-render, or a late old Idle row) — the done-chime
-        // stays quiet for that chat until the host acks, while the baseline
-        // keeps tracking silently so the ghost edge never fires later. The
-        // question chime is NOT gated: an instant AwaitingInput ack should
-        // still ring.
+        // SEND-PENDING-GATED too (`AppState::send_pending`): until the host
+        // acks a queued send, the done-chime stays quiet for that chat while
+        // the baseline keeps tracking silently, so a phantom Working→Idle
+        // never fires later. The question chime is NOT gated: an instant
+        // AwaitingInput ack should still ring.
         //
         // WINDOW-SCOPED: each window rings for the sessions it lists, so a
         // project open in its own window rings once, from there. Rows outside

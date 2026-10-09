@@ -13,7 +13,7 @@
 //!
 //! The RPC path multiplexes NOTHING new: each distinct client `connId` becomes a virtual
 //! string-frame connection feeding the existing [`serve_connection`] seam, so every RPC
-//! handler works through the relay untouched (the port of zeron's `device-room-host.ts`).
+//! handler works through the relay untouched.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

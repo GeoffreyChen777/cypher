@@ -1076,8 +1076,8 @@ impl Render for Composer {
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
-        // (round-9 follow-up: the send/attach/chips must not ride the height,
-        // and none of them fade — the full cluster stays visible throughout).
+        // (the send/attach/chips must not ride the height, and none of them
+        // fade — the full cluster stays visible throughout).
         let cluster_dy = morph_cluster_dy(morph_t);
         // The context gauge round the send button, drawn once a mode change
         // has landed: mid-morph the pill's end is still the old one's shape.

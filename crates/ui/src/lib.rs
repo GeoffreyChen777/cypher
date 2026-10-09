@@ -107,7 +107,7 @@ pub struct UiConfig {
     /// WorkOS client id; `Some` makes the embedded headed engine require a
     /// production session before opening identity-scoped stores.
     pub workos_client_id: Option<String>,
-    /// Harness for doc-command runs until per-chat config lands (M4).
+    /// Harness for doc-command runs on chats without a per-chat config.
     pub default_harness: HarnessId,
 }
 
@@ -176,7 +176,7 @@ pub fn run_app(config: UiConfig) {
         .with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()));
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
-    // (crates/zed/src/main.rs `app.on_reopen`).
+    // (zed's crates/zed/src/main.rs `app.on_reopen`).
     app.on_reopen(|cx| {
         if cx.windows().is_empty()
             && let Some(reopen) = cx.try_global::<ReopenState>()
