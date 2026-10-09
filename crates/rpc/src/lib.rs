@@ -125,10 +125,9 @@ pub mod methods {
     /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
     /// renameChat|setChatArchived|deleteChat|renameDevice|deleteDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
-    /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
-    /// the answer is about whichever engine you are directly connected to).
-    pub const LOCAL_DEVICE: &str = "LocalDevice";
-    /// This engine runtime's fixed device and workspace identity.
+    /// This engine runtime's fixed identity → `{deviceId, workspaceScope}`
+    /// (IPC-only; never relay-forwarded — the answer is about whichever engine
+    /// you are directly connected to).
     pub const ENGINE_INFO: &str = "EngineInfo";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.

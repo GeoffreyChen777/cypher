@@ -1979,9 +1979,6 @@ impl RpcService for EngineRpc {
                     .merged_sessions_watch(self.sessions.watch_sessions());
                 Ok(RpcReply::Stream(watch_stream(merged)))
             }
-            methods::LOCAL_DEVICE => {
-                RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
-            }
             methods::LOCAL_IMPORT_STATUS => {
                 let importer = self.local_importer()?.clone();
                 let status = tokio::task::spawn_blocking(move || importer.status())

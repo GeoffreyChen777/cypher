@@ -6,17 +6,13 @@ use cypher_engine::{EngineCore, default_registry};
 use cypher_proto::view::{group_chats, project_label};
 use cypher_proto::{SessionStatus, UserProfile};
 
+/// An engine that predates `EngineInfo`: it serves no identity method.
 struct LegacyIdentityRpc;
 
 #[async_trait]
 impl RpcService for LegacyIdentityRpc {
     async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        match method {
-            methods::LOCAL_DEVICE => {
-                RpcReply::value(&serde_json::json!({ "deviceId": "legacy-device" }))
-            }
-            other => Err(RpcError::UnknownMethod(other.into())),
-        }
+        Err(RpcError::UnknownMethod(method.into()))
     }
 }
 

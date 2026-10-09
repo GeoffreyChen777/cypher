@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn local_device_is_not_forwardable() {
-    assert!(!forwardable(methods::LOCAL_DEVICE));
+fn engine_identity_is_not_forwardable() {
     assert!(!forwardable(methods::ENGINE_INFO));
     assert!(!forwardable(methods::ENGINE_READY));
     assert!(forwardable(methods::QUEUE_COMMAND));

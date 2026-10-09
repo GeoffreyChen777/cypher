@@ -3,7 +3,7 @@
 //! Connects to two running headless engines over their private Unix IPC sockets and proves
 //! the cross-device command plane end to end against a real edge:
 //!
-//! 1. `LocalDevice` on both — distinct device ids;
+//! 1. `EngineInfo` on both — distinct device ids;
 //! 2. `Mutate createChat` on A (A hosts the chat, mock harness config);
 //! 3. waits until the chat row syncs A → edge → B (`WatchChats` on B);
 //! 4. `QueueCommand` a Run on **B** — the doc path: B commits the command into its
@@ -31,15 +31,15 @@ fn pass(message: &str) {
 
 async fn device_id(client: &RpcClient, label: &str) -> String {
     match client
-        .call(methods::LOCAL_DEVICE, serde_json::json!({}))
+        .call(methods::ENGINE_INFO, serde_json::json!({}))
         .await
     {
         Ok(value) => value
             .get("deviceId")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(|| fail(&format!("{label}: LocalDevice reply missing deviceId"))),
-        Err(err) => fail(&format!("{label}: LocalDevice call failed: {err}")),
+            .unwrap_or_else(|| fail(&format!("{label}: EngineInfo reply missing deviceId"))),
+        Err(err) => fail(&format!("{label}: EngineInfo call failed: {err}")),
     }
 }
 

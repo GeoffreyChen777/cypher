@@ -90,7 +90,6 @@ impl AppState {
             ),
             spawn_update_watch(cx, handle.clone()),
             spawn_pi_update_watch(cx, handle.clone()),
-            spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
         // EngineInfo is part of the attachment boundary: views must know which
@@ -550,33 +549,6 @@ fn spawn_pi_update_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Ta
                 return;
             }
             cx.background_executor().timer(delay).await;
-        }
-    })
-}
-
-/// Best-effort `LocalDevice` probe: fills `local_device_id` for the "This
-/// device" badge. Engines that don't serve the method leave it `None`.
-fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
-    cx.spawn(async move |this, cx| {
-        let Ok(value) = handle
-            .client()
-            .call("LocalDevice", serde_json::json!({}))
-            .await
-        else {
-            tracing::debug!("LocalDevice unavailable; skipping this-device badge");
-            return;
-        };
-        let id = value
-            .get("id")
-            .or_else(|| value.get("deviceId"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if let Some(id) = id {
-            this.update(cx, |state, cx| {
-                state.local_device_id = Some(id);
-                cx.notify();
-            })
-            .ok();
         }
     })
 }
