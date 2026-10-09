@@ -14,15 +14,15 @@ pub mod frame_type {
     pub const ROW: u8 = 0x04;
     pub const ROWS_DONE: u8 = 0x05;
     pub const PUSH: u8 = 0x06;
-    pub const ACK: u8 = 0x07;
-    pub const PRESENCE: u8 = 0x08;
-    pub const PROBE: u8 = 0x09;
-    pub const PROBE_OK: u8 = 0x0a;
-    pub const ERROR: u8 = 0x0b;
+    pub(crate) const ACK: u8 = 0x07;
+    pub(crate) const PRESENCE: u8 = 0x08;
+    pub(crate) const PROBE: u8 = 0x09;
+    pub(crate) const PROBE_OK: u8 = 0x0a;
+    pub(crate) const ERROR: u8 = 0x0b;
 }
 
 /// Headers are ids + a few integers; anything bigger is a peer bug.
-pub const MAX_HEADER_BYTES: usize = 4096;
+pub(crate) const MAX_HEADER_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireFrame {
@@ -67,27 +67,27 @@ pub fn decode(bytes: &[u8]) -> Option<WireFrame> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HelloHeader<'a> {
+pub(crate) struct HelloHeader<'a> {
     pub cursor: u64,
     pub device: &'a str,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RowsReqHeader {
+pub(crate) struct RowsReqHeader {
     pub after: u64,
     pub exclude_own: bool,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PushHeader<'a> {
+pub(crate) struct PushHeader<'a> {
     pub batch_id: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StateHeader {
+pub(crate) struct StateHeader {
     pub head_seq: u64,
     pub seq_floor: u64,
     pub checkpoint_seq: u64,
@@ -100,30 +100,26 @@ pub struct StateHeader {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RowHeader {
+pub(crate) struct RowHeader {
     pub seq: u64,
-    pub device: String,
-    pub batch_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RowsDoneHeader {
+pub(crate) struct RowsDoneHeader {
     pub head_seq: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AckHeader {
+pub(crate) struct AckHeader {
     pub batch_id: String,
     pub seq: u64,
-    #[serde(default)]
-    pub dup: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProbeOkHeader {
+pub(crate) struct ProbeOkHeader {
     pub head_seq: u64,
 }
 
@@ -184,6 +180,6 @@ mod tests {
         assert_eq!(state.checkpoint_seq, 3);
         let ack: AckHeader =
             serde_json::from_value(serde_json::json!({"batchId": "b", "seq": 4})).unwrap();
-        assert!(!ack.dup);
+        assert_eq!((ack.batch_id.as_str(), ack.seq), ("b", 4));
     }
 }

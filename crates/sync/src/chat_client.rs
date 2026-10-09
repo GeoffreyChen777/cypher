@@ -190,7 +190,7 @@ pub trait ChatTransport: Send + Sync + 'static {
 // ── catch-up planning (pure — the client-side precision rule) ───────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CatchUpPlan {
+pub(crate) enum CatchUpPlan {
     /// Local doc already contains the checkpoint frontier (or there is no
     /// checkpoint): stream rows only.
     RowsOnly { after: u64 },
@@ -200,7 +200,7 @@ pub enum CatchUpPlan {
 
 /// Decide the catch-up path from the hello state. `frontier_contained` is the
 /// sink's verdict on the checkpoint frontier payload.
-pub fn plan_catch_up(
+pub(crate) fn plan_catch_up(
     cursor: u64,
     state: &wire::StateHeader,
     frontier_contained: bool,
