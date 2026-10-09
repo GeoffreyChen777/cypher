@@ -5,7 +5,7 @@ use super::*;
 /// Stream `{edge}/releases/<file>` to `dest`, requiring the manifest sha256 or
 /// a standalone checksum for legacy metadata. Writes through a private temp file so an interrupted download never
 /// leaves a plausible-looking artifact behind.
-pub async fn download_release_file(
+pub(crate) async fn download_release_file(
     edge_url: &str,
     manifest: &Manifest,
     file: &str,

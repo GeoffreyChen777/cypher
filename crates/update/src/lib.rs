@@ -64,7 +64,7 @@ mod managed;
 mod release;
 
 pub use checker::*;
-pub use download::*;
+use download::*;
 pub use install::*;
 pub use macos::*;
 pub use managed::*;

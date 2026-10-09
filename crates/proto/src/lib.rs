@@ -8,17 +8,17 @@
 //! working trailer's tok/s ([`Throughput`]) is an estimate on the same local-only
 //! path, never persisted anywhere.
 
-pub mod agent;
+mod agent;
 pub mod agent_prompt;
 pub mod attachment_refs;
-pub mod entities;
-pub mod github;
+mod entities;
+mod github;
 pub mod motion;
 pub mod scratch;
-pub mod session_fork;
-pub mod side_chat;
+mod session_fork;
+mod side_chat;
 pub mod view;
-pub mod workspace;
+mod workspace;
 
 pub use agent::*;
 pub use entities::*;

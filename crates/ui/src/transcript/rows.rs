@@ -61,7 +61,7 @@ pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
 
 /// Max lines of a codemode script's invocation block. The script is the
 /// whole point of the call and the doc keeps it (capped at
-/// [`cypher_doc::parts::CODEMODE_SCRIPT_MAX_CHARS`]), so it gets more room
+/// [`cypher_doc::CODEMODE_SCRIPT_MAX_CHARS`]), so it gets more room
 /// than a command's echo before the counted tail.
 pub const SCRIPT_DETAIL_MAX_LINES: usize = 80;
 
