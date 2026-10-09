@@ -803,14 +803,9 @@ pub(super) async fn drive_run(
         // background re-invocations) must not wipe the segment being written.
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
+            // Full tool output stays in the host's local run journal; the doc
+            // keeps the fold's bounded summary and diff stats.
             fold_event_into_parts(&mut folded, &event);
-            // R2 sidecar is parked: the fold's bounded output summary and
-            // diff stats are the doc-resident record used by the transcript.
-            // Full output survives only in the host's local run journal.
-            // To add a full-output affordance later, reintroduce
-            // `cypher_doc::sidecar_payload(&event)` →
-            // `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`; all
-            // supporting code remains in place and tested.
         }
 
         if let AgentEvent::Done { status, .. } = &event {

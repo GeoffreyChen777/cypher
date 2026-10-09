@@ -192,7 +192,7 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
         /// Sidecar key (`{chatId}/{partId}`) of the full output — additive;
-        /// stamped by [`apply_sidecar_refs`] (the fold is chat-agnostic).
+        /// the fold never writes it (docs from earlier builds may carry it).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_ref: Option<String>,
         /// Full-output byte length, so the UI can say "Show full output (12 KB)".
@@ -490,62 +490,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::Throughput { .. }
         | AgentEvent::InputTranslation { .. } => {}
     }
-}
-
-/// Stamp sidecar keys onto resolved tool parts that have sidecar content.
-///
-/// Separate from the fold because the fold is chat-agnostic and pure; the
-/// caller (who knows the chat id) runs this right after each fold step, before
-/// the parts hit the doc. Idempotent. Key shape `{chatId}/{partId}` (+
-/// `.diff`) matches the edge's `/blob/{chatId}/{partId}` route.
-pub fn apply_sidecar_refs(chat_id: &str, parts: &mut [MessagePart]) {
-    for part in parts.iter_mut() {
-        if let MessagePart::Tool {
-            id,
-            resolved: true,
-            output_ref,
-            output_bytes,
-            diff_ref,
-            diff_stats,
-            ..
-        } = part
-        {
-            if output_ref.is_none() && output_bytes.is_some() {
-                *output_ref = Some(format!("{chat_id}/{id}"));
-            }
-            if diff_ref.is_none() && diff_stats.is_some() {
-                *diff_ref = Some(format!("{chat_id}/{id}.diff"));
-            }
-        }
-    }
-}
-
-/// What a [`AgentEvent::ToolResult`] owes the sidecar: the full output text
-/// and/or the full diff (as JSON), keyed by part id. `None` when the event
-/// carries nothing worth uploading.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SidecarPayload {
-    pub part_id: String,
-    pub output: Option<String>,
-    pub diff: Option<ToolDiff>,
-}
-
-pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
-    let AgentEvent::ToolResult {
-        id, output, diff, ..
-    } = event
-    else {
-        return None;
-    };
-    let output = output.clone().filter(|o| !o.trim().is_empty());
-    if output.is_none() && diff.is_none() {
-        return None;
-    }
-    Some(SidecarPayload {
-        part_id: id.clone(),
-        output,
-        diff: diff.clone(),
-    })
 }
 
 /// Render-only privacy policy — strip heavy/sensitive tool inputs before a call enters the doc.
