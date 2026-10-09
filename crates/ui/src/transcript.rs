@@ -2182,16 +2182,13 @@ pub const OVERFLOW_ROW_HEIGHT: f32 = 26.0;
 
 /// How many leading chips a group folds away: the cap keeps the LAST `limit`
 /// calls (the ones the agent just ran), `limit == 0` keeps every call, and a
-/// revealed group (`revealed`) hides nothing. One chip is never worth a row of
-/// its own — folding it would trade 38px of content for 26px of button.
+/// revealed group (`revealed`) hides nothing. The cap is strict — one call
+/// over it folds too, so a group never shows more calls than the setting.
 pub fn hidden_tool_count(total: usize, limit: u32, revealed: bool) -> usize {
     if revealed || limit == 0 {
         return 0;
     }
-    match total.saturating_sub(limit as usize) {
-        1 => 0,
-        hidden => hidden,
-    }
+    total.saturating_sub(limit as usize)
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -7817,8 +7814,34 @@ mod tests {
         assert_eq!(&ids(&revealed)[2..], &ids(&open)[1..]);
         assert_eq!(run_overflow_label(0, 0), "Show fewer tool calls");
 
-        // "Show all", one call short of the cap, or a closed run: untouched.
-        for limit in [0, 8, 9] {
+        // One call over the cap folds too, with the thinking before it.
+        let mut capped = open.clone();
+        cap_work_runs(&mut capped, 8, &none);
+        assert_eq!(
+            ids(&capped),
+            [
+                "m1#r0.activity",
+                "m1#r0.activity.overflow",
+                "m1#g0",
+                "m1#r4.thought",
+                "m1#g1",
+                "m1#r8.thought",
+                "m1#g2",
+                "m1#t12.0",
+            ]
+        );
+        assert!(matches!(capped[2].kind, RowKind::ToolGroup { skip: 1, .. }));
+        assert!(matches!(
+            capped[1].kind,
+            RowKind::RunOverflow {
+                tools: 1,
+                thoughts: 1,
+                ..
+            }
+        ));
+
+        // "Show all", a cap the run fits, or a closed run: untouched.
+        for limit in [0, 9, 10] {
             let mut uncapped = open.clone();
             cap_work_runs(&mut uncapped, limit, &none);
             assert_eq!(ids(&uncapped), ids(&open));
@@ -9221,8 +9244,8 @@ mod tests {
         // Under the cap nothing folds; over it, the LAST `limit` chips stay.
         assert_eq!(hidden_tool_count(5, 5, false), 0);
         assert_eq!(hidden_tool_count(12, 5, false), 7);
-        // Folding a single chip would cost more height than it saves.
-        assert_eq!(hidden_tool_count(6, 5, false), 0);
+        // Strict: one call over the cap folds too.
+        assert_eq!(hidden_tool_count(6, 5, false), 1);
         assert_eq!(hidden_tool_count(7, 5, false), 2);
         // Revealed rows and the "show all" setting hide nothing.
         assert_eq!(hidden_tool_count(12, 5, true), 0);
