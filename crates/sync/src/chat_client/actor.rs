@@ -693,8 +693,10 @@ impl Actor {
                 )
             });
             if let Some((id, _)) = &frame {
-                shared.in_flight =
-                    Some((id.clone(), tokio::time::Instant::now() + PUSH_ACK_DEADLINE));
+                shared.in_flight = Some((
+                    id.clone(),
+                    tokio::time::Instant::now() + self.tuning.push_ack_deadline,
+                ));
             }
             frame.map(|(_, frame)| frame)
         };
