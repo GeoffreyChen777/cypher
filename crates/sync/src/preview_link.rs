@@ -574,10 +574,9 @@ mod tests {
                 publisher_token: None,
             },
         );
-        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-            "../tests/fixtures/preview-reducer-v1.json"
-        ))
-        .unwrap();
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/preview-reducer-v1.json"))
+                .unwrap();
         for c in cases {
             link.receive(
                 &wire::encode(
