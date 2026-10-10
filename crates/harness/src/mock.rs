@@ -33,7 +33,10 @@ pub fn work_script() -> Vec<AgentEvent> {
         (
             "**Reading the writer**\n\n",
             "The writer appends into `LoroText`. Check how it batches commits.",
-            &[("sed -n '1,80p' crates/doc/src/writer.rs", false)],
+            &[(
+                "sed -n '1,80p' crates/doc/src/schema/segment_writer.rs",
+                false,
+            )],
         ),
         (
             "**Checking the commit cadence**\n\n",
@@ -56,13 +59,16 @@ pub fn work_script() -> Vec<AgentEvent> {
                     "cargo test -p cypher-doc writer::coalesces -- --nocapture",
                     false,
                 ),
-                ("git log -3 --oneline -- crates/doc/src/writer.rs", false),
+                (
+                    "git log -3 --oneline -- crates/doc/src/schema/segment_writer.rs",
+                    false,
+                ),
             ],
         ),
         (
             "**Tracing the relay**\n\n",
-            "Commits leave through the session room; confirm the fan-out.",
-            &[("rg -n \"SessionRoom\" edge/src", false)],
+            "Commits leave through the chat's relay room; confirm the fan-out.",
+            &[("rg -n \"ChatRoom\" apps/edge/src", false)],
         ),
         (
             "**Confirming the device side**\n\n",

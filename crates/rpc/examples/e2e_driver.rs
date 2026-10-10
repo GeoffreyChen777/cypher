@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use cypher_rpc::{RpcClient, connect_local, methods};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(90);
-const MOCK_TEXT: &str = "Mock harness reporting in.";
+const MOCK_TEXT: &str = "each commit reaches your other devices through the chat's relay room";
 
 fn fail(message: &str) -> ! {
     eprintln!("FAIL: {message}");

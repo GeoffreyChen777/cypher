@@ -420,7 +420,7 @@ fn default_registry_with_runtime(
                 diff: None,
             },
             AgentEvent::TextDelta {
-                text: "The `SegmentWriter` appends into `LoroText` so the oplog stays RLE-merged:\n\n```rust\nfolded = fold_event_into_parts(&folded, &event);\nwriter.sync(&folded)?; // 120ms coalesced commits\n```\n\nSynced to every device through the session room. *Mock harness reporting in.*".into(),
+                text: "The `SegmentWriter` appends into `LoroText`, so the oplog stays RLE-merged:\n\n```rust\nfold_event_into_parts(&mut folded, &event);\nwriter.sync(&folded)?; // commits coalesce every 120ms\n```\n\nWith sync on, each commit reaches your other devices through the chat's relay room.".into(),
             },
             AgentEvent::Done {
                 status: DoneStatus::Completed,
