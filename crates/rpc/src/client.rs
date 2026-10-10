@@ -1,4 +1,5 @@
-//! Client side: request/stream multiplexing over string frames + the WebSocket dialer.
+//! Client side: request/stream multiplexing over string frames, plus the adapter that
+//! runs a client over an already-dialed WebSocket (device-room links).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

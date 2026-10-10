@@ -57,9 +57,7 @@ fn make_configuration(
         .map_err(|error| HighlightError::Parser(error.to_string()))
 }
 
-pub fn configuration(
-    language: LanguageId,
-) -> Result<HighlightConfiguration, HighlightError> {
+pub fn configuration(language: LanguageId) -> Result<HighlightConfiguration, HighlightError> {
     use LanguageId::*;
     match language {
         Rust => rust_configuration(),
