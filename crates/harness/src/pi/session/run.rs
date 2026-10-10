@@ -6,6 +6,11 @@ use super::setup::{
 };
 use super::steer::{Disposition, NextTurn, disposition, emit_boundaries, requeue_stranded};
 use super::*;
+use crate::CancellationToken;
+use crate::process::StderrTail;
+
+/// The agent name crash messages lead with.
+const AGENT_NAME: &str = "pi";
 
 /// The role of a `message_start` / `message_end` payload (assistant only —
 /// toolResult/user messages are internal to the turn).
@@ -632,12 +637,7 @@ impl PiRun {
         Flow::Continue
     }
 
-    async fn on_eof(
-        &mut self,
-        child: &mut Child,
-        stderr_tail: &crate::process::StderrTail,
-        agent_name: &str,
-    ) -> Flow {
+    async fn on_eof(&mut self, child: &mut Child, stderr_tail: &StderrTail) -> Flow {
         // A child death while PARKED (turn already settled) ends
         // the run cleanly — the engine treats a parked stream end
         // as such. Mid-turn, it is a crash.
@@ -663,7 +663,7 @@ impl PiRun {
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
-                    error: Some(crash_message(agent_name, status, stderr_tail)),
+                    error: Some(crash_message(AGENT_NAME, status, stderr_tail)),
                     session_id: Some(self.session_file.clone()),
                 }))
                 .await;
@@ -776,53 +776,30 @@ pub async fn run_session(session: Session) {
     } = controls;
     let _host = host; // child env was already applied at spawn; kept for clarity
     let request_input = std::sync::Arc::new(request_input);
-    let agent_name = "pi";
 
-    // ---- handshake + session setup (interruptible) -------------------------
-    let setup = setup_session(&client, &request, model_catalog_wait);
-    let (session_file, model_name) = tokio::select! {
-        res = tokio::time::timeout(handshake_timeout, setup) => {
-            let res = res.unwrap_or_else(|_| Err(HarnessError::Protocol(format!(
-                "pi did not complete the RPC handshake within {}s (the agent \
-                 may be waiting for a login — try running it once in a terminal)",
-                handshake_timeout.as_secs()
-            ))));
-            match res {
-                Ok(v) => v,
-                Err(e) => {
-                    let error = match child.try_wait() {
-                        Ok(Some(status)) => {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                            format!("{e}; {}", crash_message(agent_name, Some(status), &stderr_tail))
-                        }
-                        _ => match stderr_tail.snapshot() {
-                            Some(tail) => format!("{e}; stderr: {tail}"),
-                            None => e.to_string(),
-                        },
-                    };
-                    tracing::warn!(target: "cypher_harness::pi", %error, "pi setup failed");
-                    let _ = event_tx
-                        .send(Ok(AgentEvent::Done {
-                            status: DoneStatus::Errored,
-                            result: None,
-                            error: Some(error),
-                            session_id: None,
-                        }))
-                        .await;
-                    shutdown_child(&mut child, kill_grace).await;
-                    return;
-                }
-            }
-        },
-        _ = interrupt.cancelled() => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Interrupted,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                }))
-                .await;
+    let handshake = handshake(
+        &client,
+        &request,
+        &mut child,
+        &stderr_tail,
+        &interrupt,
+        handshake_timeout,
+        model_catalog_wait,
+    );
+    let (session_file, model_name) = match handshake.await {
+        Ok(ready) => ready,
+        Err(error) => {
+            let status = match error {
+                Some(_) => DoneStatus::Errored,
+                None => DoneStatus::Interrupted,
+            };
+            let done = AgentEvent::Done {
+                status,
+                result: None,
+                error,
+                session_id: None,
+            };
+            let _ = event_tx.send(Ok(done)).await;
             shutdown_child(&mut child, kill_grace).await;
             return;
         }
@@ -883,14 +860,8 @@ pub async fn run_session(session: Session) {
     // handler returns — and handlers like `/subagent-config` block on
     // `ctx.ui.select` first. Awaiting the ACK here would deadlock: the
     // select arrives as `Incoming::UiRequest`, which is only drained in
-    // the loop. Attachments are inlined ONLY on this first prompt: routed
-    // mailbox messages carry none, and re-sending them would duplicate.
-    let attachments_images = inline_images(&request.attachments);
-    let mut prompt_params = Map::new();
-    prompt_params.insert("message".into(), Value::String(request.prompt.clone()));
-    if let Some(images) = &attachments_images {
-        prompt_params.insert("images".into(), images.clone());
-    }
+    // the loop.
+    let prompt_params = first_prompt(&request);
     let first_prompt_client = client.clone();
 
     let mut run = PiRun {
@@ -953,7 +924,7 @@ pub async fn run_session(session: Session) {
                     run.on_ui_request(id, method, payload).await
                 }
                 Some(Incoming::Eof) | None => {
-                    run.on_eof(&mut child, &stderr_tail, agent_name).await
+                    run.on_eof(&mut child, &stderr_tail).await
                 }
             },
             steer = steering.recv(), if run.steering_open && !run.interrupted => {
@@ -972,40 +943,103 @@ pub async fn run_session(session: Session) {
         }
     }
 
-    // Terminal bookkeeping: never end the stream without a Done unless the
-    // consumer already hung up.
-    if !run.event_tx.is_closed() && !run.done_sent {
-        if run.interrupted {
-            let _ = run
-                .event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Interrupted,
-                    result: None,
-                    error: None,
-                    session_id: Some(run.session_file.clone()),
-                }))
-                .await;
-        } else {
-            let status = child.try_wait().ok().flatten();
-            let _ = run
-                .event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(crash_message(agent_name, status, &stderr_tail)),
-                    session_id: Some(run.session_file.clone()),
-                }))
-                .await;
-        }
-    }
+    run.finish(&mut child, &stderr_tail).await;
+}
 
-    // Escalation dies BEFORE the child is reaped: after `shutdown_child`
-    // waits the pid, a still-armed SIGTERM/SIGKILL timer would fire at a
-    // freed (reusable) pid.
-    if let Some(handle) = run.escalation {
-        handle.abort();
+/// Handshake + session setup, raced against the interrupt and bounded by
+/// `handshake_timeout`. Returns the session file and model name; an error is
+/// the setup failure's message, or `None` when the interrupt won.
+async fn handshake(
+    client: &PiClient,
+    request: &RunRequest,
+    child: &mut Child,
+    stderr_tail: &StderrTail,
+    interrupt: &CancellationToken,
+    handshake_timeout: Duration,
+    model_catalog_wait: Duration,
+) -> Result<(String, String), Option<String>> {
+    let setup = setup_session(client, request, model_catalog_wait);
+    let error = tokio::select! {
+        res = tokio::time::timeout(handshake_timeout, setup) => {
+            let res = res.unwrap_or_else(|_| Err(HarnessError::Protocol(format!(
+                "pi did not complete the RPC handshake within {}s (the agent \
+                 may be waiting for a login — try running it once in a terminal)",
+                handshake_timeout.as_secs()
+            ))));
+            match res {
+                Ok(ready) => return Ok(ready),
+                Err(e) => e,
+            }
+        },
+        _ = interrupt.cancelled() => return Err(None),
+    };
+    let error = match child.try_wait() {
+        Ok(Some(status)) => {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            format!(
+                "{error}; {}",
+                crash_message(AGENT_NAME, Some(status), stderr_tail)
+            )
+        }
+        _ => match stderr_tail.snapshot() {
+            Some(tail) => format!("{error}; stderr: {tail}"),
+            None => error.to_string(),
+        },
+    };
+    tracing::warn!(%error, "pi setup failed");
+    Err(Some(error))
+}
+
+/// The first prompt's params. Attachments are inlined ONLY here: routed
+/// mailbox messages carry none, and re-sending them would duplicate.
+fn first_prompt(request: &RunRequest) -> Map<String, Value> {
+    let mut params = Map::new();
+    params.insert("message".into(), Value::String(request.prompt.clone()));
+    if let Some(images) = inline_images(&request.attachments) {
+        params.insert("images".into(), images);
     }
-    shutdown_child(&mut child, run.kill_grace).await;
+    params
+}
+
+impl PiRun {
+    /// Terminal bookkeeping once the loop ends: send the Done the run still
+    /// owes, stop the interrupt escalation, then reap the child.
+    async fn finish(self, child: &mut Child, stderr_tail: &StderrTail) {
+        // Terminal bookkeeping: never end the stream without a Done unless the
+        // consumer already hung up.
+        if !self.event_tx.is_closed() && !self.done_sent {
+            if self.interrupted {
+                let _ = self
+                    .event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(self.session_file.clone()),
+                    }))
+                    .await;
+            } else {
+                let status = child.try_wait().ok().flatten();
+                let _ = self
+                    .event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(crash_message(AGENT_NAME, status, stderr_tail)),
+                        session_id: Some(self.session_file.clone()),
+                    }))
+                    .await;
+            }
+        }
+
+        // Escalation dies BEFORE the child is reaped: after `shutdown_child`
+        // waits the pid, a still-armed SIGTERM/SIGKILL timer would fire at a
+        // freed (reusable) pid.
+        if let Some(handle) = self.escalation {
+            handle.abort();
+        }
+        shutdown_child(child, self.kill_grace).await;
+    }
 }
 
 /// `RunRequest.attachments` (absolute paths already staged on the run device)
