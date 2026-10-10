@@ -1275,7 +1275,7 @@ impl Render for Shell {
         }
 
         // Boot splash overlay: visible → crossfades out on Ready → removed.
-        let root = match self.splash {
+        let root = match self.splash.phase {
             SplashPhase::Visible => {
                 let theme = Theme::of(cx).clone();
                 root.child(loaders::splash_overlay(&theme, false))

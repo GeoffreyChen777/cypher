@@ -1220,6 +1220,12 @@ struct Attention {
     notification_activity: crate::shell::notification_activity::DesktopActivity,
 }
 
+/// The boot splash: its phase and the fade-out timer.
+struct Splash {
+    phase: SplashPhase,
+    task: Option<Task<()>>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1284,8 +1290,8 @@ pub struct Shell {
     motion: ShellMotion,
     /// Fullscreen tracking and the titlebar's window drag.
     titlebar: TitlebarState,
-    splash: SplashPhase,
-    splash_task: Option<Task<()>>,
+    /// The boot splash.
+    splash: Splash,
     save_task: Option<Task<()>>,
     /// Where keyboard focus lands when nothing else holds it.
     focus: FocusFallback,
@@ -1575,8 +1581,10 @@ impl Shell {
                 fullscreen: None,
                 should_move: false,
             },
-            splash: SplashPhase::Visible,
-            splash_task: None,
+            splash: Splash {
+                phase: SplashPhase::Visible,
+                task: None,
+            },
             save_task: None,
             focus: FocusFallback {
                 sub: None,

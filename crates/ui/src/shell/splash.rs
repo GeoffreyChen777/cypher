@@ -272,14 +272,14 @@ impl Shell {
     fn advance_splash(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
-                if self.splash == SplashPhase::Visible {
-                    self.splash = SplashPhase::FadingOut;
-                    self.splash_task = Some(cx.spawn(async move |this, cx| {
+                if self.splash.phase == SplashPhase::Visible {
+                    self.splash.phase = SplashPhase::FadingOut;
+                    self.splash.task = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor()
                             .timer(SPLASH_OUT.total() + Duration::from_millis(30))
                             .await;
                         this.update(cx, |shell, cx| {
-                            shell.splash = SplashPhase::Gone;
+                            shell.splash.phase = SplashPhase::Gone;
                             cx.notify();
                         })
                         .ok();
@@ -287,7 +287,7 @@ impl Shell {
                 }
             }
             // Reveal the gate card immediately; the splash never returns mid-session.
-            ConnectionStatus::Failed(_) => self.splash = SplashPhase::Gone,
+            ConnectionStatus::Failed(_) => self.splash.phase = SplashPhase::Gone,
             ConnectionStatus::Connecting => {}
         }
     }

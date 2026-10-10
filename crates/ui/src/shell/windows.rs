@@ -85,7 +85,7 @@ impl Shell {
         let mut shell = Self::build(state, boot, data_dir, project.clone(), cx);
         // The state arrives attached and populated — no boot splash, and no
         // first-run setup (the main window owns that flow).
-        shell.splash = SplashPhase::Gone;
+        shell.splash.phase = SplashPhase::Gone;
         shell.pages.setup_dismissed = true;
         shell.space_boot_applied = true;
         cx.on_release(move |_, cx| {
