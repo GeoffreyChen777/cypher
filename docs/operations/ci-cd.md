@@ -2,11 +2,18 @@
 
 ## Workflows
 
-- **`ci.yml`**: pull requests, pushes to `main`, and manual runs. Runs workflow
-  lint, release/installer regressions, Edge typechecking and unit/workerd tests,
-  Linux backend tests (including Engine integration tests), updater Clippy,
-  formatting, macOS workspace compilation, and focused setup/runtime/MCP/Unix
-  IPC UI regressions. No deployment credentials are available to these jobs.
+- **`ci.yml`**: pull requests, pushes to `main`, and manual runs. Each step runs
+  one stage of `scripts/check.sh` (see
+  [Development](../development/README.md#checks)): workflow lint and policy,
+  release/installer and script tests, documentation links, Pi runtime suites,
+  Edge typechecking and unit/workerd tests, formatting, the crate-layer check,
+  ShellCheck, clippy with `-D warnings` (the headless crates on Linux, the
+  whole workspace on macOS), every crate's tests, the headless build and CLI
+  tests, the full `cypher-ui` suite and the Rust/Swift preview vectors. No
+  deployment credentials are available to these jobs.
+- **`ios-tests.yml`**: the iOS unit tests (`CypherTests`) on a simulator, on the
+  same Xcode selection the archive job uses. It runs only when `apps/ios/**`, the
+  shared preview fixtures or its own scripts change.
 - **`deploy.yml`**: pushes to `main` and main-only manual runs. Captures a fresh
   `main` SHA once, tests it, checks installer compatibility, then deploys all
   three workers from that same SHA. It deliberately does not use per-push path
@@ -281,10 +288,11 @@ Ubuntu 20.04 / glibc 2.31.
 
 ## Local checks
 
+`bash scripts/check.sh <stage>` runs the same checks as CI
+([Development](../development/README.md#checks) lists the stages). The release
+tooling has read-only checks of its own:
+
 ```sh
-bash scripts/ci/actionlint.sh
-python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
-python3 scripts/tests/test-linux-cli.py
 node scripts/ci/pi-runtime-smoke.mjs /path/to/extracted/runtime
 python3 scripts/ci/release.py validate-platform --platform linux \
   --dist /path/to/artifacts --version 0.3.41 --build 1 --out /tmp/release-plan

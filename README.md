@@ -67,14 +67,18 @@ On macOS: use the desktop release, or build `cypher` from source and run `cypher
 
 ---
 
-Developing or curious how it works? See [ARCHITECTURE.md](ARCHITECTURE.md).
-
-CI, deployment prerequisites and release recovery: [CI/CD operations](docs/operations/ci-cd.md).
-
 Chat fonts, colors, spacing and wide-screen mode: [Chat appearance](docs/features/chat-appearance.md).
 
 Overall themes and Terminal, Git and Sidebar color overrides: [Appearance colors](docs/features/appearance-colors.md).
 
 Unified and side-by-side Git comparison: [Git diff layouts](docs/features/git-diff.md).
+
+## Developing
+
+[Development](docs/development/README.md) covers the repository layout, conventions
+and `scripts/check.sh`, the one command that runs CI's checks locally. How the
+product works: [ARCHITECTURE.md](ARCHITECTURE.md). CI, deployment prerequisites and
+release recovery: [CI/CD operations](docs/operations/ci-cd.md). All docs:
+[docs/README.md](docs/README.md).
 
 Licensed under the [MIT License](LICENSE).

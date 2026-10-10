@@ -8,6 +8,8 @@ description: Start, rebuild, restart and verify the local Cypher desktop develop
 Use this skill to start, restart or smoke-test the local desktop dev app from
 this repository. It follows `AGENTS.md`: after each verified feature, rebuild
 and restart the dev UI, keep the running engine, then verify and report.
+Repository layout, checks and conventions: `docs/development/README.md`;
+the development Edge: `docs/development/local-edge.md`.
 
 ## Scope and ground rules
 
