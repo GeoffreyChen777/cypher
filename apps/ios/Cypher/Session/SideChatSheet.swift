@@ -122,6 +122,7 @@ struct SideChatSheet: View {
                             QuestionPanel(
                                 requestId: request.requestId, questions: request.questions,
                                 maximumHeight: 420, canRespond: true,
+                                notice: store.session.inputAnswerFailure,
                                 stop: {
                                     _ = store.session.sendInterrupt()
                                 }

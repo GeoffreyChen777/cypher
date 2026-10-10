@@ -1031,6 +1031,110 @@ async fn respond_input_resolves_pending_question() {
     .await;
 }
 
+/// A harness that stops waiting (Pi resolved its timed-out dialog on its own)
+/// withdraws the question: the part resolves while the turn keeps going, and a
+/// late answer is rejected instead of "applied" into a dialog that is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn abandoned_question_is_withdrawn_mid_turn() {
+    let harness = common::TestHarness::new(HarnessId::Mock, "Abandoning", move |_, controls| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let answer = (controls.request_input)(vec![cypher_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: false,
+            }]);
+            let _ = tokio::time::timeout(Duration::from_millis(300), answer).await;
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: "no answer, moving on".into(),
+                }))
+                .await;
+            controls.interrupt.cancelled().await;
+            let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    })
+    .reasoning(&[]);
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(harness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-abandon",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+            agent_prompt: None,
+        },
+    );
+    let request_id = {
+        let mut found = None;
+        wait_for(
+            || {
+                found = entries(&core).iter().find_map(|e| {
+                    e.parts.iter().find_map(|p| match p {
+                        MessagePart::Input { request_id, .. } => Some(request_id.clone()),
+                        _ => None,
+                    })
+                });
+                found.is_some()
+            },
+            "input part in doc",
+        )
+        .await;
+        found.unwrap()
+    };
+
+    // Withdrawn while the turn is still live.
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Working)
+                && entries(&core).iter().any(|e| {
+                    e.status == Some(MessageStatus::Streaming)
+                        && e.parts
+                            .iter()
+                            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
+                })
+        },
+        "abandoned question withdrawn",
+    )
+    .await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-late",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![cypher_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-answer-late")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "late answer processed",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-answer-late"),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("no pending input request".into())
+        ))
+    );
+    core.sessions.interrupt(CHAT).await.unwrap();
+}
+
 /// Resilience: a RespondInput whose id matches no pending request is REJECTED
 /// with a resolution (never silently dropped), the question stays live (the
 /// panel persists), and a subsequent correct answer still resumes the run —

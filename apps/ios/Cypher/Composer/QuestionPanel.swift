@@ -9,6 +9,8 @@ struct QuestionPanel: View {
     let questions: [UserInputQuestion]
     var maximumHeight: CGFloat = 480
     var canRespond = true
+    /// Why this question is back after an answer — shown in the footer.
+    var notice: String?
     var stop: (() -> Void)?
     let respond: (String, [UserInputAnswer]) -> Void
 
@@ -21,8 +23,9 @@ struct QuestionPanel: View {
 
     var body: some View {
         if !questions.isEmpty {
-            let question = questions[min(max(page, 0), questions.count - 1)]
-            let presentation = QuestionPresentation(question)
+            let wire = questions[min(max(page, 0), questions.count - 1)]
+            let presentation = QuestionPresentation(wire)
+            let question = presentation.displayQuestion(wire)
             VStack(spacing: 0) {
                 header(presentation)
                 Rectangle().fill(Theme.border).frame(height: 1)
@@ -159,7 +162,10 @@ struct QuestionPanel: View {
                         .foregroundStyle(Theme.textFaint)
                         .padding(.bottom, 2)
                     ForEach(Array(question.options.enumerated()), id: \.offset) { index, option in
-                        optionRow(option, index: index, question: question)
+                        optionRow(
+                            option, index: index, question: question,
+                            description: presentation.listedOptions.indices.contains(index)
+                                ? presentation.listedOptions[index].description : nil)
                     }
                 }
             }
@@ -202,7 +208,9 @@ struct QuestionPanel: View {
         }
     }
 
-    private func optionRow(_ option: String, index: Int, question: UserInputQuestion) -> some View {
+    private func optionRow(
+        _ option: String, index: Int, question: UserInputQuestion, description: String? = nil
+    ) -> some View {
         let selected = draft.picked[question.id, default: []].contains(option)
         let isCustom = option == QuestionPresentation.customAnswerOption
         return Button {
@@ -219,12 +227,19 @@ struct QuestionPanel: View {
                 .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(selected ? Theme.text : Theme.textFaint.opacity(0.6))
                 .frame(width: 20)
-                Text(isCustom ? "Write a custom answer" : option)
-                    .font(Theme.sans(13, weight: selected ? .medium : .regular))
-                    .foregroundStyle(Theme.text)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isCustom ? "Write a custom answer" : option)
+                        .font(Theme.sans(13, weight: selected ? .medium : .regular))
+                        .foregroundStyle(Theme.text)
+                    if let description, !description.isEmpty {
+                        Text(description)
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                }
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
@@ -256,6 +271,11 @@ struct QuestionPanel: View {
                 .font(Theme.sans(13, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(minHeight: 44)
+            } else if let notice, canRespond {
+                Text(notice)
+                    .font(Theme.sans(11))
+                    .foregroundStyle(Theme.danger)
+                    .lineLimit(2)
             } else {
                 Text(
                     !canRespond

@@ -62,15 +62,29 @@ fn bridge_ui_request(
         },
         multi_select: false,
     };
+    // Pi resolves a dialog with a `timeout` to its default on its own and
+    // tells no one. Give up on the answer at the same moment: dropping the
+    // receiver withdraws the question, instead of leaving it open for an
+    // answer Pi would ignore.
+    let timeout = payload
+        .get("timeout")
+        .and_then(Value::as_f64)
+        .filter(|ms| *ms > 0.0)
+        .and_then(|ms| std::time::Duration::try_from_secs_f64(ms / 1000.0).ok());
     let client = client.clone();
     let request_input = std::sync::Arc::clone(&request_input);
     // Owned copies for the spawned task (the caller's refs are not 'static).
     let id = id.to_owned();
     let method = method.to_owned();
     tokio::spawn(async move {
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
+        let answer = (request_input)(vec![question.clone()]);
+        let answers = match timeout {
+            Some(limit) => match tokio::time::timeout(limit, answer).await {
+                Ok(answers) => answers.unwrap_or_default(),
+                Err(_) => return,
+            },
+            None => answer.await.unwrap_or_default(),
+        };
         let picked = answers
             .iter()
             .find(|a| a.question_id == question.id)

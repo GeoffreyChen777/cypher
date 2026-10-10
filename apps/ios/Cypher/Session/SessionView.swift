@@ -364,6 +364,7 @@ struct SessionView: View {
                                 requestId: request.requestId, questions: request.questions,
                                 maximumHeight: min(560, max(180, viewHeight * 0.72)),
                                 canRespond: canControl(chat),
+                                notice: store.inputAnswerFailure,
                                 stop: {
                                     guard canControl(chat) else { return }
                                     controlError = store.sendInterrupt() ? nil : "Couldn't queue Stop. Please retry."

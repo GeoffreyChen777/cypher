@@ -747,13 +747,35 @@ impl SessionsEngine {
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
+                let (mut answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
+                    request_id: request_id.clone(),
                     questions,
                 });
-                rx
+                // Withdrawal watch: the harness drops its receiver when the
+                // dialog it bridges is gone (Pi resolves a timed-out dialog on
+                // its own, silently). Retire the question then, or it stays
+                // open and a late answer is "applied" into a dialog that no
+                // longer exists — the model never sees it.
+                let pending = pending.clone();
+                let engine_tx = engine_tx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        answers = rx => {
+                            if let Ok(answers) = answers {
+                                let _ = answer_tx.send(answers);
+                            }
+                        }
+                        () = answer_tx.closed() => {
+                            if lock(&pending).remove(&request_id).is_some() {
+                                let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                            }
+                        }
+                    }
+                });
+                answer_rx
             })
         };
         let interrupt_token = CancellationToken::new();

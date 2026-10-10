@@ -43,6 +43,16 @@ final class SessionStore {
     private(set) var connected = false
     /// Client-minted ids of sends the host hasn't materialized yet.
     private(set) var pendingSends: [PendingSend] = []
+    /// Questions this device answered whose part the host hasn't resolved
+    /// yet: request id → the respondInput command id ("" over a direct
+    /// transport). The panel retires on the tap instead of waiting out the
+    /// host round trip; it only comes back if the answer is turned down.
+    private(set) var answeredInputs: [String: String] = [:]
+    /// Why an answered question came back — shown on the reopened panel.
+    private(set) var inputAnswerFailure: String?
+    /// Host outcomes of respondInput commands (command id → status), read
+    /// with each projection.
+    @ObservationIgnored private var inputCommandOutcomes: [String: String] = [:]
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.
@@ -105,6 +115,7 @@ final class SessionStore {
             let ids = Set(new.map(\.id))
             pendingSends.removeAll { ids.contains($0.messageId) }
         }
+        settleAnsweredInputs()
         revision &+= 1
         transcriptCache.prewarm(entries: entries)
     }
@@ -323,15 +334,16 @@ final class SessionStore {
         let doc = self.doc
         Task { @MainActor [weak self] in
             let projection = await Task.detached(priority: .userInitiated) {
-                () -> ([MessageEntry]?, PreviewCoverage?) in
-                guard let root = doc.getDeepValue().mapValue else { return (nil, nil) }
+                () -> ([MessageEntry]?, PreviewCoverage?, [String: String]) in
+                guard let root = doc.getDeepValue().mapValue else { return (nil, nil, [:]) }
                 let marker = root["meta"]?.mapValue?["previewCoverage"]?.stringValue
                 let coverage = marker.flatMap { try? JSONDecoder().decode(PreviewCoverage.self, from: Data($0.utf8)) }
-                return (Self.decodeEntries(root: root), coverage)
+                return (Self.decodeEntries(root: root), coverage, Self.inputCommandOutcomes(root: root))
             }.value
             guard let self else { return }
             self.projecting = false
             if let decoded = projection.0 {
+                self.inputCommandOutcomes = projection.2
                 self.apply(decoded, coverage: projection.1)
             }
             if self.projectPending {
@@ -348,6 +360,7 @@ final class SessionStore {
         // Drop echoes the host has materialized.
         let ids = Set(decoded.map(\.id))
         pendingSends.removeAll { ids.contains($0.messageId) }
+        settleAnsweredInputs()
         revision &+= 1
         // If no transcript view is open, settle the parses now (off-main) so
         // the eventual open is memo hits all the way down.
@@ -383,6 +396,20 @@ final class SessionStore {
             return entry
         }
         return joinContinuations(raw)
+    }
+
+    /// Settled respondInput commands: command id → host status.
+    nonisolated static func inputCommandOutcomes(root: [String: LoroValue]) -> [String: String] {
+        var outcomes: [String: String] = [:]
+        for command in root["commands"]?.listValue ?? [] {
+            guard let command = command.mapValue,
+                command["kind"]?.stringValue == "respondInput",
+                let id = command["id"]?.stringValue,
+                let status = command["status"]?.stringValue, status != "pending"
+            else { continue }
+            outcomes[id] = status
+        }
+        return outcomes
     }
 
     nonisolated static func entryFrom(_ value: LoroValue) -> MessageEntry? {
@@ -500,20 +527,56 @@ final class SessionStore {
 
     var lastEntryId: String? { durableEntries.last?.id }
 
-    /// The unresolved input request to surface in the question panel.
+    /// The unresolved input request to surface in the question panel. One
+    /// this device already answered is skipped: the answer is on its way.
     var openInputRequest: (entryId: String, requestId: String, questions: [UserInputQuestion])? {
         for entry in durableEntries.reversed() {
             for part in entry.parts.reversed() {
                 // An empty question list can't be answered, so it must not take
                 // the composer's place — leaving the user with no way to type.
                 if case .input(_, let requestId, let questions, let resolved) = part,
-                    !resolved, !questions.isEmpty
+                    !resolved, !questions.isEmpty, answeredInputs[requestId] == nil
                 {
                     return (entry.id, requestId, questions)
                 }
             }
         }
         return nil
+    }
+
+    /// Unresolved input request ids in the durable transcript.
+    private var unresolvedInputIds: Set<String> {
+        var ids = Set<String>()
+        for entry in durableEntries {
+            for part in entry.parts {
+                if case .input(_, let requestId, _, false) = part { ids.insert(requestId) }
+            }
+        }
+        return ids
+    }
+
+    /// Forget answers whose question resolved, and reopen any the host
+    /// rejected or let expire — the question is still open, and silently
+    /// keeping it hidden would leave the run waiting on nobody.
+    private func settleAnsweredInputs() {
+        guard !answeredInputs.isEmpty else { return }
+        let open = unresolvedInputIds
+        for (requestId, commandId) in answeredInputs {
+            if !open.contains(requestId) {
+                answeredInputs[requestId] = nil
+            } else if let status = inputCommandOutcomes[commandId],
+                status == "rejected" || status == "expired"
+            {
+                reopenInput(requestId, reason: "Your answer didn't reach the agent. Please answer again.")
+            }
+        }
+    }
+
+    /// Bring an answered question's panel back, e.g. when its answer failed
+    /// to leave this device.
+    func reopenInput(_ requestId: String, reason: String) {
+        guard answeredInputs.removeValue(forKey: requestId) != nil else { return }
+        inputAnswerFailure = reason
     }
 
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
@@ -542,7 +605,7 @@ final class SessionStore {
             "messageId": messageId,
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
-        guard queueCommand(kind: "run", payload: payload) else { return false }
+        guard queueCommand(kind: "run", payload: payload) != nil else { return false }
         pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs()))
         revision &+= 1
         return true
@@ -563,7 +626,7 @@ final class SessionStore {
             "messageId": messageId,
         ]
         if let agentPrompt { payload["agentPrompt"] = agentPrompt }
-        guard queueCommand(kind: "steer", payload: payload) else { return false }
+        guard queueCommand(kind: "steer", payload: payload) != nil else { return false }
         pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: nowMs(), isSteer: true))
         revision &+= 1
         return true
@@ -572,19 +635,30 @@ final class SessionStore {
     @discardableResult
     func sendInterrupt() -> Bool {
         if let directTransport { return directTransport.interrupt() }
-        return queueCommand(kind: "interrupt", payload: ["kind": "interrupt"])
+        return queueCommand(kind: "interrupt", payload: ["kind": "interrupt"]) != nil
     }
 
+    /// Answer a question; on success its panel retires immediately.
     @discardableResult
     func respondInput(requestId: String, answers: [UserInputAnswer]) -> Bool {
-        if let directTransport { return directTransport.respondInput(requestId, answers) }
-        return queueCommand(
-            kind: "respondInput",
-            payload: [
-                "kind": "respondInput",
-                "requestId": requestId,
-                "answers": answers.map(encodableJSON),
-            ])
+        // A second tap racing the retire must not queue a duplicate answer.
+        guard answeredInputs[requestId] == nil else { return true }
+        let commandId: String?
+        if let directTransport {
+            commandId = directTransport.respondInput(requestId, answers) ? "" : nil
+        } else {
+            commandId = queueCommand(
+                kind: "respondInput",
+                payload: [
+                    "kind": "respondInput",
+                    "requestId": requestId,
+                    "answers": answers.map(encodableJSON),
+                ])
+        }
+        guard let commandId else { return false }
+        answeredInputs[requestId] = commandId
+        inputAnswerFailure = nil
+        return true
     }
 
     /// A direct send, echoed optimistically like a queued one (the host's
@@ -597,12 +671,13 @@ final class SessionStore {
         return true
     }
 
-    /// schema.rs queue_command, field for field.
-    private func queueCommand(kind: String, payload: [String: Any]) -> Bool {
+    /// schema.rs queue_command, field for field. Returns the command id.
+    private func queueCommand(kind: String, payload: [String: Any]) -> String? {
         let commands = doc.getList(id: "commands")
+        let id = UUID().uuidString.lowercased()
         do {
             let map = try commands.pushContainer(child: LoroMap())
-            try map.insert(key: "id", v: UUID().uuidString.lowercased())
+            try map.insert(key: "id", v: id)
             try map.insert(key: "kind", v: kind)
             try map.insert(key: "payload", v: LoroValue.fromJSON(payload))
             try map.insert(key: "issuedBy", v: config.deviceId)
@@ -618,9 +693,9 @@ final class SessionStore {
             try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
             try map.insert(key: "status", v: "pending")
             doc.commit()
-        } catch { return false }
+        } catch { return nil }
         nudgeHost()
-        return true
+        return id
     }
 
     /// Durable-nudge the host device so a cold host opens the doc and drains

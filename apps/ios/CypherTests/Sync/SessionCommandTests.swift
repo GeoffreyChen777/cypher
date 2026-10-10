@@ -56,4 +56,60 @@ final class SessionCommandTests: XCTestCase {
         XCTAssertEqual(store.pendingSends.count, 1, "Only message-bearing commands have optimistic echoes")
         XCTAssertEqual(store.pendingSends.first?.isSteer, true)
     }
+
+    private func question(_ requestId: String, resolved: Bool) -> MessageEntry {
+        .fixture(
+            "entry-\(requestId)",
+            parts: [
+                .input(
+                    id: requestId, requestId: requestId,
+                    questions: [
+                        UserInputQuestion(
+                            id: "q1", header: "Pick", question: "Which?", options: ["a", "b"],
+                            multiSelect: false)
+                    ], resolved: resolved)
+            ])
+    }
+
+    func testAnsweredQuestionRetiresOnTapUntilResolved() {
+        let store = makeStore()
+        store.setEntries([question("req-1", resolved: false)])
+        XCTAssertEqual(store.openInputRequest?.requestId, "req-1")
+        let answer = [UserInputAnswer(questionId: "q1", labels: ["a"])]
+        XCTAssertTrue(store.respondInput(requestId: "req-1", answers: answer))
+        XCTAssertNil(store.openInputRequest, "The panel must not wait out the host round trip")
+        XCTAssertTrue(store.respondInput(requestId: "req-1", answers: answer))
+        XCTAssertEqual(commands(store).count, 1, "A second tap must not queue a duplicate answer")
+
+        // The host resolves it: the bookkeeping is dropped.
+        store.setEntries([question("req-1", resolved: true)])
+        XCTAssertTrue(store.answeredInputs.isEmpty)
+        XCTAssertNil(store.openInputRequest)
+    }
+
+    func testFailedAnswerBringsTheQuestionBack() {
+        let store = makeStore()
+        store.setEntries([question("req-1", resolved: false)])
+        XCTAssertTrue(store.respondInput(requestId: "req-1", answers: []))
+        XCTAssertNil(store.openInputRequest)
+        store.reopenInput("req-1", reason: "Try again")
+        XCTAssertEqual(store.openInputRequest?.requestId, "req-1")
+        XCTAssertEqual(store.inputAnswerFailure, "Try again")
+        XCTAssertTrue(store.respondInput(requestId: "req-1", answers: []))
+        XCTAssertNil(store.inputAnswerFailure)
+    }
+
+    func testInputCommandOutcomesReadOnlySettledAnswers() {
+        let root: [String: LoroValue] = [
+            "commands": .list(value: [
+                .map(value: ["id": .string(value: "c1"), "kind": .string(value: "respondInput"),
+                             "status": .string(value: "rejected")]),
+                .map(value: ["id": .string(value: "c2"), "kind": .string(value: "respondInput"),
+                             "status": .string(value: "pending")]),
+                .map(value: ["id": .string(value: "c3"), "kind": .string(value: "steer"),
+                             "status": .string(value: "applied")]),
+            ])
+        ]
+        XCTAssertEqual(SessionStore.inputCommandOutcomes(root: root), ["c1": "rejected"])
+    }
 }

@@ -122,4 +122,45 @@ final class QuestionPanelTests: XCTestCase {
         XCTAssertNotEqual(pending.version, resolved.version)
         XCTAssertEqual(pending.id, resolved.id)
     }
+
+    func testBlankOptionalCommentIsAnAnswerNotACancel() {
+        let comment = question(
+            "Choose?\n\nSelected option:\n- Remote", header: "Optional comment", options: [])
+        let answers = QuestionAnswerDraft().answers(for: [comment])
+        XCTAssertEqual(answers.first?.labels, [""])
+    }
+
+    func testRpcMultiSelectListBecomesCheckboxesAndAnswersJoined() {
+        let raw = """
+            Which targets?
+
+            Context:
+            Pick all that apply.
+
+            Options (select one or more):
+            1. iOS — the phone app
+            2. Desktop
+            3. Web — browser build
+            spans two lines
+            """
+        let wire = question(raw, options: [])
+        let presentation = QuestionPresentation(wire)
+        XCTAssertEqual(presentation.prompt, "Which targets?")
+        XCTAssertEqual(presentation.context, "Pick all that apply.")
+        XCTAssertEqual(presentation.listedOptions.map(\.title), ["iOS", "Desktop", "Web"])
+        XCTAssertEqual(presentation.listedOptions[2].description, "browser build\nspans two lines")
+        let display = presentation.displayQuestion(wire)
+        XCTAssertEqual(display.multiSelect, true)
+        var draft = QuestionAnswerDraft()
+        draft.select("Web", for: display)
+        draft.select("iOS", for: display)
+        XCTAssertEqual(draft.answers(for: [wire]).first?.labels, ["iOS, Web"])
+        draft.typed[wire.id] = "Desktop"
+        XCTAssertEqual(draft.answers(for: [wire]).first?.labels, ["Desktop"])
+    }
+
+    func testPromptWithoutAValidListStaysFreeText() {
+        let wire = question("Notes?\n\nOptions (select one or more):\nnot a list", options: [])
+        XCTAssertTrue(QuestionPresentation(wire).listedOptions.isEmpty)
+    }
 }

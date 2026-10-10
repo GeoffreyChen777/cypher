@@ -176,12 +176,19 @@ final class SideChatStore {
                         "sideChatId": id, "requestId": requestId,
                         "answers": answers.map(Self.json),
                     ],
-                    failure: "Couldn't send the answer")
-                return true
+                    failure: "Couldn't send the answer"
+                ) { [weak self] in
+                    // The panel retired on the tap; the answer never landed.
+                    self?.session.reopenInput(requestId, reason: "Couldn't send your answer. Please retry.")
+                }
+                return self?.relay != nil
             })
     }
 
-    private func call(_ method: String, _ params: [String: Any], failure: String) {
+    private func call(
+        _ method: String, _ params: [String: Any], failure: String,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) {
         guard let relay else { return }
         Task { @MainActor [weak self] in
             do {
@@ -189,6 +196,7 @@ final class SideChatStore {
                 self?.error = nil
             } catch {
                 self?.error = "\(failure) — \(error.localizedDescription)"
+                onFailure?()
             }
         }
     }
