@@ -37,7 +37,7 @@ const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
     ("Chinese", "Chinese"),
 ];
 
-pub struct TranslationSettings {
+pub struct TranslationControl {
     state: Entity<AppState>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -66,7 +66,7 @@ pub struct TranslationSettings {
     _input_observers: Vec<Subscription>,
 }
 
-impl TranslationSettings {
+impl TranslationControl {
     pub fn new(
         state: Entity<AppState>,
         target: Entity<DeviceTarget>,
@@ -320,7 +320,7 @@ impl TranslationSettings {
     }
 }
 
-impl TranslationSettings {
+impl TranslationControl {
     fn toggle_language_menu(&mut self, source: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.target.read(cx).can_write(cx) {
             return;
@@ -752,7 +752,7 @@ fn mode_button(
         .child(label)
 }
 
-impl Render for TranslationSettings {
+impl Render for TranslationControl {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let Loadable::Ready(_) = self.settings.clone() else {
