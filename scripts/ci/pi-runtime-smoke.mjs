@@ -46,7 +46,7 @@ export async function verifyRuntime(directory, { brokenExtension = false } = {})
       packages.push(name === "pi-permission-control" ? { source, extensions: ["-index.ts"] } : source);
     }
     assert.ok(packages.length > 0, "Runtime must register its curated packages");
-    // Guards dist/pi-runtime/patches/pi-agent-squad-cypher-host.mjs: an
+    // Guards pi-runtime/patches/pi-agent-squad-cypher-host.mjs: an
     // unpatched squad still loads fine, it just hides every subagent session.
     const squad = join(runtime, "npm/node_modules/pi-agent-squad");
     await access(join(squad, "cypher-host.ts"));

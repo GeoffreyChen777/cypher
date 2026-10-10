@@ -21,7 +21,7 @@
   build/validate-only.
 - **`pi-runtime.yml`**: pushes of `pi-runtime-v<version>` publish the Runtime
   channel **alone** (see below). Manual runs are build/validate-only on the same
-  terms. The tag must match `dist/pi-runtime/release.json`.
+  terms. The tag must match `pi-runtime/release.json`.
 
 ## Independent platform releases
 
@@ -239,7 +239,7 @@ claim a distributed transaction across independent manual actors.
 
 ## Runtime versioning and reproducibility
 
-`dist/pi-runtime/release.json` pins the bundle revision, minimum Cypher version
+`pi-runtime/release.json` pins the bundle revision, minimum Cypher version
 and Node version. The minimum version does not automatically increase on every
 application release. Bump the Runtime revision when changing bundle contents or
 its compatibility requirements.
@@ -250,7 +250,7 @@ Devices poll `releases/runtimes/pi/manifest.json` on their own and install a
 newer Runtime whose `minimumCypherVersion` their client already satisfies, so a
 curated-package refresh does not need an application version to reach the fleet.
 Commit the new pin, then push `pi-runtime-v<version>` matching
-`dist/pi-runtime/release.json`.
+`pi-runtime/release.json`.
 
 `release.py publish-runtime` is the application publisher minus the application:
 same artifact validation across all three platforms, same immutability and
@@ -264,7 +264,7 @@ refused: a client on the platform still sitting behind it could not load it.
 
 Keep the repository pin ahead of the channel. The Runtime now ships from exactly
 one workflow — an application release no longer republishes it — so cutting a
-Runtime from a commit whose `dist/pi-runtime/release.json` is older than the
+Runtime from a commit whose `pi-runtime/release.json` is older than the
 published Runtime is refused as a rollback; bump the pin on `main` rather than
 reverting it.
 

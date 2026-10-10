@@ -14,7 +14,7 @@
  * extension's own spawn path produces, so the rest of the extension is
  * untouched.
  *
- * Installed by dist/pi-runtime/patches/pi-agent-squad-cypher-host.mjs, which
+ * Installed by pi-runtime/patches/pi-agent-squad-cypher-host.mjs, which
  * also routes `spawnInteractiveSubagent` here and adds `childChatId` to the
  * `cypher.subagents.v1` snapshot. Self-contained on purpose (node builtins
  * only) so it can be tested without a Pi install.

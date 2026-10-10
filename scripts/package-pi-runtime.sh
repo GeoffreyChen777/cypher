@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SPEC="$ROOT/dist/pi-runtime"
+SPEC="$ROOT/pi-runtime"
 OUT_DIR="${OUT_DIR:-$ROOT/target/package}"
 # npm 11 can mistake a symlinked prefix (/tmp -> /private/tmp on macOS)
 # for an extra root dependency and reject an otherwise valid lockfile.

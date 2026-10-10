@@ -24,7 +24,7 @@ export function requireVersion(packageDir, { name, expected, script }) {
   if (version !== expected) {
     fail(
       `${name} patch: expected ${expected}, found ${version}.\n` +
-        `Re-check dist/pi-runtime/patches/${script} against the new version.`,
+        `Re-check pi-runtime/patches/${script} against the new version.`,
     );
   }
 }
@@ -43,7 +43,7 @@ export function patchFile(packageDir, file, { name, marker, edits }) {
     if (at < 0 || out.indexOf(from, at + 1) >= 0) {
       fail(
         `${name} patch: anchor ${at < 0 ? "not found" : "not unique"} (${basename(file)}: ${label}).\n` +
-          `${name} changed shape — update dist/pi-runtime/patches/ before packaging.`,
+          `${name} changed shape — update pi-runtime/patches/ before packaging.`,
       );
     }
     out = out.replace(from, to);

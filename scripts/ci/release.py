@@ -847,7 +847,7 @@ def main():
             prefix, source = "refs/tags/cypher-ios-v", "the Xcode project version"
             credential = "AC_API_KEY_P8"
         else:
-            v = read_json((ROOT / "dist/pi-runtime/release.json").read_bytes()).get("version")
+            v = read_json((ROOT / "pi-runtime/release.json").read_bytes()).get("version")
             prefix, source = "refs/tags/pi-runtime-v", "the pinned Runtime version"
             credential = "CLOUDFLARE_API_TOKEN"
         version(v)
@@ -872,7 +872,7 @@ def main():
     if args.action == "check-deploy":
         print("Installer prerequisites verified for " + check_deploy(args.base_url))
         return
-    spec = ROOT / "dist/pi-runtime/package.json"
+    spec = ROOT / "pi-runtime/package.json"
     if args.action in ("validate-runtime", "publish-runtime"):
         plan = validate_runtime(args.dist, args.version, args.out, spec)
         if args.action == "publish-runtime":

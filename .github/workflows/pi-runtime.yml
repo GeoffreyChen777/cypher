@@ -7,7 +7,7 @@ name: pi-runtime
 # write` because a Runtime release has no GitHub assets. Like every other
 # release workflow,
 # workflow_dispatch is ALWAYS build/validate-only. The tag must match
-# `dist/pi-runtime/release.json`.
+# `pi-runtime/release.json`.
 on:
   push:
     tags: ["pi-runtime-v*"]
@@ -49,7 +49,7 @@ jobs:
         with:
           node-version: 24.19.0
           cache: npm
-          cache-dependency-path: dist/pi-runtime/package-lock.json
+          cache-dependency-path: pi-runtime/package-lock.json
       - name: package Runtime with real RPC and negative extension tests
         run: scripts/package-pi-runtime.sh
       - run: python3 scripts/test-linux-cli.py Installer.test_runtime_metadata_size_is_portable_and_validated
@@ -59,7 +59,7 @@ jobs:
           docker run --rm \
             -v "$PWD/target/package:/packages:ro" \
             -v "$PWD/scripts/ci:/ci:ro" \
-            -v "$PWD/dist/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
+            -v "$PWD/pi-runtime/provider-service.test.mjs:/provider-service.test.mjs:ro" \
             public.ecr.aws/docker/library/ubuntu:20.04 sh -ec '
               mkdir /runtime /agent
               archive=$(find /packages -name "cypher-pi-runtime-*.tar.gz")

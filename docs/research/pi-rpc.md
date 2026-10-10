@@ -251,7 +251,7 @@ Runtime's locked dependency tree, never from global npm.
 `CYPHER_SUBAGENT_BRIDGE` rides with the socket and names the bridge protocol
 (`2`: the `prompt`/`address` start fields and a lag-tolerant, de-duplicated
 event stream). The bridge's only caller is the Runtime's build-time patch of
-`pi-agent-squad` (`dist/pi-runtime/patches/pi-agent-squad-cypher-host.mjs`,
+`pi-agent-squad` (`pi-runtime/patches/pi-agent-squad-cypher-host.mjs`,
 Runtime 0.86.0.5+): upstream spawns every subagent as its own hidden child
 process, which left the inspector row with no session to open. The patch hosts
 sync and background runs as child chats when it reads a version it knows, and

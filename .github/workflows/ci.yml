@@ -37,11 +37,11 @@ jobs:
             python3 scripts/test-linux-cli.py
           '
       - run: node --test scripts/test-landing.mjs
-      - run: node --test dist/pi-runtime/provider-service.test.mjs
-      - run: node --test dist/pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
+      - run: node --test pi-runtime/provider-service.test.mjs
+      - run: node --test pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
       # The extension suites import their .ts sources directly (Node type
       # stripping) and need no staged runtime.
-      - run: node --test dist/pi-runtime/extensions/cypher-translation.test.mjs dist/pi-runtime/extensions/cypher-fast-mode.test.mjs dist/pi-runtime/extensions/cypher-codemode.test.mjs
+      - run: node --test pi-runtime/extensions/cypher-translation.test.mjs pi-runtime/extensions/cypher-fast-mode.test.mjs pi-runtime/extensions/cypher-codemode.test.mjs
       - run: bash scripts/test-check-linux-abi.sh
       - run: bash -n scripts/*.sh
       - run: sh -n edge/src/install.sh
