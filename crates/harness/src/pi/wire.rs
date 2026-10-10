@@ -53,7 +53,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
     }
     if text.len() > SUBAGENTS_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "subagent status snapshot over 64KiB; ignoring"
         );
@@ -63,7 +62,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(
-                target: "cypher_harness::pi",
                 error = %err,
                 "subagent status: invalid JSON; ignoring"
             );
@@ -71,16 +69,12 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         }
     };
     if value.get("version").and_then(Value::as_u64) != Some(1) {
-        tracing::warn!(
-            target: "cypher_harness::pi",
-            "subagent status: unsupported snapshot version; ignoring"
-        );
+        tracing::warn!("subagent status: unsupported snapshot version; ignoring");
         return None;
     }
     let runs = value.get("runs").and_then(Value::as_array)?;
     if runs.len() > SUBAGENTS_MAX_RUNS {
         tracing::warn!(
-            target: "cypher_harness::pi",
             count = runs.len(),
             "subagent status: too many runs; ignoring"
         );
@@ -91,10 +85,7 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
         match parse_subagent_run(run) {
             Some(parsed) => out.push(parsed),
             None => {
-                tracing::warn!(
-                    target: "cypher_harness::pi",
-                    "subagent status: malformed run; ignoring snapshot"
-                );
+                tracing::warn!("subagent status: malformed run; ignoring snapshot");
                 return None;
             }
         }
@@ -113,7 +104,6 @@ pub(super) fn parse_subagent_status(text: &str) -> Option<Vec<SubagentRun>> {
 pub(super) fn parse_translation_status(text: &str) -> Option<String> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "translation status snapshot over cap; ignoring"
         );
@@ -136,7 +126,6 @@ pub(super) fn parse_translation_status(text: &str) -> Option<String> {
 pub(super) fn parse_input_translation_status(text: &str) -> Option<(String, String)> {
     if text.len() > TRANSLATION_STATUS_MAX_BYTES {
         tracing::warn!(
-            target: "cypher_harness::pi",
             bytes = text.len(),
             "input translation status over cap; ignoring"
         );

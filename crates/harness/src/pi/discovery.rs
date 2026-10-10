@@ -44,7 +44,7 @@ pub(super) fn synthesize_commands(discovered: &[SlashCommand]) -> Vec<SlashComma
 
 impl PiHarness {
     pub(super) fn cached_commands(&self) -> Option<Vec<SlashCommand>> {
-        self.commands.lock().ok().and_then(|g| g.clone())
+        crate::lock(&self.commands).clone()
     }
 
     /// Short-lived discovery run for [`Harness::models`]: `get_state` (a

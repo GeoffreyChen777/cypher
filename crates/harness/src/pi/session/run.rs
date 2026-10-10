@@ -1059,7 +1059,7 @@ pub fn inline_images(paths: &[String]) -> Option<Value> {
             continue;
         }
         let Ok(bytes) = std::fs::read(path) else {
-            tracing::debug!(target: "cypher_harness::pi", "attachment unreadable: {path}");
+            tracing::debug!(%path, "attachment unreadable");
             continue;
         };
         images.push(json!({

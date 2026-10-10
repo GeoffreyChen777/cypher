@@ -332,15 +332,12 @@ impl Harness for PiHarness {
     /// surfaces as NotInstalled.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_program()?;
-        if let Some(models) = self.models_cache.lock().ok().and_then(|g| g.clone()) {
+        if let Some(models) = crate::lock(&self.models_cache).clone() {
             return Ok(models);
         }
         let discovered = self.discover_models().await?;
-        if discovered.from_catalog
-            && !discovered.models.is_empty()
-            && let Ok(mut slot) = self.models_cache.lock()
-        {
-            *slot = Some(discovered.models.clone());
+        if discovered.from_catalog && !discovered.models.is_empty() {
+            *crate::lock(&self.models_cache) = Some(discovered.models.clone());
         }
         Ok(discovered.models)
     }
@@ -350,19 +347,13 @@ impl Harness for PiHarness {
             return Ok(synthesize_commands(&discovered));
         }
         let discovered = self.discover_commands().await?;
-        if let Ok(mut slot) = self.commands.lock() {
-            *slot = Some(discovered.clone());
-        }
+        *crate::lock(&self.commands) = Some(discovered.clone());
         Ok(synthesize_commands(&discovered))
     }
 
     fn invalidate_discovery(&self) {
-        if let Ok(mut slot) = self.commands.lock() {
-            *slot = None;
-        }
-        if let Ok(mut slot) = self.models_cache.lock() {
-            *slot = None;
-        }
+        *crate::lock(&self.commands) = None;
+        *crate::lock(&self.models_cache) = None;
     }
 
     async fn run_slash(&self, prompt: &str) -> Result<String, HarnessError> {

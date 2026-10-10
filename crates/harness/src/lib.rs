@@ -166,6 +166,14 @@ pub mod shell_env;
 
 pub use process::{compose_child_path, resolve_cli};
 
+/// Lock a mutex, ignoring poisoning: every critical section here leaves its
+/// data consistent, so a panic elsewhere must not cascade into the run.
+pub(crate) fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
 /// bounds what crosses the event stream.

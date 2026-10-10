@@ -64,7 +64,7 @@ fn route_steer(client: &PiClient, text: String, atomic: bool) -> Option<RoutedSt
         Ok(id) => Some(RoutedSteer { id, text }),
         Err(e) => {
             // The child is gone; its EOF ends the run.
-            tracing::debug!(target: "cypher_harness::pi", "steer not sent (dropped): {e}");
+            tracing::debug!(error = %e, "steer not sent (dropped)");
             None
         }
     }
@@ -167,10 +167,7 @@ impl PiRun {
                     &mut self.prompt_backlog,
                 ),
                 Err(e) if self.in_turn => {
-                    tracing::debug!(
-                        target: "cypher_harness::pi",
-                        "steer rejected (dropped): {e}"
-                    );
+                    tracing::debug!(error = %e, "steer rejected (dropped)");
                 }
                 // Rejected once the turn had ended: restart with
                 // it like any parked message — a real failure

@@ -139,10 +139,7 @@ impl StderrTail {
         if line.is_empty() {
             return;
         }
-        let mut tail = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut tail = crate::lock(&self.0);
         tail.push_back(line.chars().take(Self::KEEP_BYTES).collect());
         while tail.len() > Self::KEEP_LINES {
             tail.pop_front();
@@ -151,10 +148,7 @@ impl StderrTail {
 
     /// The captured tail as one display string, `None` when nothing arrived.
     pub fn snapshot(&self) -> Option<String> {
-        let tail = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tail = crate::lock(&self.0);
         if tail.is_empty() {
             return None;
         }

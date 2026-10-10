@@ -713,7 +713,7 @@ impl PiHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "cypher_harness::pi", "fork stderr: {line}");
+                    tracing::debug!(%line, "fork stderr");
                     tail.push(&line);
                 }
             });
