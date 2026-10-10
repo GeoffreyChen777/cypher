@@ -1,5 +1,6 @@
 use super::*;
 use cypher_doc::MessagePart;
+use cypher_proto::{Chat, HarnessId};
 
 // ---- transcript comments ----
 // Quote normalization / preview moved to the shared `crate::comment_popup`

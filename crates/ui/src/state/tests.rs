@@ -2,7 +2,7 @@ use super::*;
 use async_trait::async_trait;
 use chrono::TimeDelta;
 use cypher_engine::{EngineCore, default_registry};
-use cypher_rpc::{RpcClient, RpcError, RpcReply, memory_client};
+use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client};
 // `SessionStatus` is only needed to build the fixtures below — the module
 // itself derives everything through `cypher_proto::view`.
 use cypher_proto::view::{group_chats, project_label};

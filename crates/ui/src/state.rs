@@ -35,7 +35,7 @@ use cypher_doc::{
 use cypher_proto::{
     AuthState, Chat, ChatIndicator, Device, Session, SideChatStatus, Space, WorkspaceScope,
 };
-use cypher_rpc::{RpcService, methods};
+use cypher_rpc::methods;
 
 use crate::prefs::SidebarSort;
 mod engine;

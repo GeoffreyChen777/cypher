@@ -41,7 +41,7 @@ use gpui::{
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use cypher_proto::view::Indicator;
-use cypher_proto::{AnsweredModel, Chat, HarnessId, ToolCall};
+use cypher_proto::{AnsweredModel, ToolCall};
 
 use crate::kit::motion::{self, AnimationExt as _, RESIZE};
 use crate::kit::theme::{MonoStyled, Theme};
