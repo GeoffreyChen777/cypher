@@ -358,13 +358,11 @@ fn dirs_data_dir() -> std::path::PathBuf {
 ///
 /// The returned file holds an exclusive `flock` for the process lifetime:
 /// rotate-on-launch is only safe when nothing is still WRITING the current
-/// file. Once, a dev build launched twice next to the running
-/// installed app — the first rename put the daemon's live log at `.old`, the
-/// second unlinked it entirely, and the daemon spent the rest of the incident
-/// logging to an orphaned inode (an entire day of sync diagnostics gone at
-/// the exact moment they were needed). A launch that finds the canonical file
-/// locked logs to `cypher-{mode}.{pid}.log` instead; the next lock-holding
-/// launch sweeps pid-suffixed files older than a week.
+/// file. Two launches next to a running daemon would otherwise rename its
+/// live log to `.old` and then unlink it, leaving the daemon logging to an
+/// orphaned inode. A launch that finds the canonical file locked logs to
+/// `cypher-{mode}.{pid}.log` instead; the next lock-holding launch sweeps
+/// pid-suffixed files older than a week.
 fn open_log_file(mode: &str) -> Option<std::fs::File> {
     let dir = cypher_env::data_dir().join("logs");
     open_log_file_in(&dir, mode)

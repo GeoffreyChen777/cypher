@@ -121,8 +121,8 @@ impl Drop for EngineRuntime {
 /// Is this Edge URL a development endpoint, entitled to the locked `dev-user`
 /// identity and the preview relay?
 ///
-/// The hosted development Worker was retired on 2026-09-22, so a loopback
-/// `wrangler dev` is the default answer. `CYPHER_DEV_EDGE_URL` may name a
+/// There is no hosted development Worker, so a loopback `wrangler dev` is the
+/// default answer. `CYPHER_DEV_EDGE_URL` may name a
 /// self-hosted staging endpoint instead; the client-side guard that keeps a
 /// development bearer away from production lives in `apps/cypher`
 /// (`development_edge_is_safe`), and this only has to agree with it.
