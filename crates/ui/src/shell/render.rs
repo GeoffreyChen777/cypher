@@ -713,7 +713,7 @@ impl Shell {
             SharedString,
         ) = match workspace_scope {
             Some(WorkspaceScope::Local) => {
-                let line = if matches!(self.sync_flow, SyncFlow::RestartPending { .. }) {
+                let line = if matches!(self.sync.flow, SyncFlow::RestartPending { .. }) {
                     "Sync ready after restart"
                 } else {
                     "Local only"
@@ -1192,8 +1192,8 @@ impl Render for Shell {
             let state = self.state.read(cx);
             (state.workspace_scope, state.auth.clone())
         };
-        self.sync_flow = sync_flow_after_auth(self.sync_flow, workspace_scope, auth.as_ref());
-        let restart_required = self.sync_flow == SyncFlow::SignedOutRestartRequired;
+        self.sync.flow = sync_flow_after_auth(self.sync.flow, workspace_scope, auth.as_ref());
+        let restart_required = self.sync.flow == SyncFlow::SignedOutRestartRequired;
         let gate = self
             .debug_gate
             .clone()

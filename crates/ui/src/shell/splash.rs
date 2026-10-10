@@ -80,15 +80,15 @@ impl Shell {
     ) {
         let next_sync_flow = {
             let state = state.read(cx);
-            sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
+            sync_flow_after_auth(self.sync.flow, state.workspace_scope, state.auth.as_ref())
         };
-        if main_window && next_sync_flow != self.sync_flow {
-            self.sync_flow = next_sync_flow;
+        if main_window && next_sync_flow != self.sync.flow {
+            self.sync.flow = next_sync_flow;
             if matches!(
-                self.sync_flow,
+                self.sync.flow,
                 SyncFlow::RestartPending { .. } | SyncFlow::SwitchOffer { .. }
             ) {
-                self.org = None;
+                self.sync.org = None;
             }
         }
         // The in-place local→synced switch: once the replacement runtime is
@@ -104,7 +104,7 @@ impl Shell {
         // AuthStatus is shared by every viewport. Whichever viewport owns the
         // embedded runtime drains it; remote viewports request daemon shutdown
         // and all of them independently reattach to the new local runtime.
-        if signed_out_synced && self.runtime_change_task.is_none() {
+        if signed_out_synced && self.sync.runtime_change_task.is_none() {
             self.start_local_runtime_transition(false, cx);
         }
     }

@@ -16,7 +16,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.menus.user.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync.flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
         // its secondary status line.
         let initial: SharedString = user_line
@@ -173,7 +173,7 @@ impl Shell {
             .read(cx)
             .engine()
             .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
-        let runtime_change_label = if self.runtime_change_task.is_some() {
+        let runtime_change_label = if self.sync.runtime_change_task.is_some() {
             "Stopping engine…"
         } else if remote_engine {
             "Stop daemon and quit"
@@ -181,7 +181,7 @@ impl Shell {
             "Quit Cypher"
         };
 
-        if self.sync_flow == SyncFlow::Enabling && needs_org {
+        if self.sync.flow == SyncFlow::Enabling && needs_org {
             return Some(self.render_org_gate(cx));
         }
 
@@ -197,7 +197,7 @@ impl Shell {
         };
         let work_phrase = local_work_phrase(local_chats, local_spaces);
 
-        let card = match self.sync_flow {
+        let card = match self.sync.flow {
             SyncFlow::Enabling => self.sync_card_enabling(&theme, cx),
             SyncFlow::Canceling => popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Canceling sync setup…"))
@@ -372,7 +372,7 @@ impl Shell {
         let mut card = popover::dialog_card(theme)
             .child(popover::dialog_title(theme, "Bringing your work over"))
             .child(div().mt(px(6.0)).child(popover::dialog_body(theme, label)));
-        if let Some(current) = self.import_current.clone() {
+        if let Some(current) = self.sync.import_current.clone() {
             card = card.child(
                 div()
                     .mt(px(4.0))
@@ -431,7 +431,7 @@ impl Shell {
                     popover::btn_primary(theme, "Continue")
                         .id("sync-switch-done")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.sync_flow = SyncFlow::Idle;
+                            this.sync.flow = SyncFlow::Idle;
                             cx.notify();
                         })),
                 ),
@@ -447,7 +447,7 @@ impl Shell {
                 theme,
                 "Anything already imported is kept; retrying only copies what's missing.",
             )))
-            .when_some(self.runtime_change_error.clone(), |card, error| {
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
                 card.child(
                     div()
                         .mt(px(10.0))
@@ -501,7 +501,7 @@ impl Shell {
                     },
                 )),
             )
-            .when_some(self.runtime_change_error.clone(), |card, error| {
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
                 card.child(
                     div()
                         .mt(px(10.0))
@@ -528,7 +528,7 @@ impl Shell {
                     .child(
                         popover::btn_primary(theme, runtime_change_label)
                             .id("sync-restart-quit")
-                            .when(self.runtime_change_task.is_some(), |button| {
+                            .when(self.sync.runtime_change_task.is_some(), |button| {
                                 button.opacity(0.6)
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -560,7 +560,7 @@ impl Shell {
                         popover::btn_ghost(theme, "Cancel", "signout-cancel")
                             .id("signout-cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.sync_flow = SyncFlow::Idle;
+                                this.sync.flow = SyncFlow::Idle;
                                 cx.notify();
                             })),
                     )
@@ -1021,7 +1021,7 @@ impl Shell {
 
     pub(super) fn render_signed_out_restart(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let runtime_change_label = if self.runtime_change_task.is_some() {
+        let runtime_change_label = if self.sync.runtime_change_task.is_some() {
             "Stopping engine…"
         } else {
             "Retry local mode"
@@ -1063,7 +1063,7 @@ impl Shell {
                         "Cypher removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
-            .when_some(self.runtime_change_error.clone(), |card, error| {
+            .when_some(self.sync.runtime_change_error.clone(), |card, error| {
                 card.child(
                     div()
                         .mb(px(16.0))
@@ -1076,7 +1076,7 @@ impl Shell {
             .child(
                 popover::btn_primary(&theme, runtime_change_label)
                     .id("signed-out-quit")
-                    .when(self.runtime_change_task.is_some(), |button| {
+                    .when(self.sync.runtime_change_task.is_some(), |button| {
                         button.opacity(0.6)
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1229,7 +1229,7 @@ impl Shell {
         self.ensure_org_ui(cx);
         let theme = Theme::of(cx).clone();
         let local_setup = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
-        let Some(org) = self.org.as_ref() else {
+        let Some(org) = self.sync.org.as_ref() else {
             return Empty.into_any_element();
         };
         let submitting = org.submitting;

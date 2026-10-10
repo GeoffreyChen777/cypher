@@ -1107,6 +1107,20 @@ struct UpdateUi {
     install: cypher_update::InstallKind,
 }
 
+/// The local→synced account lifecycle: the organization gate, the sync
+/// step, sign-in, runtime switches and the one-time import.
+struct SyncUi {
+    org: Option<OrgGateUi>,
+    flow: SyncFlow,
+    auth_task: Option<Task<()>>,
+    runtime_change_task: Option<Task<()>>,
+    runtime_change_error: Option<SharedString>,
+    /// The one-time local→synced import stream (switch wizard progress step).
+    import_task: Option<Task<()>>,
+    /// Title of the chat the import stream is copying right now.
+    import_current: Option<SharedString>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1164,17 +1178,10 @@ pub struct Shell {
     /// the mapping is dropped on a definitive reply (Created or typed
     /// Unavailable).
     fork_request_ids: std::collections::HashMap<(String, String), String>,
-    org: Option<OrgGateUi>,
-    sync_flow: SyncFlow,
+    /// The local→synced account lifecycle and runtime switches.
+    sync: SyncUi,
     mutate_task: Option<Task<()>>,
     delete_worktree_task: Option<Task<()>>,
-    auth_task: Option<Task<()>>,
-    runtime_change_task: Option<Task<()>>,
-    runtime_change_error: Option<SharedString>,
-    /// The one-time local→synced import stream (switch wizard progress step).
-    import_task: Option<Task<()>>,
-    /// Title of the chat the import stream is copying right now.
-    import_current: Option<SharedString>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
     data_dir: PathBuf,
@@ -1480,15 +1487,17 @@ impl Shell {
             dock_badge: None,
             sidebar_notice: None,
             fork_request_ids: std::collections::HashMap::new(),
-            org: None,
-            sync_flow: SyncFlow::Idle,
+            sync: SyncUi {
+                org: None,
+                flow: SyncFlow::Idle,
+                auth_task: None,
+                runtime_change_task: None,
+                runtime_change_error: None,
+                import_task: None,
+                import_current: None,
+            },
             mutate_task: None,
             delete_worktree_task: None,
-            auth_task: None,
-            runtime_change_task: None,
-            runtime_change_error: None,
-            import_task: None,
-            import_current: None,
             boot,
             data_dir,
             settings,
