@@ -61,6 +61,7 @@ mod highlight;
 use highlight::*;
 mod attachments;
 mod find;
+pub mod rail;
 mod rendering;
 mod scroll;
 use rendering::*;
@@ -350,7 +351,7 @@ pub struct Transcript {
 /// because a row's match count is memoizable against the content version the
 /// row diff already maintains — a streaming commit rescans only the rows
 /// whose version moved, never the whole transcript. Within a row, the painter
-/// resolves exact byte ranges itself (see [`crate::find`]).
+/// resolves exact byte ranges itself (see [`crate::markdown::find`]).
 #[derive(Default)]
 struct FindState {
     query: String,

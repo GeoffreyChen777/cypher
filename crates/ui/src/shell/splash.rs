@@ -19,7 +19,7 @@ impl Shell {
         if self.dock_badge != Some(count) {
             self.dock_badge = Some(count);
             tracing::debug!(count, "dock badge");
-            crate::notify::set_badge(count);
+            crate::shell::notify::set_badge(count);
         }
     }
 
@@ -171,7 +171,7 @@ impl Shell {
                             crate::sound::Sound::Done => "Run finished",
                             crate::sound::Sound::Request => "Waiting on your input",
                         };
-                        crate::notify::post(&title, body);
+                        crate::shell::notify::post(&title, body);
                     }
                 }
             }

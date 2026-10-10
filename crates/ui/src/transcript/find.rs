@@ -35,7 +35,7 @@ impl Transcript {
 
     pub fn close_find(&mut self, cx: &mut Context<Self>) {
         if self.find.take().is_some() {
-            crate::find::clear(self.scope);
+            crate::markdown::find::clear(self.scope);
             cx.notify();
         }
     }
@@ -193,10 +193,10 @@ impl Transcript {
     }
 
     /// Hand the painter this frame's query + active match (see
-    /// [`crate::find`]). Called once per render, before the list builds rows.
+    /// [`crate::markdown::find`]). Called once per render, before the list builds rows.
     pub(super) fn publish_find(&self) {
         let Some(find) = &self.find else {
-            crate::find::clear(self.scope);
+            crate::markdown::find::clear(self.scope);
             return;
         };
         let active = find.target().and_then(|(row_ix, ordinal)| {
@@ -204,6 +204,6 @@ impl Transcript {
                 .get(row_ix)
                 .map(|row| (row.id.to_string(), ordinal))
         });
-        crate::find::publish(self.scope, &find.query, active);
+        crate::markdown::find::publish(self.scope, &find.query, active);
     }
 }

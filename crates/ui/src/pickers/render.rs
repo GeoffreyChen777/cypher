@@ -10,7 +10,10 @@ impl Pickers {
     /// version), and in a Side Chat. A remote host's reading can trail a
     /// running turn by up to the session row's 20s freshness write; it
     /// catches up when the turn settles.
-    pub fn context_ring_reading(&self, cx: &App) -> Option<crate::context_ring::RingReading> {
+    pub fn context_ring_reading(
+        &self,
+        cx: &App,
+    ) -> Option<crate::composer::context_ring::RingReading> {
         if self.side_chat {
             return None;
         }
@@ -22,7 +25,7 @@ impl Pickers {
             crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
         );
         let compactable = matches!(self.effective_harness(cx), Some(HarnessId::Pi));
-        Some(crate::context_ring::RingReading {
+        Some(crate::composer::context_ring::RingReading {
             usage,
             compactable,
             busy,

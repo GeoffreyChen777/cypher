@@ -1140,7 +1140,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "dev-capture")]
         if !self.is_project_window() {
-            crate::dev_capture::start_once(window.window_handle(), cx);
+            crate::shell::dev_capture::start_once(window.window_handle(), cx);
         }
         let foreground = window.is_window_active();
         let selected = matches!(self.route, Route::Chat)
@@ -1155,7 +1155,7 @@ impl Render for Shell {
             });
         }
         let weak = cx.entity().downgrade();
-        let scroll_activity = crate::notification_activity::scroll_observer(move |cx| {
+        let scroll_activity = crate::shell::notification_activity::scroll_observer(move |cx| {
             let _ = weak.update(cx, |shell, cx| {
                 if shell
                     .notification_activity
@@ -1366,13 +1366,13 @@ impl Render for Shell {
                 )
             })
             .on_action(
-                cx.listener(|this, _: &crate::app_menus::OpenSettings, _, cx| {
+                cx.listener(|this, _: &crate::shell::menus::OpenSettings, _, cx| {
                     this.open_settings(SettingsSection::Harnesses, cx);
                 }),
             )
             // About / updates / adding projects are app-wide: a project
             // window hands them to the main window.
-            .on_action(cx.listener(|this, _: &crate::app_menus::About, _, cx| {
+            .on_action(cx.listener(|this, _: &crate::shell::menus::About, _, cx| {
                 if this.is_project_window() {
                     this.forward_to_main(cx, |main, cx| main.open_about(cx));
                     return;
@@ -1380,7 +1380,7 @@ impl Render for Shell {
                 this.open_about(cx);
             }))
             .on_action(
-                cx.listener(|this, _: &crate::app_menus::CheckForUpdates, _, cx| {
+                cx.listener(|this, _: &crate::shell::menus::CheckForUpdates, _, cx| {
                     if this.is_project_window() {
                         this.forward_to_main(cx, |main, cx| main.begin_update_check(cx));
                         return;

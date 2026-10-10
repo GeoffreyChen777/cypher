@@ -41,7 +41,9 @@ use crate::motion;
 use crate::pickers::Pickers;
 use crate::state::{AppState, EngineHandle, Indicator};
 use crate::theme::{MonoStyled, Theme};
+pub mod context_ring;
 mod layout;
+pub mod slash_menu;
 pub use layout::*;
 mod wizard;
 pub use wizard::*;
@@ -254,11 +256,11 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
-/// A `/` menu row's state badge ([`crate::slash_menu::command_badge`]):
+/// A `/` menu row's state badge ([`crate::composer::slash_menu::command_badge`]):
 /// green when something is on or running, amber for a reading worth acting
 /// on, quiet otherwise.
-fn slash_badge(theme: &Theme, badge: crate::slash_menu::Badge) -> gpui::Div {
-    use crate::slash_menu::Tone;
+fn slash_badge(theme: &Theme, badge: crate::composer::slash_menu::Badge) -> gpui::Div {
+    use crate::composer::slash_menu::Tone;
     let (background, color) = match badge.tone {
         Tone::On => (theme.success.opacity(0.14), theme.success),
         Tone::Warning => (theme.warning.opacity(0.16), theme.warning),
@@ -302,8 +304,8 @@ struct SlashState {
     /// The command whose choices are open (`/orchestrate o…`), or `None` for
     /// the command list.
     parent: Option<String>,
-    /// The rows on show ([`crate::slash_menu`]).
-    menu: crate::slash_menu::Menu,
+    /// The rows on show ([`crate::composer::slash_menu`]).
+    menu: crate::composer::slash_menu::Menu,
     /// The highlighted row, as a position in `menu.selectable`.
     active: Option<usize>,
     /// Harness the popup is showing commands for (cache key).

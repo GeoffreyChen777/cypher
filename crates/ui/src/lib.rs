@@ -2,19 +2,14 @@
 //! diff pane. Design: ARCHITECTURE.md §4. The only public surface is
 //! [`run_app`] and its [`UiConfig`].
 
-mod app_menus;
 mod appearance;
 mod attachments;
 mod changes;
 mod chat_style;
 mod comments;
 mod composer;
-mod context_ring;
-#[cfg(feature = "dev-capture")]
-mod dev_capture;
 mod edge_fade;
 mod files;
-mod find;
 mod frost;
 mod fs_util;
 mod history;
@@ -22,17 +17,13 @@ mod icons;
 mod loaders;
 mod markdown;
 mod motion;
-mod notification_activity;
-mod notify;
 mod pickers;
 mod popover;
 mod prefs;
 mod quote_origin;
-mod rail;
 mod settings;
 mod shell;
 mod side_chats;
-mod slash_menu;
 mod soft_shadow;
 mod sound;
 mod space_style;
@@ -211,7 +202,7 @@ pub fn run_app(config: UiConfig) {
         transcript::init(cx);
         terminal::panel::init(cx);
         files::editor::init(cx);
-        app_menus::init(cx);
+        shell::menus::init(cx);
 
         let state = cx.new(|_| state::AppState::new());
         state::AppState::bootstrap(state.clone(), config.data_dir.clone(), config.boot(), cx);
@@ -245,7 +236,7 @@ pub fn run_app(config: UiConfig) {
         // `open_main_window` because `Shell::new` ran `apply_keymap`
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
-        cx.set_menus(app_menus::app_menus());
+        cx.set_menus(shell::menus::app_menus());
         cx.activate(true);
     });
 }

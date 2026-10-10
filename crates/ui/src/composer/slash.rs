@@ -96,14 +96,14 @@ impl Composer {
         if let Some(token) = slash_token(text, cursor) {
             return (Some(token), None);
         }
-        let Some(choice) = crate::slash_menu::choice_token(text, cursor) else {
+        let Some(choice) = crate::composer::slash_menu::choice_token(text, cursor) else {
             return (None, None);
         };
         let offered = harness
             .and_then(|harness| self.slash_cache.get(&harness))
             .is_some_and(|commands| commands.iter().any(|c| c.name == choice.command));
         if !offered
-            || crate::slash_menu::choices(&choice.command).is_empty()
+            || crate::composer::slash_menu::choices(&choice.command).is_empty()
             || !crate::prefs::slash_commands::shows_in_app(cx, &choice.command)
         {
             return (None, None);
@@ -270,7 +270,7 @@ impl Composer {
             .map(|t| t.query.clone())
             .unwrap_or_default();
         let menu = match &self.slash.parent {
-            Some(parent) => crate::slash_menu::choice_level(parent, &query),
+            Some(parent) => crate::composer::slash_menu::choice_level(parent, &query),
             None => {
                 let commands = self
                     .slash
@@ -278,8 +278,8 @@ impl Composer {
                     .and_then(|h| self.slash_cache.get(&h))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
-                crate::slash_menu::command_level(
-                    &crate::slash_menu::Action::ALL,
+                crate::composer::slash_menu::command_level(
+                    &crate::composer::slash_menu::Action::ALL,
                     commands,
                     |name| crate::prefs::slash_commands::shows_in_app(cx, name),
                     &query,
@@ -333,7 +333,7 @@ impl Composer {
     /// it, so a command with choices opens them on the edit that follows
     /// ([`Self::update_slash`]), and a typed choice closes the menu.
     pub(super) fn accept_slash(&mut self, cx: &mut Context<Self>) {
-        use crate::slash_menu::Row;
+        use crate::composer::slash_menu::Row;
         let Some(token) = self.slash.token.clone() else {
             return;
         };
@@ -347,7 +347,7 @@ impl Composer {
             return;
         };
         let replacement = match row {
-            Row::Action(crate::slash_menu::Action::Attach) => {
+            Row::Action(crate::composer::slash_menu::Action::Attach) => {
                 // The action types nothing: drop the `/…` that summoned it.
                 self.input
                     .update(cx, |input, cx| input.remove_plain_token(token.range, cx));
@@ -399,7 +399,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        use crate::slash_menu::{self, Row};
+        use crate::composer::slash_menu::{self, Row};
         let token = self.slash.token.as_ref()?;
         let commands = self
             .slash

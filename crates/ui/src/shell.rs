@@ -40,7 +40,6 @@ use crate::prefs::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
     SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
-use crate::rail;
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::commands::{CommandsEvent, CommandsPage};
@@ -60,10 +59,16 @@ use crate::state::{
 use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
+use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
 
+#[cfg(feature = "dev-capture")]
+mod dev_capture;
 mod dock;
+pub mod menus;
 mod nav;
+mod notification_activity;
+pub mod notify;
 mod org_gate;
 mod overlays;
 mod render;
@@ -209,7 +214,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // Fixed app-level shortcuts (⌘Q quit, ⌘W close, ⌘M minimize, ⌘H hide) —
     // these back the native menu key equivalents and must survive keymap
     // re-application.
-    crate::app_menus::bind_keys(cx);
+    crate::shell::menus::bind_keys(cx);
     use crate::prefs::ShortcutId;
     let bind = |id: ShortcutId, action: Box<dyn gpui::Action>| {
         let combo = valid_or_default(keymap.get(id), id.default_combo());
@@ -254,7 +259,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // Fixed: ⌘, opens Settings (macOS convention).
         KeyBinding::new(
             &platform_combo("mod-,"),
-            crate::app_menus::OpenSettings,
+            crate::shell::menus::OpenSettings,
             None,
         ),
     ]);
@@ -1143,7 +1148,7 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
-    notification_activity: crate::notification_activity::DesktopActivity,
+    notification_activity: crate::shell::notification_activity::DesktopActivity,
     /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
     /// [`Shell::new`].
     debug_dialog: Option<String>,

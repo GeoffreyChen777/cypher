@@ -193,7 +193,7 @@ pub fn throughput_label(
     if throughput.output_tokens == 0 && rate.is_none() {
         return None;
     }
-    let tokens = crate::context_ring::format_tokens(throughput.output_tokens);
+    let tokens = crate::composer::context_ring::format_tokens(throughput.output_tokens);
     Some(match rate {
         Some(rate) => format!("↓ {tokens} tokens · {rate} tok/s"),
         None => format!("↓ {tokens} tokens"),

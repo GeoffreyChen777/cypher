@@ -534,7 +534,7 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
             if text.is_empty() || renders_as_command_chip(text, mentions, attachments) {
                 0
             } else {
-                crate::find::count_matches(text, query)
+                crate::markdown::find::count_matches(text, query)
             }
         }
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree

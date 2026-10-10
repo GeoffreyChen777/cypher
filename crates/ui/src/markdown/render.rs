@@ -584,16 +584,16 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
     let cells = |cells: &[Vec<InlineRun>]| -> usize {
         cells
             .iter()
-            .map(|runs| crate::find::count_matches(&runs_text(runs), query))
+            .map(|runs| crate::markdown::find::count_matches(&runs_text(runs), query))
             .sum()
     };
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => {
-            crate::find::count_matches(&runs_text(runs), query)
+            crate::markdown::find::count_matches(&runs_text(runs), query)
         }
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
-        Block::CodeBlock { code, .. } => crate::find::count_matches(code, query),
+        Block::CodeBlock { code, .. } => crate::markdown::find::count_matches(code, query),
         Block::BlockQuote { children } => children
             .iter()
             .map(|child| count_block_matches(child, query))
@@ -788,8 +788,11 @@ fn flat_text_element(
     // In-chat find: resolved while the element is BUILT, not painted — build
     // order is document order, which is what makes each match's ordinal within
     // its row line up with the transcript's offscreen counts.
-    let find_hits =
-        crate::find::element_matches(scope, super::selection::row_of_key(&sel_key), &flat.text);
+    let find_hits = crate::markdown::find::element_matches(
+        scope,
+        super::selection::row_of_key(&sel_key),
+        &flat.text,
+    );
     let find_washes = find_wash(theme);
     let underlay = canvas(
         |_, _, _| (),

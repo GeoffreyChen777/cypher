@@ -808,7 +808,7 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             tracing::warn!(%chat_id, "ForkSession skipped: engine offline");
             let notice = "Cannot fork: the engine is not connected.";
-            crate::notify::post("Fork", notice);
+            crate::shell::notify::post("Fork", notice);
             self.sidebar_notice = Some(notice.into());
             settle(cx);
             cx.notify();
@@ -875,7 +875,7 @@ impl Shell {
                     // `retained` is true here — nothing removes the mapping.
                     tracing::warn!(%chat_id, error = %err, "ForkSession failed");
                     let notice = Self::fork_session_error_text(&err);
-                    crate::notify::post("Fork", &notice);
+                    crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
                             shell.sidebar_notice = Some(notice.clone().into());
@@ -963,7 +963,7 @@ impl Shell {
                                 }
                             }
                             let notice = format!("Fork created: {title}");
-                            crate::notify::post("Fork", &notice);
+                            crate::shell::notify::post("Fork", &notice);
                             shell.workspace_changed(cx);
                         });
                     }
@@ -981,7 +981,7 @@ impl Shell {
                         });
                     }
                     let notice = format!("Fork unavailable: {}", unavailable.message);
-                    crate::notify::post("Fork", &notice);
+                    crate::shell::notify::post("Fork", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
                             shell.sidebar_notice = Some(notice.clone().into());
@@ -1056,7 +1056,7 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             tracing::warn!(%chat_id, "RewindSession skipped: engine offline");
             let notice = "Cannot restart the conversation: the engine is not connected.";
-            crate::notify::post("Restart", notice);
+            crate::shell::notify::post("Restart", notice);
             self.sidebar_notice = Some(notice.into());
             settle(cx);
             cx.notify();
@@ -1120,7 +1120,7 @@ impl Shell {
                     Self::rewind_session_error_text(&err)
                 }
             };
-            crate::notify::post("Restart", &notice);
+            crate::shell::notify::post("Restart", &notice);
             if let Some(shell) = weak.upgrade() {
                 shell.update(cx, |shell, cx| {
                     shell.sidebar_notice = Some(notice.clone().into());
@@ -1161,7 +1161,7 @@ impl Shell {
         if open >= MAX_SIDE_CHATS_PER_CHAT {
             tracing::warn!(%parent_chat_id, "Side Chat tab cap reached per chat");
             let notice = "Too many side chats open for this chat (max 8).";
-            crate::notify::post("Side Chat", notice);
+            crate::shell::notify::post("Side Chat", notice);
             self.sidebar_notice = Some(notice.into());
             cx.notify();
             return;
@@ -1169,7 +1169,7 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             tracing::warn!(%parent_chat_id, "StartSideChat skipped: engine offline");
             let notice = "Cannot open a side chat: engine is not connected.";
-            crate::notify::post("Side Chat", notice);
+            crate::shell::notify::post("Side Chat", notice);
             self.sidebar_notice = Some(notice.into());
             cx.notify();
             return;
@@ -1224,7 +1224,7 @@ impl Shell {
                 Err(err) => {
                     tracing::warn!(%parent_chat_id, error = %err, "StartSideChat failed");
                     let notice = Self::side_chat_start_error_text(&err);
-                    crate::notify::post("Side Chat", &notice);
+                    crate::shell::notify::post("Side Chat", &notice);
                     if let Some(shell) = weak.upgrade() {
                         shell.update(cx, |shell, cx| {
                             shell.sidebar_notice = Some(notice.clone().into());

@@ -14,6 +14,7 @@
 //!   reflow already-painted text; the canonical parse settles honestly on
 //!   completion.
 
+pub mod find;
 pub mod mend;
 pub mod parser;
 pub mod render;

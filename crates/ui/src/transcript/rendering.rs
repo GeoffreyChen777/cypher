@@ -235,9 +235,9 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         // Open this row's find-match counter before any of its text elements
-        // resolve their highlights (see [`crate::find`]). Rows build in
+        // resolve their highlights (see [`crate::markdown::find`]). Rows build in
         // document order, which is the order the ordinals have to follow.
-        crate::find::begin_row(self.scope, &row.id);
+        crate::markdown::find::begin_row(self.scope, &row.id);
         let theme = crate::chat_style::theme(cx);
         let (wide, message_spacing, paragraph_spacing) = {
             let style = crate::chat_style::settings(cx);
@@ -976,7 +976,7 @@ fn user_bubble_text(
     // In-chat find, resolved at BUILD time like the markdown rows' — a user
     // bubble is one text element, so it always takes its row's first
     // ordinals.
-    let find_hits = crate::find::element_matches(
+    let find_hits = crate::markdown::find::element_matches(
         scope,
         crate::markdown::selection::row_of_key(&sel_key),
         &text,

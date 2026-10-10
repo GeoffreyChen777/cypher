@@ -127,7 +127,7 @@ impl Transcript {
             .into_iter()
             .map(|(_, row)| row)
             .collect();
-        match crate::rail::prompt_step(&rows, top, forward) {
+        match crate::transcript::rail::prompt_step(&rows, top, forward) {
             Some(target) => {
                 self.scroll_to_row(target, cx);
                 self.prompt_nav = Some((target, Instant::now()));
@@ -829,7 +829,7 @@ impl Transcript {
             // … and the find bar with them: its matches, its counter and its
             // query all belonged to the transcript being left behind.
             self.find = None;
-            crate::find::clear(self.scope);
+            crate::markdown::find::clear(self.scope);
             self.chat_id = selected;
             self.rows.clear();
             self.row_cache.clear();

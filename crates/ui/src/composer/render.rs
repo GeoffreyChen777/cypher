@@ -551,7 +551,7 @@ impl Composer {
     /// the bottom corner, one along the bottom under the button.
     fn render_edge_ring(
         &self,
-        reading: crate::context_ring::RingReading,
+        reading: crate::composer::context_ring::RingReading,
         height: f32,
         send_bottom_inset: f32,
         theme: &Theme,
@@ -572,15 +572,15 @@ impl Composer {
         // Inside the 1px border the corner's radius is one less (CSS's inner
         // radius), which is the curve the stroke follows.
         let corner_radius = PILL_RADIUS - PILL_BORDER_V / 2.0;
-        let arc = crate::context_ring::edge_arc(
+        let arc = crate::composer::context_ring::edge_arc(
             fraction,
             corner_radius,
             track,
-            crate::context_ring::fill_color(fraction, theme),
+            crate::composer::context_ring::fill_color(fraction, theme),
         )
         .absolute()
         .inset_0();
-        let semicircle = crate::context_ring::edge_is_semicircle(height, corner_radius);
+        let semicircle = crate::composer::context_ring::edge_is_semicircle(height, corner_radius);
         let zone = |id: &'static str| {
             let summary = summary.clone();
             let hint = hint.clone();
@@ -589,7 +589,7 @@ impl Composer {
                 .absolute()
                 .bottom_0()
                 .tooltip(move |_, cx| {
-                    cx.new(|_| crate::context_ring::ContextRingTooltip {
+                    cx.new(|_| crate::composer::context_ring::ContextRingTooltip {
                         summary: summary.clone(),
                         hint: hint.clone(),
                     })
