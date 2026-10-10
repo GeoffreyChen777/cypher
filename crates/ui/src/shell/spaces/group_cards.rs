@@ -379,7 +379,10 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(5.0))
+                    // The icon hangs in the gutter above the rail; the label
+                    // lands on the 33px column the project and session
+                    // titles share (10px inset + 11px glyph + 12px).
+                    .gap(px(12.0))
                     .child(
                         icon(group.icon)
                             .size(px(11.0))
