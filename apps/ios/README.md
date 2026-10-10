@@ -225,7 +225,7 @@ provider setup, offline recovery, existing sessions and archived sessions.
 For TestFlight/App Store preparation, signing and publication boundaries, see
 [`docs/operations/ios-release.md`](../../docs/operations/ios-release.md).
 
-Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs).
+Builds with Xcode 27 or newer, the version CI pins (the app targets iOS 26 and uses its Liquid Glass APIs).
 
 ```sh
 cd apps/ios

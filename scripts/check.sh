@@ -62,7 +62,8 @@ stage_lint() {
 
 stage_rust() {
   run "$CARGO" test --locked --no-default-features -p cypher -p cypher-env -p cypher-proto \
-    -p cypher-doc -p cypher-syntax -p cypher-harness -p cypher-engine -p cypher-update -p cypher-rpc
+    -p cypher-doc -p cypher-syntax -p cypher-net -p cypher-harness -p cypher-engine -p cypher-update \
+    -p cypher-rpc
   # The registry transport suites need the in-process server, so they run
   # nowhere else: without the feature their targets don't even build.
   run "$CARGO" test --locked -p cypher-sync --features mock-server \

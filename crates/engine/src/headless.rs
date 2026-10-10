@@ -48,18 +48,20 @@ impl Engine {
         F: FnOnce(Auth) -> Fut,
         Fut: Future<Output = Result<(), EngineError>>,
     {
-        if config.ipc_socket != cypher_env::ipc_socket(&config.data_dir)? {
+        if config.ipc_socket != cypher_env::ipc_socket(&config.data_dir).map_err(startup_io)? {
             return Err(EngineError::Other(
                 "Engine IPC socket does not match its data directory".into(),
             ));
         }
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
-        std::fs::create_dir_all(&config.data_dir)?;
+        std::fs::create_dir_all(&config.data_dir).map_err(startup_io)?;
         // Auth construction can persist a sanitized session, and its refresh
         // loop rotates single-use credentials. Own the directory BEFORE either.
         let lock = InstanceLock::acquire(&config.data_dir)?;
-        let listener = cypher_rpc::LocalListener::bind(&config.ipc_socket).await?;
+        let listener = cypher_rpc::LocalListener::bind(&config.ipc_socket)
+            .await
+            .map_err(startup_io)?;
         let auth = Engine::build_auth(&config).await;
         let mut auth_state = auth.watch_state();
         let workspace_scope = Engine::initial_workspace_scope(&auth);
@@ -123,4 +125,10 @@ async fn wait_for_signed_out(state: &mut tokio::sync::watch::Receiver<AuthState>
             return;
         }
     }
+}
+
+/// Startup I/O failures read as the bare OS message (`cypher headless` prints
+/// `Error: <message>`), as they did before the engine had its own error type.
+fn startup_io(err: std::io::Error) -> EngineError {
+    EngineError::Other(err.to_string())
 }

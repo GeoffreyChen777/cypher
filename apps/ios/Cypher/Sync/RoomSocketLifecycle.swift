@@ -67,6 +67,11 @@ final class RoomSocketLifecycle<Owner: Actor> {
     private(set) var generation = 0
     private(set) var closed = false
     private(set) var joined = false
+    /// The generation whose failure is being reported. `fail` awaits the owner,
+    /// so a second report for the same session (a liveness deadline racing the
+    /// socket's receive error) can arrive meanwhile; it must not notify or back
+    /// off twice.
+    private var failingGeneration: Int?
     private(set) var backoffMs: Int
     /// Transport clock — pongs count, so a healthy socket never trips it.
     private var lastInbound: UInt64
@@ -233,11 +238,12 @@ final class RoomSocketLifecycle<Owner: Actor> {
     // MARK: Failure and redial
 
     /// The session failed: tell the delegate and redial after backoff.
-    /// Ignored for a superseded generation, and for a session already torn
-    /// down (`socket == nil`) — that is the cancelled socket's own receive
-    /// error.
+    /// Ignored for a superseded generation, for a session already torn down
+    /// (`socket == nil`) — that is the cancelled socket's own receive error —
+    /// and for a failure of this generation that is already being reported.
     nonisolated(nonsending) func fail(gen: Int, owner: Owner) async {
-        guard gen == generation, !closed, socket != nil else { return }
+        guard gen == generation, !closed, socket != nil, failingGeneration != gen else { return }
+        failingGeneration = gen
         roomLog.warning(
             "\(self.hooks.label, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms"
         )
