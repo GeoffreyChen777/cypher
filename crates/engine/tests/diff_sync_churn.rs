@@ -14,10 +14,11 @@ use std::time::Duration;
 use cypher_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
 use cypher_proto::HarnessId;
 
-/// How long a recapture would take to show: twice diff-sync's 500 ms watch
-/// debounce. Nothing positive marks "no recapture happened", so the churn
-/// checks hold this negative window after their writes have landed.
-const NO_RECAPTURE_WINDOW: Duration = Duration::from_secs(1);
+/// How long a recapture would take to show: diff-sync's 500 ms watch
+/// debounce plus the git capture after it, with margin for a loaded machine.
+/// Nothing positive marks "no recapture happened", so the churn checks hold
+/// this negative window after their writes have landed.
+const NO_RECAPTURE_WINDOW: Duration = Duration::from_millis(1500);
 
 async fn init_dirty_repo(dir: &Path) {
     common::init_repo(dir, "one\ntwo\n").await;

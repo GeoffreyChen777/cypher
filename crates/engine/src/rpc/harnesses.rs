@@ -10,7 +10,7 @@ pub(super) fn set_harness_enabled(rpc: &EngineRpc, params: Value) -> Result<RpcR
         .set_enabled(p.harness, p.enabled)
         .map_err(RpcError::Failed)?;
     // Fresh catalog in the reply: the page repaints from it in one
-    // round trip, and a refused/raced toggle rpc-corrects.
+    // round trip, and a refused/raced toggle self-corrects.
     RpcReply::value(&rpc.registry.descriptors())
 }
 
