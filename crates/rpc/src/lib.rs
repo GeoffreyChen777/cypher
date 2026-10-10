@@ -259,6 +259,271 @@ pub mod methods {
     /// transcript at a settled anchor and re-point the SAME chat at a
     /// freshly materialized, truncated Pi session. Pi-only, like the fork.
     pub const REWIND_SESSION: &str = "RewindSession";
+
+    /// How one method is answered and routed. The engine derives its routing
+    /// predicates from [`SPECS`], so adding a method means adding its constant
+    /// above and one entry there.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MethodSpec {
+        pub name: &'static str,
+        /// Replies with a stream of items instead of one value.
+        pub stream: bool,
+        /// Honors `targetDeviceId`: the engine relays the call to that device
+        /// instead of answering it locally.
+        pub forwardable: bool,
+        /// Served by the auth-only surface, which answers before a workspace
+        /// profile is open (and by the full engine through it).
+        pub auth: bool,
+        /// Carries credentials or server configuration, so it may only be
+        /// relayed over an HTTPS/WSS (or loopback development) link.
+        pub credentials: bool,
+    }
+
+    impl MethodSpec {
+        const fn unary(name: &'static str) -> Self {
+            Self {
+                name,
+                stream: false,
+                forwardable: false,
+                auth: false,
+                credentials: false,
+            }
+        }
+
+        const fn stream(name: &'static str) -> Self {
+            Self {
+                stream: true,
+                ..Self::unary(name)
+            }
+        }
+
+        const fn forwardable(self) -> Self {
+            Self {
+                forwardable: true,
+                ..self
+            }
+        }
+
+        const fn auth(self) -> Self {
+            Self { auth: true, ..self }
+        }
+
+        const fn credentials(self) -> Self {
+            Self {
+                credentials: true,
+                ..self
+            }
+        }
+    }
+
+    /// Every method, in declaration order.
+    pub const SPECS: &[MethodSpec] = &[
+        MethodSpec::unary(LIST_HARNESSES).forwardable(),
+        MethodSpec::unary(SET_HARNESS_ENABLED).forwardable(),
+        MethodSpec::unary(LIST_PI_PACKAGES).forwardable(),
+        MethodSpec::unary(INSTALL_PI).forwardable(),
+        MethodSpec::unary(INSTALL_PI_PACKAGE).forwardable(),
+        MethodSpec::unary(SET_PI_PACKAGE_ENABLED).forwardable(),
+        MethodSpec::unary(PI_RUNTIME_STATUS).forwardable(),
+        MethodSpec::unary(LIST_PI_SUBAGENTS).forwardable(),
+        MethodSpec::unary(SAVE_PI_SUBAGENT).forwardable(),
+        MethodSpec::unary(DELETE_PI_SUBAGENT).forwardable(),
+        MethodSpec::unary(GET_PI_TRANSLATION_SETTINGS).forwardable(),
+        MethodSpec::unary(SET_PI_TRANSLATION_SETTINGS).forwardable(),
+        MethodSpec::unary(DETECT_PI_LANGUAGE).forwardable(),
+        MethodSpec::unary(LIST_PI_PROVIDERS).forwardable(),
+        MethodSpec::unary(SAVE_PI_PROVIDER)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(REFRESH_PI_PROVIDER).forwardable(),
+        MethodSpec::unary(LOGOUT_PI_PROVIDER).forwardable(),
+        MethodSpec::unary(REMOVE_PI_PROVIDER).forwardable(),
+        MethodSpec::unary(BEGIN_PI_PROVIDER_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(PI_PROVIDER_LOGIN_STATUS)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(COMPLETE_PI_PROVIDER_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(CANCEL_PI_PROVIDER_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::stream(PI_UPDATE_STATUS).forwardable(),
+        MethodSpec::unary(CHECK_PI_UPDATE).forwardable(),
+        MethodSpec::unary(APPLY_PI_UPDATES).forwardable(),
+        MethodSpec::unary(LIST_MCP_SERVERS).forwardable(),
+        MethodSpec::unary(ADD_MCP_SERVERS)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(REMOVE_MCP_SERVER)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(SET_MCP_SERVER_ENABLED).forwardable(),
+        MethodSpec::unary(START_MCP_AUTH).forwardable(),
+        MethodSpec::unary(BEGIN_MCP_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(MCP_LOGIN_STATUS)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(COMPLETE_MCP_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(CANCEL_MCP_LOGIN)
+            .forwardable()
+            .credentials(),
+        MethodSpec::unary(LOGOUT_MCP_SERVER).forwardable(),
+        MethodSpec::unary(LIST_MODELS).forwardable(),
+        MethodSpec::unary(GET_TITLE_MODEL_SETTINGS).forwardable(),
+        MethodSpec::unary(SET_TITLE_MODEL_SETTINGS).forwardable(),
+        MethodSpec::unary(GET_WEB_SEARCH_FALLBACK).forwardable(),
+        MethodSpec::unary(SET_WEB_SEARCH_FALLBACK).forwardable(),
+        MethodSpec::unary(LIST_COMMANDS).forwardable(),
+        MethodSpec::unary(PI_SESSION_MODES).forwardable(),
+        MethodSpec::unary(QUEUE_COMMAND).forwardable(),
+        MethodSpec::unary(RETRY_COMMAND).forwardable(),
+        MethodSpec::stream(WATCH_DOC_MESSAGES).forwardable(),
+        MethodSpec::stream(WATCH_DOC_COMMANDS).forwardable(),
+        MethodSpec::unary(PROBE_SYNC),
+        MethodSpec::unary(NOTIFICATION_ACTIVITY).auth(),
+        MethodSpec::unary(SYNC_STATUS),
+        MethodSpec::stream(WATCH_CHATS),
+        MethodSpec::stream(WATCH_DEVICES),
+        MethodSpec::stream(WATCH_SESSIONS),
+        MethodSpec::stream(WATCH_SPACES),
+        MethodSpec::unary(MUTATE),
+        MethodSpec::unary(ENGINE_INFO),
+        MethodSpec::unary(ENGINE_READY),
+        MethodSpec::unary(STOP_ENGINE),
+        MethodSpec::stream(AUTH_STATUS).auth(),
+        MethodSpec::unary(SIGN_IN).auth(),
+        MethodSpec::unary(SIGN_IN_HEADLESS).auth(),
+        MethodSpec::unary(COMPLETE_SIGN_IN).auth(),
+        MethodSpec::unary(SIGN_OUT).auth(),
+        MethodSpec::unary(LIST_ORGS).auth(),
+        MethodSpec::unary(CREATE_ORG).auth(),
+        MethodSpec::unary(SELECT_ORG).auth(),
+        MethodSpec::unary(LOCAL_IMPORT_STATUS),
+        MethodSpec::stream(IMPORT_LOCAL_WORKSPACE),
+        MethodSpec::unary(LIST_REPOS).forwardable(),
+        MethodSpec::unary(ADD_REPO).forwardable(),
+        MethodSpec::unary(CLONE_REPO).forwardable(),
+        MethodSpec::unary(CREATE_REPO).forwardable(),
+        MethodSpec::unary(LIST_BRANCHES).forwardable(),
+        MethodSpec::unary(LIST_REFS).forwardable(),
+        MethodSpec::unary(LIST_GIT_HISTORY).forwardable(),
+        MethodSpec::unary(FETCH_ALL).forwardable(),
+        MethodSpec::unary(SWITCH_REF).forwardable(),
+        MethodSpec::unary(LIST_FOLDERS).forwardable(),
+        MethodSpec::unary(SEARCH_FILES).forwardable(),
+        MethodSpec::unary(SEARCH_GITHUB_ISSUES).forwardable(),
+        MethodSpec::unary(GET_GITHUB_ISSUE).forwardable(),
+        MethodSpec::unary(GITHUB_ACCOUNT_STATUS).forwardable(),
+        MethodSpec::unary(START_GITHUB_LOGIN).forwardable(),
+        MethodSpec::unary(POLL_GITHUB_LOGIN).forwardable(),
+        MethodSpec::unary(CANCEL_GITHUB_LOGIN).forwardable(),
+        MethodSpec::unary(SIGN_OUT_GITHUB).forwardable(),
+        MethodSpec::unary(LIST_WORKSPACE_FILES).forwardable(),
+        MethodSpec::unary(READ_WORKSPACE_FILE).forwardable(),
+        MethodSpec::unary(WRITE_WORKSPACE_FILE).forwardable(),
+        MethodSpec::unary(CREATE_WORKTREE).forwardable(),
+        MethodSpec::unary(DELETE_WORKTREE).forwardable(),
+        MethodSpec::unary(CREATE_SCRATCH_DIR).forwardable(),
+        MethodSpec::unary(DELETE_SCRATCH_DIR).forwardable(),
+        MethodSpec::unary(OPEN_TERMINAL).forwardable(),
+        MethodSpec::stream(SUBSCRIBE_TERMINAL).forwardable(),
+        MethodSpec::unary(WRITE_TERMINAL).forwardable(),
+        MethodSpec::unary(RESIZE_TERMINAL).forwardable(),
+        MethodSpec::unary(CLOSE_TERMINAL).forwardable(),
+        MethodSpec::stream(WATCH_CHECKOUT_DIFFS).forwardable(),
+        MethodSpec::unary(GET_CHECKOUT_DIFF).forwardable(),
+        MethodSpec::unary(GET_CHECKOUT_FILE_DIFF_TEXT).forwardable(),
+        MethodSpec::unary(UPLOAD_CHUNK).forwardable(),
+        MethodSpec::unary(UPLOAD_COMMIT).forwardable(),
+        MethodSpec::unary(READ_ATTACHMENT_CHUNK).forwardable(),
+        MethodSpec::unary(FETCH_TOOL_BLOB),
+        MethodSpec::stream(UPDATE_STATUS).forwardable(),
+        MethodSpec::unary(CHECK_UPDATE).forwardable(),
+        MethodSpec::unary(UPDATE_ON_ACTIVATION).forwardable(),
+        MethodSpec::unary(APPLY_UPDATE).forwardable(),
+        MethodSpec::unary(START_SUBAGENT),
+        MethodSpec::stream(WATCH_AGENT_EVENTS),
+        MethodSpec::unary(START_SIDE_CHAT).forwardable(),
+        MethodSpec::unary(SEND_SIDE_CHAT).forwardable(),
+        MethodSpec::unary(INTERRUPT_SIDE_CHAT).forwardable(),
+        MethodSpec::unary(RESPOND_SIDE_CHAT_INPUT).forwardable(),
+        MethodSpec::stream(WATCH_SIDE_CHAT_STATUS).forwardable(),
+        MethodSpec::unary(PROMOTE_SIDE_CHAT).forwardable(),
+        MethodSpec::unary(DISPOSE_SIDE_CHAT).forwardable(),
+        MethodSpec::unary(FORK_SESSION).forwardable(),
+        MethodSpec::unary(REWIND_SESSION).forwardable(),
+    ];
+
+    /// The spec for `name`, or `None` for an unknown method.
+    pub fn spec(name: &str) -> Option<&'static MethodSpec> {
+        SPECS.iter().find(|spec| spec.name == name)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{SPECS, spec};
+
+        /// The method constants as declared in this module's source.
+        fn declared_methods() -> Vec<String> {
+            let source = include_str!("lib.rs");
+            let start = source.find("pub mod methods {").unwrap();
+            let end = source[start..].find("pub struct MethodSpec").unwrap() + start;
+            source[start..end]
+                .lines()
+                .filter_map(|line| {
+                    let rest = line.trim().strip_prefix("pub const ")?;
+                    let (_, value) = rest.split_once(": &str = \"")?;
+                    Some(value.strip_suffix("\";")?.to_string())
+                })
+                .collect()
+        }
+
+        #[test]
+        fn every_method_constant_has_exactly_one_spec() {
+            let declared = declared_methods();
+            assert!(
+                declared.len() > 100,
+                "the source scan found {}",
+                declared.len()
+            );
+            for name in &declared {
+                let count = SPECS.iter().filter(|spec| spec.name == name).count();
+                assert_eq!(count, 1, "{name} must have exactly one spec");
+            }
+            for spec in SPECS {
+                assert!(
+                    declared.iter().any(|name| name == spec.name),
+                    "{} has a spec but no constant",
+                    spec.name
+                );
+            }
+            assert_eq!(SPECS.len(), declared.len());
+            assert!(spec("NoSuchMethod").is_none());
+        }
+
+        #[test]
+        fn routing_flags_are_consistent() {
+            for spec in SPECS {
+                assert!(
+                    !spec.credentials || spec.forwardable,
+                    "{}: only relayed methods need a credential transport",
+                    spec.name
+                );
+                assert!(
+                    !(spec.auth && spec.forwardable),
+                    "{}: auth methods answer for the local engine only",
+                    spec.name
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

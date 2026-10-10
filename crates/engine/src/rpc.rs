@@ -305,21 +305,7 @@ impl EngineRpc {
                 "cannot reach device {target}: remote routing unavailable (offline)"
             )));
         };
-        if matches!(
-            method,
-            methods::SAVE_PI_PROVIDER
-                | methods::ADD_MCP_SERVERS
-                | methods::REMOVE_MCP_SERVER
-                | methods::BEGIN_MCP_LOGIN
-                | methods::MCP_LOGIN_STATUS
-                | methods::COMPLETE_MCP_LOGIN
-                | methods::CANCEL_MCP_LOGIN
-                | methods::BEGIN_PI_PROVIDER_LOGIN
-                | methods::PI_PROVIDER_LOGIN_STATUS
-                | methods::COMPLETE_PI_PROVIDER_LOGIN
-                | methods::CANCEL_PI_PROVIDER_LOGIN
-        ) && !links.credential_transport_allowed()
-        {
+        if needs_credential_transport(method) && !links.credential_transport_allowed() {
             return Err(RpcError::Failed(if method != methods::SAVE_PI_PROVIDER {
                 "Remote MCP configuration requires an HTTPS/WSS relay (loopback development is allowed).".into()
             } else {
@@ -516,6 +502,24 @@ fn forwardable(method: &str) -> bool {
             | methods::FORK_SESSION
             // A rewind rewrites the same chat's Pi session: host device too.
             | methods::REWIND_SESSION
+    )
+}
+
+/// Forwarded methods that carry credentials or server configuration.
+fn needs_credential_transport(method: &str) -> bool {
+    matches!(
+        method,
+        methods::SAVE_PI_PROVIDER
+            | methods::ADD_MCP_SERVERS
+            | methods::REMOVE_MCP_SERVER
+            | methods::BEGIN_MCP_LOGIN
+            | methods::MCP_LOGIN_STATUS
+            | methods::COMPLETE_MCP_LOGIN
+            | methods::CANCEL_MCP_LOGIN
+            | methods::BEGIN_PI_PROVIDER_LOGIN
+            | methods::PI_PROVIDER_LOGIN_STATUS
+            | methods::COMPLETE_PI_PROVIDER_LOGIN
+            | methods::CANCEL_PI_PROVIDER_LOGIN
     )
 }
 

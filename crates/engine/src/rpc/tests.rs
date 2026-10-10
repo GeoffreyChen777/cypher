@@ -1,6 +1,29 @@
 use super::files::tool_file_path;
 use super::*;
 
+/// The routing predicates agree with `cypher_rpc::methods::SPECS` for every
+/// method.
+#[test]
+fn routing_predicates_match_the_method_specs() {
+    for spec in methods::SPECS {
+        let name = spec.name;
+        assert_eq!(forwardable(name), spec.forwardable, "{name} forwardable");
+        assert_eq!(
+            is_stream_method(name),
+            spec.forwardable && spec.stream,
+            "{name} forwarded stream"
+        );
+        assert_eq!(AuthRpc::handles(name), spec.auth, "{name} auth");
+        assert_eq!(
+            needs_credential_transport(name),
+            spec.credentials,
+            "{name} credential transport"
+        );
+    }
+    assert!(!forwardable("NoSuchMethod"));
+    assert!(!AuthRpc::handles("NoSuchMethod"));
+}
+
 #[test]
 fn engine_identity_is_not_forwardable() {
     assert!(!forwardable(methods::ENGINE_INFO));
