@@ -542,8 +542,8 @@ impl Shell {
     /// on the right (mini spinner while working, amber question mark while the
     /// run waits on an answer, emerald check for unseen finished turns,
     /// relative time otherwise). The row is inset from the project-card
-    /// edge — or, when `nested`, from the nav line or checkout rail that
-    /// carries the indent; click selects and right-click opens the context
+    /// edge — or, when `nested` under a checkout section, from that
+    /// section's rail; click selects and right-click opens the context
     /// menu. The branch is NOT repeated per row — it lives in the
     /// branch/worktree group header above (see [`spaces`](crate::shell::spaces)).
     /// `harness` is `None` when the sidebar hides agent marks (one runtime
@@ -605,9 +605,9 @@ impl Shell {
             // Sessions are children of the project header: keep the selected
             // wash inset 6px, then indent the content so the agent mark lands
             // beneath the project title rather than at the card's left edge.
-            // Under a nav line or checkout rail, that already carries the
-            // indent. Without an agent mark the title itself takes the mark's
-            // place, landing on the project title's 33px column either way.
+            // Under a checkout section the rail already carries the indent.
+            // Without an agent mark the title itself takes the mark's place,
+            // landing on the project title's 33px column either way.
             .pl(px(match (nested, harness.is_some()) {
                 (false, true) => 20.0,
                 (false, false) => 27.0,

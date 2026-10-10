@@ -45,7 +45,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// The sidebar's project-grouped list: one nav-line group per `Space`
+    /// The sidebar's project-grouped list: one group per `Space`
     /// (every host together, empty spaces included) plus synthetic
     /// No-project / Unavailable-project groups; the selected session's
     /// project floats as a card. Ordering comes from
@@ -118,9 +118,8 @@ impl Shell {
                 .collect()
         };
         // Only the project holding the selected session floats as a card; the
-        // rest are bare nav-line groups. A focus move swaps the two layouts
-        // and crossfades the card plate (and the nav line) over — never on
-        // first paint.
+        // rest are bare groups with the same layout. A focus move crossfades
+        // the card plate over — never on first paint.
         let focused = selected.as_deref().and_then(|id| {
             cards
                 .iter()
@@ -139,8 +138,7 @@ impl Shell {
             .into_iter()
             .map(|card| {
                 let key = card.key.clone();
-                let floating = self.sidebar.focused_card.as_ref() == Some(&key);
-                let lift = if floating {
+                let lift = if self.sidebar.focused_card.as_ref() == Some(&key) {
                     focus_t
                 } else if self.sidebar.focus_from.as_ref() == Some(&key) {
                     1.0 - focus_t
@@ -178,34 +176,28 @@ impl Shell {
                                     }
                             })
                     };
-                let element =
-                    self.render_group_card(&card, &selected, now, floating, lift, theme, cx);
+                let element = self.render_group_card(&card, &selected, now, lift, theme, cx);
                 (format!("g:{key}"), height, element)
             })
             .collect()
     }
 
-    /// One project group (12px radius, clipped). The project holding the
-    /// selected session (`floating`) is an opaque floating card
-    /// (`theme.surface`, subtle shadow + hairline ring) whose sessions span
-    /// the card; every other project is a bare group on the sidebar frost
-    /// whose body hangs off a hairline nav line under the project glyph.
-    /// Session titles sit on the same 33px column either way, so a focus
-    /// move never shifts text; `lift` crossfades the card plate and the
-    /// line. The header owns the prominent project label, a hover-revealed
-    /// target machine and a presence dot. Real space headers host the
-    /// rename/remove context menu on right-click; synthetic cards have no
-    /// menu. Below the header, chats are grouped by checkout: when there is
-    /// more than one, a small section label introduces each group (inside a
-    /// card, a hairline rail also runs down the group's indented rows); a
-    /// lone ordinary checkout skips both and lists its sessions directly.
-    #[allow(clippy::too_many_arguments)]
+    /// One project group (12px radius, clipped). Every project has the same
+    /// layout, and `lift` only adds the card plate: 1 is the opaque floating
+    /// card (`theme.surface`, subtle shadow + hairline ring) of the project
+    /// holding the selected session, 0 a bare group on the sidebar frost.
+    /// The header owns the prominent project label, a hover-revealed target
+    /// machine and a presence dot. Real space headers host the rename/remove
+    /// context menu on right-click; synthetic cards have no menu. Below the
+    /// header, chats are grouped by checkout: when there is more than one, a
+    /// small section label introduces each group and a hairline rail runs
+    /// down its left edge, tying the indented session rows to it; a lone
+    /// ordinary checkout skips both and lists its sessions directly.
     fn render_group_card(
         &self,
         group: &GroupCard,
         selected: &Option<String>,
         now: chrono::DateTime<Utc>,
-        floating: bool,
         lift: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -241,7 +233,6 @@ impl Shell {
                             chat_group,
                             group_collapsed,
                             group.space_id.as_deref(),
-                            !floating,
                             theme,
                             cx,
                         ));
@@ -269,17 +260,18 @@ impl Shell {
                                     status: *status,
                                     selected: is_selected,
                                     pinned: chat.pinned,
-                                    nested: !floating || !flat,
+                                    nested: !flat,
                                 },
                                 theme,
                                 cx,
                             )
                         });
-                        if floating && !flat {
-                            // Inside the card the rail sits under the section
-                            // icon's centre (10px inset + half the 11px
-                            // glyph), so the sessions read as hanging off
-                            // their checkout.
+                        if flat {
+                            elements.extend(chat_rows);
+                        } else {
+                            // The rail sits under the section icon's centre
+                            // (10px inset + half the 11px glyph), so the
+                            // sessions read as hanging off their checkout.
                             elements.push(
                                 div()
                                     .ml(px(15.0))
@@ -290,8 +282,6 @@ impl Shell {
                                     .children(chat_rows)
                                     .into_any_element(),
                             );
-                        } else {
-                            elements.extend(chat_rows);
                         }
                     }
                     elements
@@ -299,33 +289,6 @@ impl Shell {
                 .collect()
         };
         let has_body = !rows.is_empty();
-        // A bare group's body sits 16px in, past a 1px nav line centred under
-        // the project glyph (x = 17). It starts just below the glyph and ends
-        // on the last row's text, in the project's colour when it has one,
-        // fading in as the card plate fades out.
-        let body = has_body.then(|| {
-            if floating {
-                return div().flex().flex_col().children(rows);
-            }
-            let line = crate::appearance::space_style::space_color(group.color.as_deref(), theme)
-                .map(|color| color.opacity(0.55))
-                .unwrap_or_else(|| crate::kit::theme::hairline(0.14));
-            div()
-                .relative()
-                .pl(px(16.0))
-                .flex()
-                .flex_col()
-                .children(rows)
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(16.5))
-                        .top(px(-4.0))
-                        .bottom(px(8.0))
-                        .w(px(1.0))
-                        .bg(line.opacity(1.0 - lift)),
-                )
-        });
         div()
             .rounded(px(12.0))
             .bg(theme.sidebar_card_fill(lift))
@@ -334,7 +297,7 @@ impl Shell {
             .flex()
             .flex_col()
             .child(header)
-            .children(body)
+            .children(rows)
             .when(has_body, |el| el.pb(px(super::GROUP_CARD_BODY_PADDING)))
             .into_any_element()
     }
@@ -343,23 +306,17 @@ impl Shell {
     /// (shown only when a project spans more than one checkout). It is a
     /// small, muted caption on a short row — a level below the session
     /// titles it introduces, so the three tiers read project → checkout →
-    /// session at a glance. Inside the focused card its icon sits on the
-    /// card's 10px column, directly above the rail that runs down the
-    /// group's rows. In a bare group (`on_line`) it hangs off the project's
-    /// nav line like the sessions do, its icon on their title column (no
-    /// rail of its own — a second guide line beside the project's read as
-    /// clutter). The
-    /// disclosure chevron only surfaces on hover, except on a collapsed
-    /// group, which keeps the closed chevron and its hidden sessions'
-    /// [`StatusSummary`]; clicking the row hides/shows the group's sessions.
-    #[allow(clippy::too_many_arguments)]
+    /// session at a glance. Its icon sits on the card's 10px column, directly
+    /// above the rail that runs down the group's rows. The disclosure chevron
+    /// only surfaces on hover, except on a collapsed group, which keeps the
+    /// closed chevron and its hidden sessions' [`StatusSummary`]; clicking
+    /// the row hides/shows the group's sessions.
     fn render_branch_group_header(
         &self,
         key: &str,
         group: &ChatGroup,
         collapsed: bool,
         space_id: Option<&str>,
-        on_line: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -410,10 +367,7 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_sidebar_group(toggle_key.clone(), cx);
             }))
-            // On a nav line: 16px body inset + 17px = the 33px session-title
-            // column.
-            .ml(px(if on_line { 17.0 } else { 10.0 }))
-            .mr(px(10.0))
+            .mx(px(10.0))
             .text_size(px(11.0))
             .line_height(px(13.0))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -474,8 +428,7 @@ impl Shell {
     /// A project card's single-line header: folder icon + prominent project
     /// name on the left — semibold (the strongest type in the sidebar) on
     /// the focused card, medium on bare groups so a column of headers stays
-    /// light beside their hairlines while still out-ranking the session
-    /// titles; dimming them instead read as disabled and blurred the
+    /// light while still out-ranking the session titles; dimming them instead read as disabled and blurred the
     /// no-sessions dim below. The name is followed by the branch when the
     /// card's lone checkout is inlined — then the target-machine name, only
     /// while the host can't be reached a slashed-cloud glyph, and on a

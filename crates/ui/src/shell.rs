@@ -1194,7 +1194,7 @@ struct SidebarUi {
     /// that group's session rows. Everything defaults expanded.
     collapsed: std::collections::HashSet<String>,
     /// Key of the project holding the selected session — the one project
-    /// rendered as a floating card; every other one is a bare nav-line group.
+    /// rendered as a floating card; every other one is a bare group.
     focused_card: Option<String>,
     /// The card that held focus before the last move, and the 0→1 tween
     /// handing the lift from it to `focused_card`.

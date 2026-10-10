@@ -1,4 +1,4 @@
-//! Spaces sidebar: the project-grouped session list (one nav-line group per
+//! Spaces sidebar: the project-grouped session list (one group per
 //! Space — every host together, synthetic No-project / Unavailable-project
 //! groups — the selected session's project floating as a card), the fixed
 //! Cypher / Add project header, checkout-scoped hover actions for new
