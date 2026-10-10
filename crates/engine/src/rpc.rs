@@ -11,8 +11,8 @@
 //! the [`LinkCache`] — the remote engine sees its own id and handles locally, so the
 //! forward can never loop. Streaming methods are proxied by re-subscribing remotely and
 //! piping items. To make another method device-addressable, nothing per-method is needed
-//! beyond listing it in [`forwardable`] (and [`is_stream_method`] if it streams);
-//! handlers stay transport-agnostic.
+//! beyond marking its `cypher_rpc::methods::SPECS` entry forwardable (and stream if it
+//! streams); handlers stay transport-agnostic.
 
 use async_trait::async_trait;
 use futures::StreamExt;

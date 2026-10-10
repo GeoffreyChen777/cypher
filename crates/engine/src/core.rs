@@ -49,7 +49,8 @@ pub struct EngineCore {
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<host::local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
-    /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
+    /// Auth service (attached by [`crate::Engine::assemble_runtime`]; a lazy
+    /// dev-mode instance otherwise).
     auth: Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: Mutex<Option<Arc<cypher_rpc::LinkCache>>>,
