@@ -1,7 +1,7 @@
 /**
  * RegistryRoom — one Durable Object per per-user workspace registry
  * (`reg1/{orgId}/{userId}`), the wedge-proof replacement for the Loro
- * workspace doc (docs/registry-sync.md).
+ * workspace doc (docs/design/registry-sync.md).
  *
  * The DO is the authority: it stores CURRENT row state in its SQLite (no
  * update log, no replay, no wasm), applies pushed ops with per-field LWW

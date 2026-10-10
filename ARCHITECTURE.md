@@ -150,7 +150,7 @@ cypher/
     ui/           cypher-ui       # gpui desktop app
   apps/
     cypher/                       # the binary (headed default, `headless` subcommand, CLI)
-    edge/                         # TypeScript Worker + Durable Objects
+    edge/                         # TypeScript Worker + Durable Objects (apps/edge/README.md)
     ios/                          # SwiftUI iPhone client (apps/ios/README.md)
     landing/                      # letscypher.app landing page (static Worker assets)
     www-redirect/                 # www → apex redirect Worker
@@ -276,6 +276,9 @@ Its Loro-aware session room was replaced by the chat2 ChatRoom log relay
 3. No `/seed` migration path or legacy sync (fresh app).
 Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
 per `docs/research/durable-objects-language.md`.
+Source is grouped by feature (`src/auth`, `chat`, `registry`, `device`, `notifications`)
+behind one ordered handler chain in `src/index.ts`; layout, conventions and the golden route
+test are in [apps/edge/README.md](apps/edge/README.md).
 
 ## 7. Parity exclusions & deliberate changes
 

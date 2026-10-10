@@ -26,6 +26,8 @@ explains how it works. Everything else is grouped here by who reads it.
 
 - [Development](development/README.md) — repository map, crate layering, conventions and `scripts/check.sh`.
 - [Local Edge development](development/local-edge.md) — running the Edge locally and pointing engines and iOS at it.
+- [Edge](../apps/edge/README.md) — the Worker's layout, handler chain, conventions and tests.
+- [Pi runtime](../pi-runtime/README.md) — the bundle spec: layout, test tiers and updating it.
 
 ## Operations — releasing and running the service
 
