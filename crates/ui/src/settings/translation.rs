@@ -825,35 +825,11 @@ impl Render for TranslationControl {
             .target_menu_open
             .then(|| self.language_popup(false, &target_value, &theme, cx));
         widgets::section_card(&theme)
-            .child(
-                div()
-                    .px(px(20.0))
-                    .py(px(18.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(widgets::row_tile(&theme, crate::kit::icons::GLOBAL))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(widgets::row_title(&theme, "Message translation"))
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(
-                                        "Translate selected conversations without changing model context",
-                                    ),
-                            ),
-                    )
-                    .child(if self.enabled_models.is_empty() {
-                        widgets::badge(&theme, status)
-                    } else {
-                        widgets::badge_active(&theme, status)
-                    }),
-            )
+            .child(translation_header(
+                self.enabled_models.is_empty(),
+                status,
+                &theme,
+            ))
             .child(
                 div()
                     .border_t_1()
@@ -863,144 +839,29 @@ impl Render for TranslationControl {
                     .flex()
                     .flex_col()
                     .gap(px(16.0))
-                    .child(
-                        settings_row(
-                            &theme,
-                            "Language direction",
-                            Some("Requests go out in the second language; answers come back in the first".into()),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    dropdown_trigger(
-                                        &theme,
-                                        "translation-source-trigger",
-                                        &self.source_focus,
-                                        140.0,
-                                        SharedString::from(source_label.to_string()),
-                                        false,
-                                        writable,
-                                    )
-                                    .on_click(cx.listener(|page, _, window, cx| {
-                                        page.toggle_language_menu(true, window, cx)
-                                    }))
-                                    .children(source_popup),
-                                )
-                                .child(
-                                    crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
-                                        .size(px(14.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(
-                                    dropdown_trigger(
-                                        &theme,
-                                        "translation-target-trigger",
-                                        &self.target_focus,
-                                        140.0,
-                                        SharedString::from(target_label.to_string()),
-                                        false,
-                                        writable,
-                                    )
-                                    .on_click(cx.listener(|page, _, window, cx| {
-                                        page.toggle_language_menu(false, window, cx)
-                                    }))
-                                    .children(target_popup),
-                                ),
-                        ),
-                    )
-                    .child(
-                        settings_row(
-                            &theme,
-                            "Translate with",
-                            Some("A model from this device\u{2019}s Pi catalog".into()),
-                        )
-                        .child(
-                            dropdown_trigger(
-                                &theme,
-                                "translation-model-trigger",
-                                &self.translation_focus,
-                                220.0,
-                                SharedString::from(translation_label),
-                                false,
-                                writable,
-                            )
-                            .on_click(cx.listener(|page, _, window, cx| {
-                                page.toggle_translation_menu(window, cx)
-                            }))
-                            .children(translation_popup),
-                        ),
-                    )
-                    .child(
-                        settings_row(
-                            &theme,
-                            "Enable for session models",
-                            Some(
-                                format!(
-                                    "{} of {} models selected",
-                                    self.enabled_models.len(),
-                                    models.len()
-                                )
-                                .into(),
-                            ),
-                        )
-                        .child(
-                            dropdown_trigger(
-                                &theme,
-                                "translation-session-trigger",
-                                &self.session_focus,
-                                220.0,
-                                SharedString::from(session_label),
-                                !self.enabled_models.is_empty(),
-                                writable,
-                            )
-                            .on_click(cx.listener(|page, _, window, cx| {
-                                page.toggle_session_menu(window, cx)
-                            }))
-                            .children(session_popup),
-                        ),
-                    )
-                    .child(
-                        settings_row(&theme, "Final response", None)
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .pt(px(16.0))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .p(px(3.0))
-                                    .rounded(px(8.0))
-                                    .bg(theme.surface_raised)
-                                    .child(
-                                        mode_button(
-                                            &theme,
-                                            "translation-mode-replace",
-                                            "Replace",
-                                            self.output_mode == TranslationOutputMode::Replace,
-                                        )
-                                        .on_click(cx.listener(|page, _, _, cx| {
-                                            page.set_output_mode(TranslationOutputMode::Replace, cx)
-                                        })),
-                                    )
-                                    .child(
-                                        mode_button(
-                                            &theme,
-                                            "translation-mode-append",
-                                            "Append",
-                                            self.output_mode == TranslationOutputMode::Append,
-                                        )
-                                        .on_click(cx.listener(|page, _, _, cx| {
-                                            page.set_output_mode(TranslationOutputMode::Append, cx)
-                                        })),
-                                    ),
-                            ),
-                    )
+                    .child(self.language_direction_row(
+                        (source_label, target_label),
+                        (source_popup, target_popup),
+                        writable,
+                        &theme,
+                        cx,
+                    ))
+                    .child(self.translate_with_row(
+                        translation_label,
+                        translation_popup,
+                        writable,
+                        &theme,
+                        cx,
+                    ))
+                    .child(self.session_models_row(
+                        session_label,
+                        session_popup,
+                        models.len(),
+                        writable,
+                        &theme,
+                        cx,
+                    ))
+                    .child(self.final_response_row(&theme, cx))
                     .children(
                         self.error
                             .clone()
@@ -1009,4 +870,199 @@ impl Render for TranslationControl {
             )
             .into_any_element()
     }
+}
+
+impl TranslationControl {
+    /// Language direction: the source and target dropdowns.
+    fn language_direction_row(
+        &self,
+        (source_label, target_label): (&str, &str),
+        (source_popup, target_popup): (Option<AnyElement>, Option<AnyElement>),
+        writable: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        settings_row(
+            theme,
+            "Language direction",
+            Some("Requests go out in the second language; answers come back in the first".into()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    dropdown_trigger(
+                        theme,
+                        "translation-source-trigger",
+                        &self.source_focus,
+                        140.0,
+                        SharedString::from(source_label.to_string()),
+                        false,
+                        writable,
+                    )
+                    .on_click(cx.listener(|page, _, window, cx| {
+                        page.toggle_language_menu(true, window, cx)
+                    }))
+                    .children(source_popup),
+                )
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    dropdown_trigger(
+                        theme,
+                        "translation-target-trigger",
+                        &self.target_focus,
+                        140.0,
+                        SharedString::from(target_label.to_string()),
+                        false,
+                        writable,
+                    )
+                    .on_click(cx.listener(|page, _, window, cx| {
+                        page.toggle_language_menu(false, window, cx)
+                    }))
+                    .children(target_popup),
+                ),
+        )
+    }
+
+    /// The translation model dropdown.
+    fn translate_with_row(
+        &self,
+        translation_label: String,
+        translation_popup: Option<AnyElement>,
+        writable: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        settings_row(
+            theme,
+            "Translate with",
+            Some("A model from this device\u{2019}s Pi catalog".into()),
+        )
+        .child(
+            dropdown_trigger(
+                theme,
+                "translation-model-trigger",
+                &self.translation_focus,
+                220.0,
+                SharedString::from(translation_label),
+                false,
+                writable,
+            )
+            .on_click(cx.listener(|page, _, window, cx| page.toggle_translation_menu(window, cx)))
+            .children(translation_popup),
+        )
+    }
+
+    /// The session models translation is enabled for.
+    fn session_models_row(
+        &self,
+        session_label: String,
+        session_popup: Option<AnyElement>,
+        model_count: usize,
+        writable: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        settings_row(
+            theme,
+            "Enable for session models",
+            Some(
+                format!(
+                    "{} of {} models selected",
+                    self.enabled_models.len(),
+                    model_count
+                )
+                .into(),
+            ),
+        )
+        .child(
+            dropdown_trigger(
+                theme,
+                "translation-session-trigger",
+                &self.session_focus,
+                220.0,
+                SharedString::from(session_label),
+                !self.enabled_models.is_empty(),
+                writable,
+            )
+            .on_click(cx.listener(|page, _, window, cx| page.toggle_session_menu(window, cx)))
+            .children(session_popup),
+        )
+    }
+
+    /// Final response: replace the answer or append the translation.
+    fn final_response_row(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        settings_row(theme, "Final response", None)
+            .border_t_1()
+            .border_color(theme.border)
+            .pt(px(16.0))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .p(px(3.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_raised)
+                    .child(
+                        mode_button(
+                            theme,
+                            "translation-mode-replace",
+                            "Replace",
+                            self.output_mode == TranslationOutputMode::Replace,
+                        )
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.set_output_mode(TranslationOutputMode::Replace, cx)
+                        })),
+                    )
+                    .child(
+                        mode_button(
+                            theme,
+                            "translation-mode-append",
+                            "Append",
+                            self.output_mode == TranslationOutputMode::Append,
+                        )
+                        .on_click(cx.listener(|page, _, _, cx| {
+                            page.set_output_mode(TranslationOutputMode::Append, cx)
+                        })),
+                    ),
+            )
+    }
+}
+
+/// The card's header: icon, title and caption, and the Enabled badge.
+fn translation_header(disabled: bool, status: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .px(px(20.0))
+        .py(px(18.0))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(widgets::row_tile(theme, crate::kit::icons::GLOBAL))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(widgets::row_title(theme, "Message translation"))
+                .child(
+                    div()
+                        .mt(px(3.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("Translate selected conversations without changing model context"),
+                ),
+        )
+        .child(if disabled {
+            widgets::badge(theme, status)
+        } else {
+            widgets::badge_active(theme, status)
+        })
 }
