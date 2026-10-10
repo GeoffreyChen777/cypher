@@ -36,11 +36,11 @@ impl Shell {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
             match theme.appearance {
-                crate::theme::Appearance::Dark => {
-                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
+                crate::kit::theme::Appearance::Dark => {
+                    let purple = crate::kit::theme::oklch(0.35, 0.12, 277.0);
                     (purple.opacity(0.45), purple.opacity(0.60))
                 }
-                crate::theme::Appearance::Light => {
+                crate::kit::theme::Appearance::Light => {
                     (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
                 }
             }
@@ -91,11 +91,11 @@ impl Shell {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
             match theme.appearance {
-                crate::theme::Appearance::Dark => {
-                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
+                crate::kit::theme::Appearance::Dark => {
+                    let purple = crate::kit::theme::oklch(0.35, 0.12, 277.0);
                     (purple.opacity(0.45), purple.opacity(0.60))
                 }
-                crate::theme::Appearance::Light => {
+                crate::kit::theme::Appearance::Light => {
                     (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
                 }
             }

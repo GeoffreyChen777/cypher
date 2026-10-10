@@ -1,6 +1,13 @@
 //! The engine handle: connect to a running engine daemon or embed one.
 
-use super::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use cypher_engine::rpc::AuthRpc;
+use cypher_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock};
+use cypher_proto::{EngineInfo, HarnessId};
+use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client, methods};
 
 /// Everything needed to reach (or start) an engine.
 #[derive(Debug, Clone)]

@@ -2,308 +2,13 @@
 
 use super::*;
 
-/// One tool invocation inside a group row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolItem {
-    pub call: ToolCall,
-    pub is_error: bool,
-    pub resolved: bool,
-    /// Expandable detail: a code-block of output lines, or a real diff
-    /// section rendered by the changes pane's component.
-    /// Precomputed here because rows are cached by fingerprint — diffing and
-    /// tokenizing per paint would run on every scroll frame.
-    pub detail: Option<Arc<ToolDetail>>,
-    /// Expandable full-invocation block: the complete tool call (whole
-    /// command / pattern / URL / input JSON) that the chip header collapses
-    /// to one truncated line. Rendered above `detail` in the open card.
-    /// Precomputed for the same reason as `detail`.
-    pub invocation: Option<Arc<ToolDetail>>,
-    /// Sidecar key of the full output (chat2-sync A3) — the doc carries only
-    /// a one-line summary; expanding offers a lazy "Show full output" fetch.
-    pub output_ref: Option<SharedString>,
-    /// Full-output size, for the affordance label ("Show full output (12 KB)").
-    pub output_bytes: Option<u64>,
-    /// Sidecar key of the full diff (doc carries only per-file stats).
-    pub diff_ref: Option<SharedString>,
-    /// Nesting under the call that made this one: 0 for a call the model
-    /// made, 1 for a call a Pi codemode script made from inside its run
-    /// (deeper if that call made calls of its own). See [`nest_tool_calls`].
-    pub depth: u8,
-}
+mod fold;
+mod gates;
+mod tools;
 
-/// A chip's expandable detail payload.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ToolDetail {
-    /// Command/tool output as a code block: verbatim lines (indentation
-    /// intact), capped at [`OUTPUT_DETAIL_MAX_LINES`] with a counted tail.
-    Output {
-        lines: Vec<SharedString>,
-        truncated_by: usize,
-    },
-    /// A file diff, in the changes pane's model: hunks with 3 lines of
-    /// context, dual line numbers, and (for recognized languages) syntax
-    /// tokens — rendered by `changes::render_file_body`.
-    Diff {
-        file: Arc<crate::changes::FileDiff>,
-        old_text: Option<Arc<str>>,
-        new_text: Option<Arc<str>>,
-    },
-    /// Per-file `+N −N` stat rows — what the thin doc keeps of an edit
-    /// (chat2-sync A1). The full diff upgrades this to [`ToolDetail::Diff`]
-    /// via the sidecar fetch.
-    Stats {
-        stats: Arc<Vec<cypher_doc::ToolDiffStat>>,
-    },
-}
-
-/// Max verbatim output lines per chip before the counted tail row.
-pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
-
-/// Max lines of a codemode script's invocation block. The script is the
-/// whole point of the call and the doc keeps it (capped at
-/// [`cypher_doc::CODEMODE_SCRIPT_MAX_CHARS`]), so it gets more room
-/// than a command's echo before the counted tail.
-pub const SCRIPT_DETAIL_MAX_LINES: usize = 80;
-
-/// Max diff lines an inline tool-diff detail renders — the detail is one
-/// stacked element inside its transcript row, so it must stay bounded
-/// (~600 lines ≈ 12.6k px, several screens of context before the cut).
-pub const DIFF_DETAIL_MAX_LINES: usize = 600;
-
-/// Per-line height of an output detail block (diff blocks use the changes
-/// pane's own [`crate::changes::DIFF_LINE_HEIGHT`]).
-pub const OUTPUT_LINE_HEIGHT: f32 = 18.0;
-
-/// Vertical padding of an output detail body (py(6) × 2).
-pub(super) const OUTPUT_BODY_PAD: f32 = 12.0;
-
-/// The hairline between an expanded chip's header row and its detail body.
-pub(super) const DETAIL_SEPARATOR: f32 = 1.0;
-
-/// Build a tool part's expandable detail. A diff wins over raw output (it is
-/// the more structured record of the same action); post-strip docs carry diff
-/// STATS instead of inline diff text, which win the same way.
-pub fn tool_detail(
-    output: Option<&str>,
-    diff: Option<&cypher_proto::ToolDiff>,
-    diff_stats: Option<&[cypher_doc::ToolDiffStat]>,
-) -> Option<ToolDetail> {
-    if let Some(diff) = diff {
-        let mut file = diff_to_file(diff);
-        if file.hunks.is_empty() {
-            return None;
-        }
-        // A transcript diff renders as one stacked element inside its row —
-        // cap it so a whole-file rewrite (or fetched full-diff blob) can't
-        // build tens of thousands of elements per frame. The changes pane
-        // has no such cap; it virtualizes per line.
-        crate::changes::truncate_file_lines(&mut file, DIFF_DETAIL_MAX_LINES);
-        return Some(ToolDetail::Diff {
-            file: Arc::new(file),
-            old_text: diff.old_text.as_deref().map(Arc::from),
-            new_text: Some(Arc::from(diff.new_text.as_str())),
-        });
-    }
-    if let Some(stats) = diff_stats.filter(|s| !s.is_empty()) {
-        return Some(ToolDetail::Stats {
-            stats: Arc::new(stats.to_vec()),
-        });
-    }
-    let output = output?;
-    let mut lines: Vec<SharedString> = output
-        .lines()
-        .map(|l| SharedString::from(l.to_owned()))
-        .collect();
-    // Trim trailing blank output lines so the block hugs its content.
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
-    lines.truncate(OUTPUT_DETAIL_MAX_LINES);
-    Some(ToolDetail::Output {
-        lines,
-        truncated_by,
-    })
-}
-
-/// Columns at which an invocation line soft-wraps into continuation lines.
-/// The wrap is char-counted, not measured — block heights must be analytic —
-/// so the budget is sized to fit the narrowest useful transcript pane.
-pub const CALL_WRAP_COLS: usize = 80;
-
-/// Soft-wrap one raw line into [`CALL_WRAP_COLS`]-char chunks so a long
-/// single-line command stays fully readable instead of ellipsizing.
-fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
-    if line.chars().count() <= cols {
-        return vec![SharedString::from(line.to_owned())];
-    }
-    line.chars()
-        .collect::<Vec<_>>()
-        .chunks(cols)
-        .map(|chunk| SharedString::from(chunk.iter().collect::<String>()))
-        .collect()
-}
-
-/// Build a chip's full-invocation block — the complete tool call the header
-/// truncates to one line: the whole command, pattern, or URL, todo items one
-/// per line, MCP/unknown input as pretty-printed JSON. Reuses the output
-/// code-block payload so rendering and height stay one implementation.
-pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
-    let text: String = match call {
-        ToolCall::Exec { command } => command.clone(),
-        ToolCall::ReadFile { path } => path.clone(),
-        ToolCall::WriteFile { path, content } => match content {
-            Some(content) => format!("{path}\n{content}"),
-            None => path.clone(),
-        },
-        ToolCall::EditFile { path, .. } => path.clone(),
-        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
-        ToolCall::Search { pattern, path } => match path {
-            Some(path) => format!("{pattern} in {path}"),
-            None => pattern.clone(),
-        },
-        ToolCall::Glob { pattern } => pattern.clone(),
-        ToolCall::WebFetch { url, prompt } => match prompt {
-            Some(prompt) => format!("{url}\n{prompt}"),
-            None => url.clone(),
-        },
-        ToolCall::WebSearch { query } => query.clone(),
-        ToolCall::Todo { items } => items
-            .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        ToolCall::Mcp {
-            server,
-            tool,
-            input,
-        } => match input {
-            Some(input) => format!(
-                "{server} · {tool}\n{}",
-                serde_json::to_string_pretty(input).unwrap_or_default()
-            ),
-            None => format!("{server} · {tool}\nInput details not retained in chat"),
-        },
-        // A script reads as the code it is, not as its JSON-escaped input.
-        ToolCall::Unknown { name, .. } if name == cypher_proto::view::CODEMODE_TOOL => {
-            match cypher_proto::view::codemode_script(call) {
-                Some(code) => code.to_owned(),
-                None => format!("{name}\nInput details not retained in chat"),
-            }
-        }
-        ToolCall::Unknown { name, input } if name == cypher_proto::view::TOOL_SEARCH_TOOL => {
-            match input
-                .as_ref()
-                .and_then(|input| input.get("query"))
-                .and_then(serde_json::Value::as_str)
-            {
-                Some(query) => query.to_owned(),
-                None => format!("{name}\nInput details not retained in chat"),
-            }
-        }
-        ToolCall::Unknown { name, input } => match input {
-            Some(input) => format!(
-                "{name}\n{}",
-                serde_json::to_string_pretty(input).unwrap_or_default()
-            ),
-            None => format!("{name}\nInput details not retained in chat"),
-        },
-    };
-    // Blank lines around the invocation are formatting, not content (a
-    // model's script routinely opens with a newline).
-    let mut lines: Vec<SharedString> = text
-        .lines()
-        .skip_while(|l| l.trim().is_empty())
-        .flat_map(|l| wrap_cols(l, CALL_WRAP_COLS))
-        .collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    let max_lines = if cypher_proto::view::codemode_script(call).is_some() {
-        SCRIPT_DETAIL_MAX_LINES
-    } else {
-        OUTPUT_DETAIL_MAX_LINES
-    };
-    let truncated_by = lines.len().saturating_sub(max_lines);
-    lines.truncate(max_lines);
-    Some(ToolDetail::Output {
-        lines,
-        truncated_by,
-    })
-}
-
-/// Reduce an inline [`cypher_proto::ToolDiff`] to the changes pane's
-/// [`crate::changes::FileDiff`]: hunks grouped with 3 context lines, dual
-/// 1-based line numbers, unified-diff hunk headers, and add/del counts.
-pub fn diff_to_file(diff: &cypher_proto::ToolDiff) -> crate::changes::FileDiff {
-    use crate::changes::{DiffLine, FileDiff, FileStatus, Hunk, LineKind};
-    let old = diff.old_text.as_deref().unwrap_or("");
-    let text_diff = similar::TextDiff::from_lines(old, &diff.new_text);
-    let mut hunks = Vec::new();
-    let (mut additions, mut deletions) = (0u32, 0u32);
-    let mut max_line = 0u32;
-    for group in text_diff.grouped_ops(3) {
-        let (Some(first), Some(last)) = (group.first(), group.last()) else {
-            continue;
-        };
-        let old_range = first.old_range().start..last.old_range().end;
-        let new_range = first.new_range().start..last.new_range().end;
-        let header = format!(
-            "@@ -{},{} +{},{} @@",
-            old_range.start + 1,
-            old_range.len(),
-            new_range.start + 1,
-            new_range.len(),
-        );
-        let mut lines = Vec::new();
-        for op in &group {
-            for change in text_diff.iter_changes(op) {
-                let kind = match change.tag() {
-                    similar::ChangeTag::Delete => {
-                        deletions += 1;
-                        LineKind::Del
-                    }
-                    similar::ChangeTag::Insert => {
-                        additions += 1;
-                        LineKind::Add
-                    }
-                    similar::ChangeTag::Equal => LineKind::Context,
-                };
-                let old_no = change.old_index().map(|n| n as u32 + 1);
-                let new_no = change.new_index().map(|n| n as u32 + 1);
-                max_line = max_line.max(old_no.unwrap_or(0)).max(new_no.unwrap_or(0));
-                lines.push(DiffLine {
-                    kind,
-                    old_no,
-                    new_no,
-                    text: change.value().trim_end_matches('\n').to_owned(),
-                });
-            }
-        }
-        hunks.push(Hunk { header, lines });
-    }
-    FileDiff {
-        path: diff.path.clone(),
-        old_path: None,
-        status: if diff.old_text.is_none() {
-            FileStatus::Added
-        } else {
-            FileStatus::Modified
-        },
-        binary: false,
-        notices: Vec::new(),
-        hunks,
-        additions,
-        deletions,
-        max_line,
-    }
-}
+pub use fold::*;
+pub use gates::*;
+pub use tools::*;
 
 #[derive(Clone)]
 pub enum RowKind {
@@ -534,13 +239,14 @@ pub(super) fn row_match_count(row: &Row, query: &str) -> u32 {
             if text.is_empty() || renders_as_command_chip(text, mentions, attachments) {
                 0
             } else {
-                crate::find::count_matches(text, query)
+                crate::markdown::find::count_matches(text, query)
             }
         }
-        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
-            .blocks
-            .get(*block_ix)
-            .map_or(0, |top| render::count_block_matches(&top.block, query)),
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+            tree.blocks.get(*block_ix).map_or(0, |top| {
+                markdown::render::count_block_matches(&top.block, query)
+            })
+        }
         // Thinking is not searched: a hit inside a collapsed thought could
         // not be shown.
         RowKind::ToolGroup { .. }
@@ -610,141 +316,6 @@ pub enum TranscriptEvent {
 
 impl EventEmitter<TranscriptEvent> for Transcript {}
 
-/// Session Fork affordance state for the timestamp strip's git-branch icon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ForkGate {
-    /// Shown and clickable: the source is a settled Pi root chat.
-    Enabled,
-    /// Shown but inert (dimmed), with the reason for the tooltip.
-    Disabled(&'static str),
-}
-
-/// The fork affordance gate (pure — tests exercise the real gating without a
-/// gpui App). Embedded (Side Chat) panels, offline engines, child chats,
-/// non-Pi configs, live (Working/AwaitingInput) chats, and an OFFLINE SOURCE
-/// HOST DEVICE are all disabled. Remote Pi chats stay ENABLED while their
-/// host is online: the shell relays `ForkSession` to the source chat's host
-/// device.
-pub fn fork_gate(
-    embedded: bool,
-    chat: Option<&Chat>,
-    live: bool,
-    offline: bool,
-    host_online: bool,
-) -> ForkGate {
-    if embedded {
-        return ForkGate::Disabled("Side chats can't be forked.");
-    }
-    if offline {
-        return ForkGate::Disabled("The engine is offline.");
-    }
-    let Some(chat) = chat else {
-        return ForkGate::Disabled("No chat selected.");
-    };
-    if chat.is_child() {
-        return ForkGate::Disabled("Subagent chats can't be forked.");
-    }
-    if chat.config.as_ref().map(|c| c.harness) != Some(HarnessId::Pi) {
-        return ForkGate::Disabled("Only Pi chats can be forked.");
-    }
-    if live {
-        return ForkGate::Disabled("Wait for the chat to finish before forking.");
-    }
-    if !host_online {
-        return ForkGate::Disabled("The device hosting this chat is offline.");
-    }
-    ForkGate::Enabled
-}
-
-/// The fork affordance's tooltip: role-specific while enabled, the disabled
-/// reason otherwise. Enabled text is exactly `Fork before this message` for
-/// User and `Fork after this response` for Assistant.
-pub fn fork_tooltip(role: MessageRole, gate: &ForkGate) -> &'static str {
-    match gate {
-        ForkGate::Disabled(reason) => reason,
-        ForkGate::Enabled => match role {
-            MessageRole::User => "Fork before this message",
-            MessageRole::Assistant => "Fork after this response",
-            // System rows never emit a fork affordance; keep a fallback text
-            // so a misroute is still coherent.
-            MessageRole::System => "Fork after this message",
-        },
-    }
-}
-
-/// The rewind affordance gate (pure, like [`fork_gate`]). Restarting the
-/// conversation from a message runs the SAME pi machinery as a fork — it just
-/// lands in place — so the prerequisites match, worded for a restart. One
-/// extra rule: the NEWEST entry has nothing after it, so restarting there
-/// would delete nothing.
-pub fn rewind_gate(
-    embedded: bool,
-    chat: Option<&Chat>,
-    live: bool,
-    offline: bool,
-    host_online: bool,
-    is_last_entry: bool,
-) -> ForkGate {
-    if embedded {
-        return ForkGate::Disabled("Side chats can't be restarted from a message.");
-    }
-    if offline {
-        return ForkGate::Disabled("The engine is offline.");
-    }
-    let Some(chat) = chat else {
-        return ForkGate::Disabled("No chat selected.");
-    };
-    if chat.is_child() {
-        return ForkGate::Disabled("Subagent chats can't be restarted from a message.");
-    }
-    if chat.config.as_ref().map(|c| c.harness) != Some(HarnessId::Pi) {
-        return ForkGate::Disabled("Only Pi chats can be restarted from a message.");
-    }
-    if live {
-        return ForkGate::Disabled("Wait for the chat to finish before restarting it.");
-    }
-    if !host_online {
-        return ForkGate::Disabled("The device hosting this chat is offline.");
-    }
-    if is_last_entry {
-        return ForkGate::Disabled("Nothing to remove after the last message.");
-    }
-    ForkGate::Enabled
-}
-
-/// The rewind affordance's tooltip. The ARMED text (after the first click)
-/// spells out what the confirming click deletes — the removal is permanent,
-/// so the count is never left implicit.
-pub fn rewind_tooltip(role: MessageRole, gate: &ForkGate, armed: bool, later: usize) -> String {
-    match gate {
-        ForkGate::Disabled(reason) => (*reason).to_string(),
-        ForkGate::Enabled if armed => match role {
-            MessageRole::User => format!(
-                "Click again to delete this message and {} after it",
-                plural_messages(later)
-            ),
-            _ => format!(
-                "Click again to delete {} after this response",
-                plural_messages(later)
-            ),
-        },
-        ForkGate::Enabled => match role {
-            MessageRole::User => {
-                "Restart from here — deletes this message and everything after it".to_string()
-            }
-            _ => "Restart from here — deletes everything after this response".to_string(),
-        },
-    }
-}
-
-fn plural_messages(count: usize) -> String {
-    if count == 1 {
-        "1 message".to_string()
-    } else {
-        format!("{count} messages")
-    }
-}
-
 /// Text copied by the entry-level action, not by a virtualized markdown row.
 /// Keep Markdown intact; tool payloads and input-wizard internals aren't prose.
 pub(super) fn message_copy_text(entry: &SessionMessageEntry) -> Option<String> {
@@ -795,10 +366,10 @@ pub(super) fn message_copy_icon(copied: bool, enabled: bool, theme: &Theme) -> g
     } else {
         theme.text_muted
     };
-    crate::icons::icon(if copied {
-        crate::icons::CHECK
+    crate::kit::icons::icon(if copied {
+        crate::kit::icons::CHECK
     } else {
-        crate::icons::COPY
+        crate::kit::icons::COPY
     })
     .size(px(10.0))
     .text_color(color)
@@ -909,7 +480,7 @@ pub(super) fn user_comments(
     pending: bool,
     theme: &Theme,
     scope: crate::markdown::selection::SelectionScope,
-    selection: Option<render::SelectionUi>,
+    selection: Option<markdown::render::SelectionUi>,
 ) -> gpui::Div {
     let mut list = div()
         .min_w_0()
@@ -959,7 +530,7 @@ fn selectable_text(
     color: gpui::Hsla,
     theme: &Theme,
     scope: crate::markdown::selection::SelectionScope,
-    selection: Option<render::SelectionUi>,
+    selection: Option<markdown::render::SelectionUi>,
 ) -> AnyElement {
     let styled = StyledText::new(text.clone()).with_runs(vec![TextRun {
         len: text.len(),
@@ -974,7 +545,7 @@ fn selectable_text(
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            render::paint_text_selection(
+            markdown::render::paint_text_selection(
                 window, scope, &key, &text, &layout, &sel_theme, selection,
             );
         },
@@ -1435,296 +1006,6 @@ impl EntryRows<'_> {
     }
 }
 
-/// Fold a closed work run — `rows[start..]`, opened by part `first_part` —
-/// behind one [`RowKind::Activity`] row when it mixed tool calls with
-/// thinking. A run of only tools is one group already and a lone thought its
-/// own toggle; both stay as they are.
-fn fold_work_run(
-    rows: &mut Vec<Row>,
-    start: usize,
-    first_part: &str,
-    entry: &SessionMessageEntry,
-    auto_open: bool,
-) {
-    let mut thoughts = 0usize;
-    let mut tools: Vec<(ToolCall, bool)> = Vec::new();
-    for row in &rows[start..] {
-        match &row.kind {
-            RowKind::Thought { .. } => thoughts += 1,
-            RowKind::ToolGroup { tools: group, .. } => {
-                tools.extend(group.iter().map(|t| (t.call.clone(), t.is_error)));
-            }
-            _ => {}
-        }
-    }
-    if thoughts == 0 || tools.is_empty() {
-        return;
-    }
-    for row in &mut rows[start..] {
-        if let RowKind::ToolGroup { nested, .. }
-        | RowKind::Thought { nested, .. }
-        | RowKind::ThoughtBlock { nested, .. } = &mut row.kind
-        {
-            *nested = true;
-            // A thought that gains its first tool call redraws as a chip.
-            row.version ^= 1 << 61;
-        }
-    }
-    let summary = cypher_proto::view::work_summary(&tools, thoughts);
-    let count = rows.len() - start;
-    rows.insert(
-        start,
-        Row {
-            id: format!("{}#{}.activity", entry.id, first_part).into(),
-            version: (fnv1a(summary.as_bytes()) ^ count as u64) << 1 | auto_open as u64,
-            turn_start: false,
-            kind: RowKind::Activity {
-                rows: count,
-                summary: summary.into(),
-                auto_open,
-            },
-            entry_id: entry.id.clone().into(),
-            role: entry.role,
-            timestamp: None,
-            answered: None,
-        },
-    );
-}
-
-/// A thought's label in a work run: its first line, without the heading or
-/// emphasis markers models often title a thought with ("**Planning**").
-pub(super) fn thought_preview(text: &str) -> String {
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default();
-    let mut line = line.trim_start_matches('#').trim_start();
-    for marker in ["**", "__", "*", "_"] {
-        if line.len() > marker.len() * 2 && line.starts_with(marker) && line.ends_with(marker) {
-            line = &line[marker.len()..line.len() - marker.len()];
-            break;
-        }
-    }
-    single_line(line)
-}
-
-/// Order a tool group so each call made from inside another call's run
-/// follows that call, one level deeper. Pi runs the calls a codemode script
-/// makes (`await tools.read(…)`) through its own tool pipeline and reports
-/// each as a tool call whose id is `{caller id}/{n}`; the doc keeps those ids,
-/// so the nesting needs no field of its own — old transcripts nest too, and
-/// viewers that predate this list the same calls flat.
-///
-/// A call whose caller is not in the group (a different group, or an id that
-/// merely contains `/`) stays where it is at depth 0. Siblings keep their
-/// arrival order.
-pub(super) fn nest_tool_calls(items: Vec<(String, ToolItem)>) -> Vec<ToolItem> {
-    let index: HashMap<&str, usize> = items
-        .iter()
-        .enumerate()
-        .map(|(ix, (id, _))| (id.as_str(), ix))
-        .collect();
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
-    let mut roots: Vec<usize> = Vec::new();
-    for (ix, (id, _)) in items.iter().enumerate() {
-        // A caller's id is a strict prefix of its calls' ids, so this never
-        // cycles.
-        match id
-            .rsplit_once('/')
-            .and_then(|(caller, _)| index.get(caller).copied())
-        {
-            Some(caller) => children[caller].push(ix),
-            None => roots.push(ix),
-        }
-    }
-    if roots.len() == items.len() {
-        return items.into_iter().map(|(_, item)| item).collect();
-    }
-    let mut order: Vec<(usize, u8)> = Vec::with_capacity(items.len());
-    let mut stack: Vec<(usize, u8)> = roots.iter().rev().map(|&ix| (ix, 0)).collect();
-    while let Some((ix, depth)) = stack.pop() {
-        order.push((ix, depth));
-        for &child in children[ix].iter().rev() {
-            stack.push((child, depth.saturating_add(1)));
-        }
-    }
-    let mut slots: Vec<Option<ToolItem>> = items.into_iter().map(|(_, item)| Some(item)).collect();
-    order
-        .into_iter()
-        .filter_map(|(ix, depth)| {
-            let mut item = slots[ix].take()?;
-            item.depth = depth;
-            Some(item)
-        })
-        .collect()
-}
-
-/// How many top-level blocks of an append-mode translation's `tree` belong to
-/// the folded original: the original's own blocks plus the separator rule.
-/// `None` unless `text` is `agent`, the separator and a translation that has
-/// begun — until then (and whenever the rendering doesn't parse as expected,
-/// e.g. an original ending inside an open code fence) the text shows whole.
-fn appended_original_blocks(text: &str, agent: &str, tree: &BlockTree) -> Option<usize> {
-    crate::quote_origin::appended_translation(text, agent)?;
-    let rule = tree
-        .blocks
-        .iter()
-        .position(|top| top.range.start >= agent.len())?;
-    (rule > 0 && rule + 1 < tree.blocks.len() && matches!(tree.blocks[rule].block, Block::Rule))
-        .then_some(rule + 1)
-}
-
-/// The rows a toggle covers and whether it starts open: a translation's
-/// original and a thought start closed, a work run only while it streams.
-fn toggle_span(kind: &RowKind) -> Option<(usize, bool)> {
-    match kind {
-        RowKind::TranslationOriginal { blocks } | RowKind::Thought { blocks, .. } => {
-            Some((*blocks, false))
-        }
-        RowKind::Activity {
-            rows, auto_open, ..
-        } => Some((*rows, *auto_open)),
-        _ => None,
-    }
-}
-
-/// Whether the toggle `row` is open: the user's click (`pins`, by row id)
-/// wins, else the toggle's default.
-pub(super) fn toggle_open(row: &Row, pins: &HashMap<SharedString, bool>) -> bool {
-    toggle_span(&row.kind).is_some_and(|(_, default)| pins.get(&row.id).copied().unwrap_or(default))
-}
-
-/// Drop the rows each CLOSED toggle covers — a translation's original, a
-/// thought, a work run. `pins` holds the toggles the user clicked, by row id;
-/// every other toggle keeps its default ([`toggle_span`]). A folded row's
-/// timestamp (a reply that ended while thinking) moves onto its toggle, so
-/// the entry keeps its strip.
-pub fn fold_closed_toggles(rows: &mut Vec<Row>, pins: &HashMap<SharedString, bool>) {
-    let mut hide = 0usize;
-    let mut folded: Vec<Row> = Vec::with_capacity(rows.len());
-    for row in rows.drain(..) {
-        if hide > 0 {
-            hide -= 1;
-            if let (Some(stamp), Some(toggle)) = (row.timestamp, folded.last_mut()) {
-                toggle.timestamp = Some(stamp);
-                toggle.version ^= 1 << 62;
-                if let Some(label) = row.answered {
-                    toggle.version ^= fnv1a(label.text.as_bytes()).rotate_left(1)
-                        ^ u64::from(label.substituted.is_some());
-                    toggle.answered = Some(label);
-                }
-            }
-            continue;
-        }
-        if let Some((covered, _)) = toggle_span(&row.kind)
-            && !toggle_open(&row, pins)
-        {
-            hide = covered;
-        }
-        folded.push(row);
-    }
-    *rows = folded;
-}
-
-/// Cap each open work run the way a tool group caps its chips: keep the
-/// run's LAST `limit` tool calls ([`hidden_tool_count`]) and fold everything
-/// before them — earlier calls and thoughts alike — behind one
-/// [`RowKind::RunOverflow`] row. The cut lands right after the last hidden
-/// call, so the thinking that led into the first kept one stays; a cut inside
-/// a tool group hides that group's leading chips (`skip`). `revealed` holds
-/// the runs the user unfolded, by [`RowKind::Activity`] row id: they show
-/// whole, under a row that folds them back.
-///
-/// Runs after [`fold_closed_toggles`]: a closed run has no rows left to cap.
-pub fn cap_work_runs(
-    rows: &mut Vec<Row>,
-    limit: u32,
-    revealed: &std::collections::HashSet<SharedString>,
-) {
-    let mut ix = 0;
-    while ix < rows.len() {
-        if !matches!(rows[ix].kind, RowKind::Activity { .. }) {
-            ix += 1;
-            continue;
-        }
-        let run = rows[ix].id.clone();
-        let start = ix + 1;
-        let end = start
-            + rows[start..]
-                .iter()
-                .take_while(|row| is_nested(&row.kind))
-                .count();
-        let total: usize = rows[start..end]
-            .iter()
-            .map(|row| match &row.kind {
-                RowKind::ToolGroup { tools, .. } => tools.len(),
-                _ => 0,
-            })
-            .sum();
-        let is_revealed = revealed.contains(&run);
-        let hidden = hidden_tool_count(total, limit, is_revealed);
-        if hidden == 0 && !(is_revealed && hidden_tool_count(total, limit, false) > 0) {
-            ix = end;
-            continue;
-        }
-        // `rows[start..cut]` fold away whole; `skip` chips of `rows[cut]` too.
-        let (mut cut, mut left, mut skip, mut thoughts) = (start, hidden, 0, 0);
-        while left > 0 {
-            match &rows[cut].kind {
-                RowKind::ToolGroup { tools, .. } if tools.len() > left => {
-                    skip = left;
-                    break;
-                }
-                RowKind::ToolGroup { tools, .. } => left -= tools.len(),
-                RowKind::Thought { .. } => thoughts += 1,
-                _ => {}
-            }
-            cut += 1;
-        }
-        let group = &mut rows[cut];
-        if let RowKind::ToolGroup {
-            skip: group_skip, ..
-        } = &mut group.kind
-            && skip > 0
-        {
-            *group_skip = skip;
-            group.version ^= (skip as u64) << 48;
-        }
-        let overflow = Row {
-            id: format!("{run}.overflow").into(),
-            version: (hidden as u64) << 32 | thoughts as u64,
-            turn_start: false,
-            kind: RowKind::RunOverflow {
-                run,
-                tools: hidden,
-                thoughts,
-            },
-            entry_id: rows[ix].entry_id.clone(),
-            role: rows[ix].role,
-            timestamp: None,
-            answered: None,
-        };
-        rows.splice(start..cut, [overflow]);
-        ix = end - (cut - start) + 1;
-    }
-}
-
-/// The label of a work run's [`RowKind::RunOverflow`] row: what it folds
-/// away, or — for a revealed run (`tools == 0`) — that it folds it back.
-pub(super) fn run_overflow_label(tools: usize, thoughts: usize) -> String {
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    match (tools, thoughts) {
-        (0, _) => "Show fewer tool calls".to_string(),
-        (tools, 0) => format!("Show {tools} earlier tool call{}", plural(tools)),
-        (tools, thoughts) => format!(
-            "Show {tools} earlier tool call{} and {thoughts} thought{}",
-            plural(tools),
-            plural(thoughts)
-        ),
-    }
-}
-
 /// How [`parse_for_row`] produced its tree — carries the incremental parser's
 /// work counters so callers (and tests) can see that per-append parse work is
 /// bounded by the reparsed tail, never the whole accumulated reply.
@@ -1803,7 +1084,7 @@ fn part_prefix(id: &str) -> &str {
 /// live→split handoff cannot shift a pixel; the block gap otherwise.
 #[cfg(test)]
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
-    top_gap_for_style(prev, row, GAP_TURN, render::MD_BLOCK_GAP)
+    top_gap_for_style(prev, row, GAP_TURN, markdown::render::MD_BLOCK_GAP)
 }
 
 pub(super) fn top_gap_for_style(

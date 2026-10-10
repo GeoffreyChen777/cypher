@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use super::device_target::DeviceTarget;
 use super::widgets;
 use crate::{
-    composer::{ComposerInput, ComposerInputEvent},
-    popover::{self, Loadable},
+    kit::popover::{self, Loadable},
+    kit::theme::Theme,
     state::AppState,
-    theme::Theme,
+    widgets::text_input::{TextInput, TextInputEvent},
 };
 
 /// Offering a language the offline detector cannot judge is worse than not
@@ -37,16 +37,16 @@ const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
     ("Chinese", "Chinese"),
 ];
 
-pub struct TranslationSettings {
+pub struct TranslationControl {
     state: Entity<AppState>,
     target: Entity<DeviceTarget>,
     generation: u64,
     settings: Loadable<PiTranslationSettings>,
     models: Loadable<Vec<Model>>,
-    source: Entity<ComposerInput>,
-    target_language: Entity<ComposerInput>,
-    translation_search: Entity<ComposerInput>,
-    session_search: Entity<ComposerInput>,
+    source: Entity<TextInput>,
+    target_language: Entity<TextInput>,
+    translation_search: Entity<TextInput>,
+    session_search: Entity<TextInput>,
     translation_model: String,
     enabled_models: Vec<String>,
     output_mode: TranslationOutputMode,
@@ -66,22 +66,22 @@ pub struct TranslationSettings {
     _input_observers: Vec<Subscription>,
 }
 
-impl TranslationSettings {
+impl TranslationControl {
     pub fn new(
         state: Entity<AppState>,
         target: Entity<DeviceTarget>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let source = cx.new(|cx| ComposerInput::settings_field("auto or Chinese", false, cx));
-        let target_language = cx.new(|cx| ComposerInput::settings_field("English", false, cx));
+        let source = cx.new(|cx| TextInput::settings_field("auto or Chinese", false, cx));
+        let target_language = cx.new(|cx| TextInput::settings_field("English", false, cx));
         let translation_search =
-            cx.new(|cx| ComposerInput::settings_field("Search available models…", false, cx));
+            cx.new(|cx| TextInput::settings_field("Search available models…", false, cx));
         let session_search =
-            cx.new(|cx| ComposerInput::settings_field("Search available models…", false, cx));
+            cx.new(|cx| TextInput::settings_field("Search available models…", false, cx));
         let mut input_observers = Vec::new();
         for input in [&translation_search, &session_search] {
             input_observers.push(cx.subscribe(input, |_: &mut Self, _, event, cx| {
-                if matches!(event, ComposerInputEvent::Edited) {
+                if matches!(event, TextInputEvent::Edited) {
                     cx.notify();
                 }
             }));
@@ -265,7 +265,7 @@ impl TranslationSettings {
         // One in-flight save and one latest draft: rapid multi-select changes
         // stay interactive without out-of-order writes overwriting newer edits.
         if self.busy {
-            *self.pending_save.lock().unwrap() = Some(settings);
+            *crate::kit::lock(&self.pending_save) = Some(settings);
             cx.notify();
             return;
         }
@@ -290,7 +290,7 @@ impl TranslationSettings {
                         ticket.params(serde_json::to_value(&settings).unwrap_or_default()),
                     )
                     .await;
-                let next = pending.lock().unwrap().take();
+                let next = crate::kit::lock(&pending).take();
                 this.update(cx, |page, cx| {
                     if !page.target.read(cx).matches(&ticket) {
                         return;
@@ -320,7 +320,7 @@ impl TranslationSettings {
     }
 }
 
-impl TranslationSettings {
+impl TranslationControl {
     fn toggle_language_menu(&mut self, source: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.target.read(cx).can_write(cx) {
             return;
@@ -396,7 +396,7 @@ impl TranslationSettings {
             )
             .child(div().w(px(16.0)).when(selected, |row| {
                 row.child(
-                    crate::icons::icon(crate::icons::CHECK)
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
                         .size(px(12.0))
                         .text_color(theme.accent),
                 )
@@ -561,7 +561,7 @@ impl TranslationSettings {
             )
             .child(div().w(px(16.0)).when(selected, |row| {
                 row.child(
-                    crate::icons::icon(crate::icons::CHECK)
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
                         .size(px(12.0))
                         .text_color(theme.accent),
                 )
@@ -720,7 +720,7 @@ fn dropdown_trigger(
                 .child(label),
         )
         .child(
-            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+            crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                 .size(px(12.0))
                 .text_color(theme.text_muted),
         )
@@ -752,7 +752,7 @@ fn mode_button(
         .child(label)
 }
 
-impl Render for TranslationSettings {
+impl Render for TranslationControl {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let Loadable::Ready(_) = self.settings.clone() else {
@@ -832,7 +832,7 @@ impl Render for TranslationSettings {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
-                    .child(widgets::row_tile(&theme, crate::icons::GLOBAL))
+                    .child(widgets::row_tile(&theme, crate::kit::icons::GLOBAL))
                     .child(
                         div()
                             .flex_1()
@@ -891,7 +891,7 @@ impl Render for TranslationSettings {
                                     .children(source_popup),
                                 )
                                 .child(
-                                    crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                                    crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_RIGHT)
                                         .size(px(14.0))
                                         .text_color(theme.text_muted),
                                 )

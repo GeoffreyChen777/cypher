@@ -2,10 +2,11 @@
 //! Dragging changes a local draft; release writes through the existing HEX
 //! input, so validation, persistence errors and region scoping stay centralized.
 use crate::{
-    chat_style,
-    composer::{ComposerInput, ComposerInputEvent},
-    icons, popover,
-    theme::Theme,
+    appearance::chat_style,
+    kit::icons,
+    kit::popover,
+    kit::theme::Theme,
+    widgets::text_input::{TextInput, TextInputEvent},
 };
 use gpui::{
     AppContext, Bounds, Context, Entity, FocusHandle, Hsla, MouseButton, Pixels, Point, Render,
@@ -90,8 +91,8 @@ const PALETTE: [u32; 16] = [
 ];
 
 pub(super) struct ColorPicker {
-    output: Entity<ComposerInput>,
-    input: Entity<ComposerInput>,
+    output: Entity<TextInput>,
+    input: Entity<TextInput>,
     value: Hsla,
     hsv: Hsv,
     draft_hex: String,
@@ -107,15 +108,10 @@ pub(super) struct ColorPicker {
     _subscription: Subscription,
 }
 impl ColorPicker {
-    pub fn new(output: Entity<ComposerInput>, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| ComposerInput::settings_field("#RRGGBB", false, cx));
+    pub fn new(output: Entity<TextInput>, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| TextInput::settings_field("#RRGGBB", false, cx));
         let subscription = cx.subscribe(&input, |this: &mut Self, input, event, cx| {
-            if !this.open
-                || !matches!(
-                    event,
-                    ComposerInputEvent::Edited | ComposerInputEvent::Submitted
-                )
-            {
+            if !this.open || !matches!(event, TextInputEvent::Edited | TextInputEvent::Submitted) {
                 return;
             }
             let raw = input.read(cx).text().to_string();

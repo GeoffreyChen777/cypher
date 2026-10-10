@@ -296,7 +296,7 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&cypher_proto::FolderEntry> 
 /// id with the Context Window trait pinned to 1M. Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
-pub(crate) fn normalize_model_rows(models: Vec<Model>) -> Vec<Model> {
+pub fn normalize_model_rows(models: Vec<Model>) -> Vec<Model> {
     fn strip_1m(id: &str) -> Option<&str> {
         id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
     }
@@ -347,16 +347,18 @@ pub(crate) fn normalize_model_rows(models: Vec<Model>) -> Vec<Model> {
         .collect()
 }
 
-pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
+pub fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
         HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
+        HarnessId::Codex => (crate::kit::icons::OPENAI_MARK, None),
         // Retired harnesses without a brand asset (legacy chats only).
-        HarnessId::Cursor | HarnessId::Grok | HarnessId::Hermes => (crate::icons::GLOBAL, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Cursor | HarnessId::Grok | HarnessId::Hermes => {
+            (crate::kit::icons::GLOBAL, None)
+        }
+        HarnessId::Pi => (crate::kit::icons::PI_MARK, None),
     }
 }
 

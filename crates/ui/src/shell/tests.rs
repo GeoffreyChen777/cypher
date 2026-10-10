@@ -17,8 +17,8 @@ fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::Tes
     let engine_bytes = std::fs::read(UiSettings::path(engine.path())).unwrap();
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| state.data_dir = Some(ui.path().into()));
@@ -52,7 +52,7 @@ fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::Tes
 fn every_default_shortcut_binds_on_this_platform() {
     // `apply_keymap` silently falls back on an unparseable combo, so a
     // default gpui cannot parse would ship as a dead shortcut.
-    for id in crate::settings::ShortcutId::ALL {
+    for id in crate::prefs::ShortcutId::ALL {
         let combo = platform_combo(id.default_combo());
         assert!(
             Keystroke::parse(&combo).is_ok(),
@@ -79,8 +79,8 @@ fn test_shell(cx: &mut gpui::TestAppContext) -> (Entity<Shell>, Entity<AppState>
 fn test_shell_in(ui: PathBuf, cx: &mut gpui::TestAppContext) -> (Entity<Shell>, Entity<AppState>) {
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
         let boot = EngineBootConfig {
@@ -320,7 +320,7 @@ fn boot_restores_the_saved_layout_and_docks(cx: &mut gpui::TestAppContext) {
         workspace: Some(saved),
         session_docks: std::collections::HashMap::from([(
             "b".to_string(),
-            crate::settings::SessionDock {
+            crate::prefs::SessionDock {
                 right: Some(0.5),
                 right_open: true,
                 used_at: 1,
@@ -477,7 +477,7 @@ fn a_session_leaving_the_screen_drops_the_comment_popup(cx: &mut gpui::TestAppCo
                 "quote".into(),
                 None,
                 gpui::point(px(10.0), px(10.0)),
-                crate::comments::CommentOwner::next_terminal(),
+                crate::comment_popup::CommentOwner::next_terminal(),
                 None,
                 std::rc::Rc::new(|_| {}),
                 None,
@@ -542,8 +542,8 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
     let ui = tempfile::tempdir().unwrap().keep();
     cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
     });
     let state = cx.new(|_| AppState::new());
@@ -610,7 +610,7 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
 
 #[test]
 fn workspace_shortcuts_parse() {
-    let defaults = crate::settings::ShortcutId::ALL
+    let defaults = crate::prefs::ShortcutId::ALL
         .into_iter()
         .map(|id| id.default_combo());
     for combo in defaults.chain(FOCUS_TILE_KEYS) {

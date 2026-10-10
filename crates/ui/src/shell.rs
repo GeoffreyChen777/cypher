@@ -28,13 +28,19 @@ use cypher_rpc::methods;
 use gpui_tokio::Tokio;
 
 use crate::changes::{Changes, ChangesEvent};
-use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use crate::composer::{Composer, ComposerEvent};
 use crate::files::FilesPanel;
-use crate::icons::{self, cypher_app_icon, icon};
-use crate::loaders;
-use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
-use crate::popover::{self, Loadable};
-use crate::rail;
+use crate::kit::icons::{self, cypher_app_icon, icon};
+use crate::kit::loaders;
+use crate::kit::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
+use crate::pickers::AddSpacePalette;
+use crate::prefs::slash_commands::ProviderIntent;
+use crate::prefs::{
+    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
+    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+};
 use crate::settings::appearance::AppearancePage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::commands::{CommandsEvent, CommandsPage};
@@ -43,25 +49,27 @@ use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
-use crate::settings::providers::{ProviderIntent, ProvidersPage};
+use crate::settings::providers::ProvidersPage;
 use crate::settings::setup::{SetupEvent, SetupPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::subagents::SubagentsPage;
-use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
-    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
-};
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     OrgSetup, format_time_ago, org_setup, parse_orgs,
 };
 use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
-use crate::theme::Theme;
+use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
+#[cfg(feature = "dev-capture")]
+mod dev_capture;
 mod dock;
+pub mod menus;
 mod nav;
+mod notification_activity;
+pub mod notify;
 mod org_gate;
 mod overlays;
 mod render;
@@ -82,7 +90,6 @@ actions!(
     [
         ToggleSidebar,
         ToggleChanges,
-        AddSpacePalette,
         FindInChat,
         NewSession,
         NextSession,
@@ -202,14 +209,14 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         }
     }
     cx.clear_key_bindings();
-    crate::composer::init(cx);
+    crate::widgets::text_input::init(cx);
     crate::transcript::init(cx);
     crate::files::editor::init(cx);
     // Fixed app-level shortcuts (⌘Q quit, ⌘W close, ⌘M minimize, ⌘H hide) —
     // these back the native menu key equivalents and must survive keymap
     // re-application.
-    crate::app_menus::bind_keys(cx);
-    use crate::settings::ShortcutId;
+    crate::shell::menus::bind_keys(cx);
+    use crate::prefs::ShortcutId;
     let bind = |id: ShortcutId, action: Box<dyn gpui::Action>| {
         let combo = valid_or_default(keymap.get(id), id.default_combo());
         KeyBinding::load(
@@ -253,7 +260,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // Fixed: ⌘, opens Settings (macOS convention).
         KeyBinding::new(
             &platform_combo("mod-,"),
-            crate::app_menus::OpenSettings,
+            crate::shell::menus::OpenSettings,
             None,
         ),
     ]);
@@ -555,7 +562,7 @@ enum SplashPhase {
 /// The chat-row Rename dialog.
 struct RenameChatDialog {
     chat_id: String,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     /// Focus the input on the dialog's first paint (opened without window access).
     focus_pending: bool,
     _events: Subscription,
@@ -1142,7 +1149,7 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
-    notification_activity: crate::notification_activity::DesktopActivity,
+    notification_activity: crate::shell::notification_activity::DesktopActivity,
     /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
     /// [`Shell::new`].
     debug_dialog: Option<String>,
@@ -1180,7 +1187,7 @@ pub struct Shell {
     /// Shared floating Comment pill/editor: rendered above every
     /// clipped surface; surfaces (transcript, diff panes, terminals) drive
     /// it through the weak handles they hold.
-    comment_popup: Entity<crate::comments::CommentPopup>,
+    comment_popup: Entity<crate::comment_popup::CommentPopup>,
     /// CommentPopup → composer comment forwarding (subscribed ONCE).
     _comment_popup_events: Subscription,
     /// The project a project window is dedicated to; `None` in the main
@@ -1310,9 +1317,9 @@ impl Shell {
         });
         // The shared comment popup is created FIRST so every surface can
         // hold a weak handle to it.
-        let comment_popup = cx.new(crate::comments::CommentPopup::new);
+        let comment_popup = cx.new(crate::comment_popup::CommentPopup::new);
         if main_window {
-            crate::settings::commands::publish_shown(Vec::new(), cx);
+            crate::prefs::slash_commands::publish_shown(Vec::new(), cx);
         }
         // Lists-only: the session tiles' contexts own the transcripts; this
         // state's selection just follows the focused tile.
@@ -1324,51 +1331,53 @@ impl Shell {
         // settled (each surface captured it); the composer's guard still
         // drops a comment whose chat is no longer selected.
         let comment_popup_events = cx.subscribe(&comment_popup, {
-            move |this: &mut Shell, _, event: &crate::comments::CommentPopupEvent, cx| match event {
-                crate::comments::CommentPopupEvent::CommentSaved {
-                    chat_id,
-                    quote,
-                    origin,
-                    comment,
-                } => {
-                    let Some(composer) = this
-                        .slot_for_chat(chat_id, cx)
-                        .and_then(|sid| this.slots.get(&sid))
-                        .map(|slot| slot.composer.clone())
-                    else {
-                        return;
-                    };
-                    composer.update(cx, |composer, cx| {
-                        composer.add_comment(
+            move |this: &mut Shell, _, event: &crate::comment_popup::CommentPopupEvent, cx| {
+                match event {
+                    crate::comment_popup::CommentPopupEvent::CommentSaved {
+                        chat_id,
+                        quote,
+                        origin,
+                        comment,
+                    } => {
+                        let Some(composer) = this
+                            .slot_for_chat(chat_id, cx)
+                            .and_then(|sid| this.slots.get(&sid))
+                            .map(|slot| slot.composer.clone())
+                        else {
+                            return;
+                        };
+                        composer.update(cx, |composer, cx| {
+                            composer.add_comment(
+                                chat_id.clone(),
+                                quote.clone(),
+                                origin.clone(),
+                                comment.clone(),
+                                cx,
+                            )
+                        });
+                    }
+                    crate::comment_popup::CommentPopupEvent::SideChatRequested {
+                        chat_id,
+                        source,
+                        selected_text,
+                        origin,
+                    } => {
+                        // Open a temporary Side Chat from the settled
+                        // selection (the shell owns the StartSideChat call and
+                        // the dock tab). The selected quote rides along so the
+                        // engine validates + injects it on the first send.
+                        let Some(sid) = this.slot_for_chat(chat_id, cx) else {
+                            return;
+                        };
+                        this.open_side_chat(
+                            sid,
                             chat_id.clone(),
-                            quote.clone(),
+                            source.clone(),
+                            selected_text.clone(),
                             origin.clone(),
-                            comment.clone(),
                             cx,
-                        )
-                    });
-                }
-                crate::comments::CommentPopupEvent::SideChatRequested {
-                    chat_id,
-                    source,
-                    selected_text,
-                    origin,
-                } => {
-                    // Open a temporary Side Chat from the settled
-                    // selection (the shell owns the StartSideChat call and
-                    // the dock tab). The selected quote rides along so the
-                    // engine validates + injects it on the first send.
-                    let Some(sid) = this.slot_for_chat(chat_id, cx) else {
-                        return;
-                    };
-                    this.open_side_chat(
-                        sid,
-                        chat_id.clone(),
-                        source.clone(),
-                        selected_text.clone(),
-                        origin.clone(),
-                        cx,
-                    );
+                        );
+                    }
                 }
             }
         });
@@ -1412,7 +1421,7 @@ impl Shell {
             Some(project) => settings.project_workspaces.get(project).cloned(),
         };
         if main_window {
-            crate::settings::commands::publish_shown(settings.shown_slash_commands.clone(), cx);
+            crate::prefs::slash_commands::publish_shown(settings.shown_slash_commands.clone(), cx);
             // Bind the customizable shortcuts from the persisted keymap.
             apply_keymap(cx, &settings.keymap);
         }

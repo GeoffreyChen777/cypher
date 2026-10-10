@@ -280,7 +280,7 @@ impl Shell {
                         |this: &mut Shell, _, event: &CommandsEvent, cx| {
                             let CommandsEvent::Changed(shown) = event;
                             this.settings.shown_slash_commands = shown.clone();
-                            crate::settings::commands::publish_shown(shown.clone(), cx);
+                            crate::prefs::slash_commands::publish_shown(shown.clone(), cx);
                             this.schedule_save(cx);
                             cx.notify();
                         },

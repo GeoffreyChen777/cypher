@@ -173,9 +173,9 @@ impl Pickers {
     /// target as a folder-with-files. Kept free for focused tests.
     pub(super) fn checkout_kind_icon(is_current_checkout: bool) -> &'static str {
         if is_current_checkout {
-            crate::icons::FOLDER
+            crate::kit::icons::FOLDER
         } else {
-            crate::icons::FOLDER_WITH_FILES
+            crate::kit::icons::FOLDER_WITH_FILES
         }
     }
 

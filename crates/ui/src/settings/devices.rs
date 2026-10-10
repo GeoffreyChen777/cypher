@@ -16,20 +16,10 @@ use std::time::{Duration, Instant};
 use cypher_proto::WorkspaceScope;
 use cypher_rpc::methods;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::popover;
-use crate::state::AppState;
-use crate::theme::{MonoStyled, Theme};
-
-/// A device that pinged within this window shows a presence dot (engines
-/// heartbeat every 15s; 70s tolerates a couple of missed beats).
-pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
-
-/// Presence: last-seen within the online window (future timestamps count). Pure.
-pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    last_seen
-        .is_some_and(|at| now.signed_duration_since(at).num_seconds() <= DEVICE_ONLINE_WINDOW_SECS)
-}
+use crate::kit::popover;
+use crate::kit::theme::{MonoStyled, Theme};
+use crate::state::{AppState, device_online};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -139,7 +129,7 @@ pub fn is_busy_error(message: &str) -> bool {
 
 struct RenameDialog {
     device_id: String,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     _events: Subscription,
 }
 
@@ -184,10 +174,10 @@ impl DevicesPage {
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
-        let input = cx.new(|cx| ComposerInput::new("Device name", cx));
+        let input = cx.new(|cx| TextInput::new("Device name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.submit_rename(cx);
             }
         });
@@ -605,10 +595,10 @@ impl Render for DevicesPage {
                     _ => None,
                 };
                 let platform_icon = match device.platform.as_str() {
-                    "macos" | "darwin" => crate::icons::LAPTOP,
-                    "web" => crate::icons::GLOBAL,
-                    "ios" | "android" => crate::icons::SMARTPHONE,
-                    _ => crate::icons::MONITOR,
+                    "macos" | "darwin" => crate::kit::icons::LAPTOP,
+                    "web" => crate::kit::icons::GLOBAL,
+                    "ios" | "android" => crate::kit::icons::SMARTPHONE,
+                    _ => crate::kit::icons::MONITOR,
                 };
                 // Presence lives ON the identity tile: a corner dot (emerald
                 // online with a soft glow, faint offline), ringed by the card
@@ -633,7 +623,7 @@ impl Render for DevicesPage {
                                 inset: false,
                             }])
                         })
-                        .when(!online, |el| el.bg(crate::theme::ink(0.22))),
+                        .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
                 );
                 // One quiet meta line: platform · version · (offline: last
                 // seen) · id chip.
@@ -761,9 +751,11 @@ impl Render for DevicesPage {
                                     }
                                 }))
                                 .child(
-                                    crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
-                                        .size(px(14.0))
-                                        .text_color(theme.accent),
+                                    crate::kit::icons::icon(
+                                        crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
+                                    )
+                                    .size(px(14.0))
+                                    .text_color(theme.accent),
                                 )
                                 .child(SharedString::from(label)),
                         )
@@ -777,14 +769,14 @@ impl Render for DevicesPage {
                             .opacity(0.7)
                             .hover(|s| {
                                 s.opacity(1.0)
-                                    .bg(crate::theme::ink(0.06))
+                                    .bg(crate::kit::theme::ink(0.06))
                                     .text_color(theme.text)
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_rename(rename_id.clone(), rename_name.clone(), cx);
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::PEN)
+                                crate::kit::icons::icon(crate::kit::icons::PEN)
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
@@ -804,9 +796,11 @@ impl Render for DevicesPage {
                                     this.open_delete(remove_id.clone(), cx);
                                 }))
                                 .child(
-                                    crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
-                                        .size(px(14.0))
-                                        .text_color(theme.danger),
+                                    crate::kit::icons::icon(
+                                        crate::kit::icons::TRASH_BIN_MINIMALISTIC,
+                                    )
+                                    .size(px(14.0))
+                                    .text_color(theme.danger),
                                 )
                                 .child(SharedString::from("Remove")),
                         )
@@ -863,7 +857,7 @@ impl Render for DevicesPage {
                                         .when(checking, |el| el.opacity(0.6))
                                         .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
                                         .child(
-                                            crate::icons::icon(crate::icons::REFRESH)
+                                            crate::kit::icons::icon(crate::kit::icons::REFRESH)
                                                 .size(px(14.0))
                                                 .text_color(theme.text_muted),
                                         )
@@ -886,8 +880,8 @@ impl Render for DevicesPage {
                                                 cx.listener(|this, _, _, cx| this.apply_all(cx)),
                                             )
                                             .child(
-                                                crate::icons::icon(
-                                                    crate::icons::ARCHIVE_UP_MINIMALISTIC,
+                                                crate::kit::icons::icon(
+                                                    crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
                                                 )
                                                 .size(px(14.0))
                                                 .text_color(theme.accent),
@@ -921,17 +915,6 @@ impl Render for DevicesPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-
-    #[test]
-    fn presence_window() {
-        let now = Utc::now();
-        assert!(device_online(Some(now - TimeDelta::seconds(10)), now));
-        assert!(device_online(Some(now - TimeDelta::seconds(70)), now));
-        assert!(!device_online(Some(now - TimeDelta::seconds(71)), now));
-        assert!(!device_online(None, now));
-        // Clock skew (future) counts as online.
-        assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
-    }
 
     #[test]
     fn last_seen_formatting() {

@@ -37,10 +37,10 @@ use cypher_proto::{
     SessionStatus, SubagentRun, SubagentRunMode, SubagentRunStatus, view::subagent_call_info,
 };
 
-use crate::motion;
-use crate::popover::{self, Popup};
+use crate::kit::motion;
+use crate::kit::popover::{self, Popup};
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::state::AppState;
-use crate::theme::{MonoStyled, Theme};
 
 /// A running/async-started entry whose freshness went quiet is stale past
 /// this (matches the session staleness window).
@@ -674,7 +674,7 @@ impl SubagentsPanel {
                     div()
                         .h(px(1.0))
                         .flex_none()
-                        .bg(crate::theme::hairline(0.05)),
+                        .bg(crate::kit::theme::hairline(0.05)),
                 );
             }
             let row = inspector_row(theme, entry, running_delta);
@@ -701,7 +701,7 @@ impl SubagentsPanel {
                         .bg(motion::hover_blend(
                             &hover_id,
                             gpui::transparent_black(),
-                            crate::theme::ink(0.05),
+                            crate::kit::theme::ink(0.05),
                         ))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let child = click_child.clone();
@@ -709,7 +709,7 @@ impl SubagentsPanel {
                         }));
                     if active == Some(ix) {
                         // The focused row highlight (distinct from hover).
-                        row_wrap = row_wrap.bg(crate::theme::ink(0.09));
+                        row_wrap = row_wrap.bg(crate::kit::theme::ink(0.09));
                     }
                     row_wrap.child(row).into_any_element()
                 }
@@ -717,7 +717,7 @@ impl SubagentsPanel {
                     let row_wrap = div();
                     if active == Some(ix) {
                         row_wrap
-                            .bg(crate::theme::ink(0.09))
+                            .bg(crate::kit::theme::ink(0.09))
                             .child(row)
                             .into_any_element()
                     } else {
@@ -785,7 +785,7 @@ impl SubagentsPanel {
                 div()
                     .h(px(1.0))
                     .flex_none()
-                    .bg(crate::theme::hairline(0.07)),
+                    .bg(crate::kit::theme::hairline(0.07)),
             )
             .child(
                 div()
@@ -889,7 +889,7 @@ fn inspector_row(
                 .size(px(18.0))
                 .flex_none()
                 .rounded(px(5.0))
-                .bg(crate::theme::ink(0.06))
+                .bg(crate::kit::theme::ink(0.06))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1061,7 +1061,7 @@ impl Render for SubagentsPanel {
             .bg(motion::hover_blend(
                 &trigger_fade,
                 backing,
-                backing.blend(crate::theme::ink(0.06)),
+                backing.blend(crate::kit::theme::ink(0.06)),
             ))
             .on_hover(motion::hover_listener(trigger_fade.clone()))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -1116,7 +1116,7 @@ impl Render for SubagentsPanel {
             ));
         }
 
-        crate::frost::composer_accessory(trigger).into_any_element()
+        crate::kit::frost::composer_accessory(trigger).into_any_element()
     }
 }
 

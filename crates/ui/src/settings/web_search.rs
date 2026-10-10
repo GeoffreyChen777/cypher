@@ -11,11 +11,11 @@ use gpui::{
 
 use super::{device_target::DeviceTarget, widgets};
 use crate::{
-    composer::{ComposerInput, ComposerInputEvent},
-    icons,
-    popover::{self, Loadable},
+    kit::icons,
+    kit::popover::{self, Loadable},
+    kit::theme::Theme,
     state::AppState,
-    theme::Theme,
+    widgets::text_input::{TextInput, TextInputEvent},
 };
 
 pub struct WebSearchFallbackControl {
@@ -24,7 +24,7 @@ pub struct WebSearchFallbackControl {
     generation: u64,
     settings: Loadable<WebSearchFallbackSettings>,
     models: Loadable<Vec<Model>>,
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     busy: bool,
     error: Option<String>,
     task: Option<Task<()>>,
@@ -54,9 +54,9 @@ impl WebSearchFallbackControl {
             }
             cx.notify();
         });
-        let search = cx.new(|cx| ComposerInput::settings_field("Search models…", false, cx));
+        let search = cx.new(|cx| TextInput::settings_field("Search models…", false, cx));
         let search_observer = cx.subscribe(&search, |_: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 cx.notify();
             }
         });

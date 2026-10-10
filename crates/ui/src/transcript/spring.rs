@@ -28,10 +28,10 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// The top fade band a tile's transcript scrolls under: the session tile's
 /// header is a normal row above the viewport, and content is fully faded at
 /// the header's bottom edge, opaque this far below it.
-pub(crate) const TOP_CHROME_PX: f32 = 20.0;
+pub const TOP_CHROME_PX: f32 = 20.0;
 /// A freshly-sent prompt rests this far below the transcript viewport's top:
 /// clear of the top fade band, plus the first row's 10px breathing room.
-pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = TOP_CHROME_PX + 10.0;
+pub const OWN_SEND_TOP_INSET_PX: f32 = TOP_CHROME_PX + 10.0;
 /// Embedded (temporary Side Chat) own-turn top inset: no titlebar chrome
 /// above the panel, so the held prompt rests at a compact top gap.
 pub(super) const EMBEDDED_TOP_INSET_PX: f32 = 10.0;
@@ -103,7 +103,7 @@ impl StickSpring {
     }
 
     #[cfg(test)]
-    pub(crate) fn target_vel(&self) -> f32 {
+    pub fn target_vel(&self) -> f32 {
         self.target_vel
     }
 

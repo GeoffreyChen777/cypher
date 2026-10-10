@@ -39,7 +39,7 @@ impl Composer {
     /// Warm [`Self::slash_cache`] without opening the popup, so the first `/`
     /// is not a cold `pi --mode rpc` spawn.
     pub(super) fn prefetch_slash_commands(&mut self, cx: &mut Context<Self>) {
-        if !crate::settings::commands::any_shown_in_app(cx) {
+        if !crate::prefs::slash_commands::any_shown_in_app(cx) {
             return;
         }
         self.sync_slash_owner(cx);
@@ -96,15 +96,15 @@ impl Composer {
         if let Some(token) = slash_token(text, cursor) {
             return (Some(token), None);
         }
-        let Some(choice) = crate::slash_menu::choice_token(text, cursor) else {
+        let Some(choice) = crate::composer::slash_menu::choice_token(text, cursor) else {
             return (None, None);
         };
         let offered = harness
             .and_then(|harness| self.slash_cache.get(&harness))
             .is_some_and(|commands| commands.iter().any(|c| c.name == choice.command));
         if !offered
-            || crate::slash_menu::choices(&choice.command).is_empty()
-            || !crate::settings::commands::shows_in_app(cx, &choice.command)
+            || crate::composer::slash_menu::choices(&choice.command).is_empty()
+            || !crate::prefs::slash_commands::shows_in_app(cx, &choice.command)
         {
             return (None, None);
         }
@@ -130,7 +130,7 @@ impl Composer {
             == HarnessId::Pi;
         let relevant = ["fast", "scripts", "orchestrate", "goal"]
             .iter()
-            .any(|name| crate::settings::commands::shows_in_app(cx, name));
+            .any(|name| crate::prefs::slash_commands::shows_in_app(cx, name));
         if !pi || !relevant || !matches!(self.transport, ComposerTransport::Main) {
             return;
         }
@@ -204,7 +204,7 @@ impl Composer {
         // No resolved harness (catalog still loading): the actions only, no
         // fetch. Nor is the agent's list worth a fetch (a cold Pi spawn) when
         // none of its commands is turned on: the menu has only the actions.
-        let Some(harness) = harness.filter(|_| crate::settings::commands::any_shown_in_app(cx))
+        let Some(harness) = harness.filter(|_| crate::prefs::slash_commands::any_shown_in_app(cx))
         else {
             self.slash.loading = false;
             self.refilter_slash(cx);
@@ -270,7 +270,7 @@ impl Composer {
             .map(|t| t.query.clone())
             .unwrap_or_default();
         let menu = match &self.slash.parent {
-            Some(parent) => crate::slash_menu::choice_level(parent, &query),
+            Some(parent) => crate::composer::slash_menu::choice_level(parent, &query),
             None => {
                 let commands = self
                     .slash
@@ -278,10 +278,10 @@ impl Composer {
                     .and_then(|h| self.slash_cache.get(&h))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
-                crate::slash_menu::command_level(
-                    &crate::slash_menu::Action::ALL,
+                crate::composer::slash_menu::command_level(
+                    &crate::composer::slash_menu::Action::ALL,
                     commands,
-                    |name| crate::settings::commands::shows_in_app(cx, name),
+                    |name| crate::prefs::slash_commands::shows_in_app(cx, name),
                     &query,
                 )
             }
@@ -302,8 +302,11 @@ impl Composer {
     }
 
     pub(super) fn move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.slash.active =
-            crate::popover::menu_step(self.slash.active, self.slash.menu.selectable.len(), delta);
+        self.slash.active = crate::kit::popover::menu_step(
+            self.slash.active,
+            self.slash.menu.selectable.len(),
+            delta,
+        );
         // Keep the keyboard-highlighted row in view. Every menu row, group
         // headings included, is a direct child of the scroll container.
         if let Some(row) = self
@@ -333,7 +336,7 @@ impl Composer {
     /// it, so a command with choices opens them on the edit that follows
     /// ([`Self::update_slash`]), and a typed choice closes the menu.
     pub(super) fn accept_slash(&mut self, cx: &mut Context<Self>) {
-        use crate::slash_menu::Row;
+        use crate::composer::slash_menu::Row;
         let Some(token) = self.slash.token.clone() else {
             return;
         };
@@ -347,7 +350,7 @@ impl Composer {
             return;
         };
         let replacement = match row {
-            Row::Action(crate::slash_menu::Action::Attach) => {
+            Row::Action(crate::composer::slash_menu::Action::Attach) => {
                 // The action types nothing: drop the `/…` that summoned it.
                 self.input
                     .update(cx, |input, cx| input.remove_plain_token(token.range, cx));
@@ -399,7 +402,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        use crate::slash_menu::{self, Row};
+        use crate::composer::slash_menu::{self, Row};
         let token = self.slash.token.as_ref()?;
         let commands = self
             .slash
@@ -440,14 +443,14 @@ impl Composer {
             context,
             running_subagents,
         };
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::kit::popover::popover_card(theme)
             .w(px(420.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         // The rows come first (the composer's actions are there even while
         // the agent's list loads or fails), then a line for that list.
         let status: Option<gpui::AnyElement> = if self.slash.loading && commands.is_empty() {
             Some(
-                crate::popover::skeleton_rows("slash-loading", theme, 2, cx.entity_id(), cx)
+                crate::kit::popover::skeleton_rows("slash-loading", theme, 2, cx.entity_id(), cx)
                     .into_any_element(),
             )
         } else if let Some(error) = self.slash.error.clone() {
@@ -511,7 +514,7 @@ impl Composer {
                                     .child(SharedString::from(summary))
                             })),
                     )
-                    .child(crate::popover::menu_separator());
+                    .child(crate::kit::popover::menu_separator());
             }
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.menu.rows.len());
             for (row_ix, row) in self.slash.menu.rows.iter().enumerate() {
@@ -537,12 +540,14 @@ impl Composer {
                     .gap(px(8.0));
                 let row = match row {
                     Row::Header(title) => {
-                        rows.push(crate::popover::menu_heading(theme, title).into_any_element());
+                        rows.push(
+                            crate::kit::popover::menu_heading(theme, title).into_any_element(),
+                        );
                         continue;
                     }
                     Row::Action(action) => line
                         .child(
-                            crate::icons::icon(action.icon())
+                            crate::kit::icons::icon(action.icon())
                                 .size(px(14.0))
                                 .text_color(theme.text_muted),
                         )
@@ -582,9 +587,11 @@ impl Composer {
                         let badge = slash_menu::command_badge(&command.name, &facts);
                         let has_choices = !slash_menu::choices(&command.name).is_empty();
                         line.child(
-                            crate::icons::icon(crate::settings::commands::icon(&command.name))
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
+                            crate::kit::icons::icon(crate::prefs::slash_commands::icon(
+                                &command.name,
+                            ))
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
                         )
                         .child(
                             div()
@@ -620,9 +627,11 @@ impl Composer {
                                     .justify_center()
                                     .when(has_choices, |slot| {
                                         slot.child(
-                                            crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
-                                                .size(px(12.0))
-                                                .text_color(theme.text_muted.opacity(0.7)),
+                                            crate::kit::icons::icon(
+                                                crate::kit::icons::ALT_ARROW_RIGHT,
+                                            )
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted.opacity(0.7)),
                                         )
                                     }),
                             )
@@ -643,7 +652,7 @@ impl Composer {
                                 .justify_center()
                                 .when(in_effect, |slot| {
                                     slot.child(
-                                        crate::icons::icon(crate::icons::CHECK)
+                                        crate::kit::icons::icon(crate::kit::icons::CHECK)
                                             .size(px(12.0))
                                             .text_color(theme.success),
                                     )
@@ -670,11 +679,15 @@ impl Composer {
                     }
                 };
                 rows.push(
-                    crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
-                        .id(("slash-result", row_ix))
-                        .when_some(accept, |el, accept| el.on_click(accept))
-                        .child(row)
-                        .into_any_element(),
+                    crate::kit::popover::menu_row(
+                        theme,
+                        selected,
+                        format!("slash-result-{row_ix}"),
+                    )
+                    .id(("slash-result", row_ix))
+                    .when_some(accept, |el, accept| el.on_click(accept))
+                    .child(row)
+                    .into_any_element(),
                 );
             }
             // The scroll container owns the height cap; every row (headings
@@ -698,7 +711,7 @@ impl Composer {
             .input
             .read(cx)
             .visible_point_for_index(token.range.start)?;
-        Some(crate::popover::anchored_menu_above_at(
+        Some(crate::kit::popover::anchored_menu_above_at(
             "slash-popup",
             anchor,
             card.into_any_element(),

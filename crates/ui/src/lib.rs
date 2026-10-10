@@ -2,48 +2,28 @@
 //! diff pane. Design: ARCHITECTURE.md §4. The only public surface is
 //! [`run_app`] and its [`UiConfig`].
 
-mod app_menus;
 mod appearance;
 mod attachments;
 mod changes;
-mod chat_style;
-mod comments;
+mod comment_popup;
 mod composer;
-mod context_ring;
-#[cfg(feature = "dev-capture")]
-mod dev_capture;
-mod edge_fade;
 mod files;
-mod find;
-mod frost;
-mod fs_util;
 mod history;
-mod icons;
-mod loaders;
+mod kit;
 mod markdown;
-mod motion;
-mod notification_activity;
-mod notify;
 mod pickers;
-mod popover;
+mod prefs;
 mod quote_origin;
-mod rail;
 mod settings;
 mod shell;
 mod side_chats;
-mod slash_menu;
-mod soft_shadow;
-mod sound;
-mod space_style;
 mod state;
 mod subagents;
-mod surface_style;
-mod syntax_cache;
 mod terminal;
 #[cfg(test)]
 mod test_fixtures;
-mod theme;
 mod transcript;
+mod widgets;
 mod workspace;
 
 use std::borrow::Cow;
@@ -172,7 +152,7 @@ pub fn run_app(config: UiConfig) {
     // profile-picture avatar is a remote URL, and gpui's default null client
     // would fail every fetch (the avatar always falls back to the initial).
     let app = gpui_platform::application()
-        .with_assets(icons::Assets)
+        .with_assets(kit::icons::Assets)
         .with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()));
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
@@ -199,18 +179,18 @@ pub fn run_app(config: UiConfig) {
         // palette while settings load.
         let data_dir = config.data_dir.clone();
         appearance::init(
-            settings::UiSettings::load(&data_dir).appearance,
+            prefs::UiSettings::load(&data_dir).appearance,
             data_dir.clone(),
             cx,
         );
-        surface_style::init(data_dir.clone(), cx);
+        appearance::surface_style::init(data_dir.clone(), cx);
         changes::layout::init(data_dir.clone(), cx);
-        chat_style::init(data_dir, cx);
-        composer::init(cx);
+        appearance::chat_style::init(data_dir, cx);
+        widgets::text_input::init(cx);
         transcript::init(cx);
         terminal::panel::init(cx);
         files::editor::init(cx);
-        app_menus::init(cx);
+        shell::menus::init(cx);
 
         let state = cx.new(|_| state::AppState::new());
         state::AppState::bootstrap(state.clone(), config.data_dir.clone(), config.boot(), cx);
@@ -244,7 +224,7 @@ pub fn run_app(config: UiConfig) {
         // `open_main_window` because `Shell::new` ran `apply_keymap`
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
-        cx.set_menus(app_menus::app_menus());
+        cx.set_menus(shell::menus::app_menus());
         cx.activate(true);
     });
 }
@@ -326,7 +306,7 @@ fn shell_window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions
         // One source of truth with the re-apply loop in `appearance::apply`
         // — if these two ever disagree, vibrancy dies on the first theme
         // change and never comes back.
-        window_background: theme::Theme::of(cx).window_background_appearance(),
+        window_background: kit::theme::Theme::of(cx).window_background_appearance(),
         app_id: Some("cypher".into()),
         ..Default::default()
     }

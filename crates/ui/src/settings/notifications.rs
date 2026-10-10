@@ -9,9 +9,9 @@
 
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
-use crate::icons;
+use crate::kit::icons;
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
-use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
 pub enum NotificationsEvent {

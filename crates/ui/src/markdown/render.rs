@@ -21,7 +21,9 @@ use gpui::{
     size,
 };
 
-use crate::theme::{MonoStyled, Theme};
+use crate::kit::theme::{
+    MonoStyled, Theme, code_block_background, inline_code_text, inline_code_wash,
+};
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
 use super::veil::{RowVeil, apply_veil};
@@ -154,7 +156,7 @@ impl RenderOptions {
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
-    /// The [`crate::theme::theme_generation`] these entries were shaped under.
+    /// The [`crate::kit::theme::theme_generation`] these entries were shaped under.
     generation: u32,
     style_revision: u64,
 }
@@ -182,7 +184,7 @@ impl RenderCache {
     /// Drop every entry if the palette changed since they were shaped. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
     fn sync_palette(&mut self, theme: &Theme) {
-        let generation = crate::theme::theme_generation();
+        let generation = crate::kit::theme::theme_generation();
         if self.generation != generation || self.style_revision != theme.text_style_revision {
             self.clear();
             self.generation = generation;
@@ -535,14 +537,6 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Scoped inline-code tint. Defaults to emerald text and a translucent wash;
-/// overrides do not change the shared tokens used by mention chips.
-pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.inline_code_text.unwrap_or(theme.code_text)
-}
-pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.inline_code_background.unwrap_or(theme.code_wash)
-}
 /// Rounded-wash geometry: small radius on a box sized from the font, not the
 /// line box (paint-only — x extends 4px past the glyphs; the height is
 /// `INLINE_CODE_HEIGHT_EM × font size`, centered like GPUI centers glyphs).
@@ -592,16 +586,16 @@ pub fn count_block_matches(block: &Block, query: &str) -> usize {
     let cells = |cells: &[Vec<InlineRun>]| -> usize {
         cells
             .iter()
-            .map(|runs| crate::find::count_matches(&runs_text(runs), query))
+            .map(|runs| crate::markdown::find::count_matches(&runs_text(runs), query))
             .sum()
     };
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => {
-            crate::find::count_matches(&runs_text(runs), query)
+            crate::markdown::find::count_matches(&runs_text(runs), query)
         }
         // A fence is ONE selectable text model (see `flatten_code`), so its
         // matches are counted over the raw source, newlines included.
-        Block::CodeBlock { code, .. } => crate::find::count_matches(code, query),
+        Block::CodeBlock { code, .. } => crate::markdown::find::count_matches(code, query),
         Block::BlockQuote { children } => children
             .iter()
             .map(|child| count_block_matches(child, query))
@@ -796,8 +790,11 @@ fn flat_text_element(
     // In-chat find: resolved while the element is BUILT, not painted — build
     // order is document order, which is what makes each match's ordinal within
     // its row line up with the transcript's offscreen counts.
-    let find_hits =
-        crate::find::element_matches(scope, super::selection::row_of_key(&sel_key), &flat.text);
+    let find_hits = crate::markdown::find::element_matches(
+        scope,
+        super::selection::row_of_key(&sel_key),
+        &flat.text,
+    );
     let find_washes = find_wash(theme);
     let underlay = canvas(
         |_, _, _| (),
@@ -866,7 +863,7 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// Find tints: `(every match, the active one)`. Amber rather than the accent
 /// hue so a highlight never reads as a selection — they can overlap, and the
 /// browser/editor convention is worth more here than palette purity.
-pub(crate) fn find_wash(theme: &Theme) -> (Hsla, Hsla) {
+pub fn find_wash(theme: &Theme) -> (Hsla, Hsla) {
     (theme.warning.opacity(0.22), theme.warning.opacity(0.58))
 }
 
@@ -879,7 +876,7 @@ const FIND_PAD_X: f32 = 2.0;
 
 /// Paint one element's find matches under its glyphs. `hits` pairs each byte
 /// range with whether it is the surface's active match.
-pub(crate) fn paint_find_hits(
+pub fn paint_find_hits(
     window: &mut Window,
     layout: &gpui::TextLayout,
     hits: &[(Range<usize>, bool)],
@@ -904,7 +901,7 @@ pub(crate) fn paint_find_hits(
 /// into the frame's document-ordered registry (so drags span into adjacent
 /// markdown rows and Cmd+C joins in order), and re-registers the mouse
 /// listeners. Call from a paint-phase canvas that sits UNDER the text.
-pub(crate) fn paint_text_selection(
+pub fn paint_text_selection(
     window: &mut Window,
     scope: super::selection::SelectionScope,
     key: &std::sync::Arc<str>,
@@ -938,7 +935,7 @@ pub(crate) fn paint_text_selection(
 /// A run of plain text that selects + copies under `scope` as `key`. Font,
 /// size and color inherit from the parent div. The surface must paint
 /// [`selection_frame_reset`] for `scope` before any of these.
-pub(crate) fn selectable_plain_text(
+pub fn selectable_plain_text(
     scope: super::selection::SelectionScope,
     key: std::sync::Arc<str>,
     text: SharedString,
@@ -1040,7 +1037,7 @@ fn registry_point(
 /// Current window-space endpoint for a settled selection head. The transcript
 /// uses this to keep its floating Comment affordance attached while scrolling,
 /// streaming, or resize/reflow moves the underlying text.
-pub(crate) fn selection_anchor(
+pub fn selection_anchor(
     scope: super::selection::SelectionScope,
     key: &str,
     index: usize,
@@ -1196,7 +1193,7 @@ fn register_selection_listeners(
 /// text's own geometry. `pad_x` overhangs the box horizontally (inline code);
 /// `inset_y` shrinks it vertically — both 0 for a selection wash, which wants
 /// full-line-height boxes that tile seamlessly across wrapped rows.
-pub(crate) fn range_rects(
+pub fn range_rects(
     layout: &gpui::TextLayout,
     range: &Range<usize>,
     pad_x: f32,
@@ -1311,12 +1308,6 @@ fn text_element(
         .into_any_element()
 }
 
-pub fn code_block_background(theme: &Theme) -> Hsla {
-    theme
-        .code_block_background
-        .unwrap_or_else(|| theme.ink(0.035))
-}
-
 /// Scoped to fenced blocks: inline code, tool/diff renderers and the installed
 /// theme keep their original colors. Neutral syntax tokens use the base code
 /// foreground; keywords, strings, comments and other colored tokens do not.
@@ -1422,21 +1413,21 @@ fn render_code_block(
             .gap(px(4.0))
             .cursor_pointer()
             // Ghost-button hover wash fades over transition-colors like every
-            // other interactive chrome (crate::motion hover fades).
-            .bg(crate::motion::hover_blend(
+            // other interactive chrome (crate::kit::motion hover fades).
+            .bg(crate::kit::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
                 theme.ink(0.08),
             ))
-            .on_hover(crate::motion::hover_listener(fade_key))
+            .on_hover(crate::kit::motion::hover_listener(fade_key))
             .text_size(px(10.5))
             .text_color(chrome_color)
             .on_click(move |_, window, cx| handler(ix, code_text.clone(), window, cx))
             .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
+                crate::kit::icons::icon(if copied {
+                    crate::kit::icons::CHECK
                 } else {
-                    crate::icons::COPY
+                    crate::kit::icons::COPY
                 })
                 .size(px(12.0))
                 .text_color(chrome_color),

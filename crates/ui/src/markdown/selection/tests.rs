@@ -54,7 +54,7 @@ fn spans_across_elements_cover_middles_whole() {
 /// The drag tests below mutate the process-global selection state —
 /// serialize them, or the parallel test runner interleaves their
 /// begin/end_drag calls (long-standing flake).
-pub(crate) fn state_lock() -> std::sync::MutexGuard<'static, ()> {
+pub fn state_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

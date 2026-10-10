@@ -291,7 +291,10 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = crate::surface_style::theme(crate::surface_style::Region::Sidebar, cx);
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Sidebar,
+            cx,
+        );
         let inner: AnyElement = match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
@@ -362,7 +365,7 @@ impl Shell {
                         .py(px(6.0))
                         .text_size(px(13.0))
                         .when(selected, |el| {
-                            el.bg(crate::surface_style::sidebar_selected(theme))
+                            el.bg(crate::appearance::surface_style::sidebar_selected(theme))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                         })
                         .text_color(if selected {
@@ -373,9 +376,9 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| {
                             s.bg(if selected {
-                                crate::surface_style::sidebar_selected(theme)
+                                crate::appearance::surface_style::sidebar_selected(theme)
                             } else {
-                                crate::surface_style::sidebar_hover(theme)
+                                crate::appearance::surface_style::sidebar_hover(theme)
                             })
                             .text_color(theme.text)
                         })
@@ -481,7 +484,7 @@ impl Shell {
                             .text_color(theme.text_muted)
                             .cursor_pointer()
                             .hover(|s| {
-                                s.bg(crate::surface_style::sidebar_hover(theme))
+                                s.bg(crate::appearance::surface_style::sidebar_hover(theme))
                                     .text_color(theme.text)
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
@@ -560,8 +563,11 @@ impl Shell {
                 .child(time_ago)
                 .into_any_element(),
         };
-        let (hover, text) = (crate::surface_style::sidebar_hover(theme), theme.text);
-        let selected_wash = crate::surface_style::sidebar_selected(theme);
+        let (hover, text) = (
+            crate::appearance::surface_style::sidebar_hover(theme),
+            theme.text,
+        );
+        let selected_wash = crate::appearance::surface_style::sidebar_selected(theme);
         let subline = theme.text_muted.opacity(0.5);
         let select_id = id.clone();
         let menu_id = id.clone();
@@ -576,7 +582,7 @@ impl Shell {
         let rest_bg = if selected {
             selected_wash
         } else {
-            crate::theme::wash(0.0)
+            crate::kit::theme::wash(0.0)
         };
         // A selected row must NOT drift toward the hover wash: in dark the two
         // fills are identical so the blend is a no-op, but light's hover sits
@@ -800,7 +806,7 @@ impl Shell {
             // shrink (row archived while scrolled) left a phantom fade stuck
             // over an unscrollable list (user report).
             .child(
-                crate::edge_fade::edge_faded(
+                crate::kit::edge_fade::edge_faded(
                     SIDEBAR_GLASS_FADE_BAND,
                     true,
                     true,
@@ -882,7 +888,7 @@ impl Shell {
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
 pub(super) fn grid_backdrop(theme: &Theme) -> AnyElement {
-    let line = crate::theme::hairline(0.035);
+    let line = crate::kit::theme::hairline(0.035);
     let bg = theme.bg;
     const STEP: f32 = 44.0;
     const SPAN: f32 = 2640.0;
@@ -1120,8 +1126,8 @@ pub(super) fn header_icon_button(
         // zeron __root.tsx header buttons: `transition-colors`.
         .bg(motion::hover_blend(
             &fade_key,
-            crate::theme::wash(0.0),
-            crate::theme::wash(0.11),
+            crate::kit::theme::wash(0.0),
+            crate::kit::theme::wash(0.11),
         ))
         .on_hover(motion::hover_listener(fade_key))
         // Same occlusion + click-swallowing as [`window_control_button`]: this
@@ -1140,7 +1146,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "dev-capture")]
         if !self.is_project_window() {
-            crate::dev_capture::start_once(window.window_handle(), cx);
+            crate::shell::dev_capture::start_once(window.window_handle(), cx);
         }
         let foreground = window.is_window_active();
         let selected = matches!(self.route, Route::Chat)
@@ -1155,7 +1161,7 @@ impl Render for Shell {
             });
         }
         let weak = cx.entity().downgrade();
-        let scroll_activity = crate::notification_activity::scroll_observer(move |cx| {
+        let scroll_activity = crate::shell::notification_activity::scroll_observer(move |cx| {
             let _ = weak.update(cx, |shell, cx| {
                 if shell
                     .notification_activity
@@ -1366,13 +1372,13 @@ impl Render for Shell {
                 )
             })
             .on_action(
-                cx.listener(|this, _: &crate::app_menus::OpenSettings, _, cx| {
+                cx.listener(|this, _: &crate::shell::menus::OpenSettings, _, cx| {
                     this.open_settings(SettingsSection::Harnesses, cx);
                 }),
             )
             // About / updates / adding projects are app-wide: a project
             // window hands them to the main window.
-            .on_action(cx.listener(|this, _: &crate::app_menus::About, _, cx| {
+            .on_action(cx.listener(|this, _: &crate::shell::menus::About, _, cx| {
                 if this.is_project_window() {
                     this.forward_to_main(cx, |main, cx| main.open_about(cx));
                     return;
@@ -1380,7 +1386,7 @@ impl Render for Shell {
                 this.open_about(cx);
             }))
             .on_action(
-                cx.listener(|this, _: &crate::app_menus::CheckForUpdates, _, cx| {
+                cx.listener(|this, _: &crate::shell::menus::CheckForUpdates, _, cx| {
                     if this.is_project_window() {
                         this.forward_to_main(cx, |main, cx| main.begin_update_check(cx));
                         return;
@@ -1411,7 +1417,7 @@ impl Render for Shell {
             // on this root, outside every input's Copy binding. Edit → Copy
             // dispatches the action here; ⌘C arrives as a raw key (a global
             // binding would pre-empt the terminal's own raw ⌘C copy).
-            .on_action(|_: &crate::composer::Copy, _, cx| {
+            .on_action(|_: &crate::widgets::text_input::Copy, _, cx| {
                 copy_surface_selection(cx);
             })
             .on_key_down(|event: &gpui::KeyDownEvent, _, cx| {

@@ -24,8 +24,9 @@ use gpui::{
     StyledImage as _, div, img, prelude::*, px,
 };
 
+use crate::kit::lock;
+use crate::kit::theme::ink;
 use crate::state::EngineHandle;
-use crate::theme::ink;
 use cypher_proto::attachment_refs;
 use cypher_rpc::methods;
 
@@ -365,7 +366,7 @@ fn chunk_ranges(b64_len: usize) -> Vec<(u64, std::ops::Range<usize>)> {
 
 /// Race an RPC against `timeout` on the gpui background executor (these
 /// futures run under `cx.spawn`, so tokio's timer reactor isn't available).
-pub(crate) async fn call_with_timeout(
+pub async fn call_with_timeout(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     method: &str,
@@ -633,7 +634,7 @@ impl ImageCache {
             self.pending_free.push(image.image);
         }
         self.loaded_bytes += bytes;
-        let shielded = protected().lock().unwrap().clone();
+        let shielded = lock(protected()).clone();
         while self.loaded_bytes > IMAGE_CACHE_BUDGET_BYTES {
             let oldest = self
                 .map
@@ -672,7 +673,7 @@ fn protected() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
 
 /// Replace the eviction shield with the given keys (see [`protected`]).
 pub fn protect_attachments(keys: std::collections::HashSet<(String, String)>) {
-    *protected().lock().unwrap() = keys;
+    *lock(protected()) = keys;
 }
 
 fn key(device_id: &str, path: &str) -> (String, String) {
@@ -680,7 +681,7 @@ fn key(device_id: &str, path: &str) -> (String, String) {
 }
 
 pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = lock(cache());
     let tick = {
         cache.tick += 1;
         cache.tick
@@ -705,7 +706,7 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
 /// calling from a render path, since that window is detached from
 /// `App::windows` during its own update. Cheap when nothing was evicted.
 pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) {
-    let evicted = std::mem::take(&mut cache().lock().unwrap().pending_free);
+    let evicted = std::mem::take(&mut lock(cache()).pending_free);
     for image in evicted {
         gpui::ImageSource::Image(image).evict(window.as_deref_mut(), cx);
     }
@@ -715,7 +716,7 @@ pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) 
 /// (the entry is marked Loading so concurrent renders don't double-fetch).
 /// Errored sources hand out a retry only after their backoff has elapsed.
 pub fn begin_load(device_id: &str, path: &str) -> bool {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = lock(cache());
     let entry = cache.map.entry(key(device_id, path));
     match entry {
         std::collections::hash_map::Entry::Vacant(v) => {
@@ -736,14 +737,11 @@ pub fn begin_load(device_id: &str, path: &str) -> bool {
 }
 
 pub fn store_loaded(device_id: &str, path: &str, name: SharedString, image: Arc<Image>) {
-    cache()
-        .lock()
-        .unwrap()
-        .insert_loaded(key(device_id, path), CachedAttachmentImage { name, image });
+    lock(cache()).insert_loaded(key(device_id, path), CachedAttachmentImage { name, image });
 }
 
 pub fn store_error(device_id: &str, path: &str) {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = lock(cache());
     let attempts = match cache.map.get(&key(device_id, path)) {
         Some(CacheEntry::Loading { attempts }) => attempts + 1,
         Some(CacheEntry::Error { attempts, .. }) => *attempts,
@@ -778,7 +776,7 @@ pub const FILE_BAR_MAX_W: f32 = 280.0;
 /// A non-image attachment: a horizontal rounded bar with a document glyph and
 /// the file name (truncated). Sized to its content up to [`FILE_BAR_MAX_W`];
 /// shared by the composer strip and the transcript.
-pub fn file_bar(name: &str, theme: &crate::theme::Theme) -> gpui::Div {
+pub fn file_bar(name: &str, theme: &crate::kit::theme::Theme) -> gpui::Div {
     div()
         .h(px(FILE_BAR_H))
         .max_w(px(FILE_BAR_MAX_W))
@@ -791,10 +789,10 @@ pub fn file_bar(name: &str, theme: &crate::theme::Theme) -> gpui::Div {
         .pr(px(12.0))
         .rounded(px(8.0))
         .border_1()
-        .border_color(crate::theme::hairline(0.11))
-        .bg(crate::theme::ink(0.035))
+        .border_color(crate::kit::theme::hairline(0.11))
+        .bg(crate::kit::theme::ink(0.035))
         .child(
-            crate::icons::icon(crate::icons::DOCUMENT)
+            crate::kit::icons::icon(crate::kit::icons::DOCUMENT)
                 .flex_none()
                 .size(px(14.0))
                 .text_color(theme.text_muted),
@@ -844,7 +842,7 @@ pub fn lightbox(
                     .track_focus(focus)
                     .w(viewport.width)
                     .h(viewport.height)
-                    .bg(crate::popover::scrim_alpha(0.7))
+                    .bg(crate::kit::popover::scrim_alpha(0.7))
                     .flex()
                     .flex_col()
                     .items_center()

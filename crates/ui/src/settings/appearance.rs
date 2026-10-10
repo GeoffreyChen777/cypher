@@ -16,9 +16,10 @@ use gpui::{
     AnyElement, Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
 };
 
-use crate::appearance::{self, AppearanceMode};
+use crate::appearance;
+use crate::kit::theme::Theme;
+use crate::prefs::AppearanceMode;
 use crate::settings::widgets;
-use crate::theme::Theme;
 
 const SECTION_SPACING: f32 = 24.0;
 const SECTION_BODY_GAP: f32 = 12.0;
@@ -76,10 +77,10 @@ fn section_header(
         .child(widgets::field_label(theme, title).flex_1())
         .children(action)
         .child(
-            crate::icons::icon(if expanded {
-                crate::icons::ALT_ARROW_DOWN
+            crate::kit::icons::icon(if expanded {
+                crate::kit::icons::ALT_ARROW_DOWN
             } else {
-                crate::icons::ALT_ARROW_RIGHT
+                crate::kit::icons::ALT_ARROW_RIGHT
             })
             .size(px(14.0))
             .text_color(theme.text_muted),
@@ -100,7 +101,7 @@ impl AppearancePage {
             mode_expanded: true,
             chat: cx.new(chat::ChatStyleEditor::new),
             overall: cx.new(|cx| surfaces::SurfaceStyleEditor::new(None, cx)),
-            regions: crate::surface_style::Region::ALL
+            regions: crate::appearance::surface_style::Region::ALL
                 .into_iter()
                 .map(|r| cx.new(|cx| surfaces::SurfaceStyleEditor::new(Some(r), cx)))
                 .collect(),

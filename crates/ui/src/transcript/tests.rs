@@ -1,8 +1,9 @@
 use super::*;
 use cypher_doc::MessagePart;
+use cypher_proto::{Chat, HarnessId};
 
 // ---- transcript comments ----
-// Quote normalization / preview moved to the shared `crate::comments`
+// Quote normalization / preview moved to the shared `crate::comment_popup`
 // module (they are exercised there); the transcript only wires the
 // shared popup.
 
@@ -991,8 +992,14 @@ fn split_sibling_gaps_match_live_internal_spacing() {
     // Rows: t0.0, t0.1, t0.2 (three MD blocks), g0, t1.0.
     assert_eq!(rows.len(), 5);
     // Sibling markdown blocks from the same part: md block gap.
-    assert_eq!(top_gap_for(Some(&rows[0]), &rows[1]), render::MD_BLOCK_GAP);
-    assert_eq!(top_gap_for(Some(&rows[1]), &rows[2]), render::MD_BLOCK_GAP);
+    assert_eq!(
+        top_gap_for(Some(&rows[0]), &rows[1]),
+        markdown::render::MD_BLOCK_GAP
+    );
+    assert_eq!(
+        top_gap_for(Some(&rows[1]), &rows[2]),
+        markdown::render::MD_BLOCK_GAP
+    );
     // Markdown → tool group and tool group → next part: block gap.
     assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_BLOCK);
     assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_BLOCK);

@@ -294,13 +294,13 @@ pub(super) fn wizard_context_block(
     context: &str,
     scope: crate::markdown::selection::SelectionScope,
     key: Arc<str>,
-    theme: &crate::theme::Theme,
+    theme: &crate::kit::theme::Theme,
 ) -> gpui::Div {
     div()
         .mt(px(10.0))
         .pl(px(10.0))
         .border_l_2()
-        .border_color(crate::theme::ink(0.12))
+        .border_color(crate::kit::theme::ink(0.12))
         .text_size(px(12.5))
         .line_height(px(18.0))
         .text_color(theme.text_muted)
@@ -314,7 +314,7 @@ pub(super) fn wizard_context_block(
 }
 
 /// Section label inside the card ("Pick one", "Your answer", …).
-pub(super) fn wizard_section_label(label: &str, theme: &crate::theme::Theme) -> gpui::Div {
+pub(super) fn wizard_section_label(label: &str, theme: &crate::kit::theme::Theme) -> gpui::Div {
     div()
         .mb(px(8.0))
         .text_size(px(11.5))
@@ -324,7 +324,11 @@ pub(super) fn wizard_section_label(label: &str, theme: &crate::theme::Theme) -> 
 }
 
 /// A keyboard hint in the card footer: a small keycap and what it does.
-pub(super) fn wizard_key_hint(key: &str, action: &str, theme: &crate::theme::Theme) -> gpui::Div {
+pub(super) fn wizard_key_hint(
+    key: &str,
+    action: &str,
+    theme: &crate::kit::theme::Theme,
+) -> gpui::Div {
     div()
         .flex()
         .flex_row()
@@ -341,7 +345,7 @@ pub(super) fn wizard_key_hint(key: &str, action: &str, theme: &crate::theme::The
                 .rounded(px(5.0))
                 .border_1()
                 .border_color(theme.border)
-                .bg(crate::theme::ink(0.03))
+                .bg(crate::kit::theme::ink(0.03))
                 .text_size(px(10.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)

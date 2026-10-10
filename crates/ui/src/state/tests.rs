@@ -1,10 +1,12 @@
 use super::*;
+use async_trait::async_trait;
 use chrono::TimeDelta;
 use cypher_engine::{EngineCore, default_registry};
+use cypher_rpc::{RpcClient, RpcError, RpcReply, RpcService, memory_client};
 // `SessionStatus` is only needed to build the fixtures below — the module
 // itself derives everything through `cypher_proto::view`.
 use cypher_proto::view::{group_chats, project_label};
-use cypher_proto::{SessionStatus, UserProfile};
+use cypher_proto::{EngineInfo, HarnessId, SessionStatus, UserProfile};
 
 /// An engine that predates `EngineInfo`: it serves no identity method.
 struct LegacyIdentityRpc;
@@ -2248,4 +2250,15 @@ fn steer_ids_join_ledger_steers_and_local_echoes() {
     assert!(!ids.contains("m1"), "a Run is a plain prompt");
     assert!(ids.contains("m2"), "the ledger's Steer message id");
     assert!(ids.contains("m3"), "this device's unsynced steer echo");
+}
+
+#[test]
+fn presence_window() {
+    let now = Utc::now();
+    assert!(device_online(Some(now - TimeDelta::seconds(10)), now));
+    assert!(device_online(Some(now - TimeDelta::seconds(70)), now));
+    assert!(!device_online(Some(now - TimeDelta::seconds(71)), now));
+    assert!(!device_online(None, now));
+    // Clock skew (future) counts as online.
+    assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
 }

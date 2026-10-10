@@ -23,10 +23,10 @@ use super::{
     widgets,
 };
 use crate::{
-    icons,
-    popover::Loadable,
+    kit::icons,
+    kit::popover::Loadable,
+    kit::theme::{MonoStyled, Theme},
     state::AppState,
-    theme::{MonoStyled, Theme},
 };
 
 /// How often the page asks the device whether GitHub approved the code (the

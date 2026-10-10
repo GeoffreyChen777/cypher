@@ -44,8 +44,8 @@ fn missing_runtime_button_keeps_the_chat_device_and_refresh_clears_errors(
         }
     }
     let pickers = cx.update(|cx| {
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("local-mac".into());
@@ -720,9 +720,9 @@ fn checkout_kind_icon_pinned_current_reads_bare_folder() {
     // Pinned "Current checkout" → bare folder (even behind a stale
     // NewWorktree draft); worktree-backed and fresh-worktree targets →
     // folder-with-files.
-    assert_eq!(Pickers::checkout_kind_icon(true), crate::icons::FOLDER);
+    assert_eq!(Pickers::checkout_kind_icon(true), crate::kit::icons::FOLDER);
     assert_eq!(
         Pickers::checkout_kind_icon(false),
-        crate::icons::FOLDER_WITH_FILES
+        crate::kit::icons::FOLDER_WITH_FILES
     );
 }

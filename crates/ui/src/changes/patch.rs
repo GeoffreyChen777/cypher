@@ -1,6 +1,9 @@
 //! Patch model + `diff --git` parser (pure).
 
-use super::*;
+use std::sync::Arc;
+
+use super::layout::Side;
+use super::{BODY_BOTTOM_PAD, DIFF_LINE_HEIGHT, GUTTER_WIDTH, HUNK_HEADER_HEIGHT, NOTICE_HEIGHT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {

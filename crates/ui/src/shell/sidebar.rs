@@ -32,10 +32,10 @@ impl Shell {
             .find(|c| c.id == chat_id)
             .and_then(|c| c.title.clone())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Session title", cx));
+        let input = cx.new(|cx| TextInput::new("Session title", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.submit_rename_chat(cx);
             }
         });
@@ -105,7 +105,7 @@ impl Shell {
     /// A new sort starts in its natural direction.
     pub(super) fn set_sidebar_sort(
         &mut self,
-        sort: crate::settings::SidebarSort,
+        sort: crate::prefs::SidebarSort,
         cx: &mut Context<Self>,
     ) {
         if self.settings.sidebar_sort != sort {
@@ -134,6 +134,120 @@ impl Shell {
         self.close_sidebar_view_menu(cx);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// The sidebar view menu: a Devices section (All devices + one row per
+    /// device, this device first) and a Sort section, each with a check on
+    /// the current choice.
+    pub(super) fn render_sidebar_view_menu(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let position = *self.sidebar_view_menu.get()?;
+        let closing = self.sidebar_view_menu.closing_since();
+        let (filter, sort) = (
+            self.settings.sidebar_device_filter.clone(),
+            self.settings.sidebar_sort,
+        );
+        let descending = self.sidebar_view().descending();
+        let devices: Vec<(String, String)> = {
+            let state = self.state.read(cx);
+            let local = state.local_device_id.clone();
+            let mut devices = state.devices.clone();
+            devices.sort_by_key(|d| {
+                (
+                    local.as_deref() != Some(d.id.as_str()),
+                    d.name.to_lowercase(),
+                    d.id.clone(),
+                )
+            });
+            devices.into_iter().map(|d| (d.id, d.name)).collect()
+        };
+        let check = |on: bool, theme: &Theme| {
+            div().flex_none().size(px(14.0)).when(on, |el| {
+                el.child(icon(icons::CHECK).size(px(13.0)).text_color(theme.text))
+            })
+        };
+        let mut menu = popover::popover_card(theme)
+            .w(px(200.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_sidebar_view_menu(cx);
+            }))
+            .flex()
+            .flex_col()
+            .child(popover::menu_heading(theme, "Devices"))
+            .child(
+                popover::menu_row(theme, false, "sidebar-view-all-devices")
+                    .id("sidebar-view-all-devices")
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_sidebar_device_filter(None, cx)),
+                    )
+                    .child(check(filter.is_none(), theme))
+                    .child(SharedString::from("All devices")),
+            );
+        for (id, name) in devices {
+            let on = filter.as_deref() == Some(id.as_str());
+            let pick = id.clone();
+            menu = menu.child(
+                popover::menu_row(theme, false, format!("sidebar-view-device-{id}"))
+                    .id(SharedString::from(format!("sidebar-view-device-{id}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_sidebar_device_filter(Some(pick.clone()), cx)
+                    }))
+                    .child(check(on, theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(name)),
+                    ),
+            );
+        }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(theme, "Sort by"));
+        for option in crate::prefs::SidebarSort::ALL {
+            menu = menu.child(
+                popover::menu_row(
+                    theme,
+                    false,
+                    format!("sidebar-view-sort-{}", option.label()),
+                )
+                .id(SharedString::from(format!(
+                    "sidebar-view-sort-{}",
+                    option.label()
+                )))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_sidebar_sort(option, cx)))
+                .child(check(sort == option, theme))
+                .child(SharedString::from(option.label())),
+            );
+        }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(popover::menu_heading(theme, "Order"));
+        for (label, glyph, desc) in [
+            ("Ascending", icons::ARROW_UP, false),
+            ("Descending", icons::ARROW_DOWN, true),
+        ] {
+            menu = menu.child(
+                popover::menu_row(theme, false, format!("sidebar-view-order-{label}"))
+                    .id(SharedString::from(format!("sidebar-view-order-{label}")))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_sidebar_descending(desc, cx)),
+                    )
+                    .child(check(descending == desc, theme))
+                    .child(icon(glyph).size(px(13.0)).text_color(theme.text_muted))
+                    .child(SharedString::from(label)),
+            );
+        }
+        Some(popover::menu_at(
+            "sidebar-view-menu-popover",
+            position,
+            menu.into_any_element(),
+            closing,
+        ))
     }
 
     /// Pin/unpin a session (synced): pinned sessions lead their project.

@@ -3,32 +3,6 @@
 use super::*;
 
 impl Pickers {
-    /// What the composer's context gauge shows: the selected session's latest
-    /// context-window reading, and whether a click compacts it (the harness
-    /// has `/compact` and no turn is running). `None` — no ring at all —
-    /// until the host engine has a reading (new chats, hosts on an older
-    /// version), and in a Side Chat. A remote host's reading can trail a
-    /// running turn by up to the session row's 20s freshness write; it
-    /// catches up when the turn settles.
-    pub fn context_ring_reading(&self, cx: &App) -> Option<crate::context_ring::RingReading> {
-        if self.side_chat {
-            return None;
-        }
-        let state = self.state.read(cx);
-        let chat_id = state.selected_chat.as_deref()?;
-        let usage = state.session_for(chat_id)?.context_usage?;
-        let busy = matches!(
-            state.indicator_for(chat_id, chrono::Utc::now()),
-            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
-        );
-        let compactable = matches!(self.effective_harness(cx), Some(HarnessId::Pi));
-        Some(crate::context_ring::RingReading {
-            usage,
-            compactable,
-            busy,
-        })
-    }
-
     // Chip builder: every argument is one visual slot of the chip.
     #[allow(clippy::too_many_arguments)]
     fn trigger_chip(
@@ -96,7 +70,7 @@ impl Pickers {
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
             .when_some(chip_icon, |el, (path, tint)| {
                 el.child(
-                    crate::icons::icon(path)
+                    crate::kit::icons::icon(path)
                         .size(px(16.0))
                         .flex_none()
                         .text_color(tint.unwrap_or(theme.text_muted)),
@@ -164,14 +138,14 @@ impl Pickers {
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
             .child(
-                crate::icons::icon(icon_path)
+                crate::kit::icons::icon(icon_path)
                     .size(px(12.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             )
             .child(div().min_w_0().truncate().child(label))
             .child(
-                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.5)),
@@ -198,7 +172,7 @@ impl Pickers {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text_muted.opacity(0.6))
             .child(
-                crate::icons::icon(icon_path)
+                crate::kit::icons::icon(icon_path)
                     .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.6)),
             )
@@ -261,11 +235,11 @@ impl Pickers {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    Self::footer_label(crate::icons::MONITOR, device_label, &theme)
+                    Self::footer_label(crate::kit::icons::MONITOR, device_label, &theme)
                         .when(offline, |el| el.text_color(theme.warning.opacity(0.8))),
                 )
                 .child(Self::footer_label(
-                    crate::icons::FOLDER,
+                    crate::kit::icons::FOLDER,
                     project_label,
                     &theme,
                 ))
@@ -275,7 +249,7 @@ impl Pickers {
             .footer_chip(
                 PickerKind::Device,
                 "picker-device",
-                crate::icons::MONITOR,
+                crate::kit::icons::MONITOR,
                 device_label,
                 &theme,
                 cx,
@@ -284,7 +258,7 @@ impl Pickers {
         let project_chip = self.footer_chip(
             PickerKind::Space,
             "picker-project",
-            crate::icons::FOLDER,
+            crate::kit::icons::FOLDER,
             project_label,
             &theme,
             cx,
@@ -358,9 +332,9 @@ impl Pickers {
             let space = space.as_ref().filter(|s| s.git_detected)?;
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
             let (icon_path, label) = if is_worktree {
-                (crate::icons::FOLDER_WITH_FILES, "Worktree")
+                (crate::kit::icons::FOLDER_WITH_FILES, "Worktree")
             } else {
-                (crate::icons::FOLDER, "Local checkout")
+                (crate::kit::icons::FOLDER, "Local checkout")
             };
             // Mirrors the draft chips: checkout hugs the left edge, ref the
             // right.
@@ -380,7 +354,7 @@ impl Pickers {
                 .items_center()
                 .min_w_0()
                 .child(Self::footer_label(
-                    crate::icons::GIT_BRANCH,
+                    crate::kit::icons::GIT_BRANCH,
                     chat.branch
                         .clone()
                         .map(SharedString::from)
@@ -417,7 +391,7 @@ impl Pickers {
         let ref_chip = self.footer_chip(
             PickerKind::Branch,
             "picker-branch",
-            crate::icons::GIT_BRANCH,
+            crate::kit::icons::GIT_BRANCH,
             ref_label,
             &theme,
             cx,
@@ -726,16 +700,16 @@ impl Pickers {
             "Current checkout"
         };
         let local_icon = if has_worktree {
-            crate::icons::FOLDER_WITH_FILES
+            crate::kit::icons::FOLDER_WITH_FILES
         } else {
-            crate::icons::FOLDER
+            crate::kit::icons::FOLDER
         };
         let options: [(CheckoutKind, &'static str, &'static str); 2] = [
             (CheckoutKind::Local, local_label, local_icon),
             (
                 CheckoutKind::NewWorktree,
                 "New worktree",
-                crate::icons::FOLDER_WITH_FILES,
+                crate::kit::icons::FOLDER_WITH_FILES,
             ),
         ];
         let active = self.active;
@@ -761,7 +735,7 @@ impl Pickers {
                             this.pick_checkout(kind, cx);
                         }))
                         .child(
-                            crate::icons::icon(icon_path)
+                            crate::kit::icons::icon(icon_path)
                                 .size(px(14.0))
                                 .text_color(theme.text_muted),
                         )
@@ -852,7 +826,7 @@ impl Pickers {
                     .justify_center()
                     .cursor_pointer()
                     .when(!favorites_view, |el| {
-                        el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                        el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.model_rail = ModelRail::Favorites;
@@ -864,7 +838,7 @@ impl Pickers {
                         cx.notify();
                     }))
                     .child(
-                        crate::icons::icon(crate::icons::STAR_BOLD)
+                        crate::kit::icons::icon(crate::kit::icons::STAR_BOLD)
                             .size(px(17.0))
                             .text_color(if favorites_view {
                                 theme.text
@@ -883,7 +857,7 @@ impl Pickers {
                     .h(px(1.0))
                     .mx(px(-4.0))
                     .my(px(1.0))
-                    .bg(crate::theme::hairline(0.08)),
+                    .bg(crate::kit::theme::hairline(0.08)),
             );
             for (ix, provider) in provider_tabs.iter().enumerate() {
                 let provider = provider.clone();
@@ -907,18 +881,20 @@ impl Pickers {
                         .when(is_disabled, |el| el.opacity(0.35))
                         .when(!is_disabled, |el| el.cursor_pointer())
                         .when(!is_disabled && !is_viewed, |el| {
-                            el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                            el.hover(|s| s.bg(crate::kit::theme::ink(0.06)))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.pick_provider(provider.clone(), cx);
                         }))
-                        .child(crate::icons::icon(icon_path).size(px(18.0)).text_color(
-                            tint.unwrap_or(if is_viewed {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            }),
-                        ))
+                        .child(
+                            crate::kit::icons::icon(icon_path)
+                                .size(px(18.0))
+                                .text_color(tint.unwrap_or(if is_viewed {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })),
+                        )
                         .when(is_viewed, |el| {
                             el.child(rail_indicator(picker_purple(&theme)))
                         }),
@@ -938,13 +914,13 @@ impl Pickers {
             .h(px(46.0))
             .px(px(10.0))
             .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
+            .border_color(crate::kit::theme::hairline(0.08))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
             .child(
-                crate::icons::icon(crate::icons::MAGNIFER)
+                crate::kit::icons::icon(crate::kit::icons::MAGNIFER)
                     .size(px(14.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
@@ -998,10 +974,10 @@ impl Pickers {
                     // treatment (wash + ring).
                     if is_selected {
                         el = el
-                            .bg(crate::theme::card_selected_bg())
-                            .shadow(crate::theme::card_selected_shadows());
+                            .bg(crate::kit::theme::card_selected_bg())
+                            .shadow(crate::kit::theme::card_selected_shadows());
                     } else if is_active {
-                        el = el.bg(crate::theme::ink(0.05));
+                        el = el.bg(crate::kit::theme::ink(0.05));
                     }
                     el = el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered && this.active != ix {
@@ -1039,7 +1015,7 @@ impl Pickers {
                                         .items_center()
                                         .gap(px(6.0))
                                         .child(
-                                            crate::icons::icon(icon_path)
+                                            crate::kit::icons::icon(icon_path)
                                                 .size(px(11.0))
                                                 .flex_none()
                                                 .text_color(
@@ -1070,16 +1046,16 @@ impl Pickers {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.08)))
+                            .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.toggle_model_favorite(harness, &star_model, cx);
                             }))
                             .child(
-                                crate::icons::icon(if is_fav {
-                                    crate::icons::STAR_BOLD
+                                crate::kit::icons::icon(if is_fav {
+                                    crate::kit::icons::STAR_BOLD
                                 } else {
-                                    crate::icons::STAR
+                                    crate::kit::icons::STAR
                                 })
                                 .size(px(13.0))
                                 .text_color(if is_fav {
@@ -1138,9 +1114,10 @@ impl Pickers {
             .flex_col()
             // A whisper of wash lifts the pane off the rail (t3
             // `bg-muted/40` + `border-l border-border/70`).
-            .bg(crate::theme::ink(0.02))
+            .bg(crate::kit::theme::ink(0.02))
             .when(rail.is_some(), |el| {
-                el.border_l_1().border_color(crate::theme::hairline(0.07))
+                el.border_l_1()
+                    .border_color(crate::kit::theme::hairline(0.07))
             })
             .child(search_row)
             .child(
@@ -1314,8 +1291,8 @@ fn rail_indicator(tint: gpui::Hsla) -> gpui::Div {
 /// violet-600 on light (AA against white).
 fn picker_purple(theme: &Theme) -> gpui::Hsla {
     match theme.appearance {
-        crate::theme::Appearance::Dark => crate::theme::oklch(0.702, 0.183, 293.541),
-        crate::theme::Appearance::Light => crate::theme::oklch(0.541, 0.281, 293.009),
+        crate::kit::theme::Appearance::Dark => crate::kit::theme::oklch(0.702, 0.183, 293.541),
+        crate::kit::theme::Appearance::Light => crate::kit::theme::oklch(0.541, 0.281, 293.009),
     }
 }
 
@@ -1431,8 +1408,8 @@ impl Render for Pickers {
             from_model
                 .or_else(|| self.viewed_provider(cx).map(|id| provider_brand_icon(&id)))
                 .unwrap_or((
-                    crate::icons::CLAUDE_MARK,
-                    Some(crate::icons::claude_brand()),
+                    crate::kit::icons::CLAUDE_MARK,
+                    Some(crate::kit::icons::claude_brand()),
                 ))
         };
         let explicit_options = self.explicit_options(cx);

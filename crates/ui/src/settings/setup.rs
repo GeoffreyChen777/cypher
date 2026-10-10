@@ -10,11 +10,11 @@ use cypher_engine::pi_packages::PiPackagesSnapshot;
 use cypher_engine::pi_runtime::PiRuntimeStatus;
 use cypher_rpc::methods;
 
-use crate::icons;
-use crate::popover::{self, Loadable};
+use crate::kit::icons;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 /// Shell listens for this and persists `setup_completed`.
 #[derive(Debug, Clone)]
@@ -191,7 +191,7 @@ impl SetupPage {
             .items_center()
             .gap(px(6.0))
             .child(
-                crate::icons::icon(icons::CHECK)
+                crate::kit::icons::icon(icons::CHECK)
                     .size(px(14.0))
                     .text_color(theme.success_muted),
             )
@@ -360,7 +360,7 @@ impl Render for SetupPage {
                             .py(px(32.0))
                             .flex()
                             .flex_col()
-                            .child(crate::icons::cypher_app_icon().w(px(28.0)).h(px(28.0)))
+                            .child(crate::kit::icons::cypher_app_icon().w(px(28.0)).h(px(28.0)))
                             .child(
                                 div()
                                     .mt(px(20.0))
@@ -392,7 +392,7 @@ impl Render for SetupPage {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::sync::{
@@ -401,11 +401,11 @@ pub(crate) mod tests {
     };
 
     #[derive(Default)]
-    pub(crate) struct RuntimeFixture {
-        pub(crate) installs: AtomicUsize,
-        pub(crate) polls: AtomicUsize,
-        pub(crate) finish: tokio::sync::Notify,
-        pub(crate) requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    pub struct RuntimeFixture {
+        pub installs: AtomicUsize,
+        pub polls: AtomicUsize,
+        pub finish: tokio::sync::Notify,
+        pub requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     #[async_trait::async_trait]
@@ -449,7 +449,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
+    pub fn pump_until(cx: &TestAppContext, predicate: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             cx.run_until_parked();
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         runtime.spawn(listener.serve(fixture.clone()));
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

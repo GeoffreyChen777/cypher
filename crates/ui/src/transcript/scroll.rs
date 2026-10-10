@@ -1,4 +1,4 @@
-//! Rail plumbing (rendering lives in `crate::rail`), scrolling, stick-to-bottom
+//! Rail plumbing (rendering lives in `rail.rs`), scrolling, stick-to-bottom
 //! and the doc → rows sync.
 
 use super::*;
@@ -12,7 +12,7 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn rail_enabled(&self) -> bool {
+    pub fn rail_enabled(&self) -> bool {
         self.rail_enabled
     }
 
@@ -58,28 +58,28 @@ impl Transcript {
         cx.notify();
     }
 
-    pub(crate) fn rail_hover(&self) -> Option<usize> {
+    pub fn rail_hover(&self) -> Option<usize> {
         self.rail_hover
     }
 
-    pub(crate) fn set_rail_hover(&mut self, hover: Option<usize>) {
+    pub fn set_rail_hover(&mut self, hover: Option<usize>) {
         self.rail_hover = hover;
     }
 
-    pub(crate) fn rows(&self) -> &[Row] {
+    pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
-    pub(crate) fn list_state(&self) -> &ListState {
+    pub fn list_state(&self) -> &ListState {
         &self.list
     }
 
-    pub(crate) fn state_entity(&self) -> &Entity<AppState> {
+    pub fn state_entity(&self) -> &Entity<AppState> {
         &self.state
     }
 
     /// Replace the transcript's scroll animation task (rail click / jump).
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
+    pub fn set_scroll_task(&mut self, task: Task<()>) {
         // Rail navigation within the session RELEASES the hold but keeps the
         // runway (user spec: only leaving and revisiting the session clears
         // it) — scrolling back down re-arms the hold like any restick.
@@ -127,7 +127,7 @@ impl Transcript {
             .into_iter()
             .map(|(_, row)| row)
             .collect();
-        match crate::rail::prompt_step(&rows, top, forward) {
+        match crate::transcript::rail::prompt_step(&rows, top, forward) {
             Some(target) => {
                 self.scroll_to_row(target, cx);
                 self.prompt_nav = Some((target, Instant::now()));
@@ -156,7 +156,7 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn distance_from_bottom(&self) -> f32 {
+    pub fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         (max + cur).max(0.0)
@@ -720,7 +720,7 @@ impl Transcript {
     /// Whether the scroll offset is in a bottom-glued representation (`None`
     /// or anchored past the end) — states where the next layout hard-snaps to
     /// the new end instead of holding a pixel position.
-    pub(crate) fn is_glued(&self) -> bool {
+    pub fn is_glued(&self) -> bool {
         self.list.logical_scroll_top().item_ix >= self.rows.len()
     }
 
@@ -783,7 +783,7 @@ impl Transcript {
                 s.transcript_revision(),
                 s.selected_chat.clone(),
                 self.attachment_device_ids(cx),
-                crate::chat_style::settings(cx).tool_call_limit,
+                crate::appearance::chat_style::settings(cx).tool_call_limit,
             )
         };
         if self.synced_revision.as_ref() == Some(&revision) {
@@ -829,7 +829,7 @@ impl Transcript {
             // … and the find bar with them: its matches, its counter and its
             // query all belonged to the transcript being left behind.
             self.find = None;
-            crate::find::clear(self.scope);
+            crate::markdown::find::clear(self.scope);
             self.chat_id = selected;
             self.rows.clear();
             self.row_cache.clear();
@@ -1095,3 +1095,6 @@ impl Transcript {
         entry.toggled_at = Some(Instant::now());
     }
 }
+
+#[cfg(test)]
+mod tests;

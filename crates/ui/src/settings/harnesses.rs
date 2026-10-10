@@ -11,16 +11,16 @@ use cypher_rpc::methods;
 
 use super::device_target::DeviceTarget;
 use super::titles::TitlesPage;
-use super::translation::TranslationSettings;
-use crate::popover::{self, Loadable};
+use super::translation::TranslationControl;
+use crate::kit::popover::{self, Loadable};
+use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
-use crate::theme::Theme;
 
 pub struct HarnessesPage {
     state: Entity<AppState>,
     titles: Entity<TitlesPage>,
-    translation: Entity<TranslationSettings>,
+    translation: Entity<TranslationControl>,
     packages: Loadable<PiPackagesSnapshot>,
     target: Entity<DeviceTarget>,
     generation: u64,
@@ -56,7 +56,7 @@ impl HarnessesPage {
             cx.notify();
         });
         let titles = cx.new(|cx| TitlesPage::new_embedded(state.clone(), target.clone(), cx));
-        let translation = cx.new(|cx| TranslationSettings::new(state.clone(), target.clone(), cx));
+        let translation = cx.new(|cx| TranslationControl::new(state.clone(), target.clone(), cx));
         let mut page = Self {
             state,
             titles,
@@ -270,7 +270,7 @@ impl Render for HarnessesPage {
                                 .flex()
                                 .items_center()
                                 .gap(px(12.0))
-                                .child(widgets::row_tile(&theme, crate::icons::TUNING))
+                                .child(widgets::row_tile(&theme, crate::kit::icons::TUNING))
                                 .child(
                                     div()
                                         .flex_1()
@@ -386,7 +386,7 @@ mod tests {
         runtime.spawn(listener.serve(fixture.clone()));
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
-            cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+            cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

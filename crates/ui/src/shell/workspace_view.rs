@@ -877,8 +877,8 @@ impl Shell {
                     ))
                 })
         });
-        let card_bg = crate::chat_style::panel_background(
-            crate::chat_style::settings(cx),
+        let card_bg = crate::appearance::chat_style::panel_background(
+            crate::appearance::chat_style::settings(cx),
             Theme::of(cx),
             true,
         );
@@ -1004,7 +1004,7 @@ impl Shell {
         // The strip region takes what the buttons leave (they never shrink)
         // and clips there; tabs hidden past an edge fade out.
         let strip = div().flex_1().min_w_0().h_full().overflow_hidden().child(
-            crate::edge_fade::edge_faded(TILE_TAB_FADE, false, false, strip)
+            crate::kit::edge_fade::edge_faded(TILE_TAB_FADE, false, false, strip)
                 .fade_left(true)
                 .fade_right(true)
                 .fade_overflow_x(&scroll),
@@ -1147,9 +1147,15 @@ impl Shell {
             // Only the focused tile's active tab carries the full wash; the
             // other tiles' active tabs keep a faint one.
             .when(active, |el| {
-                el.bg(crate::theme::wash(if tile_focused { 0.10 } else { 0.035 }))
+                el.bg(crate::kit::theme::wash(if tile_focused {
+                    0.10
+                } else {
+                    0.035
+                }))
             })
-            .when(!active, |el| el.hover(|s| s.bg(crate::theme::wash(0.06))))
+            .when(!active, |el| {
+                el.hover(|s| s.bg(crate::kit::theme::wash(0.06)))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.activate_tab(group, index, cx);
@@ -1206,7 +1212,7 @@ impl Shell {
                     .justify_center()
                     .opacity(if active { 1.0 } else { 0.0 })
                     .group_hover(hover_group, |s| s.opacity(1.0))
-                    .hover(|s| s.bg(crate::theme::wash(0.12)))
+                    .hover(|s| s.bg(crate::kit::theme::wash(0.12)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.close_tab(&close_tab, cx);

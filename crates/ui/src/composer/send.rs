@@ -29,7 +29,7 @@ impl Composer {
             self.comments.clear();
             self.comment_edit = None;
             if self.comments_popup.begin_close() {
-                crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+                crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
             }
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
@@ -178,7 +178,7 @@ impl Composer {
                 .harness
                 .unwrap_or(HarnessId::Pi)
                 == HarnessId::Pi
-            && crate::settings::providers::command_intent(self.input.read(cx).text()).is_some()
+            && crate::prefs::slash_commands::command_intent(self.input.read(cx).text()).is_some()
         {
             return false;
         }
@@ -220,7 +220,7 @@ impl Composer {
                 .harness
                 .unwrap_or(HarnessId::Pi)
                 == HarnessId::Pi
-            && let Some(intent) = crate::settings::providers::command_intent(&text)
+            && let Some(intent) = crate::prefs::slash_commands::command_intent(&text)
         {
             let state = self.state.read(cx);
             let target = state
@@ -537,7 +537,7 @@ impl Composer {
             let sent = std::mem::take(&mut self.comments);
             self.comment_edit = None;
             if self.comments_popup.begin_close() {
-                crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+                crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
             }
             sent
         } else {

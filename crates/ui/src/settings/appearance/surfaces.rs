@@ -1,9 +1,11 @@
 //! Overall theme selection and lazily expanded per-region color controls.
-use crate::chat_style::{ColorPreset, normalize_hex};
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::appearance::chat_style::{ColorPreset, normalize_hex};
+use crate::appearance::surface_style::{
+    self, FIELDS, Field, Palette, Region, SurfaceAppearanceState,
+};
+use crate::kit::theme::{Appearance, MonoStyled, Theme};
 use crate::settings::widgets;
-use crate::surface_style::{self, FIELDS, Field, Palette, Region, SurfaceAppearanceState};
-use crate::theme::{Appearance, MonoStyled, Theme};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 use gpui::{
     AnyElement, Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
@@ -15,7 +17,7 @@ pub(super) struct SurfaceStyleEditor {
     expanded: bool,
     advanced: bool,
     fields: Vec<Field>,
-    inputs: Vec<Entity<ComposerInput>>,
+    inputs: Vec<Entity<TextInput>>,
     color_pickers: Vec<Entity<super::color_picker::ColorPicker>>,
     invalid: Vec<bool>,
     last: Palette,
@@ -36,8 +38,7 @@ impl SurfaceStyleEditor {
             .iter()
             .map(|field| {
                 cx.new(|cx| {
-                    let mut input =
-                        ComposerInput::settings_field("Follow overall theme", false, cx);
+                    let mut input = TextInput::settings_field("Follow overall theme", false, cx);
                     input.set_text(
                         last.overrides.get(field.key).cloned().unwrap_or_default(),
                         cx,
@@ -53,10 +54,7 @@ impl SurfaceStyleEditor {
         let mut subscriptions = Vec::new();
         for (index, input) in inputs.iter().enumerate() {
             subscriptions.push(cx.subscribe(input, move |this: &mut Self, _, event, cx| {
-                if matches!(
-                    event,
-                    ComposerInputEvent::Edited | ComposerInputEvent::Submitted
-                ) {
+                if matches!(event, TextInputEvent::Edited | TextInputEvent::Submitted) {
                     this.edit(index, cx);
                 }
             }));
@@ -379,7 +377,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
             div()
                 .p(px(12.0))
                 .rounded(px(8.0))
-                .bg(view::background(t))
+                .bg(crate::kit::theme::terminal::background(t))
                 .mono(t)
                 .text_size(px(view::TERM_FONT_SIZE))
                 .line_height(px(view::TERM_LINE_HEIGHT))
@@ -392,7 +390,11 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
                 .child(
                     div()
                         .flex()
-                        .child(div().bg(view::selection(t)).child("selected output"))
+                        .child(
+                            div()
+                                .bg(crate::kit::theme::terminal::selection(t))
+                                .child("selected output"),
+                        )
                         .child("  $ ")
                         .child(div().w(px(8.0)).h(px(16.0)).bg(t.cursor)),
                 )

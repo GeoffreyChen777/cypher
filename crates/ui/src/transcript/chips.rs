@@ -1,6 +1,12 @@
 //! Tool summaries / chips and the working-indicator flavour (pure).
 
-use super::*;
+use cypher_proto::ToolCall;
+use gpui::SharedString;
+
+use super::{
+    CHIP_GAP, CHIP_HEIGHT, CHIPS_TOP_PAD, DETAIL_SEPARATOR, OUTPUT_BODY_PAD, OUTPUT_LINE_HEIGHT,
+    Row, RowKind, ToolDetail, ToolItem, fnv1a, tool_detail,
+};
 
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
 ///
@@ -193,7 +199,7 @@ pub fn throughput_label(
     if throughput.output_tokens == 0 && rate.is_none() {
         return None;
     }
-    let tokens = crate::context_ring::format_tokens(throughput.output_tokens);
+    let tokens = crate::composer::context_ring::format_tokens(throughput.output_tokens);
     Some(match rate {
         Some(rate) => format!("↓ {tokens} tokens · {rate} tok/s"),
         None => format!("↓ {tokens} tokens"),

@@ -889,7 +889,7 @@ fn chat_row(id: &str, child: Option<cypher_proto::ChildChat>) -> cypher_proto::C
 fn clicking_a_running_child_row_opens_its_session(cx: &mut gpui::TestAppContext) {
     let now = Utc::now();
     let state = cx.update(|cx| {
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
         cx.new(|_| AppState::new())
     });
     cx.update(|cx| {

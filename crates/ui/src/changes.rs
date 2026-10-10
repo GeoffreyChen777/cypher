@@ -23,7 +23,6 @@
 //!   the watch checksum says the tree moved.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,17 +32,16 @@ use gpui::{
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 
-use cypher_proto::{Chat, CheckoutDiff, GitHistoryCommit};
+use cypher_proto::{CheckoutDiff, GitHistoryCommit};
 use cypher_rpc::methods;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
-use crate::markdown::render;
-use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
-use crate::popover::{self, Popup};
+use crate::kit::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
+use crate::kit::popover::{self, Popup};
+use crate::kit::theme::{MonoStyled, Theme};
+use crate::markdown;
 use crate::state::{AppState, EngineHandle};
-use crate::theme::{MonoStyled, Theme};
-use cypher_syntax::LanguageId as Lang;
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 pub mod layout;
 mod patch;
@@ -53,9 +51,9 @@ pub use resolution::*;
 mod rows;
 pub use rows::*;
 mod comments;
-mod rendering;
+mod render;
 use layout::{DiffLayout, Side};
-pub use rendering::*;
+pub use render::*;
 
 // ---------------------------------------------------------------------------
 // Layout numbers (analytic — they drive the fold tween)
@@ -139,7 +137,7 @@ enum DiffHighlightState {
 /// (`PaletteSearch` context so ↑↓/⏎ bubble to the card's key handler),
 /// ranked substring rows below.
 struct RefMenu {
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     /// Keyboard highlight within the filtered rows.
     active: usize,
     /// Tracked on the card — puts it on the keyboard dispatch path while the
@@ -215,7 +213,7 @@ pub struct Changes {
     /// hidden or background pane never affects the active one.
     sel_scope: crate::markdown::selection::SelectionScope,
     /// The shared shell-level Comment pill/editor (weak — the shell owns it).
-    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
     _observe: Subscription,
     _layout_observe: Subscription,
 }
@@ -290,8 +288,8 @@ impl Changes {
                     )
                     .children(
                         [
-                            (-120.0, crate::icons::ALT_ARROW_LEFT),
-                            (120.0, crate::icons::ALT_ARROW_RIGHT),
+                            (-120.0, crate::kit::icons::ALT_ARROW_LEFT),
+                            (120.0, crate::kit::icons::ALT_ARROW_RIGHT),
                         ]
                         .into_iter()
                         .enumerate()
@@ -307,7 +305,7 @@ impl Changes {
                                 .justify_center()
                                 .cursor_pointer()
                                 .child(
-                                    crate::icons::icon(icon)
+                                    crate::kit::icons::icon(icon)
                                         .size(px(12.0))
                                         .text_color(theme.text_muted),
                                 )
@@ -414,7 +412,7 @@ impl Changes {
             .map(|h| h.spans_for_side(line, side))
             .unwrap_or(&[]);
         let mono = theme.mono();
-        let runs = render::runs_for_syntax_line_with_plain(
+        let runs = markdown::render::runs_for_syntax_line_with_plain(
             &line.text,
             spans,
             &mono,
@@ -476,7 +474,7 @@ impl Changes {
 
     pub fn new(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
@@ -504,7 +502,10 @@ impl Changes {
             for scope in scopes {
                 if let Some(popup) = scroll_popup.upgrade() {
                     popup.update(cx, |popup, cx| {
-                        popup.dismiss_if_owner(crate::comments::CommentOwner::Markdown(scope), cx)
+                        popup.dismiss_if_owner(
+                            crate::comment_popup::CommentOwner::Markdown(scope),
+                            cx,
+                        )
                     });
                 }
                 crate::markdown::selection::clear(scope);
@@ -644,9 +645,9 @@ impl Changes {
                     .tooltip(move |_, cx| cx.new(|_| DiffLayoutTooltip(mode)).into())
                     .tooltip_show_delay(Duration::from_millis(300))
                     .child(
-                        crate::icons::icon(match mode {
-                            DiffLayout::Unified => crate::icons::DIFF_UNIFIED,
-                            DiffLayout::Split => crate::icons::DIFF_SPLIT,
+                        crate::kit::icons::icon(match mode {
+                            DiffLayout::Unified => crate::kit::icons::DIFF_UNIFIED,
+                            DiffLayout::Split => crate::kit::icons::DIFF_SPLIT,
                         })
                         .size(px(16.0))
                         .text_color(if self.view_layout == mode {
@@ -663,7 +664,7 @@ impl Changes {
     /// `parent vs commit` once and never offers the scope menu.
     pub fn for_commit(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         commit: GitHistoryCommit,
         cx: &mut Context<Self>,
     ) -> Self {

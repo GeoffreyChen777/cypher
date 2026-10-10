@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
-    Subscription, Task, Window, div, prelude::*, px,
+    Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
 use cypher_engine::registry::HarnessDescriptor;
@@ -25,17 +25,23 @@ use cypher_proto::{
 };
 use cypher_rpc::methods;
 
+// The space picker's "New project…" row opens the add-project palette. The
+// action lives beside the picker (in the shell's action namespace, which its
+// key binding and menu use) so the picker doesn't depend on the shell; the
+// shell binds and handles it.
+actions!(shell, [AddSpacePalette]);
+
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::motion;
-use crate::popover::{self, Loadable, MenuKey};
-use crate::settings::composer::ComposerDefaults;
+use crate::kit::motion;
+use crate::kit::popover::{self, Loadable, MenuKey};
+use crate::kit::theme::Theme;
+use crate::prefs::composer_defaults::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
-use crate::theme::Theme;
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 mod pure;
 pub use pure::*;
 mod checkout;
@@ -127,15 +133,15 @@ fn provider_display_name(id: &str) -> SharedString {
 fn provider_brand_icon(id: &str) -> (&'static str, Option<gpui::Hsla>) {
     match id {
         "anthropic" | "claude-code" | "claude-bridge" => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        "openai-codex" | "openai" => (crate::icons::OPENAI_MARK, None),
+        "openai-codex" | "openai" => (crate::kit::icons::OPENAI_MARK, None),
         "mock" => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
+            crate::kit::icons::CLAUDE_MARK,
+            Some(crate::kit::icons::claude_brand()),
         ),
-        _ => (crate::icons::GLOBAL, None),
+        _ => (crate::kit::icons::GLOBAL, None),
     }
 }
 
@@ -230,7 +236,7 @@ pub struct Pickers {
     /// (`scroll_to_item`; the add-space palette standard).
     model_scroll: gpui::ScrollHandle,
     /// Shared search / URL / name input, reused across popovers.
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     /// One-shot mute for the next Edited event's highlight reset — armed by
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
@@ -261,9 +267,9 @@ impl Pickers {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| ComposerInput::new("Search…", cx));
+        let search = cx.new(|cx| TextInput::new("Search…", cx));
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Edited => {
+            TextInputEvent::Edited => {
                 // Typing in a filter resets the highlight to the top of the
                 // fresh results. `set_text` emits Edited on programmatic
                 // clears too, and this subscription runs AFTER `toggle`
@@ -282,15 +288,15 @@ impl Pickers {
                 }
                 cx.notify();
             }
-            ComposerInputEvent::Submitted => this.on_search_submit(cx),
+            TextInputEvent::Submitted => this.on_search_submit(cx),
             // Pasted images/files don't apply to a search box.
-            ComposerInputEvent::PastedImages(_)
-            | ComposerInputEvent::PastedPaths(_)
-            | ComposerInputEvent::CursorMoved
-            | ComposerInputEvent::ViewportChanged
-            | ComposerInputEvent::MentionNavigate(_)
-            | ComposerInputEvent::MentionAccept
-            | ComposerInputEvent::MentionDismiss => {}
+            TextInputEvent::PastedImages(_)
+            | TextInputEvent::PastedPaths(_)
+            | TextInputEvent::CursorMoved
+            | TextInputEvent::ViewportChanged
+            | TextInputEvent::MentionNavigate(_)
+            | TextInputEvent::MentionAccept
+            | TextInputEvent::MentionDismiss => {}
         });
         // Chat selection / config changes must re-render the chips (child views
         // only re-render on their own notify). A selection change also drops
@@ -461,8 +467,13 @@ impl Pickers {
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
+    /// Whether this picker set belongs to a Side Chat composer.
+    pub fn is_side_chat(&self) -> bool {
+        self.side_chat
+    }
+
     /// Effective harness: picked, or the chat's config, or the first listed.
-    fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
+    pub fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if let Some(harness) = self.config.harness {
             return Some(harness);
         }

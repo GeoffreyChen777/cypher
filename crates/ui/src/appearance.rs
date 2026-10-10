@@ -4,7 +4,7 @@
 //! Three pieces, following the pattern zed uses (zed's `crates/theme/src/theme.rs`
 //! `SystemAppearance` + `reload_theme` + `cx.refresh_windows`):
 //!
-//! 1. [`AppearanceMode`] — the persisted user choice: follow the OS, or pin one.
+//! 1. [`AppearanceMode`] (in `prefs`) — the persisted user choice: follow the OS, or pin one.
 //! 2. [`AppearanceState`] — a gpui global holding that choice alongside the last
 //!    appearance the OS reported, so [`resolve`] can combine them.
 //! 3. [`observe_window`] — subscribes to the platform's appearance notification
@@ -19,38 +19,15 @@
 //! per-view prepaint cache for the frame, which is the only thing that forces
 //! already-laid-out elements to re-run their paint with the new palette.
 
+pub mod chat_style;
+pub mod space_style;
+pub mod surface_style;
+
 use std::path::{Path, PathBuf};
 
+use crate::kit::theme::{Appearance, Theme};
+use crate::prefs::{AppearanceMode, UiSettings};
 use gpui::{App, Global, Subscription, Window};
-use serde::{Deserialize, Serialize};
-
-use crate::settings::UiSettings;
-use crate::theme::{Appearance, Theme};
-
-/// The user's appearance preference. Persisted in `ui-settings.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AppearanceMode {
-    /// Follow the OS. The default — matches every other native app on the
-    /// machine, including when the user has macOS set to switch at sunset.
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-impl AppearanceMode {
-    /// Menu/label text.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-        }
-    }
-
-    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
-}
 
 /// Global state behind the current theme: what the user chose, and what the OS
 /// last said. Kept separate from [`Theme`] itself so that flipping the OS
@@ -75,6 +52,25 @@ pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
     }
 }
 
+/// Install the theme for `appearance` as the gpui global — with the overall
+/// colour preset and the surface-colour revision applied — and point the
+/// context-free paint helpers at it. The **only** way the appearance should
+/// change: setting the global directly leaves
+/// [`crate::kit::theme::current_appearance`] stale.
+pub fn install_theme(appearance: Appearance, cx: &mut App) {
+    crate::kit::theme::set_current_appearance(appearance);
+    let preset = crate::appearance::surface_style::settings(cx)
+        .palette(appearance)
+        .preset;
+    let mut theme =
+        crate::appearance::surface_style::apply_preset(Theme::for_appearance(appearance), preset);
+    theme.text_style_revision = cx
+        .try_global::<crate::appearance::surface_style::SurfaceAppearanceState>()
+        .map(|s| s.revision)
+        .unwrap_or(0);
+    cx.set_global(theme);
+}
+
 /// Install the appearance globals and the matching theme. Call once at boot,
 /// before any window opens, so the first frame is already the right palette
 /// (installing later produces a visible dark-to-light flash).
@@ -87,7 +83,7 @@ pub fn init(mode: AppearanceMode, data_dir: impl Into<PathBuf>, cx: &mut App) {
         data_dir: data_dir.into(),
     });
     sync_ns_appearance(mode);
-    Theme::install(resolve(mode, system), cx);
+    install_theme(resolve(mode, system), cx);
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
@@ -177,7 +173,7 @@ pub fn apply(cx: &mut App) {
         .is_some_and(|t| t.appearance == wanted);
     if changed {
         tracing::debug!(?wanted, "appearance: installing palette");
-        Theme::install(wanted, cx);
+        install_theme(wanted, cx);
         cx.refresh_windows();
     }
     // Unconditional, even when the palette did not move: this is the only thing

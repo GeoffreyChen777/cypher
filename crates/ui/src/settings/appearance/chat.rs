@@ -7,11 +7,11 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::appearance::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
+use crate::kit::theme::{Appearance, Theme};
 use crate::markdown::{parser, render};
 use crate::settings::widgets;
-use crate::theme::{Appearance, Theme};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FontKind {
@@ -211,13 +211,13 @@ pub(super) struct ChatStyleEditor {
     palette: Appearance,
     follow_current_palette: bool,
     last_colors: ChatColors,
-    color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT],
+    color_inputs: [Entity<TextInput>; COLOR_FIELD_COUNT],
     color_pickers: [Entity<super::color_picker::ColorPicker>; COLOR_FIELD_COUNT],
     color_errors: [bool; COLOR_FIELD_COUNT],
     fonts: Arc<Vec<String>>,
     font_menu: Option<FontKind>,
     font_active: usize,
-    font_search: Entity<ComposerInput>,
+    font_search: Entity<TextInput>,
     font_scroll: gpui::ScrollHandle,
     font_focus: [FocusHandle; 2],
     error: Option<SharedString>,
@@ -231,41 +231,37 @@ impl ChatStyleEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let palette = Theme::of(cx).appearance;
         let colors = chat_style::settings(cx).colors(palette).clone();
-        let color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT] =
-            std::array::from_fn(|index| {
-                cx.new(|cx| {
-                    let mut input = ComposerInput::settings_field("Theme default", false, cx);
-                    input.set_text(
-                        ColorField::ALL[index]
-                            .get(&colors)
-                            .clone()
-                            .unwrap_or_default(),
-                        cx,
-                    );
-                    input
-                })
-            });
+        let color_inputs: [Entity<TextInput>; COLOR_FIELD_COUNT] = std::array::from_fn(|index| {
+            cx.new(|cx| {
+                let mut input = TextInput::settings_field("Theme default", false, cx);
+                input.set_text(
+                    ColorField::ALL[index]
+                        .get(&colors)
+                        .clone()
+                        .unwrap_or_default(),
+                    cx,
+                );
+                input
+            })
+        });
         let color_pickers = std::array::from_fn(|index| {
             cx.new(|cx| super::color_picker::ColorPicker::new(color_inputs[index].clone(), cx))
         });
-        let font_search = cx
-            .new(|cx| ComposerInput::with_context("Search installed fonts…", "PaletteSearch", cx));
+        let font_search =
+            cx.new(|cx| TextInput::with_context("Search installed fonts…", "PaletteSearch", cx));
         let mut subscriptions = Vec::new();
         for field in ColorField::ALL {
             subscriptions.push(cx.subscribe(
                 &color_inputs[field.index()],
                 move |this: &mut Self, _, event, cx| {
-                    if matches!(
-                        event,
-                        ComposerInputEvent::Edited | ComposerInputEvent::Submitted
-                    ) {
+                    if matches!(event, TextInputEvent::Edited | TextInputEvent::Submitted) {
                         this.edit_color(field, cx);
                     }
                 },
             ));
         }
         subscriptions.push(cx.subscribe(&font_search, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 this.font_active = 0;
                 this.font_scroll.scroll_to_item(0);
                 cx.notify();
@@ -495,7 +491,7 @@ impl ChatStyleEditor {
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .when(is_selected, |el| {
                         el.child(
-                            crate::icons::icon(crate::icons::CHECK)
+                            crate::kit::icons::icon(crate::kit::icons::CHECK)
                                 .size(px(12.0))
                                 .text_color(theme.accent),
                         )
@@ -557,7 +553,7 @@ impl ChatStyleEditor {
                         .child("No matching fonts."),
                 )
             });
-        crate::popover::anchored_menu_below("chat-font-popup", menu.into_any_element(), None)
+        crate::kit::popover::anchored_menu_below("chat-font-popup", menu.into_any_element(), None)
     }
 
     fn font_row(
@@ -618,7 +614,7 @@ impl ChatStyleEditor {
                             .child(font_label(selected.as_deref())),
                     )
                     .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        crate::kit::icons::icon(crate::kit::icons::ALT_ARROW_DOWN)
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     )
@@ -639,10 +635,14 @@ impl ChatStyleEditor {
             ColorField::Background => preview.bg,
             ColorField::Accent => preview.accent,
             ColorField::Bubble => preview.bg.blend(chat_style::bubble(preview)),
-            ColorField::CodeBackground => preview.bg.blend(render::code_block_background(preview)),
+            ColorField::CodeBackground => preview
+                .bg
+                .blend(crate::kit::theme::code_block_background(preview)),
             ColorField::CodeText => preview.code_block_text.unwrap_or(preview.text),
-            ColorField::InlineText => render::inline_code_text(preview),
-            ColorField::InlineBackground => preview.bg.blend(render::inline_code_wash(preview)),
+            ColorField::InlineText => crate::kit::theme::inline_code_text(preview),
+            ColorField::InlineBackground => preview
+                .bg
+                .blend(crate::kit::theme::inline_code_wash(preview)),
         };
         let index = field.index();
         let input = self.color_inputs[index].clone();
@@ -747,9 +747,9 @@ impl Render for ChatStyleEditor {
         let settings = chat_style::settings(cx).clone();
         let preview = chat_style::resolve(
             &settings,
-            &crate::surface_style::apply_preset(
+            &crate::appearance::surface_style::apply_preset(
                 Theme::for_appearance(self.palette),
-                crate::surface_style::settings(cx)
+                crate::appearance::surface_style::settings(cx)
                     .palette(self.palette)
                     .preset,
             ),

@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 # Dev-only file-driven UI driver + in-process window capture
-# (`src/dev_capture.rs`). Pulls in gpui's test-support; never in releases.
+# (`src/shell/dev_capture.rs`). Pulls in gpui's test-support; never in releases.
 dev-capture = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dependencies]

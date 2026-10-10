@@ -25,8 +25,8 @@ use cypher_proto::SideChatSource;
 use cypher_rpc::methods;
 
 use crate::composer::{Composer, ComposerEvent, ComposerSideChat};
+use crate::kit::theme::Theme;
 use crate::state::AppState;
-use crate::theme::Theme;
 use crate::transcript::Transcript;
 
 /// Events the shell listens for.
@@ -352,8 +352,8 @@ impl SideChatPanel {
                             .pr(px(5.0))
                             .py(px(5.0))
                             .rounded(px(8.0))
-                            .bg(crate::theme::ink(0.035))
-                            .child(crate::comments::quote_rail(&theme))
+                            .bg(crate::kit::theme::ink(0.035))
+                            .child(crate::comment_popup::quote_rail(&theme))
                             .child(
                                 div()
                                     .flex_1()
@@ -374,7 +374,9 @@ impl SideChatPanel {
                                     .text_color(theme.text_muted)
                                     .cursor_pointer()
                                     .hover(|style| {
-                                        style.bg(crate::theme::ink(0.08)).text_color(theme.text)
+                                        style
+                                            .bg(crate::kit::theme::ink(0.08))
+                                            .text_color(theme.text)
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.promote(cx)))
                                     .child(SharedString::from("Open as Chat")),

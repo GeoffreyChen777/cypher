@@ -111,8 +111,8 @@ fn start(cx: &mut gpui::TestAppContext, builtin: &str) -> (Fixture, gpui::Visual
 
     let state = cx.update(|cx| {
         gpui_tokio::init(cx);
-        cx.set_global(Theme::for_appearance(crate::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
+        crate::widgets::text_input::init(cx);
         let state = cx.new(|_| AppState::new());
         AppState::bootstrap(
             state.clone(),

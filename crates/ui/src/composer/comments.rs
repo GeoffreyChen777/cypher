@@ -48,7 +48,7 @@ impl Composer {
         }
         // An empty list closes the inspector (nothing left to show).
         if self.comments.is_empty() && self.comments_popup.begin_close() {
-            crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+            crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
         }
         cx.notify();
     }
@@ -57,14 +57,14 @@ impl Composer {
         if index >= self.comments.len() {
             return;
         }
-        let input = cx.new(|cx| ComposerInput::new("Edit comment…", cx));
+        let input = cx.new(|cx| TextInput::new("Edit comment…", cx));
         input.update(cx, |input, cx| {
             input.set_text(self.comments[index].comment.clone(), cx)
         });
         // Enter saves; Shift+Enter newlines (the input's standard mapping);
         // Escape propagates (no mentions open) to the inspector's key handler.
         let _events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.save_comment_edit(cx);
             }
         });
@@ -102,7 +102,7 @@ impl Composer {
 
     fn close_comments_popup(&mut self, cx: &mut Context<Self>) {
         if self.comments_popup.begin_close() {
-            crate::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
+            crate::kit::popover::reap_popup(cx, |this: &mut Self| &mut this.comments_popup);
         }
         self.comment_edit = None;
         cx.notify();
@@ -154,7 +154,7 @@ impl Composer {
             );
         }
         let closing = self.comments_popup.closing_since();
-        crate::popover::anchored_menu_above_end(
+        crate::kit::popover::anchored_menu_above_end(
             "comments-inspector",
             div()
                 .w(px(360.0))
@@ -227,12 +227,12 @@ impl Composer {
                             .justify_center()
                             .rounded(px(5.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.08)))
+                            .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.begin_comment_edit(index, window, cx)
                             }))
                             .child(
-                                crate::icons::icon(crate::icons::PEN)
+                                crate::kit::icons::icon(crate::kit::icons::PEN)
                                     .size(px(12.0))
                                     .text_color(theme.text_faint),
                             ),
@@ -247,12 +247,12 @@ impl Composer {
                             .justify_center()
                             .rounded(px(5.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.08)))
+                            .hover(|s| s.bg(crate::kit::theme::ink(0.08)))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.remove_comment(index, cx)),
                             )
                             .child(
-                                crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
+                                crate::kit::icons::icon(crate::kit::icons::TRASH_BIN_MINIMALISTIC)
                                     .size(px(12.0))
                                     .text_color(theme.text_faint),
                             ),
@@ -338,12 +338,12 @@ impl Composer {
             .items_center()
             .gap(px(5.0))
             .cursor_pointer()
-            .bg(crate::motion::hover_blend(
+            .bg(crate::kit::motion::hover_blend(
                 &comments_fade,
                 backing,
-                backing.blend(crate::theme::ink(0.06)),
+                backing.blend(crate::kit::theme::ink(0.06)),
             ))
-            .on_hover(crate::motion::hover_listener(comments_fade.clone()))
+            .on_hover(crate::kit::motion::hover_listener(comments_fade.clone()))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, _cx| this.comments_popup.note_trigger_press()),
@@ -353,7 +353,7 @@ impl Composer {
                 this.toggle_comments_popup(cx);
             }))
             .child(
-                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
                     .size(px(12.0))
                     .text_color(theme.text_muted),
             )
@@ -366,7 +366,7 @@ impl Composer {
         if open {
             trigger = trigger.child(self.render_comments_inspector(cx));
         }
-        crate::frost::composer_accessory(trigger).into_any_element()
+        crate::kit::frost::composer_accessory(trigger).into_any_element()
     }
 
     /// The staged-attachment strip (attachment-ui.tsx AttachmentStrip): image
@@ -405,7 +405,7 @@ impl Composer {
                         .rounded(px(8.0))
                         .overflow_hidden()
                         .border_1()
-                        .border_color(crate::theme::hairline(0.10))
+                        .border_color(crate::kit::theme::hairline(0.10))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.preview = Some(preview.clone());
@@ -432,7 +432,7 @@ impl Composer {
                 // Own layer: inside the frosted pill everything shares one
                 // draw order and images render last, so without it the
                 // thumbnail paints OVER this button (user report).
-                .child(crate::frost::layered(
+                .child(crate::kit::frost::layered(
                     div()
                         .id(("composer-att-remove", ix))
                         .absolute()
@@ -456,7 +456,7 @@ impl Composer {
                             this.remove_attachment(&remove_id, cx);
                         }))
                         .child(
-                            crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+                            crate::kit::icons::icon(crate::kit::icons::CLOSE_CIRCLE)
                                 .size(px(14.0))
                                 .text_color(theme.text_muted),
                         ),
@@ -722,7 +722,7 @@ impl Composer {
 
     pub(super) fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.mention.active =
-            crate::popover::menu_step(self.mention.active, self.mention.count(), delta);
+            crate::kit::popover::menu_step(self.mention.active, self.mention.count(), delta);
         // Keep the keyboard-highlighted row in view, including the wrap from
         // the last row back to the first.
         if let Some(active) = self.mention.active {
@@ -835,11 +835,11 @@ impl Composer {
         let files = &self.mention.files;
         let n_sessions = sessions.len();
         let n_files = files.len();
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::kit::popover::popover_card(theme)
             .w(px(380.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && n_files == 0 && n_sessions == 0 {
-            card = card.child(crate::popover::skeleton_rows(
+            card = card.child(crate::kit::popover::skeleton_rows(
                 "file-mention-loading",
                 theme,
                 3,
@@ -898,21 +898,17 @@ impl Composer {
                 for (ix, session) in sessions.iter().enumerate() {
                     let selected = self.mention.active == Some(ix);
                     let subtitle = self.session_row_subtitle(session, cx);
-                    let tooltip_title: SharedString = session.title.clone().into();
-                    let tooltip_range = token.range.clone();
+                    let tooltip_label = session_tooltip_label(&session.title);
                     list = list.child(
-                        crate::popover::menu_row(
+                        crate::kit::popover::menu_row(
                             theme,
                             selected,
                             format!("session-mention-result-{ix}"),
                         )
                         .id(("session-mention-result", ix))
                         .tooltip(move |_, cx| {
-                            cx.new(|_| MentionPathTooltip {
-                                target: MentionTooltipTarget::Session {
-                                    range: tooltip_range.clone(),
-                                    title: tooltip_title.clone(),
-                                },
+                            cx.new(|_| ChipTooltip {
+                                label: tooltip_label.clone(),
                                 activation: ix as u64,
                             })
                             .into()
@@ -930,7 +926,7 @@ impl Composer {
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(
-                                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                    crate::kit::icons::icon(crate::kit::icons::CHAT_ROUND_LINE)
                                         .size(px(14.0))
                                         .text_color(theme.text_muted),
                                 )
@@ -979,20 +975,16 @@ impl Composer {
                         let selected = self.mention.active == Some(n_sessions + ix);
                         let path = result.path.clone();
                         let tooltip_path: SharedString = path.clone().into();
-                        let tooltip_range = token.range.clone();
                         list = list.child(
-                            crate::popover::menu_row(
+                            crate::kit::popover::menu_row(
                                 theme,
                                 selected,
                                 format!("file-mention-result-{ix}"),
                             )
                             .id(("file-mention-result", ix))
                             .tooltip(move |_, cx| {
-                                cx.new(|_| MentionPathTooltip {
-                                    target: MentionTooltipTarget::File {
-                                        range: tooltip_range.clone(),
-                                        path: tooltip_path.clone(),
-                                    },
+                                cx.new(|_| ChipTooltip {
+                                    label: tooltip_path.clone(),
                                     activation: ix as u64,
                                 })
                                 .into()
@@ -1010,10 +1002,10 @@ impl Composer {
                                     .items_center()
                                     .gap(px(8.0))
                                     .child(
-                                        crate::icons::icon(if result.is_dir {
-                                            crate::icons::FOLDER
+                                        crate::kit::icons::icon(if result.is_dir {
+                                            crate::kit::icons::FOLDER
                                         } else {
-                                            crate::icons::DOCUMENT
+                                            crate::kit::icons::DOCUMENT
                                         })
                                         .size(px(14.0))
                                         .text_color(theme.text_muted),
@@ -1043,7 +1035,7 @@ impl Composer {
                             .child(error),
                     );
                 } else {
-                    list = list.child(crate::popover::skeleton_rows(
+                    list = list.child(crate::kit::popover::skeleton_rows(
                         "file-mention-loading",
                         theme,
                         2,
@@ -1061,7 +1053,7 @@ impl Composer {
         // No exit phase: the completion popup tracks the token under the
         // caret — a fade-out on every keystroke-driven dismissal would read
         // as input lag, not polish.
-        Some(crate::popover::anchored_menu_above_at(
+        Some(crate::kit::popover::anchored_menu_above_at(
             "file-mention-popup",
             anchor,
             card.into_any_element(),
@@ -1262,7 +1254,7 @@ impl Composer {
 
     pub(super) fn move_issue(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.issue.active =
-            crate::popover::menu_step(self.issue.active, self.issue.row_count(), delta);
+            crate::kit::popover::menu_step(self.issue.active, self.issue.row_count(), delta);
         if let Some(active) = self.issue.active {
             self.issue_scroll
                 .scroll_to_item(self.issue.scroll_index(active));
@@ -1331,7 +1323,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let token = self.issue.token.as_ref()?;
-        let mut card = crate::popover::popover_card(theme)
+        let mut card = crate::kit::popover::popover_card(theme)
             .w(px(420.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_issue(cx)));
         let note = |text: SharedString, color: gpui::Hsla| {
@@ -1344,7 +1336,7 @@ impl Composer {
         };
         if self.issue.row_count() == 0 {
             card = if self.issue.loading {
-                card.child(crate::popover::skeleton_rows(
+                card.child(crate::kit::popover::skeleton_rows(
                     "issue-mention-loading",
                     theme,
                     3,
@@ -1364,7 +1356,7 @@ impl Composer {
                             "Install the Cypher GitHub App…".to_string()
                         }
                     };
-                    crate::popover::menu_row(theme, false, "issue-mention-action")
+                    crate::kit::popover::menu_row(theme, false, "issue-mention-action")
                         .id("issue-mention-action")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.run_issue_action(action.clone(), cx)
@@ -1410,10 +1402,10 @@ impl Composer {
                 .overflow_y_scroll()
                 .track_scroll(&self.issue_scroll);
             let sections = [
-                ("Issues", crate::icons::ISSUE, &self.issue.issues, 0),
+                ("Issues", crate::kit::icons::ISSUE, &self.issue.issues, 0),
                 (
                     "Pull requests",
-                    crate::icons::PULL_REQUEST,
+                    crate::kit::icons::PULL_REQUEST,
                     &self.issue.pull_requests,
                     self.issue.issues.len(),
                 ),
@@ -1436,7 +1428,7 @@ impl Composer {
             .input
             .read(cx)
             .visible_point_for_index(token.range.start)?;
-        Some(crate::popover::anchored_menu_above_at(
+        Some(crate::kit::popover::anchored_menu_above_at(
             "issue-mention-popup",
             anchor,
             card.into_any_element(),
@@ -1462,7 +1454,7 @@ impl Composer {
         } else {
             issue.labels.first().cloned()
         };
-        crate::popover::menu_row(theme, selected, format!("issue-mention-result-{ix}"))
+        crate::kit::popover::menu_row(theme, selected, format!("issue-mention-result-{ix}"))
             .id(("issue-mention-result", ix))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.issue.active = Some(ix);
@@ -1477,7 +1469,7 @@ impl Composer {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        crate::icons::icon(icon)
+                        crate::kit::icons::icon(icon)
                             .size(px(14.0))
                             .text_color(theme.text_muted),
                     )

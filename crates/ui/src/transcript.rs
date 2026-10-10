@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -41,16 +41,17 @@ use gpui::{
 
 use cypher_doc::{MessageComment, MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use cypher_proto::view::Indicator;
-use cypher_proto::{AnsweredModel, Chat, HarnessId, ToolCall};
+use cypher_proto::{AnsweredModel, ToolCall};
 
+use crate::kit::motion::{self, AnimationExt as _, RESIZE};
+use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
-use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
-use crate::motion::{self, AnimationExt as _, RESIZE};
+use crate::markdown::{
+    self,
+    render::{RenderCache, RenderOptions},
+};
 use crate::state::AppState;
-use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
-use crate::theme::{MonoStyled, Theme};
-use cypher_syntax::LanguageId as Lang;
 mod spring;
 pub use spring::*;
 mod rows;
@@ -61,9 +62,10 @@ mod highlight;
 use highlight::*;
 mod attachments;
 mod find;
-mod rendering;
+pub mod rail;
+mod render;
 mod scroll;
-use rendering::*;
+use render::*;
 mod comments;
 
 /// Key context of a transcript holding focus (a click into the chat history).
@@ -100,7 +102,7 @@ pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
 pub const GAP_BLOCK: f32 = 8.0;
 /// Transcript column max width (zeron 46rem).
-pub const MAX_CONTENT_WIDTH: f32 = crate::chat_style::CONTENT_WIDTH;
+pub const MAX_CONTENT_WIDTH: f32 = crate::appearance::chat_style::CONTENT_WIDTH;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
 /// A row is the guide rail + a 30px chip card centered in it (zeron
 /// tool-chip.tsx: `TOOL_CHIP_HEIGHT = 38`, card `h-[30px]`); rows stack with no
@@ -174,7 +176,7 @@ struct OwnTurnAnchor {
 }
 
 /// The transcript is a pure viewer now — comments live in the shared
-/// [`crate::comments::CommentPopup`] (shell-rendered, shell-subscribed), so
+/// [`crate::comment_popup::CommentPopup`] (shell-rendered, shell-subscribed), so
 /// the transcript no longer emits events of its own.
 pub struct Transcript {
     state: Entity<AppState>,
@@ -320,7 +322,7 @@ pub struct Transcript {
     blob_fetch_counter: u64,
     /// The shared shell-level Comment pill/editor. Weak: the
     /// shell owns it; the transcript only ever drives and reads it.
-    comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+    comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
     /// In-flight Session Forks, keyed `(chat id, anchor message id)`: while
     /// an entry's fork RPC is pending its affordance shows a spinner and is
     /// inert (double-click guard). The shell begins/ends these around the
@@ -350,7 +352,7 @@ pub struct Transcript {
 /// because a row's match count is memoizable against the content version the
 /// row diff already maintains — a streaming commit rescans only the rows
 /// whose version moved, never the whole transcript. Within a row, the painter
-/// resolves exact byte ranges itself (see [`crate::find`]).
+/// resolves exact byte ranges itself (see [`crate::markdown::find`]).
 #[derive(Default)]
 struct FindState {
     query: String,
@@ -396,7 +398,7 @@ enum BlobFetch {
 impl Transcript {
     pub fn new(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::with_options(
@@ -428,7 +430,7 @@ impl Transcript {
 
     fn with_options(
         state: Entity<AppState>,
-        comment_popup: gpui::WeakEntity<crate::comments::CommentPopup>,
+        comment_popup: gpui::WeakEntity<crate::comment_popup::CommentPopup>,
         scope: crate::markdown::selection::SelectionScope,
         rail_enabled: bool,
         embedded: bool,
@@ -445,21 +447,23 @@ impl Transcript {
             .ok();
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
-        let style_observe =
-            cx.observe_global::<crate::chat_style::ChatAppearanceState>(|this: &mut Self, cx| {
-                this.dismiss_comment_ui_and_selection(cx);
-                this.render_cache.borrow_mut().clear();
-                // A new tool call cap re-caps work runs, which are capped at
-                // build time; the revision gate skips every other change.
-                this.sync(cx);
-                // Invalidate measurements without resetting the scroll anchor,
-                // transcript rows, folds, or streamed content.
-                this.list.remeasure_items(0..this.rows.len());
-                this.spring.reset();
-                this.spring_kick = this.pinned;
-                this.own_turn_kick = this.own_turn.is_some();
-                cx.notify();
-            });
+        let style_observe = cx
+            .observe_global::<crate::appearance::chat_style::ChatAppearanceState>(
+                |this: &mut Self, cx| {
+                    this.dismiss_comment_ui_and_selection(cx);
+                    this.render_cache.borrow_mut().clear();
+                    // A new tool call cap re-caps work runs, which are capped at
+                    // build time; the revision gate skips every other change.
+                    this.sync(cx);
+                    // Invalidate measurements without resetting the scroll anchor,
+                    // transcript rows, folds, or streamed content.
+                    this.list.remeasure_items(0..this.rows.len());
+                    this.spring.reset();
+                    this.spring_kick = this.pinned;
+                    this.own_turn_kick = this.own_turn.is_some();
+                    cx.notify();
+                },
+            );
         let mut this = Self {
             state,
             list,
@@ -524,9 +528,6 @@ impl Transcript {
         this
     }
 }
-
-#[cfg(test)]
-mod scroll_tests;
 
 #[cfg(test)]
 mod tests;

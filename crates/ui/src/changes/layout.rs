@@ -70,7 +70,7 @@ pub fn current(cx: &App) -> DiffLayout {
 }
 fn save(dir: &Path, layout: DiffLayout) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(&Preference { layout }).map_err(std::io::Error::other)?;
-    crate::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
+    crate::kit::fs_util::write_atomic(dir, FILE_NAME, &bytes, 0o600)
 }
 pub fn set(layout: DiffLayout, cx: &mut App) -> std::io::Result<()> {
     let state = cx

@@ -2,16 +2,8 @@
 //! mode, draft comments and session references.
 
 use super::*;
+use crate::widgets::text_input::{INPUT_LINE_HEIGHT, TEXTAREA_MAX, TEXTAREA_MIN, TEXTAREA_PAD_V};
 
-/// Expanded-mode textarea vertical padding: `pt-4 pb-1` (zeron composer.tsx
-/// line 578) = 16 + 4.
-pub const TEXTAREA_PAD_V: f32 = 20.0;
-/// The expanded textarea BOX (content + padding) is clamped by the original's
-/// auto-grow effect: `ta.style.height = Math.min(Math.max(scrollHeight, 76),
-/// 260)` (zeron composer.tsx line 235). The 76px floor applies even when
-/// empty — it's what makes the always-expanded new-chat composer tall.
-pub const TEXTAREA_MIN: f32 = 76.0;
-pub const TEXTAREA_MAX: f32 = 260.0;
 /// Expanded actions row: `pt-1` (4) + h-8 picker chips (32 — the tallest
 /// children; composer/styles.tsx pickerChip) + `pb-2.5` (10) — zeron
 /// composer-actions.tsx line 60.
@@ -35,24 +27,18 @@ pub(super) const EDGE_RING_HIT_WIDTH: f32 = CLUSTER_INSET;
 pub(super) const SEND_BUTTON_SIZE: f32 = 28.0;
 /// How far the pill's lift shadow reaches: a little above, more at the
 /// sides, most below (Tailwind `shadow-lg`'s drop, roughly).
-pub(super) const PILL_SHADOW_REACH: crate::soft_shadow::Reach = crate::soft_shadow::Reach {
-    top: 3.0,
-    side: 8.0,
-    bottom: 14.0,
-};
+pub(super) const PILL_SHADOW_REACH: crate::kit::soft_shadow::Reach =
+    crate::kit::soft_shadow::Reach {
+        top: 3.0,
+        side: 8.0,
+        bottom: 14.0,
+    };
 /// Compact pill, border-box: one-line textarea `py-3` (24) + one 22.75px line
 /// (scrollHeight rounds to 47 in the original) + the 2px hairline = 49. The
 /// compact cluster (`py-1.5` + h-8 = 44) is shorter, so the textarea wins.
 pub const COMPACT_TOTAL_HEIGHT: f32 = 49.0;
 /// Below this pill input width the composer always expands.
 pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
-/// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
-pub const INPUT_LINE_HEIGHT: f32 = 22.75;
-pub const INPUT_TEXT_SIZE: f32 = 14.0;
-/// Content cap for a [`ComposerInput::settings_prompt_field`] — a settings
-/// field that holds a DOCUMENT (a subagent's system prompt) rather than a
-/// value. Deep enough to read a paragraph in place, then scrolls internally.
-pub const PROMPT_FIELD_MAX: f32 = 420.0;
 
 pub(super) fn compact_height_for_line(line_height: f32) -> f32 {
     COMPACT_TOTAL_HEIGHT.max(COMPACT_TOTAL_HEIGHT + line_height - INPUT_LINE_HEIGHT)
@@ -85,9 +71,6 @@ const _: () = assert!(WIZARD_STUCK_ANSWER_MS > WIZARD_HANDOFF_QUIET_MS);
 /// Keep a question panel with many options inside the composer instead of
 /// letting its content push past the bottom edge of the window.
 pub(super) const WIZARD_CONTENT_MAX_HEIGHT: f32 = 360.0;
-/// Drag-selection autoscroll runs at the display-friendly 60fps cadence.
-pub const DRAG_SCROLL_FRAME_MS: u64 = 16;
-
 /// Hysteresis slack for the expanded→compact flip: once expanded, the composer
 /// only collapses when the text is comfortably narrower than the compact
 /// capacity — expanding and collapsing share no boundary, so a width right at
@@ -129,16 +112,6 @@ pub fn composer_flip(
     }
 }
 
-/// Caret blink half-period (standard textarea cadence: ~500ms on / 500ms off).
-pub const CARET_BLINK_MS: u64 = 500;
-
-/// Caret blink phase for a time since the last keystroke/caret move: solid
-/// through the first half-period (typing bursts never blink — each keystroke
-/// resets the phase), then alternating.
-pub fn caret_visible(ms_since_activity: u64) -> bool {
-    (ms_since_activity / CARET_BLINK_MS).is_multiple_of(2)
-}
-
 /// Total expanded composer height (border-box) for a content height: the
 /// textarea BOX (content + `pt-4 pb-1`) clamps to 76–260 exactly like the
 /// original's auto-grow effect, then the 46px actions row and the hairline
@@ -147,56 +120,6 @@ pub fn composer_total_height(content_height: f32) -> f32 {
     (content_height + TEXTAREA_PAD_V).clamp(TEXTAREA_MIN, TEXTAREA_MAX)
         + ACTIONS_ROW_HEIGHT
         + PILL_BORDER_V
-}
-
-pub(super) fn input_max_scroll(content_height: f32, viewport_height: f32) -> f32 {
-    (content_height - viewport_height).max(0.0)
-}
-
-/// Apply GPUI's wheel delta to a top-origin input offset. Positive deltas mean
-/// scrolling toward the start, matching gpui's built-in list/div behavior.
-pub(super) fn input_scroll_offset(
-    current: f32,
-    delta_y: f32,
-    content_height: f32,
-    viewport_height: f32,
-) -> f32 {
-    (current - delta_y).clamp(0.0, input_max_scroll(content_height, viewport_height))
-}
-
-/// Minimally adjust the viewport so the caret row is fully visible.
-pub(super) fn input_scroll_offset_for_cursor(
-    current: f32,
-    cursor_top: f32,
-    cursor_height: f32,
-    content_height: f32,
-    viewport_height: f32,
-) -> f32 {
-    let mut next = current;
-    if cursor_top < next {
-        next = cursor_top;
-    } else if cursor_top + cursor_height > next + viewport_height {
-        next = cursor_top + cursor_height - viewport_height;
-    }
-    next.clamp(0.0, input_max_scroll(content_height, viewport_height))
-}
-
-/// Per-frame drag-selection scroll. Distance increases speed, capped at one
-/// text row per frame so crossing the input boundary never causes a jump.
-pub(super) fn input_drag_scroll_delta(
-    pointer_y: f32,
-    viewport_top: f32,
-    viewport_bottom: f32,
-    line_height: f32,
-) -> f32 {
-    let distance = if pointer_y < viewport_top {
-        pointer_y - viewport_top
-    } else if pointer_y > viewport_bottom {
-        pointer_y - viewport_bottom
-    } else {
-        return 0.0;
-    };
-    distance.signum() * (distance.abs() * 0.2).clamp(1.0, line_height)
 }
 
 /// Staged-attachment strip metrics (zeron attachment-ui.tsx AttachmentStrip:
@@ -466,7 +389,7 @@ pub fn merge_restored_comments(
 }
 
 /// One-line quote preview for the comments inspector/editor.
-pub(crate) fn comment_quote_preview(quote: &str) -> String {
+pub fn comment_quote_preview(quote: &str) -> String {
     let single = quote.replace('\n', " ");
     if single.chars().count() > 120 {
         let mut out: String = single.chars().take(120).collect();
