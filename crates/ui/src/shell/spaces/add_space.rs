@@ -18,10 +18,9 @@ impl Shell {
         // "PaletteSearch" context: navigation keys stay unbound so ↑↓/←/→/⏎
         // bubble to the palette frame (`add_space_key`) instead of moving the
         // text caret — Enter and ⌘Enter are both handled there.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
+        let search = cx.new(|cx| TextInput::with_context("Search folders…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
                 // it — the query reads as a path segment, so the slash IS the
                 // pick (shell-style). Otherwise the slash stays in the query

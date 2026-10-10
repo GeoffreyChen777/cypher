@@ -35,13 +35,13 @@ use gpui::{
 use cypher_proto::{CheckoutDiff, GitHistoryCommit};
 use cypher_rpc::methods;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
 use crate::kit::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
 use crate::kit::popover::{self, Popup};
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::markdown;
 use crate::state::{AppState, EngineHandle};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 pub mod layout;
 mod patch;
@@ -137,7 +137,7 @@ enum DiffHighlightState {
 /// (`PaletteSearch` context so ↑↓/⏎ bubble to the card's key handler),
 /// ranked substring rows below.
 struct RefMenu {
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     /// Keyboard highlight within the filtered rows.
     active: usize,
     /// Tracked on the card — puts it on the keyboard dispatch path while the

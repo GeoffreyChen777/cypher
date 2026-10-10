@@ -8,10 +8,10 @@ use gpui::{
 };
 
 use crate::appearance::chat_style::{self, ChatAppearance, ChatAppearanceState, ChatColors};
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::theme::{Appearance, Theme};
 use crate::markdown::{parser, render};
 use crate::settings::widgets;
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FontKind {
@@ -211,13 +211,13 @@ pub(super) struct ChatStyleEditor {
     palette: Appearance,
     follow_current_palette: bool,
     last_colors: ChatColors,
-    color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT],
+    color_inputs: [Entity<TextInput>; COLOR_FIELD_COUNT],
     color_pickers: [Entity<super::color_picker::ColorPicker>; COLOR_FIELD_COUNT],
     color_errors: [bool; COLOR_FIELD_COUNT],
     fonts: Arc<Vec<String>>,
     font_menu: Option<FontKind>,
     font_active: usize,
-    font_search: Entity<ComposerInput>,
+    font_search: Entity<TextInput>,
     font_scroll: gpui::ScrollHandle,
     font_focus: [FocusHandle; 2],
     error: Option<SharedString>,
@@ -231,41 +231,37 @@ impl ChatStyleEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let palette = Theme::of(cx).appearance;
         let colors = chat_style::settings(cx).colors(palette).clone();
-        let color_inputs: [Entity<ComposerInput>; COLOR_FIELD_COUNT] =
-            std::array::from_fn(|index| {
-                cx.new(|cx| {
-                    let mut input = ComposerInput::settings_field("Theme default", false, cx);
-                    input.set_text(
-                        ColorField::ALL[index]
-                            .get(&colors)
-                            .clone()
-                            .unwrap_or_default(),
-                        cx,
-                    );
-                    input
-                })
-            });
+        let color_inputs: [Entity<TextInput>; COLOR_FIELD_COUNT] = std::array::from_fn(|index| {
+            cx.new(|cx| {
+                let mut input = TextInput::settings_field("Theme default", false, cx);
+                input.set_text(
+                    ColorField::ALL[index]
+                        .get(&colors)
+                        .clone()
+                        .unwrap_or_default(),
+                    cx,
+                );
+                input
+            })
+        });
         let color_pickers = std::array::from_fn(|index| {
             cx.new(|cx| super::color_picker::ColorPicker::new(color_inputs[index].clone(), cx))
         });
-        let font_search = cx
-            .new(|cx| ComposerInput::with_context("Search installed fonts…", "PaletteSearch", cx));
+        let font_search =
+            cx.new(|cx| TextInput::with_context("Search installed fonts…", "PaletteSearch", cx));
         let mut subscriptions = Vec::new();
         for field in ColorField::ALL {
             subscriptions.push(cx.subscribe(
                 &color_inputs[field.index()],
                 move |this: &mut Self, _, event, cx| {
-                    if matches!(
-                        event,
-                        ComposerInputEvent::Edited | ComposerInputEvent::Submitted
-                    ) {
+                    if matches!(event, TextInputEvent::Edited | TextInputEvent::Submitted) {
                         this.edit_color(field, cx);
                     }
                 },
             ));
         }
         subscriptions.push(cx.subscribe(&font_search, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 this.font_active = 0;
                 this.font_scroll.scroll_to_item(0);
                 cx.notify();

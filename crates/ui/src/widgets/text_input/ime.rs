@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl EntityInputHandler for ComposerInput {
+impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -56,7 +56,7 @@ impl EntityInputHandler for ComposerInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.projection.normalize_range(range);
-        self.invalidate_mention_tooltip();
+        self.invalidate_chip_tooltip();
         // An IME commit is the tail of a composition whose pre-composition
         // snapshot was already taken (`replace_and_mark_text_in_range`);
         // recording here would pin undo to the half-composed text instead.
@@ -71,7 +71,7 @@ impl EntityInputHandler for ComposerInput {
         self.marked_range.take();
         self.follow_cursor = true;
         self.reset_blink();
-        cx.emit(ComposerInputEvent::Edited);
+        cx.emit(TextInputEvent::Edited);
         cx.notify();
     }
 
@@ -89,7 +89,7 @@ impl EntityInputHandler for ComposerInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let range = self.projection.normalize_range(range);
-        self.invalidate_mention_tooltip();
+        self.invalidate_chip_tooltip();
         // First keystroke of a composition: snapshot the text as it stood
         // before any of it existed, so one undo drops the whole composition.
         if self.marked_range.is_none() && !self.secret {
@@ -123,7 +123,7 @@ impl EntityInputHandler for ComposerInput {
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.follow_cursor = true;
         self.reset_blink();
-        cx.emit(ComposerInputEvent::Edited);
+        cx.emit(TextInputEvent::Edited);
         cx.notify();
     }
 

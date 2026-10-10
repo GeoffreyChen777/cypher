@@ -45,7 +45,7 @@ fn missing_runtime_button_keeps_the_chat_device_and_refresh_clears_errors(
     }
     let pickers = cx.update(|cx| {
         cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        crate::widgets::text_input::init(cx);
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("local-mac".into());

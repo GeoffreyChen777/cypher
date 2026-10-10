@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 use cypher_proto::WorkspaceScope;
 use cypher_rpc::methods;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::popover;
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::state::{AppState, device_online};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -129,7 +129,7 @@ pub fn is_busy_error(message: &str) -> bool {
 
 struct RenameDialog {
     device_id: String,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     _events: Subscription,
 }
 
@@ -174,10 +174,10 @@ impl DevicesPage {
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
-        let input = cx.new(|cx| ComposerInput::new("Device name", cx));
+        let input = cx.new(|cx| TextInput::new("Device name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.submit_rename(cx);
             }
         });

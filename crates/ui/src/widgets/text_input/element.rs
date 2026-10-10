@@ -8,15 +8,12 @@ use gpui::{
     Window, fill, point, px, quad, relative, size,
 };
 
-use super::{
-    ComposerInputEvent, ComposerTextElement, MENTION_TOOLTIP_HEIGHT, MentionHit, MentionKind,
-    MentionTooltipTarget,
-};
+use super::{CHIP_TOOLTIP_HEIGHT, ChipHit, ChipTooltipTarget, TextInputElement, TextInputEvent};
 
-pub(super) struct ComposerTextPrepaint {
+pub(super) struct TextInputPrepaint {
     cursor: Option<PaintQuad>,
-    mention_quads: Vec<PaintQuad>,
-    mention_hits: Vec<MentionHit>,
+    chip_quads: Vec<PaintQuad>,
+    chip_hits: Vec<ChipHit>,
     selection_quads: Vec<PaintQuad>,
     /// Completion preview: window-space origin of the end-of-text caret plus
     /// the suffix to paint there (shaped at paint time — it never joins the
@@ -24,16 +21,16 @@ pub(super) struct ComposerTextPrepaint {
     ghost: Option<(Point<Pixels>, SharedString)>,
 }
 
-impl IntoElement for ComposerTextElement {
+impl IntoElement for TextInputElement {
     type Element = Self;
     fn into_element(self) -> Self {
         self
     }
 }
 
-impl gpui::Element for ComposerTextElement {
+impl gpui::Element for TextInputElement {
     type RequestLayoutState = ();
-    type PrepaintState = ComposerTextPrepaint;
+    type PrepaintState = TextInputPrepaint;
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -82,7 +79,7 @@ impl gpui::Element for ComposerTextElement {
             let scrolled = input.clamp_scroll(f32::from(bounds.size.height));
             input.last_bounds = Some(bounds);
             if scrolled {
-                cx.emit(ComposerInputEvent::ViewportChanged);
+                cx.emit(TextInputEvent::ViewportChanged);
             }
         });
         let input = self.input.read(cx);
@@ -92,25 +89,14 @@ impl gpui::Element for ComposerTextElement {
         let selection_color = input_theme.selection;
         let caret_color = input_theme.caret;
         // The inline-code recipe: chips wash emerald like `code` spans do.
-        let mention_color = input_theme.code_wash;
+        let chip_color = input_theme.code_wash;
 
-        let mut mention_quads = Vec::new();
-        let mut mention_hits = Vec::new();
-        for (mention, display) in &input.projection.mentions {
-            let target = match &mention.kind {
-                MentionKind::File { path, is_dir } => MentionTooltipTarget::File {
-                    range: mention.range.clone(),
-                    path: SharedString::from(format!("{path}{}", if *is_dir { "/" } else { "" })),
-                },
-                MentionKind::Session { .. } => MentionTooltipTarget::Session {
-                    range: mention.range.clone(),
-                    title: mention.label.clone().into(),
-                },
-                MentionKind::Issue { repo, number, pull } => MentionTooltipTarget::Issue {
-                    range: mention.range.clone(),
-                    reference: format!("{repo}#{number}").into(),
-                    pull: *pull,
-                },
+        let mut chip_quads = Vec::new();
+        let mut chip_hits = Vec::new();
+        for (chip, display) in &input.projection.chips {
+            let target = ChipTooltipTarget {
+                range: chip.range.clone(),
+                label: chip.tooltip.clone(),
             };
             for local_bounds in input.bounds_for_display_range(display.clone()) {
                 let chip_bounds = Bounds::new(
@@ -120,15 +106,15 @@ impl gpui::Element for ComposerTextElement {
                     ),
                     size(local_bounds.size.width, local_bounds.size.height - px(4.0)),
                 );
-                mention_quads.push(quad(
+                chip_quads.push(quad(
                     chip_bounds,
                     px(5.0),
-                    mention_color,
+                    chip_color,
                     px(0.0),
                     gpui::transparent_black(),
                     BorderStyle::default(),
                 ));
-                let above_anchor = chip_bounds.top() - px(MENTION_TOOLTIP_HEIGHT) - px(1.0);
+                let above_anchor = chip_bounds.top() - px(CHIP_TOOLTIP_HEIGHT) - px(1.0);
                 let anchor_y = if above_anchor >= px(0.0) {
                     above_anchor
                 } else {
@@ -140,7 +126,7 @@ impl gpui::Element for ComposerTextElement {
                 if visible_bounds.size.width == px(0.0) || visible_bounds.size.height == px(0.0) {
                     continue;
                 }
-                mention_hits.push(MentionHit {
+                chip_hits.push(ChipHit {
                     target: target.clone(),
                     bounds: visible_bounds,
                     // The fixed-height popup starts at anchor + 1px. Moving
@@ -207,7 +193,7 @@ impl gpui::Element for ComposerTextElement {
                 ));
             }
         }
-        let tooltip = input.visible_mention_tooltip();
+        let tooltip = input.visible_chip_tooltip();
         if let Some((_target, anchor, _activation, view)) = tooltip {
             let view = view.into();
             let input = self.input.clone();
@@ -216,7 +202,7 @@ impl gpui::Element for ComposerTextElement {
                 mouse_position: anchor,
                 check_visible_and_update: Rc::new(move |popup, window, cx| {
                     input.update(cx, |input, _| {
-                        input.check_mention_tooltip_visibility(popup, window.mouse_position())
+                        input.check_chip_tooltip_visibility(popup, window.mouse_position())
                     })
                 }),
             });
@@ -238,10 +224,10 @@ impl gpui::Element for ComposerTextElement {
                     .point_for_index(input.content.len())
                     .map(|p| (point(origin.x + p.x, origin.y + p.y), g))
             });
-        ComposerTextPrepaint {
+        TextInputPrepaint {
             cursor,
-            mention_quads,
-            mention_hits,
+            chip_quads,
+            chip_hits,
             selection_quads,
             ghost,
         }
@@ -259,7 +245,7 @@ impl gpui::Element for ComposerTextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         self.input.update(cx, |input, _| {
-            input.set_mention_hits(prepaint.mention_hits.clone())
+            input.set_chip_hits(prepaint.chip_hits.clone())
         });
         window.handle_input(
             &focus_handle,
@@ -284,7 +270,7 @@ impl gpui::Element for ComposerTextElement {
         });
 
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            for quad in prepaint.mention_quads.drain(..) {
+            for quad in prepaint.chip_quads.drain(..) {
                 window.paint_quad(quad);
             }
             for quad in prepaint.selection_quads.drain(..) {

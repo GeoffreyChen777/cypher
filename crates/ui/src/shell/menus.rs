@@ -15,8 +15,8 @@
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
 use crate::appearance;
-use crate::composer;
 use crate::prefs::AppearanceMode;
+use crate::widgets::text_input;
 
 actions!(
     cypher,
@@ -135,14 +135,14 @@ pub fn app_menus() -> Vec<Menu> {
         Menu::new("Edit").items([
             // Undo/Redo have no `OsAction` counterpart — they dispatch as plain
             // actions to the focused input, same as the composer keymap.
-            MenuItem::action("Undo", composer::Undo),
-            MenuItem::action("Redo", composer::Redo),
+            MenuItem::action("Undo", text_input::Undo),
+            MenuItem::action("Redo", text_input::Redo),
             MenuItem::separator(),
-            MenuItem::os_action("Cut", composer::Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", composer::Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
+            MenuItem::os_action("Cut", text_input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", text_input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", text_input::Paste, OsAction::Paste),
             MenuItem::separator(),
-            MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
+            MenuItem::os_action("Select All", text_input::SelectAll, OsAction::SelectAll),
             MenuItem::separator(),
             // Routed to the shell's root handler, which owns the find bar
             // over the open conversation (no-op in Settings).
@@ -230,10 +230,10 @@ mod tests {
         // `OsAction` has no `Debug` impl at the pinned rev, so compare
         // per-field.
         let expect = [
-            (composer::Cut.name(), OsAction::Cut),
-            (composer::Copy.name(), OsAction::Copy),
-            (composer::Paste.name(), OsAction::Paste),
-            (composer::SelectAll.name(), OsAction::SelectAll),
+            (text_input::Cut.name(), OsAction::Cut),
+            (text_input::Copy.name(), OsAction::Copy),
+            (text_input::Paste.name(), OsAction::Paste),
+            (text_input::SelectAll.name(), OsAction::SelectAll),
         ];
         let got: Vec<(&str, OsAction)> = edit
             .items

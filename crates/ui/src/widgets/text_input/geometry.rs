@@ -3,16 +3,13 @@
 
 use super::*;
 
-impl ComposerInput {
+impl TextInput {
     /// Content-local point for a byte index (y grows down from content top).
     pub(super) fn point_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         self.point_for_display_index(self.projection.raw_to_display(index))
     }
 
-    pub(in crate::composer) fn visible_point_for_index(
-        &self,
-        index: usize,
-    ) -> Option<Point<Pixels>> {
+    pub fn visible_point_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         let point = self.point_for_index(index)?;
         let height = self.last_bounds?.size.height;
         let y = point.y - px(self.scroll_top);
@@ -136,7 +133,7 @@ impl ComposerInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.invalidate_mention_tooltip();
+        self.invalidate_chip_tooltip();
         window.focus(&self.focus_handle, cx);
         self.is_selecting = true;
         self.drag_position = Some(event.position);
@@ -158,7 +155,7 @@ impl ComposerInput {
     }
 
     pub(super) fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        self.on_mention_pointer_move(event.position, cx);
+        self.on_chip_pointer_move(event.position, cx);
         if self.is_selecting {
             self.drag_position = Some(event.position);
             let position = self.drag_selection_position(event.position);
@@ -259,11 +256,11 @@ impl ComposerInput {
         if next == self.scroll_top {
             return;
         }
-        self.invalidate_mention_tooltip();
+        self.invalidate_chip_tooltip();
         self.scroll_top = next;
         self.follow_cursor = false;
         cx.stop_propagation();
-        cx.emit(ComposerInputEvent::ViewportChanged);
+        cx.emit(TextInputEvent::ViewportChanged);
         cx.notify();
     }
 
@@ -359,7 +356,7 @@ impl ComposerInput {
             _ => {
                 let mut runs = Vec::new();
                 let mut at = 0;
-                for (_, chip) in &self.projection.mentions {
+                for (_, chip) in &self.projection.chips {
                     if at < chip.start {
                         runs.push(run_for(chip.start - at, false, false));
                     }

@@ -88,7 +88,7 @@ pub(super) struct SessionSlot {
     /// ([`Transcript::find_open`]) — this pair is just the chrome, so a chat
     /// switch closing find over there closes the bar here with no second
     /// flag to keep in step.
-    pub(super) find_input: Entity<ComposerInput>,
+    pub(super) find_input: Entity<TextInput>,
     pub(super) find_focus: gpui::FocusHandle,
     /// Focus lands in the field on the render after ⌘F (the element has to
     /// exist first — the palette flows do the same).

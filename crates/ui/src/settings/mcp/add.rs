@@ -1,5 +1,5 @@
 use super::*;
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 use gpui::{Focusable, KeyDownEvent};
 use std::collections::BTreeMap;
 
@@ -21,14 +21,14 @@ pub(super) struct AddForm {
     mode: Mode,
     auth: Auth,
     ticket: super::super::device_target::DeviceTicket,
-    name: Entity<ComposerInput>,
-    endpoint: Entity<ComposerInput>,
-    token: Entity<ComposerInput>,
-    args: Entity<ComposerInput>,
-    env: Entity<ComposerInput>,
-    cwd: Entity<ComposerInput>,
-    headers: Entity<ComposerInput>,
-    json: Entity<ComposerInput>,
+    name: Entity<TextInput>,
+    endpoint: Entity<TextInput>,
+    token: Entity<TextInput>,
+    args: Entity<TextInput>,
+    env: Entity<TextInput>,
+    cwd: Entity<TextInput>,
+    headers: Entity<TextInput>,
+    json: Entity<TextInput>,
     _events: Vec<Subscription>,
 }
 
@@ -79,9 +79,9 @@ impl McpPage {
         let Ok(ticket) = self.target.read(cx).ticket(cx) else {
             return;
         };
-        let name = cx.new(|cx| ComposerInput::settings_field("e.g. docs-server", false, cx));
+        let name = cx.new(|cx| TextInput::settings_field("e.g. docs-server", false, cx));
         let endpoint = cx.new(|cx| {
-            ComposerInput::settings_field(
+            TextInput::settings_field(
                 if mode == Mode::Stdio {
                     "Executable, e.g. npx or /absolute/path/server"
                 } else {
@@ -91,21 +91,20 @@ impl McpPage {
                 cx,
             )
         });
-        let token = cx.new(|cx| ComposerInput::settings_field("Bearer token", true, cx));
+        let token = cx.new(|cx| TextInput::settings_field("Bearer token", true, cx));
         let args =
-            cx.new(|cx| ComposerInput::settings_field("[\"-y\", \"your-mcp-package\"]", true, cx));
-        let env = cx.new(|cx| ComposerInput::settings_field("{\"API_KEY\": \"…\"}", true, cx));
+            cx.new(|cx| TextInput::settings_field("[\"-y\", \"your-mcp-package\"]", true, cx));
+        let env = cx.new(|cx| TextInput::settings_field("{\"API_KEY\": \"…\"}", true, cx));
         let cwd = cx.new(|cx| {
-            ComposerInput::settings_field(
+            TextInput::settings_field(
                 "Optional absolute working directory on the selected host",
                 false,
                 cx,
             )
         });
-        let headers =
-            cx.new(|cx| ComposerInput::settings_field("{\"X-API-Key\": \"…\"}", true, cx));
+        let headers = cx.new(|cx| TextInput::settings_field("{\"X-API-Key\": \"…\"}", true, cx));
         let json = cx.new(|cx| {
-            ComposerInput::settings_field(
+            TextInput::settings_field(
                 "Paste MCP JSON here (masked to protect credentials)",
                 true,
                 cx,
@@ -115,8 +114,8 @@ impl McpPage {
         for input in [&name, &endpoint, &token, &args, &env, &cwd, &headers, &json] {
             events.push(
                 cx.subscribe(input, |page: &mut Self, _, event, cx| match event {
-                    ComposerInputEvent::Submitted => page.save_add(cx),
-                    ComposerInputEvent::Edited => {
+                    TextInputEvent::Submitted => page.save_add(cx),
+                    TextInputEvent::Edited => {
                         page.error = None;
                         cx.notify();
                     }
@@ -277,7 +276,7 @@ impl McpPage {
             );
         }
         fields = fields.child(tabs);
-        let input_row = |label: &'static str, input: &Entity<ComposerInput>| {
+        let input_row = |label: &'static str, input: &Entity<TextInput>| {
             div()
                 .flex()
                 .flex_col()
@@ -515,7 +514,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
             cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-            crate::composer::init(cx);
+            crate::widgets::text_input::init(cx);
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

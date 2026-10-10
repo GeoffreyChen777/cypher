@@ -62,8 +62,7 @@ impl Shell {
         // "PaletteSearch" context: ↵ / ⇧↵ / esc stay unbound so they bubble
         // to the bar's frame (`find_key`) as match navigation instead of
         // editing text.
-        let find_input =
-            cx.new(|cx| ComposerInput::with_context("Find in chat…", "PaletteSearch", cx));
+        let find_input = cx.new(|cx| TextInput::with_context("Find in chat…", "PaletteSearch", cx));
         let subscriptions = vec![
             // A tile's sends change the shared pending-send overlay without
             // notifying main, so the shell observes each context itself
@@ -121,8 +120,8 @@ impl Shell {
             ),
             cx.subscribe(&find_input, {
                 let transcript = transcript.clone();
-                move |_: &mut Shell, input, event: &ComposerInputEvent, cx| {
-                    if matches!(event, ComposerInputEvent::Edited) {
+                move |_: &mut Shell, input, event: &TextInputEvent, cx| {
+                    if matches!(event, TextInputEvent::Edited) {
                         let query = input.read(cx).text().to_owned();
                         transcript.update(cx, |t, cx| t.set_find_query(&query, cx));
                     }

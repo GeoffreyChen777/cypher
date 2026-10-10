@@ -397,7 +397,7 @@ impl TerminalPanel {
         if ks.key == "c" && (mods.platform || (mods.control && mods.shift)) {
             // Terminal-native selection wins. If focus stayed in the terminal
             // while the user selected transcript/diff text, fall back to the
-            // shared custom selection just like ComposerInput does.
+            // shared custom selection just like TextInput does.
             if self.copy_selection(cx) || self.copy_surface_selection(cx) {
                 cx.stop_propagation();
                 return;

@@ -28,7 +28,7 @@ use cypher_rpc::methods;
 use gpui_tokio::Tokio;
 
 use crate::changes::{Changes, ChangesEvent};
-use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use crate::composer::{Composer, ComposerEvent};
 use crate::files::FilesPanel;
 use crate::kit::icons::{self, cypher_app_icon, icon};
 use crate::kit::loaders;
@@ -61,6 +61,7 @@ use crate::subagents::SubagentsPanel;
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::transcript::rail;
 use crate::transcript::{self, Transcript};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 #[cfg(feature = "dev-capture")]
 mod dev_capture;
@@ -208,7 +209,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         }
     }
     cx.clear_key_bindings();
-    crate::composer::init(cx);
+    crate::widgets::text_input::init(cx);
     crate::transcript::init(cx);
     crate::files::editor::init(cx);
     // Fixed app-level shortcuts (⌘Q quit, ⌘W close, ⌘M minimize, ⌘H hide) —
@@ -561,7 +562,7 @@ enum SplashPhase {
 /// The chat-row Rename dialog.
 struct RenameChatDialog {
     chat_id: String,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     /// Focus the input on the dialog's first paint (opened without window access).
     focus_pending: bool,
     _events: Subscription,

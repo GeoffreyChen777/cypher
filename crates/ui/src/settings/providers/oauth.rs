@@ -23,15 +23,12 @@ impl ProvidersPage {
             provider: Some(id.to_string()),
         });
         let callback = cx.new(|cx| {
-            ComposerInput::settings_field("Paste callback URL or authorization code", false, cx)
+            TextInput::settings_field("Paste callback URL or authorization code", false, cx)
         });
         let events = vec![cx.subscribe(&callback, |page: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 page.submit_oauth(cx);
-            } else if matches!(
-                event,
-                ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved
-            ) {
+            } else if matches!(event, TextInputEvent::Edited | TextInputEvent::CursorMoved) {
                 cx.notify();
             }
         })];

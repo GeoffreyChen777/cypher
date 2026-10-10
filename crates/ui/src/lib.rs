@@ -23,6 +23,7 @@ mod terminal;
 #[cfg(test)]
 mod test_fixtures;
 mod transcript;
+mod widgets;
 mod workspace;
 
 use std::borrow::Cow;
@@ -185,7 +186,7 @@ pub fn run_app(config: UiConfig) {
         appearance::surface_style::init(data_dir.clone(), cx);
         changes::layout::init(data_dir.clone(), cx);
         appearance::chat_style::init(data_dir, cx);
-        composer::init(cx);
+        widgets::text_input::init(cx);
         transcript::init(cx);
         terminal::panel::init(cx);
         files::editor::init(cx);

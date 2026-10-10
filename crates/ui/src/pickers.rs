@@ -36,12 +36,12 @@ actions!(shell, [AddSpacePalette]);
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::motion;
 use crate::kit::popover::{self, Loadable, MenuKey};
 use crate::kit::theme::Theme;
 use crate::prefs::composer_defaults::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 mod pure;
 pub use pure::*;
 mod checkout;
@@ -236,7 +236,7 @@ pub struct Pickers {
     /// (`scroll_to_item`; the add-space palette standard).
     model_scroll: gpui::ScrollHandle,
     /// Shared search / URL / name input, reused across popovers.
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     /// One-shot mute for the next Edited event's highlight reset — armed by
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
@@ -267,9 +267,9 @@ impl Pickers {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| ComposerInput::new("Search…", cx));
+        let search = cx.new(|cx| TextInput::new("Search…", cx));
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Edited => {
+            TextInputEvent::Edited => {
                 // Typing in a filter resets the highlight to the top of the
                 // fresh results. `set_text` emits Edited on programmatic
                 // clears too, and this subscription runs AFTER `toggle`
@@ -288,15 +288,15 @@ impl Pickers {
                 }
                 cx.notify();
             }
-            ComposerInputEvent::Submitted => this.on_search_submit(cx),
+            TextInputEvent::Submitted => this.on_search_submit(cx),
             // Pasted images/files don't apply to a search box.
-            ComposerInputEvent::PastedImages(_)
-            | ComposerInputEvent::PastedPaths(_)
-            | ComposerInputEvent::CursorMoved
-            | ComposerInputEvent::ViewportChanged
-            | ComposerInputEvent::MentionNavigate(_)
-            | ComposerInputEvent::MentionAccept
-            | ComposerInputEvent::MentionDismiss => {}
+            TextInputEvent::PastedImages(_)
+            | TextInputEvent::PastedPaths(_)
+            | TextInputEvent::CursorMoved
+            | TextInputEvent::ViewportChanged
+            | TextInputEvent::MentionNavigate(_)
+            | TextInputEvent::MentionAccept
+            | TextInputEvent::MentionDismiss => {}
         });
         // Chat selection / config changes must re-render the chips (child views
         // only re-render on their own notify). A selection change also drops

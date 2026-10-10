@@ -3,9 +3,9 @@ use crate::appearance::chat_style::{ColorPreset, normalize_hex};
 use crate::appearance::surface_style::{
     self, FIELDS, Field, Palette, Region, SurfaceAppearanceState,
 };
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::theme::{Appearance, MonoStyled, Theme};
 use crate::settings::widgets;
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 use gpui::{
     AnyElement, Context, Entity, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
@@ -17,7 +17,7 @@ pub(super) struct SurfaceStyleEditor {
     expanded: bool,
     advanced: bool,
     fields: Vec<Field>,
-    inputs: Vec<Entity<ComposerInput>>,
+    inputs: Vec<Entity<TextInput>>,
     color_pickers: Vec<Entity<super::color_picker::ColorPicker>>,
     invalid: Vec<bool>,
     last: Palette,
@@ -38,8 +38,7 @@ impl SurfaceStyleEditor {
             .iter()
             .map(|field| {
                 cx.new(|cx| {
-                    let mut input =
-                        ComposerInput::settings_field("Follow overall theme", false, cx);
+                    let mut input = TextInput::settings_field("Follow overall theme", false, cx);
                     input.set_text(
                         last.overrides.get(field.key).cloned().unwrap_or_default(),
                         cx,
@@ -55,10 +54,7 @@ impl SurfaceStyleEditor {
         let mut subscriptions = Vec::new();
         for (index, input) in inputs.iter().enumerate() {
             subscriptions.push(cx.subscribe(input, move |this: &mut Self, _, event, cx| {
-                if matches!(
-                    event,
-                    ComposerInputEvent::Edited | ComposerInputEvent::Submitted
-                ) {
+                if matches!(event, TextInputEvent::Edited | TextInputEvent::Submitted) {
                     this.edit(index, cx);
                 }
             }));

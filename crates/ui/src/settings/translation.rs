@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 use super::device_target::DeviceTarget;
 use super::widgets;
 use crate::{
-    composer::{ComposerInput, ComposerInputEvent},
     kit::popover::{self, Loadable},
     kit::theme::Theme,
     state::AppState,
+    widgets::text_input::{TextInput, TextInputEvent},
 };
 
 /// Offering a language the offline detector cannot judge is worse than not
@@ -43,10 +43,10 @@ pub struct TranslationControl {
     generation: u64,
     settings: Loadable<PiTranslationSettings>,
     models: Loadable<Vec<Model>>,
-    source: Entity<ComposerInput>,
-    target_language: Entity<ComposerInput>,
-    translation_search: Entity<ComposerInput>,
-    session_search: Entity<ComposerInput>,
+    source: Entity<TextInput>,
+    target_language: Entity<TextInput>,
+    translation_search: Entity<TextInput>,
+    session_search: Entity<TextInput>,
     translation_model: String,
     enabled_models: Vec<String>,
     output_mode: TranslationOutputMode,
@@ -72,16 +72,16 @@ impl TranslationControl {
         target: Entity<DeviceTarget>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let source = cx.new(|cx| ComposerInput::settings_field("auto or Chinese", false, cx));
-        let target_language = cx.new(|cx| ComposerInput::settings_field("English", false, cx));
+        let source = cx.new(|cx| TextInput::settings_field("auto or Chinese", false, cx));
+        let target_language = cx.new(|cx| TextInput::settings_field("English", false, cx));
         let translation_search =
-            cx.new(|cx| ComposerInput::settings_field("Search available models…", false, cx));
+            cx.new(|cx| TextInput::settings_field("Search available models…", false, cx));
         let session_search =
-            cx.new(|cx| ComposerInput::settings_field("Search available models…", false, cx));
+            cx.new(|cx| TextInput::settings_field("Search available models…", false, cx));
         let mut input_observers = Vec::new();
         for input in [&translation_search, &session_search] {
             input_observers.push(cx.subscribe(input, |_: &mut Self, _, event, cx| {
-                if matches!(event, ComposerInputEvent::Edited) {
+                if matches!(event, TextInputEvent::Edited) {
                     cx.notify();
                 }
             }));

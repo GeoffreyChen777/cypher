@@ -1,9 +1,15 @@
-//! Mention projection: the strict local Markdown links behind file, session,
-//! issue and pull-request chips, their chip display projection (and the
-//! secret-field mask), the reference limits enforced on send, and the chip
-//! hover tooltip.
+//! Mentions: the strict local Markdown links behind file, session, issue and
+//! pull-request chips, their projection onto the text input's chips, and the
+//! reference limits enforced on send.
 
-use super::*;
+use std::collections::HashSet;
+use std::ops::Range;
+use std::time::Duration;
+
+use cypher_proto::Chat;
+use gpui::{Context, SharedString};
+
+use crate::widgets::text_input::{Chip, TextInput, TextProjection};
 
 /// The literal `@` a chip displays before its file name. Projected as TEXT so
 /// it shapes, wraps, and hit-tests with the label — the earlier SVG icons
@@ -11,10 +17,6 @@ use super::*;
 /// (user report). Chips read as inline code: `@name` in the mono font over
 /// the code wash.
 const MENTION_PREFIX: char = '@';
-
-pub(super) const MENTION_TOOLTIP_DELAY: Duration = Duration::from_millis(420);
-
-pub(super) const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
 
@@ -496,264 +498,68 @@ pub(in crate::composer) fn reconcile_mention_active(
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(in crate::composer) struct TextProjection {
-    pub(in crate::composer) display: String,
-    pub(in crate::composer) mentions: Vec<(MentionLink, Range<usize>)>,
-    pub(super) secret_boundaries: Vec<(usize, usize)>,
+/// Project composer text for display: every mention link becomes an atomic
+/// chip of the text input (`@label`, with the link's hover tooltip).
+pub fn mention_projection(raw: &str) -> TextProjection {
+    project_mentions(raw).0
 }
 
-/// The hover identity of one chip: the raw range plus enough display info to
-/// render the tooltip. A path alone is not enough — two identical relative
-/// paths can appear in a draft, so the raw range remains part of the identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::composer) enum MentionTooltipTarget {
-    File {
-        range: Range<usize>,
-        path: SharedString,
-    },
-    Session {
-        range: Range<usize>,
-        title: SharedString,
-    },
-    Issue {
-        range: Range<usize>,
-        /// `owner/name#482`.
-        reference: SharedString,
-        pull: bool,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::composer) enum MentionTooltipPhase {
-    Hidden,
-    Waiting {
-        target: MentionTooltipTarget,
-        generation: u64,
-    },
-    Visible {
-        target: MentionTooltipTarget,
-        generation: u64,
-    },
-}
-
-impl MentionTooltipPhase {
-    pub(super) fn target(&self) -> Option<&MentionTooltipTarget> {
-        match self {
-            Self::Hidden => None,
-            Self::Waiting { target, .. } | Self::Visible { target, .. } => Some(target),
+/// [`mention_projection`] plus the links behind its chips, in the same order.
+fn project_mentions(raw: &str) -> (TextProjection, Vec<MentionLink>) {
+    let links = mention_links(raw);
+    let labels = mention_display_labels(&links);
+    let mut display = String::new();
+    let mut chips = Vec::new();
+    let mut raw_at = 0;
+    for (link, label) in links.iter().zip(labels) {
+        display.push_str(&raw[raw_at..link.range.start]);
+        let display_start = display.len();
+        // The chip is plain projected text — `@` plus the label between
+        // non-breaking side bearings; the rounded code wash beneath it is
+        // painted by the text input's element. Every character here must
+        // exist in Geist (no exotic whitespace — U+2003/U+202F shape at
+        // fallback width and collapsed the chip once already).
+        display.push_str(MENTION_SIDE_PAD);
+        // Issue labels already lead with their own `#`.
+        if !matches!(link.kind, MentionKind::Issue { .. }) {
+            display.push(MENTION_PREFIX);
         }
-    }
-}
-
-/// Pure tooltip lifecycle reducer. Motion within the same chip preserves both
-/// waiting and visible phases, so normal pointer jitter cannot starve the
-/// delay or flicker an already-visible tooltip.
-pub(in crate::composer) fn mention_tooltip_reduce(
-    phase: MentionTooltipPhase,
-    pointer_target: Option<MentionTooltipTarget>,
-    pointer_in_popup: bool,
-    generation: u64,
-) -> MentionTooltipPhase {
-    match pointer_target {
-        Some(target) if phase.target() == Some(&target) => phase,
-        Some(target) => MentionTooltipPhase::Waiting { target, generation },
-        None if pointer_in_popup && matches!(phase, MentionTooltipPhase::Visible { .. }) => phase,
-        None => MentionTooltipPhase::Hidden,
-    }
-}
-
-pub(in crate::composer) fn mention_tooltip_promote(
-    phase: MentionTooltipPhase,
-    generation: u64,
-    target_is_live: bool,
-) -> MentionTooltipPhase {
-    match phase {
-        MentionTooltipPhase::Waiting {
-            target,
-            generation: current,
-        } if current == generation && target_is_live => MentionTooltipPhase::Visible {
-            target,
-            generation: current,
-        },
-        MentionTooltipPhase::Waiting {
-            generation: current,
-            ..
-        } if current == generation => MentionTooltipPhase::Hidden,
-        phase => phase,
-    }
-}
-
-pub(in crate::composer) fn mention_tooltip_contains(in_chip: bool, in_popup: bool) -> bool {
-    in_chip || in_popup
-}
-
-pub(in crate::composer) fn display_row_segments(
-    range: Range<usize>,
-    row_ends: impl IntoIterator<Item = usize>,
-) -> Vec<(usize, usize, Range<usize>)> {
-    let mut segments = Vec::new();
-    let mut row_start = 0usize;
-    for (row_ix, row_end) in row_ends.into_iter().enumerate() {
-        let start = range.start.max(row_start);
-        let end = range.end.min(row_end);
-        if start < end {
-            segments.push((row_ix, row_start, start..end));
+        for ch in label.chars() {
+            display.push(if ch == ' ' { '\u{00A0}' } else { ch });
         }
-        row_start = row_end;
-        if row_start >= range.end {
-            break;
-        }
+        display.push('\u{00A0}');
+        let display_end = display.len();
+        let chip = Chip {
+            range: link.range.clone(),
+            tooltip: link.tooltip_label(),
+        };
+        chips.push((chip, display_start..display_end));
+        raw_at = link.range.end;
     }
-    segments
+    display.push_str(&raw[raw_at..]);
+    (TextProjection::with_chips(display, chips), links)
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct MentionHit {
-    pub(super) target: MentionTooltipTarget,
-    pub(super) bounds: Bounds<Pixels>,
-    pub(super) anchor: Point<Pixels>,
-}
-
-impl TextProjection {
-    pub(in crate::composer) fn secret(raw: &str) -> Self {
-        let mut result = Self::default();
-        for (offset, _) in raw.char_indices() {
-            result
-                .secret_boundaries
-                .push((offset, result.display.len()));
-            result.display.push('•');
-        }
-        result
-            .secret_boundaries
-            .push((raw.len(), result.display.len()));
-        result
-    }
-
-    pub(in crate::composer) fn new(raw: &str) -> Self {
-        let links = mention_links(raw);
-        let labels = mention_display_labels(&links);
-        let mut projection = Self::default();
-        let mut raw_at = 0;
-        for (link, label) in links.into_iter().zip(labels) {
-            projection.display.push_str(&raw[raw_at..link.range.start]);
-            let display_start = projection.display.len();
-            // The chip is plain projected text — `@` plus the label between
-            // non-breaking side bearings; the rounded code wash beneath it is
-            // painted by `ComposerTextElement::paint`. Every character here
-            // must exist in Geist (no exotic whitespace — U+2003/U+202F shape
-            // at fallback width and collapsed the chip once already).
-            projection.display.push_str(MENTION_SIDE_PAD);
-            // Issue labels already lead with their own `#`.
-            if !matches!(link.kind, MentionKind::Issue { .. }) {
-                projection.display.push(MENTION_PREFIX);
+impl MentionLink {
+    /// What the chip's hover tooltip says: a file's workspace-relative path,
+    /// a session's title, an issue or pull request's reference.
+    fn tooltip_label(&self) -> SharedString {
+        match &self.kind {
+            MentionKind::File { path, is_dir } => {
+                format!("{path}{}", if *is_dir { "/" } else { "" }).into()
             }
-            for ch in label.chars() {
-                projection
-                    .display
-                    .push(if ch == ' ' { '\u{00A0}' } else { ch });
-            }
-            projection.display.push('\u{00A0}');
-            let display_end = projection.display.len();
-            projection
-                .mentions
-                .push((link.clone(), display_start..display_end));
-            raw_at = link.range.end;
-        }
-        projection.display.push_str(&raw[raw_at..]);
-        projection
-    }
-
-    pub(in crate::composer) fn raw_to_display(&self, raw: usize) -> usize {
-        if !self.secret_boundaries.is_empty() {
-            return self
-                .secret_boundaries
-                .iter()
-                .rev()
-                .find(|(r, _)| *r <= raw)
-                .map(|(_, d)| *d)
-                .unwrap_or(0);
-        }
-        let mut raw_at = 0;
-        let mut display_at = 0;
-        for (link, display) in &self.mentions {
-            if raw <= link.range.start {
-                return display_at + raw.saturating_sub(raw_at);
-            }
-            if raw < link.range.end {
-                return display.start;
-            }
-            raw_at = link.range.end;
-            display_at = display.end;
-        }
-        display_at + raw.saturating_sub(raw_at)
-    }
-
-    pub(in crate::composer) fn display_to_raw(&self, display_offset: usize) -> usize {
-        if !self.secret_boundaries.is_empty() {
-            return self
-                .secret_boundaries
-                .iter()
-                .rev()
-                .find(|(_, d)| *d <= display_offset)
-                .map(|(r, _)| *r)
-                .unwrap_or(0);
-        }
-        let mut raw_at = 0;
-        let mut display_at = 0;
-        for (link, display) in &self.mentions {
-            if display_offset <= display.start {
-                return raw_at + display_offset.saturating_sub(display_at);
-            }
-            if display_offset < display.end {
-                return if display_offset - display.start < display.len() / 2 {
-                    link.range.start
-                } else {
-                    link.range.end
-                };
-            }
-            raw_at = link.range.end;
-            display_at = display.end;
-        }
-        raw_at + display_offset.saturating_sub(display_at)
-    }
-
-    pub(in crate::composer) fn normalize_range(&self, range: Range<usize>) -> Range<usize> {
-        if range.is_empty() {
-            for (link, _) in &self.mentions {
-                if link.range.start < range.start && range.start < link.range.end {
-                    let midpoint = link.range.start + link.range.len() / 2;
-                    let at = if range.start < midpoint {
-                        link.range.start
-                    } else {
-                        link.range.end
-                    };
-                    return at..at;
-                }
-            }
-            return range;
-        }
-        let mut normalized = range;
-        for (link, _) in &self.mentions {
-            if normalized.start < link.range.end && normalized.end > link.range.start {
-                normalized.start = normalized.start.min(link.range.start);
-                normalized.end = normalized.end.max(link.range.end);
+            MentionKind::Session { .. } => session_tooltip_label(&self.label),
+            MentionKind::Issue { repo, number, pull } => {
+                format!("GitHub {} {repo}#{number}", github_kind_noun(*pull)).into()
             }
         }
-        normalized
     }
+}
 
-    pub(in crate::composer) fn previous_boundary(&self, raw: usize) -> Option<usize> {
-        self.mentions
-            .iter()
-            .find_map(|(link, _)| (raw == link.range.end).then_some(link.range.start))
-    }
-
-    pub(in crate::composer) fn next_boundary(&self, raw: usize) -> Option<usize> {
-        self.mentions
-            .iter()
-            .find_map(|(link, _)| (raw == link.range.start).then_some(link.range.end))
-    }
+/// The tooltip text for a session reference, on its chip and in the mention
+/// menu.
+pub(in crate::composer) fn session_tooltip_label(title: &str) -> SharedString {
+    format!("Session: {title}").into()
 }
 
 /// Chips keep compact labels in the common case. File basenames are
@@ -830,14 +636,14 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
     {
         return None;
     }
-    let projection = TextProjection::new(raw);
-    if projection.mentions.is_empty() {
+    let (projection, links) = project_mentions(raw);
+    if links.is_empty() {
         return None;
     }
-    let spans = projection
-        .mentions
+    let spans = links
         .iter()
-        .map(|(link, display)| match &link.kind {
+        .zip(&projection.chips)
+        .map(|(link, (_, display))| match &link.kind {
             MentionKind::File { path, is_dir } => SentMentionSpan {
                 range: display.clone(),
                 path: SharedString::from(format!("{path}{}", if *is_dir { "/" } else { "" })),
@@ -861,41 +667,68 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
     Some((projection.display, spans))
 }
 
-pub(in crate::composer) struct MentionPathTooltip {
-    pub(in crate::composer) target: MentionTooltipTarget,
-    /// Stable for one `Waiting → Visible` promotion; a later activation gets
-    /// a new key and therefore exactly one fresh fade-in.
-    pub(in crate::composer) activation: u64,
+/// The composer's mention edits on its text input: each replaces the
+/// completed `@query` / `#query` token with a chip's link as one
+/// non-coalescing undo step.
+pub(in crate::composer) trait MentionInput {
+    /// A file or folder mention.
+    fn replace_mention(
+        &mut self,
+        range: Range<usize>,
+        path: &str,
+        is_dir: bool,
+        cx: &mut Context<TextInput>,
+    );
+    /// A session reference (same atomicity as file mentions).
+    fn replace_session_mention(
+        &mut self,
+        range: Range<usize>,
+        title: &str,
+        chat_id: &str,
+        cx: &mut Context<TextInput>,
+    );
+    /// A GitHub issue or pull request.
+    fn replace_issue_mention(
+        &mut self,
+        range: Range<usize>,
+        repo: &str,
+        number: u64,
+        title: &str,
+        pull: bool,
+        cx: &mut Context<TextInput>,
+    );
 }
 
-impl Render for MentionPathTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        // File chips keep showing the workspace-relative path; session chips
-        // identify the reference as a session by its title.
-        let label: SharedString = match &self.target {
-            MentionTooltipTarget::File { path, .. } => path.clone(),
-            MentionTooltipTarget::Session { title, .. } => format!("Session: {title}").into(),
-            MentionTooltipTarget::Issue {
-                reference, pull, ..
-            } => format!("GitHub {} {reference}", github_kind_noun(*pull)).into(),
-        };
-        motion::fade_quick(
-            ("file-mention-path-tooltip", self.activation),
-            div()
-                .h(px(MENTION_TOOLTIP_HEIGHT))
-                .max_w(px(480.0))
-                .flex()
-                .items_center()
-                .px(px(8.0))
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface_raised)
-                .mono(theme)
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(label),
-        )
+impl MentionInput for TextInput {
+    fn replace_mention(
+        &mut self,
+        range: Range<usize>,
+        path: &str,
+        is_dir: bool,
+        cx: &mut Context<TextInput>,
+    ) {
+        self.replace_with_chip(range, local_file_link(path, is_dir), cx);
+    }
+
+    fn replace_session_mention(
+        &mut self,
+        range: Range<usize>,
+        title: &str,
+        chat_id: &str,
+        cx: &mut Context<TextInput>,
+    ) {
+        self.replace_with_chip(range, local_session_link(title, chat_id), cx);
+    }
+
+    fn replace_issue_mention(
+        &mut self,
+        range: Range<usize>,
+        repo: &str,
+        number: u64,
+        title: &str,
+        pull: bool,
+        cx: &mut Context<TextInput>,
+    ) {
+        self.replace_with_chip(range, local_issue_link(repo, number, title, pull), cx);
     }
 }

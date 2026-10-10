@@ -43,12 +43,12 @@ use cypher_proto::Model;
 use cypher_rpc::methods;
 
 use super::device_target::{DeviceTarget, DeviceTicket};
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::icons;
 use crate::kit::popover::{self, Loadable};
 use crate::kit::theme::Theme;
 use crate::settings::widgets;
 use crate::state::AppState;
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 /// Pi's built-in tools (`core/tools/index.js` `allToolNames`). Anything else a
 /// profile lists — an extension or MCP tool — is kept as a custom chip.
@@ -106,13 +106,13 @@ struct Editor {
     thinking: Option<String>,
     /// Empty = every tool.
     tools: Vec<String>,
-    name: Entity<ComposerInput>,
-    description: Entity<ComposerInput>,
-    prompt: Entity<ComposerInput>,
+    name: Entity<TextInput>,
+    description: Entity<TextInput>,
+    prompt: Entity<TextInput>,
     /// Free-form entry for an extension/MCP tool Pi cannot enumerate.
-    tool_entry: Entity<ComposerInput>,
+    tool_entry: Entity<TextInput>,
     model_menu_open: bool,
-    model_search: Entity<ComposerInput>,
+    model_search: Entity<TextInput>,
     model_trigger: FocusHandle,
     _events: Vec<Subscription>,
 }
@@ -361,7 +361,7 @@ impl SubagentsPage {
             return;
         };
         let field = |placeholder: &'static str, value: &str, cx: &mut Context<Self>| {
-            let input = cx.new(|cx| ComposerInput::settings_field(placeholder, false, cx));
+            let input = cx.new(|cx| TextInput::settings_field(placeholder, false, cx));
             if !value.is_empty() {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
@@ -382,7 +382,7 @@ impl SubagentsPage {
         let tool_entry = field("Add an extension or MCP tool…", "", cx);
         let model_search = field("Search models…", "", cx);
         let prompt = cx.new(|cx| {
-            let mut input = ComposerInput::settings_prompt_field(
+            let mut input = TextInput::settings_prompt_field(
                 "The system prompt appended for this agent's runs.",
                 cx,
             );
@@ -400,8 +400,8 @@ impl SubagentsPage {
                 cx.subscribe(input, |page: &mut Self, _, event, cx| match event {
                     // Enter in a value field saves; the prompt field binds
                     // Enter to a newline and never emits this.
-                    ComposerInputEvent::Submitted => page.save(cx),
-                    ComposerInputEvent::Edited => {
+                    TextInputEvent::Submitted => page.save(cx),
+                    TextInputEvent::Edited => {
                         page.error = None;
                         cx.notify();
                     }
@@ -412,8 +412,8 @@ impl SubagentsPage {
         // Enter in the tool box adds that tool instead of saving the form.
         events.push(
             cx.subscribe(&tool_entry, |page: &mut Self, _, event, cx| match event {
-                ComposerInputEvent::Submitted => page.add_custom_tool(cx),
-                ComposerInputEvent::Edited => {
+                TextInputEvent::Submitted => page.add_custom_tool(cx),
+                TextInputEvent::Edited => {
                     page.error = None;
                     cx.notify();
                 }
@@ -421,7 +421,7 @@ impl SubagentsPage {
             }),
         );
         events.push(cx.subscribe(&model_search, |_: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 cx.notify();
             }
         }));
@@ -535,7 +535,7 @@ impl SubagentsPage {
     /// Build the save request from the open editor.
     fn save_request(&self, cx: &Context<Self>) -> Option<serde_json::Value> {
         let editor = self.editor.as_ref()?;
-        let text = |input: &Entity<ComposerInput>| input.read(cx).text().trim().to_string();
+        let text = |input: &Entity<TextInput>| input.read(cx).text().trim().to_string();
         let mut params = serde_json::json!({
             "name": text(&editor.name),
             "description": text(&editor.description),
@@ -1064,7 +1064,7 @@ impl SubagentsPage {
         let editor = self.editor.as_ref().unwrap();
 
         let input_row =
-            |label: &'static str, hint: Option<&'static str>, input: &Entity<ComposerInput>| {
+            |label: &'static str, hint: Option<&'static str>, input: &Entity<TextInput>| {
                 let mut column = div()
                     .flex()
                     .flex_col()

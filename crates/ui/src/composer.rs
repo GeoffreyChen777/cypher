@@ -1,5 +1,5 @@
-//! The composer: a hand-rolled multiline text input (adapted from gpui's
-//! `examples/input.rs`), the compact↔expanded flip, the Send/Steer/Stop morph,
+//! The composer: the chat's text input (a [`TextInput`] with mention chips),
+//! the compact↔expanded flip, the Send/Steer/Stop morph,
 //! optimistic send with failure recovery, per-chat drafts, and the question
 //! wizard that replaces the composer while a run awaits input.
 //!
@@ -15,14 +15,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, BackgroundExecutor, Bounds, ClipboardEntry, ClipboardItem, Context,
-    CursorStyle, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, SharedString,
-    StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
-    Window, WrappedLine, actions, div, img, point, prelude::*, px, size,
+    AnyElement, App, BackgroundExecutor, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, KeyDownEvent, ObjectFit, PathPromptOptions, Point, ScrollHandle, SharedString,
+    StyledImage as _, Subscription, Task, Window, div, img, prelude::*, px,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 use cypher_doc::{
     MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry, TranscriptFrame,
@@ -39,14 +35,15 @@ use crate::kit::motion;
 use crate::kit::theme::{MonoStyled, Theme};
 use crate::pickers::Pickers;
 use crate::state::{AppState, EngineHandle, Indicator};
+use crate::widgets::text_input::{ChipTooltip, TextInput, TextInputEvent};
 pub mod context_ring;
 mod layout;
 pub mod slash_menu;
 pub use layout::*;
 mod wizard;
 pub use wizard::*;
-mod input;
-pub use input::*;
+mod mentions;
+pub use mentions::*;
 mod comments;
 mod render;
 mod send;
@@ -586,7 +583,7 @@ pub struct Composer {
     /// possible compact/expanded flip. Never depend on typing to finish sizing.
     style_relayout_passes: u8,
     state: Entity<AppState>,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     /// Composer actions row: repo/branch/harness-model/traits.
     /// Shared with the shell's new-session canvas, which renders the
     /// device/project target selectors ([`Pickers::render_target_selectors`]).
@@ -715,7 +712,7 @@ pub struct Composer {
 /// subscription (Enter saves).
 struct CommentEdit {
     index: usize,
-    input: Entity<ComposerInput>,
+    input: Entity<TextInput>,
     _events: Subscription,
 }
 
@@ -781,11 +778,11 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| {
-            let mut input = ComposerInput::new("Do anything…", cx);
+            let mut input = TextInput::new("Do anything…", cx);
             input.use_chat_style = true;
             input.line_height = px(crate::appearance::chat_style::settings(cx).input_line_height());
             input.content_height = f32::from(input.line_height);
-            input.enable_mentions();
+            input.set_projector(mention_projection);
             input
         });
         let pickers = cx.new(|cx| {
@@ -861,15 +858,13 @@ impl Composer {
                 },
             );
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Submitted => this.on_submit(cx),
-            ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
-                this.on_input_edited(cx)
-            }
-            ComposerInputEvent::ViewportChanged => cx.notify(),
+            TextInputEvent::Submitted => this.on_submit(cx),
+            TextInputEvent::Edited | TextInputEvent::CursorMoved => this.on_input_edited(cx),
+            TextInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
             // completion key routing; they are mutually exclusive by token
             // shape (`/` at offset 0 vs `@` at a token boundary).
-            ComposerInputEvent::MentionNavigate(delta) => {
+            TextInputEvent::MentionNavigate(delta) => {
                 if this.slash.token.is_some() {
                     this.move_slash(*delta, cx)
                 } else if this.issue.token.is_some() {
@@ -878,7 +873,7 @@ impl Composer {
                     this.move_mention(*delta, cx)
                 }
             }
-            ComposerInputEvent::MentionAccept => {
+            TextInputEvent::MentionAccept => {
                 if this.slash.token.is_some() {
                     this.accept_slash(cx)
                 } else if this.issue.token.is_some() {
@@ -887,7 +882,7 @@ impl Composer {
                     this.accept_mention(cx)
                 }
             }
-            ComposerInputEvent::MentionDismiss => {
+            TextInputEvent::MentionDismiss => {
                 if this.slash.token.is_some() {
                     this.dismiss_slash(cx)
                 } else if this.issue.token.is_some() {
@@ -896,14 +891,14 @@ impl Composer {
                     this.dismiss_mention(cx)
                 }
             }
-            ComposerInputEvent::PastedImages(images) => {
+            TextInputEvent::PastedImages(images) => {
                 let staged = images
                     .iter()
                     .map(|image| attachments::stage_clipboard_image(image.clone()))
                     .collect();
                 this.add_staged(staged, cx);
             }
-            ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
+            TextInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
         });
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {

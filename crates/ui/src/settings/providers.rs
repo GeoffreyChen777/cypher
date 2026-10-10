@@ -14,11 +14,11 @@ use super::web_search::WebSearchFallbackControl;
 use super::widgets;
 use crate::prefs::slash_commands::ProviderIntent;
 use crate::{
-    composer::{ComposerInput, ComposerInputEvent},
     kit::icons,
     kit::popover::{self, Loadable},
     kit::theme::Theme,
     state::AppState,
+    widgets::text_input::{TextInput, TextInputEvent},
 };
 
 mod dialogs;
@@ -40,9 +40,9 @@ fn status_color(theme: &Theme, state: &str) -> gpui::Hsla {
 }
 
 struct Form {
-    id: Entity<ComposerInput>,
-    url: Entity<ComposerInput>,
-    key: Entity<ComposerInput>,
+    id: Entity<TextInput>,
+    url: Entity<TextInput>,
+    key: Entity<TextInput>,
     original: Option<PiProviderInfo>,
     kind: CustomProviderKind,
     errors: FieldErrors,
@@ -51,7 +51,7 @@ struct Form {
 }
 
 impl Form {
-    fn input(&self, field: Field) -> &Entity<ComposerInput> {
+    fn input(&self, field: Field) -> &Entity<TextInput> {
         match field {
             Field::Name => &self.id,
             Field::Url => &self.url,
@@ -68,7 +68,7 @@ struct Busy {
 struct OauthLogin {
     ticket: DeviceTicket,
     status: Option<LoginStatus>,
-    callback: Entity<ComposerInput>,
+    callback: Entity<TextInput>,
     submitting: bool,
     error: Option<String>,
     focus_callback: bool,
@@ -485,10 +485,10 @@ impl ProvidersPage {
         self.menu = popover::Popup::default();
         self.add_menu = popover::Popup::default();
         let kind = CustomProviderKind::from_provider(provider.as_ref());
-        let id = cx.new(|cx| ComposerInput::settings_field("e.g. my-gateway", false, cx));
-        let url = cx.new(|cx| ComposerInput::settings_field("https://api.example.com", false, cx));
+        let id = cx.new(|cx| TextInput::settings_field("e.g. my-gateway", false, cx));
+        let url = cx.new(|cx| TextInput::settings_field("https://api.example.com", false, cx));
         let key = cx.new(|cx| {
-            ComposerInput::settings_field(
+            TextInput::settings_field(
                 if provider.as_ref().is_some_and(|p| p.credential_saved) {
                     "Leave empty to keep the saved key"
                 } else {
@@ -505,13 +505,10 @@ impl ProvidersPage {
         let mut events = Vec::new();
         for (field, input) in [(Field::Name, &id), (Field::Url, &url), (Field::Key, &key)] {
             events.push(cx.subscribe(input, move |page: &mut Self, _, event, cx| {
-                if matches!(event, ComposerInputEvent::Submitted) {
+                if matches!(event, TextInputEvent::Submitted) {
                     page.save(cx);
-                } else if matches!(
-                    event,
-                    ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved
-                ) {
-                    if matches!(event, ComposerInputEvent::Edited)
+                } else if matches!(event, TextInputEvent::Edited | TextInputEvent::CursorMoved) {
+                    if matches!(event, TextInputEvent::Edited)
                         && let Some(form) = &mut page.form
                     {
                         match field {

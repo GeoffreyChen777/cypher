@@ -19,10 +19,10 @@ use gpui::{
     point, prelude::*, px,
 };
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::kit::theme::Theme;
 use crate::markdown::render;
 use crate::markdown::selection::{self, SelectionScope};
+use crate::widgets::text_input::{TextInput, TextInputEvent};
 
 /// Events the shell listens for.
 pub enum CommentPopupEvent {
@@ -173,16 +173,16 @@ pub struct CommentPopup {
     offer: Option<CommentOffer>,
     editor: Option<CommentEditor>,
     /// Reusable multiline input for the anchored comment editor.
-    comment_input: Entity<ComposerInput>,
+    comment_input: Entity<TextInput>,
     /// Input events for the comment editor: Enter saves.
     _comment_input_events: Subscription,
 }
 
 impl CommentPopup {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let comment_input = cx.new(|cx| ComposerInput::new("Add a comment…", cx));
+        let comment_input = cx.new(|cx| TextInput::new("Add a comment…", cx));
         let comment_events = cx.subscribe(&comment_input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.save(cx);
             }
         });

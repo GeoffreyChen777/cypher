@@ -6,7 +6,7 @@ fn defaults_preserve_existing_typography_and_layout() {
     assert_eq!(defaults.metrics(), MarkdownMetrics::default());
     assert_eq!(
         defaults.input_line_height(),
-        crate::composer::INPUT_LINE_HEIGHT
+        crate::widgets::text_input::INPUT_LINE_HEIGHT
     );
     assert_eq!(
         defaults.paragraph_spacing,

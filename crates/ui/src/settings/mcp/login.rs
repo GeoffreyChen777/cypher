@@ -1,6 +1,6 @@
 use super::super::device_target::DeviceTicket;
 use super::*;
-use crate::composer::ComposerInput;
+use crate::widgets::text_input::TextInput;
 use cypher_engine::mcp::login::LoginStatus;
 
 async fn login_call(
@@ -22,7 +22,7 @@ async fn login_call(
 pub(super) struct LoginForm {
     ticket: DeviceTicket,
     status: Option<LoginStatus>,
-    callback: Entity<ComposerInput>,
+    callback: Entity<TextInput>,
     submitting: bool,
     error: Option<String>,
 }
@@ -47,9 +47,8 @@ impl McpPage {
         self.login = Some(LoginForm {
             ticket: ticket.clone(),
             status: None,
-            callback: cx.new(|cx| {
-                ComposerInput::settings_field("Paste full callback URL (masked)", true, cx)
-            }),
+            callback: cx
+                .new(|cx| TextInput::settings_field("Paste full callback URL (masked)", true, cx)),
             submitting: false,
             error: None,
         });
@@ -292,7 +291,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_tokio::init(cx);
             cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-            crate::composer::init(cx);
+            crate::widgets::text_input::init(cx);
             let state = cx.new(|_| AppState::new());
             AppState::bootstrap(
                 state.clone(),

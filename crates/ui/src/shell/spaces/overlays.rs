@@ -35,10 +35,10 @@ impl Shell {
             .space_row(&space_id)
             .map(|s| s.display_name().to_string())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Project name", cx));
+        let input = cx.new(|cx| TextInput::new("Project name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.submit_rename_space(cx);
             }
         });

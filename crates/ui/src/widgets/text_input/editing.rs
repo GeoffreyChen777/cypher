@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl ComposerInput {
+impl TextInput {
     pub(super) fn snapshot(&self) -> EditSnapshot {
         EditSnapshot {
             content: self.content.clone(),
@@ -55,7 +55,7 @@ impl ComposerInput {
     }
 
     fn restore(&mut self, snapshot: EditSnapshot, cx: &mut Context<Self>) {
-        self.invalidate_mention_tooltip();
+        self.invalidate_chip_tooltip();
         self.content = snapshot.content;
         self.refresh_projection();
         self.selected_range = snapshot.selected_range;
@@ -65,7 +65,7 @@ impl ComposerInput {
         // Never merge a subsequent edit into a step that undo just crossed.
         self.last_edit = None;
         self.reset_blink();
-        cx.emit(ComposerInputEvent::Edited);
+        cx.emit(TextInputEvent::Edited);
         cx.notify();
     }
 
@@ -100,7 +100,7 @@ impl ComposerInput {
         self.selected_range = offset..offset;
         self.follow_cursor = true;
         self.reset_blink();
-        cx.emit(ComposerInputEvent::CursorMoved);
+        cx.emit(TextInputEvent::CursorMoved);
         cx.notify();
     }
 
@@ -117,7 +117,7 @@ impl ComposerInput {
         }
         self.follow_cursor = true;
         self.reset_blink();
-        cx.emit(ComposerInputEvent::CursorMoved);
+        cx.emit(TextInputEvent::CursorMoved);
         cx.notify();
     }
 
@@ -221,7 +221,7 @@ impl ComposerInput {
 
     pub(super) fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
-            cx.emit(ComposerInputEvent::MentionNavigate(-1));
+            cx.emit(TextInputEvent::MentionNavigate(-1));
             return;
         }
         if let Some(ix) = self.vertical_target(-1.0) {
@@ -231,7 +231,7 @@ impl ComposerInput {
 
     pub(super) fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
-            cx.emit(ComposerInputEvent::MentionNavigate(1));
+            cx.emit(TextInputEvent::MentionNavigate(1));
             return;
         }
         if let Some(ix) = self.vertical_target(1.0) {
@@ -454,11 +454,11 @@ impl ComposerInput {
             }
         }
         if !images.is_empty() {
-            cx.emit(ComposerInputEvent::PastedImages(images));
+            cx.emit(TextInputEvent::PastedImages(images));
             return;
         }
         if !paths.is_empty() {
-            cx.emit(ComposerInputEvent::PastedPaths(paths));
+            cx.emit(TextInputEvent::PastedPaths(paths));
             return;
         }
         if let Some(text) = item.text() {
@@ -473,15 +473,15 @@ impl ComposerInput {
 
     pub(super) fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(if self.mention_has_selection {
-            ComposerInputEvent::MentionAccept
+            TextInputEvent::MentionAccept
         } else {
-            ComposerInputEvent::Submitted
+            TextInputEvent::Submitted
         });
     }
 
     pub(super) fn mention_tab(&mut self, _: &MentionTab, _: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
-            cx.emit(ComposerInputEvent::MentionAccept);
+            cx.emit(TextInputEvent::MentionAccept);
         } else {
             cx.propagate();
         }
@@ -494,7 +494,7 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) {
         if self.mention_open {
-            cx.emit(ComposerInputEvent::MentionDismiss);
+            cx.emit(TextInputEvent::MentionDismiss);
         } else {
             cx.propagate();
         }

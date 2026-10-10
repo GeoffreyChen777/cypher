@@ -833,10 +833,9 @@ impl Changes {
     pub(super) fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
-        let search =
-            cx.new(|cx| ComposerInput::with_context("Search branches…", "PaletteSearch", cx));
+        let search = cx.new(|cx| TextInput::with_context("Search branches…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
+            if matches!(event, TextInputEvent::Edited) {
                 if let Some(menu) = this.ref_menu.open_mut() {
                     menu.active = 0;
                 }

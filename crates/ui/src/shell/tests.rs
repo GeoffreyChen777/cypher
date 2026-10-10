@@ -18,7 +18,7 @@ fn unix_engine_directory_does_not_redirect_client_preferences(cx: &mut gpui::Tes
     cx.update(|cx| {
         gpui_tokio::init(cx);
         cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| state.data_dir = Some(ui.path().into()));
@@ -80,7 +80,7 @@ fn test_shell_in(ui: PathBuf, cx: &mut gpui::TestAppContext) -> (Entity<Shell>, 
     cx.update(|cx| {
         gpui_tokio::init(cx);
         cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
         let state = cx.new(|_| AppState::new());
         let boot = EngineBootConfig {
@@ -543,7 +543,7 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         gpui_tokio::init(cx);
         cx.set_global(Theme::for_appearance(crate::kit::theme::Appearance::Dark));
-        crate::composer::init(cx);
+        crate::widgets::text_input::init(cx);
         crate::terminal::panel::init(cx);
     });
     let state = cx.new(|_| AppState::new());

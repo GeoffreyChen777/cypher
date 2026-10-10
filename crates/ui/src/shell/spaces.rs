@@ -37,7 +37,7 @@ pub(super) struct AddSpaceFlow {
     /// Filter input; Enter descends into the highlighted folder. Carries the
     /// tab-completion ghost (the faint suffix ⇥ accepts), and a trailing `/`
     /// on a folder-naming query descends immediately.
-    search: Entity<ComposerInput>,
+    search: Entity<TextInput>,
     browser: Loadable<FolderListing>,
     /// Requested browser path (`None` = the device's default, i.e. home).
     browser_path: Option<String>,
@@ -78,7 +78,7 @@ pub(super) struct QuickChatFlow {
 /// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
 pub(super) struct RenameSpaceDialog {
     pub space_id: String,
-    pub input: Entity<ComposerInput>,
+    pub input: Entity<TextInput>,
     pub focus_pending: bool,
     pub _events: Subscription,
 }

@@ -32,10 +32,10 @@ impl Shell {
             .find(|c| c.id == chat_id)
             .and_then(|c| c.title.clone())
             .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Session title", cx));
+        let input = cx.new(|cx| TextInput::new("Session title", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.submit_rename_chat(cx);
             }
         });

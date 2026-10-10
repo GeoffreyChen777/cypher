@@ -1417,7 +1417,7 @@ impl Render for Shell {
             // on this root, outside every input's Copy binding. Edit → Copy
             // dispatches the action here; ⌘C arrives as a raw key (a global
             // binding would pre-empt the terminal's own raw ⌘C copy).
-            .on_action(|_: &crate::composer::Copy, _, cx| {
+            .on_action(|_: &crate::widgets::text_input::Copy, _, cx| {
                 copy_surface_selection(cx);
             })
             .on_key_down(|event: &gpui::KeyDownEvent, _, cx| {

@@ -57,14 +57,14 @@ impl Composer {
         if index >= self.comments.len() {
             return;
         }
-        let input = cx.new(|cx| ComposerInput::new("Edit comment…", cx));
+        let input = cx.new(|cx| TextInput::new("Edit comment…", cx));
         input.update(cx, |input, cx| {
             input.set_text(self.comments[index].comment.clone(), cx)
         });
         // Enter saves; Shift+Enter newlines (the input's standard mapping);
         // Escape propagates (no mentions open) to the inspector's key handler.
         let _events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
+            if matches!(event, TextInputEvent::Submitted) {
                 this.save_comment_edit(cx);
             }
         });
@@ -898,8 +898,7 @@ impl Composer {
                 for (ix, session) in sessions.iter().enumerate() {
                     let selected = self.mention.active == Some(ix);
                     let subtitle = self.session_row_subtitle(session, cx);
-                    let tooltip_title: SharedString = session.title.clone().into();
-                    let tooltip_range = token.range.clone();
+                    let tooltip_label = session_tooltip_label(&session.title);
                     list = list.child(
                         crate::kit::popover::menu_row(
                             theme,
@@ -908,11 +907,8 @@ impl Composer {
                         )
                         .id(("session-mention-result", ix))
                         .tooltip(move |_, cx| {
-                            cx.new(|_| MentionPathTooltip {
-                                target: MentionTooltipTarget::Session {
-                                    range: tooltip_range.clone(),
-                                    title: tooltip_title.clone(),
-                                },
+                            cx.new(|_| ChipTooltip {
+                                label: tooltip_label.clone(),
                                 activation: ix as u64,
                             })
                             .into()
@@ -979,7 +975,6 @@ impl Composer {
                         let selected = self.mention.active == Some(n_sessions + ix);
                         let path = result.path.clone();
                         let tooltip_path: SharedString = path.clone().into();
-                        let tooltip_range = token.range.clone();
                         list = list.child(
                             crate::kit::popover::menu_row(
                                 theme,
@@ -988,11 +983,8 @@ impl Composer {
                             )
                             .id(("file-mention-result", ix))
                             .tooltip(move |_, cx| {
-                                cx.new(|_| MentionPathTooltip {
-                                    target: MentionTooltipTarget::File {
-                                        range: tooltip_range.clone(),
-                                        path: tooltip_path.clone(),
-                                    },
+                                cx.new(|_| ChipTooltip {
+                                    label: tooltip_path.clone(),
                                     activation: ix as u64,
                                 })
                                 .into()
