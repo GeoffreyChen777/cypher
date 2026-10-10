@@ -1,5 +1,6 @@
 use super::*;
 use crate::terminal::{emulator::CellColor, view};
+use crate::theme::terminal;
 
 #[test]
 fn default_content_backgrounds_match_for_every_color_theme() {
@@ -116,8 +117,8 @@ fn default_regions_preserve_the_existing_theme_and_geometry() {
             assert_eq!(t.font_mono, base.font_mono);
             assert_eq!(t.markdown, base.markdown);
             assert_eq!(t.regions.git_added, None);
-            assert_eq!(view::background(&t), view::terminal_bg_for(a));
-            assert_eq!(view::selection(&t), view::terminal_selection_for(a));
+            assert_eq!(terminal::background(&t), terminal::terminal_bg_for(a));
+            assert_eq!(terminal::selection(&t), terminal::terminal_selection_for(a));
             for i in 0..=255 {
                 assert_eq!(
                     view::resolve_color(CellColor::Indexed(i), &t),
@@ -313,7 +314,7 @@ fn ansi_overrides_do_not_rewrite_truecolor_or_extended_indices() {
         );
         assert_eq!(t.cursor, p.get("terminalCursor").unwrap().opacity(0.55));
         assert_eq!(
-            view::selection(&t),
+            terminal::selection(&t),
             p.get("terminalSelection").unwrap().opacity(0.25)
         );
     }

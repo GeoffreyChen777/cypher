@@ -379,7 +379,7 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
             div()
                 .p(px(12.0))
                 .rounded(px(8.0))
-                .bg(view::background(t))
+                .bg(crate::theme::terminal::background(t))
                 .mono(t)
                 .text_size(px(view::TERM_FONT_SIZE))
                 .line_height(px(view::TERM_LINE_HEIGHT))
@@ -392,7 +392,11 @@ fn region_preview(region: Region, t: &Theme) -> AnyElement {
                 .child(
                     div()
                         .flex()
-                        .child(div().bg(view::selection(t)).child("selected output"))
+                        .child(
+                            div()
+                                .bg(crate::theme::terminal::selection(t))
+                                .child("selected output"),
+                        )
                         .child("  $ ")
                         .child(div().w(px(8.0)).h(px(16.0)).bg(t.cursor)),
                 )

@@ -77,12 +77,12 @@ impl Field {
         self.key.strip_prefix("terminalAnsi")?.parse().ok()
     }
     pub fn value(self, theme: &Theme) -> Hsla {
-        use crate::terminal::view;
+        use crate::theme::terminal;
         match self.key {
-            "terminalBackground" => view::background(theme),
+            "terminalBackground" => terminal::background(theme),
             "terminalText" | "gitText" | "sidebarText" => theme.text,
             "terminalCursor" => theme.cursor,
-            "terminalSelection" => view::selection(theme),
+            "terminalSelection" => terminal::selection(theme),
             "gitBackground" => theme.regions.git_background.unwrap_or(theme.surface),
             "gitLineNumber" => theme
                 .regions
@@ -100,30 +100,9 @@ impl Field {
             "sidebarSecondary" => theme.text_muted,
             "sidebarSelected" => sidebar_selected(theme),
             "sidebarHover" => sidebar_hover(theme),
-            _ => view::resolve_color(
-                crate::terminal::emulator::CellColor::Indexed(
-                    self.ansi_index().expect("known color field") as u8,
-                ),
-                theme,
-            ),
+            _ => terminal::ansi(theme, self.ansi_index().expect("known color field") as u8),
         }
     }
-}
-
-/// Runtime-only tokens. Region overrides are applied to cloned Themes, never
-/// to the global theme or to another region's renderers.
-#[derive(Clone, Debug, Default)]
-pub struct RegionTokens {
-    pub chat_background: Option<Hsla>,
-    pub terminal_background: Option<Hsla>,
-    pub terminal_selection: Option<Hsla>,
-    pub terminal_ansi: [Option<Hsla>; 16],
-    pub git_background: Option<Hsla>,
-    pub git_line_number: Option<Hsla>,
-    pub git_added: Option<Hsla>,
-    pub git_deleted: Option<Hsla>,
-    pub sidebar_selected: Option<Hsla>,
-    pub sidebar_hover: Option<Hsla>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -204,7 +183,7 @@ pub fn init(dir: PathBuf, cx: &mut App) {
         revision: 1,
         dir,
     });
-    Theme::install(Theme::of(cx).appearance, cx);
+    crate::appearance::install_theme(Theme::of(cx).appearance, cx);
 }
 pub fn settings(cx: &App) -> &SurfaceAppearance {
     static DEFAULT: LazyLock<SurfaceAppearance> = LazyLock::new(SurfaceAppearance::default);
@@ -226,7 +205,7 @@ pub fn set(settings: SurfaceAppearance, cx: &mut App) -> std::io::Result<()> {
     let state = cx.global_mut::<SurfaceAppearanceState>();
     state.settings = settings;
     state.revision = state.revision.wrapping_add(1);
-    Theme::install(Theme::of(cx).appearance, cx);
+    crate::appearance::install_theme(Theme::of(cx).appearance, cx);
     cx.refresh_windows();
     Ok(())
 }
@@ -294,7 +273,7 @@ pub fn resolve(palette: &Palette, base: &Theme, region: Region) -> Theme {
             }
             if let Some(v) = c("terminalText") {
                 t.text = v;
-                let bg = crate::terminal::view::background(&t);
+                let bg = crate::theme::terminal::background(&t);
                 secondary_text(&mut t, v, bg);
             }
             if let Some(v) = c("terminalCursor") {
@@ -359,12 +338,12 @@ pub fn contrast_warnings(region: Region, t: &Theme) -> Vec<String> {
     let mut pairs = Vec::new();
     match region {
         Region::Terminal => {
-            let bg = crate::terminal::view::background(t);
+            let bg = crate::theme::terminal::background(t);
             pairs.push(("Default text".into(), t.text, bg));
             pairs.push((
                 "Selected text".into(),
                 t.text,
-                bg.blend(crate::terminal::view::selection(t)),
+                bg.blend(crate::theme::terminal::selection(t)),
             ));
             for i in 0..16 {
                 // Report only explicitly configured ANSI colors: black/dim

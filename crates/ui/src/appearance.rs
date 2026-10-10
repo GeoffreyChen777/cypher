@@ -75,6 +75,24 @@ pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
     }
 }
 
+/// Install the theme for `appearance` as the gpui global — with the overall
+/// colour preset and the surface-colour revision applied — and point the
+/// context-free paint helpers at it. The **only** way the appearance should
+/// change: setting the global directly leaves
+/// [`crate::theme::current_appearance`] stale.
+pub fn install_theme(appearance: Appearance, cx: &mut App) {
+    crate::theme::set_current_appearance(appearance);
+    let preset = crate::surface_style::settings(cx)
+        .palette(appearance)
+        .preset;
+    let mut theme = crate::surface_style::apply_preset(Theme::for_appearance(appearance), preset);
+    theme.text_style_revision = cx
+        .try_global::<crate::surface_style::SurfaceAppearanceState>()
+        .map(|s| s.revision)
+        .unwrap_or(0);
+    cx.set_global(theme);
+}
+
 /// Install the appearance globals and the matching theme. Call once at boot,
 /// before any window opens, so the first frame is already the right palette
 /// (installing later produces a visible dark-to-light flash).
@@ -87,7 +105,7 @@ pub fn init(mode: AppearanceMode, data_dir: impl Into<PathBuf>, cx: &mut App) {
         data_dir: data_dir.into(),
     });
     sync_ns_appearance(mode);
-    Theme::install(resolve(mode, system), cx);
+    install_theme(resolve(mode, system), cx);
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
@@ -177,7 +195,7 @@ pub fn apply(cx: &mut App) {
         .is_some_and(|t| t.appearance == wanted);
     if changed {
         tracing::debug!(?wanted, "appearance: installing palette");
-        Theme::install(wanted, cx);
+        install_theme(wanted, cx);
         cx.refresh_windows();
     }
     // Unconditional, even when the palette did not move: this is the only thing

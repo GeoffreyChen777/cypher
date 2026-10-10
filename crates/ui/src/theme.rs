@@ -37,6 +37,8 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use cypher_syntax::HighlightKind;
 use gpui::{App, Global, Hsla, SharedString, hsla};
 
+pub mod terminal;
+
 /// Which appearance the app is painting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Appearance {
@@ -67,7 +69,8 @@ impl Appearance {
 /// called from deep inside element builders that have no `cx` in scope, so they
 /// read the appearance from here instead of the gpui global. Appearance is
 /// genuinely process-wide — one setting for every window — so a single mirror is
-/// sound; [`Theme::install`] is the only writer outside tests.
+/// sound; the appearance layer's `install_theme` is the only writer outside
+/// tests.
 static CURRENT_APPEARANCE: AtomicU8 = AtomicU8::new(0);
 
 /// Bumped every time the appearance actually changes.
@@ -104,8 +107,9 @@ pub(crate) fn lock_appearance() -> std::sync::MutexGuard<'static, ()> {
     APPEARANCE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Point the context-free paint helpers at an appearance. Called by
-/// [`Theme::install`]; exposed for tests that build a theme without an `App`.
+/// Point the context-free paint helpers at an appearance. Called by the
+/// appearance layer's `install_theme`; exposed for tests that build a theme
+/// without an `App`.
 pub fn set_current_appearance(appearance: Appearance) {
     let encoded = match appearance {
         Appearance::Dark => 0,
@@ -300,10 +304,26 @@ impl Default for MarkdownMetrics {
     }
 }
 
+/// Runtime-only tokens. Region overrides are applied to cloned Themes, never
+/// to the global theme or to another region's renderers.
+#[derive(Clone, Debug, Default)]
+pub struct RegionTokens {
+    pub chat_background: Option<Hsla>,
+    pub terminal_background: Option<Hsla>,
+    pub terminal_selection: Option<Hsla>,
+    pub terminal_ansi: [Option<Hsla>; 16],
+    pub git_background: Option<Hsla>,
+    pub git_line_number: Option<Hsla>,
+    pub git_added: Option<Hsla>,
+    pub git_deleted: Option<Hsla>,
+    pub sidebar_selected: Option<Hsla>,
+    pub sidebar_hover: Option<Hsla>,
+}
+
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
-    pub regions: crate::surface_style::RegionTokens,
+    pub regions: RegionTokens,
     pub markdown: MarkdownMetrics,
     /// Distinguishes cached chat runs after typography/custom-color changes.
     pub text_style_revision: u64,
@@ -849,23 +869,6 @@ impl Theme {
             Appearance::Dark => Self::dark(),
             Appearance::Light => Self::light(),
         }
-    }
-
-    /// Install the theme for `appearance` as the gpui global and point the
-    /// context-free paint helpers at it. The **only** way the appearance should
-    /// change — setting the global directly leaves [`current_appearance`] stale.
-    pub fn install(appearance: Appearance, cx: &mut App) {
-        set_current_appearance(appearance);
-        let preset = crate::surface_style::settings(cx)
-            .palette(appearance)
-            .preset;
-        let mut theme =
-            crate::surface_style::apply_preset(Self::for_appearance(appearance), preset);
-        theme.text_style_revision = cx
-            .try_global::<crate::surface_style::SurfaceAppearanceState>()
-            .map(|s| s.revision)
-            .unwrap_or(0);
-        cx.set_global(theme);
     }
 
     /// Read the theme global.
