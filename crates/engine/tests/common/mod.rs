@@ -310,6 +310,21 @@ pub async fn wait_for_within(mut predicate: impl FnMut() -> bool, what: &str, bu
     }
 }
 
+/// Poll `probe` until it yields a value (15s budget).
+pub async fn wait_for_some<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Poll `cond` by blocking the calling thread (400 × 25ms).
 pub fn wait_blocking(cond: impl Fn() -> bool, what: &str) {
     for _ in 0..400 {

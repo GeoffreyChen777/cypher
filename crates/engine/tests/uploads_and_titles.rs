@@ -32,20 +32,6 @@ async fn init_repo(dir: &Path) {
 }
 
 /// Poll until `probe` yields Some, or panic at the deadline.
-async fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(value) = probe() {
-            return value;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Uploads
 // ---------------------------------------------------------------------------
@@ -215,7 +201,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("dispatch");
 
     // The mock's scripted reply doubles as the titling model's output.
-    let chat = wait_for("chat title", || {
+    let chat = common::wait_for_some("chat title", || {
         core.workspace
             .chat(chat_id)
             .ok()
@@ -227,7 +213,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     // Branch renamed from the title, chat row updated to match. The rename
     // lands in its own commit after the title — wait for it before asserting
     // (the title wait above can race it).
-    wait_for("branch rename", || {
+    common::wait_for_some("branch rename", || {
         core.workspace
             .chat(chat_id)
             .ok()

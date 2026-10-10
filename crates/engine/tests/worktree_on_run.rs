@@ -9,7 +9,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,30 +41,11 @@ fn run_payload(message_id: &str, repo_path: &str, base_ref: &str) -> SessionComm
     }
 }
 
-fn git(cwd: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 /// A minimal repo with one commit on `main`, returned as a canonical path
 /// (git records canonical paths in worktree gitdir links, and macOS tempdirs
 /// live behind the /var → /private/var symlink).
-fn init_repo(dir: &Path) -> String {
-    std::fs::create_dir_all(dir).expect("repo dir");
-    git(dir, &["init", "-b", "main"]);
-    git(dir, &["config", "user.email", "t@example.com"]);
-    git(dir, &["config", "user.name", "Test"]);
-    std::fs::write(dir.join("README.md"), "hello\n").expect("readme");
-    git(dir, &["add", "."]);
-    git(dir, &["commit", "-m", "init"]);
+async fn init_repo(dir: &Path) -> String {
+    common::init_repo(dir, "hello\n").await;
     dir.canonicalize()
         .unwrap_or_else(|_| dir.to_path_buf())
         .to_string_lossy()
@@ -141,7 +121,7 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     let (core, tmp) = assemble_with(cwds.clone()).await;
     let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
-    let repo_path = init_repo(&tmp_path.join("repo"));
+    let repo_path = init_repo(&tmp_path.join("repo")).await;
 
     create_chat(&core).await;
     core.doc_host
@@ -215,7 +195,7 @@ async fn invalid_base_ref_rejects_and_never_dispatches() {
     let (core, tmp) = assemble_with(cwds.clone()).await;
     let tmp_path = tmp.path().canonicalize().unwrap();
     let worktrees_root = tmp_path.join("worktrees");
-    let repo_path = init_repo(&tmp_path.join("repo"));
+    let repo_path = init_repo(&tmp_path.join("repo")).await;
 
     create_chat(&core).await;
     core.doc_host
