@@ -1,4 +1,4 @@
-//! Temporary Side Chats (round 21): engine-side integration.
+//! Temporary Side Chats: engine-side integration.
 //!
 //! - `StartSideChat` mints an ephemeral chat: NO workspace row, NO public
 //!   `WatchSessions` entry, no snapshot; validates the selection (non-empty,
@@ -802,7 +802,7 @@ async fn failed_promotion_retains_temp_state_and_retries() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn first_send_injects_quote_with_empty_parent_context() {
-    // Round-21 audit: the FIRST send ALWAYS injects the selected text + the
+    // The FIRST send ALWAYS injects the selected text + the
     // user request, even when the parent transcript is empty/unreadable —
     // a safe marker stands in for the parent context. Never a None prompt.
     let rig = assemble();
@@ -854,7 +854,7 @@ async fn first_send_injects_quote_with_empty_parent_context() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_starts_cannot_exceed_global_cap() {
-    // Round-21 audit: the manager-level start mutex serializes the capacity
+    // The manager-level start mutex serializes the capacity
     // check + insertion, so 16 racing starts land EXACTLY 8 successes and 8
     // cap rejections — never a 9th record.
     let (core, _requests, _dir) = assemble_arc();
@@ -893,7 +893,7 @@ async fn concurrent_starts_cannot_exceed_global_cap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_promotes_are_idempotent() {
-    // Round-21 audit: the manager-level promotion mutex serializes promotes
+    // The manager-level promotion mutex serializes promotes
     // so a concurrent promote WAITS and then observes the completed durable
     // row — every caller gets the same chat id, exactly one row, and the
     // chat is fully promoted (never a fake early success with no row).
@@ -965,7 +965,7 @@ async fn concurrent_promotes_are_idempotent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispose_rolls_back_partially_promoted_row() {
-    // Round-21 audit: a retained record with a durable row is a PARTIALLY-
+    // A retained record with a durable row is a PARTIALLY-
     // FAILED promotion (finish never ran — the handle is still ephemeral),
     // NOT a completed durable chat. Dispose rolls the partial row back and
     // drops every ephemeral remnant.
@@ -1026,7 +1026,7 @@ async fn dispose_rolls_back_partially_promoted_row() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_side_chat_send_and_watch_are_rejected() {
-    // Round-21 final audit: SEND_SIDE_CHAT must NEVER mint/claim an arbitrary
+    // SEND_SIDE_CHAT must NEVER mint/claim an arbitrary
     // hidden chat for an unknown id, and WATCH_SIDE_CHAT_STATUS must never
     // grow the private status map with a sender nothing would remove.
     let rig = assemble();
@@ -1088,7 +1088,7 @@ async fn unknown_side_chat_send_and_watch_are_rejected() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn promoted_chat_send_dispatches_as_normal_chat() {
-    // Round-21 final audit: once promoted (durable row exists, record gone),
+    // Once promoted (durable row exists, record gone),
     // SEND_SIDE_CHAT dispatches as a normal chat — same id, same transcript,
     // no first-send injection — while an unknown id stays rejected.
     let rig = assemble();
@@ -1184,7 +1184,7 @@ async fn first_send_quotes_the_original_of_a_translated_selection() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn first_send_prompt_frames_context_as_untrusted_reference() {
-    // Round-21 final audit: the first-send effective prompt EXPLICITLY frames
+    // The first-send effective prompt EXPLICITLY frames
     // the selected text + parent transcript as UNTRUSTED reference context
     // (not instructions) and marks the final User request as the only
     // authoritative instruction. Selected text and visible request unchanged.

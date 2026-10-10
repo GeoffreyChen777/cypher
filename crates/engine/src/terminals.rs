@@ -1,5 +1,4 @@
-//! Terminals — PTY sessions owned by this device (port of zeron's
-//! `terminals.ts` over `portable-pty`).
+//! Terminals — PTY sessions owned by this device, over `portable-pty`.
 //!
 //! - `open` spawns the user's login shell in the chat's cwd; `subscribe` replays a
 //!   bounded 1MB window (resumable via `afterSeq`) then tails live output, batched

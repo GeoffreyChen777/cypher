@@ -1,4 +1,4 @@
-//! M4b integration: `targetDeviceId` routing — engine A forwards device-addressed RPCs
+//! `targetDeviceId` routing — engine A forwards device-addressed RPCs
 //! to engine B through B's device-room relay (host relay on B, link cache on A), with a
 //! minimal in-memory device-room standing in for the edge DO (route client→host with
 //! `from` stamped, host→client by `to`).

@@ -1,8 +1,8 @@
 //! DocHost — per-chat `SessionDoc` handles: snapshot persistence (debounced), edge room
 //! sync (offline-tolerant), and the HOST-ONLY durable command executor.
 //!
-//! Pragmatic port of zeron's `session-docs.ts` + the `main.ts` executor (spec:
-//! ARCHITECTURE §2 "command plane"):
+//! Ported from zeron's session docs and command executor (spec: ARCHITECTURE §2
+//! "command plane"):
 //! - the doc IS the outbox: commands and user entries commit locally and sync whenever a
 //!   room connection exists; the engine is fully functional with sync disabled;
 //! - on every doc change (local commit or remote import) the handle re-emits the joined

@@ -110,8 +110,8 @@ impl Harness for TestHarness {
 /// (matched by `main_prompt`) streams whatever the test pushes through the
 /// returned sender; any other run — the engine's auto-titler — completes
 /// immediately with nothing. With `confirm_steers`, each accepted steer is
-/// confirmed with a `Steered` boundary ahead of later feed events, like the
-/// ACP adapters do.
+/// confirmed with a `Steered` boundary ahead of later feed events, like a
+/// steerable harness does.
 pub fn feed_harness(
     main_prompt: &str,
     confirm_steers: bool,

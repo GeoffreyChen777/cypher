@@ -1,4 +1,4 @@
-//! M4a integration: two `EngineCore`s (distinct data dirs + device ids) sharing one
+//! Integration: two `EngineCore`s (distinct data dirs + device ids) sharing one
 //! per-org workspace doc.
 //!
 //! The in-memory bridge below stands in for the edge room: it cross-imports Loro

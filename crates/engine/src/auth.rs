@@ -1,4 +1,4 @@
-//! Auth — the engine owns the WorkOS session for its device (ARCHITECTURE §5). Port of zeron's `apps/backend/src/auth.ts`.
+//! Auth — the engine owns the WorkOS session for its device (ARCHITECTURE §5).
 //!
 //! The engine is a public client: it builds the AuthKit authorize URL itself but
 //! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker

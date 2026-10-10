@@ -1,5 +1,5 @@
 //! Repos/worktrees, folder listing, checkout-diff capture + sync,
-//! terminals, and the RPC dispatch for each new method over the memory transport.
+//! terminals, and their RPC dispatch over the memory transport.
 
 mod common;
 

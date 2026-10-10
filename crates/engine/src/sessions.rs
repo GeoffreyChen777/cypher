@@ -1,7 +1,7 @@
 //! SessionsEngine — per-chat agent runs: dispatch, steering, interrupts, input bridging,
 //! journal + broadcast fan-out, and 120ms coalesced doc streaming.
 //!
-//! Pragmatic port of zeron's `sessions.ts`:
+//! Ported from zeron's session runner:
 //! - every `AgentEvent` is (a) appended to the on-disk run journal, (b) broadcast to
 //!   in-process subscribers, (c) folded via `fold_event_into_parts` and diffed into the
 //!   chat's `SessionDoc` through `SegmentWriter` on a coalesced `STREAM_COMMIT_MS` timer;
@@ -105,9 +105,8 @@ impl LaunchConfig {
 }
 
 /// A harness-native session id plus the cwd it was created under. Harness
-/// session stores are cwd-scoped (claude keys conversations by project
-/// directory — zeron sessions.ts:563 "harness session stores are keyed by
-/// cwd"), so resume is only injected for runs launched from the same cwd.
+/// session stores are cwd-scoped (keyed by project directory), so resume is
+/// only injected for runs launched from the same cwd.
 #[derive(Debug, Clone)]
 struct HarnessSessionRef {
     session_id: String,
@@ -169,7 +168,7 @@ struct Inner {
     /// [`MAX_LOCAL_CHILD_CHANNELS`], and removed on child-chat delete/rollback.
     child_channels: Mutex<HashMap<String, LocalChildChannel>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
-    /// run config from this (chat config rows land with the workspace doc in M4).
+    /// run config from this (the chat row is the fallback after a restart).
     last_requests: Mutex<HashMap<String, RunRequest>>,
     /// Harness-native session ids per chat (resume continuity across turns) —
     /// the live-process cache over the durable copy on the workspace chat row
@@ -772,8 +771,8 @@ impl SessionsEngine {
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_prompt(&user_id, &visible_prompt, &comments, now_ms())?;
 
-        // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
-        // chat's stored harness session): callers always send `resume: None`;
+        // Engine-owned resume (every dispatch reads the chat's stored harness
+        // session): callers always send `resume: None`;
         // the engine threads the chat's prior harness session back in so a new
         // process (app restart) continues the same harness conversation. The
         // startup-crash retry injects too — a stale id is the harness's
@@ -1175,7 +1174,7 @@ impl SessionsEngine {
             // Harness continuity first: the crashed run's session id may only
             // exist in the journal (the debounced workspace-row write may
             // never have landed) — remember it so the revived run resumes the
-            // same harness conversation (zeron recoverDraft, sessions.ts:538).
+            // same harness conversation.
             if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
                 self.inner
                     .remember_harness_session(&chat_id, &session_id, &cwd);
@@ -1439,11 +1438,11 @@ impl Inner {
             .and_then(|s| s.context_usage)
     }
 
-    /// Context-window gauge (ACP `usage_update`, pi session stats): update
+    /// Context-window gauge (pi session stats): update
     /// the chat's session row's `context_usage` ONLY. Unlike subagent status
     /// it is not a liveness signal, so `updated_at` stays put — a gauge
     /// landing after a turn settled must not make a parked row read fresh.
-    /// An unchanged reading publishes nothing (Claude streams one per
+    /// An unchanged reading publishes nothing (a harness may stream one per
     /// message delta).
     ///
     /// Every reading reaches this engine's own watchers at once. The synced
@@ -1657,7 +1656,7 @@ impl Inner {
 
     /// Record the chat's harness-native session id (and its cwd): live-process
     /// cache plus the durable workspace chat row — the row is what survives an
-    /// engine restart (zeron sessions.ts:1039).
+    /// engine restart.
     fn remember_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
         if session_id.is_empty() {
             return;
@@ -1679,15 +1678,14 @@ impl Inner {
         }
     }
 
-    // NB: there is deliberately no `forget_harness_session` anymore. The old
-    // tombstone fired on "run died before SessionStarted", which — since the
-    // ACP conversion made stale ids a harness-internal fallback — only ever
-    // meant a child STARTUP failure, and permanently severed good
-    // conversations. A truly stale id simply
-    // yields a fresh session whose SessionStarted overwrites the row.
+    // NB: there is deliberately no `forget_harness_session`. A run that dies
+    // before SessionStarted means a child STARTUP failure (a stale id falls
+    // back to a fresh session inside the harness), so tombstoning there would
+    // sever good conversations. A truly stale id simply yields a fresh session
+    // whose SessionStarted overwrites the row.
 
     /// The session id to resume for a run in `chat_id` launching from `cwd`
-    /// (zeron sessions.ts:736, looked up on every dispatch):
+    /// (looked up on every dispatch):
     /// live-process cache → workspace chat row → journal scan (the crash path
     /// where the debounced row write never landed — SessionStarted/Done events
     /// are journaled per event, flushed immediately). Cwd-gated throughout:

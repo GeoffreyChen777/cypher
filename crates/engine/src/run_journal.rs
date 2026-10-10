@@ -1,4 +1,4 @@
-//! Per-session on-disk event journal (port of zeron's `run-journal.ts`, JSONL-shaped).
+//! Per-session on-disk event journal (ported from zeron, JSONL-shaped).
 //!
 //! One append-only JSONL file per chat under `{data_dir}/journals/{chat_id}.jsonl`; each
 //! line is `{"seq": n, "event": AgentEvent}` with a monotonically increasing `seq`. The
