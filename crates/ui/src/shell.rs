@@ -948,6 +948,7 @@ struct OrgGateUi {
 
 /// The session slots behind a window's workspace tabs: one per open tab,
 /// the focus/follow bookkeeping, and the boot-time layout restore.
+#[derive(Default)]
 struct SlotTable {
     /// One slot per open workspace tab (created on open, dropped on close —
     /// dropping the context kills its watches).
@@ -974,6 +975,7 @@ struct SlotTable {
 
 /// What closed session tabs leave behind, restored when the session's slot
 /// is created again.
+#[derive(Default)]
 struct ClosedTabStash {
     /// Unsent drafts + staged attachments of closed session tabs, restored
     /// when the session's slot is created again (drafts used to survive chat
@@ -988,6 +990,7 @@ struct ClosedTabStash {
 
 /// Measured tile geometry (paint-time canvases) and the per-tile state that
 /// reads it: tab-strip scrolling, the session rail's entrance, tab drags.
+#[derive(Default)]
 struct TileGeometry {
     /// Per tile: its tab strip's scroll handle and the (active tab, tab
     /// count) last scrolled into view — a change scrolls the active tab
@@ -1021,6 +1024,7 @@ struct TileGeometry {
 
 /// The window's popover menus (each a [`popover::Popup`] keyed by what it
 /// opened for).
+#[derive(Default)]
 struct ShellMenus {
     /// The dock surface strip's `+` menu, for the slot that opened it (one
     /// menu is open at a time).
@@ -1064,6 +1068,7 @@ struct SettingsPages {
 }
 
 /// The window's modal dialogs and palettes; each is `Some` while open.
+#[derive(Default)]
 struct ShellDialogs {
     rename_chat: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
@@ -1158,6 +1163,7 @@ struct DevKnobs {
 
 /// The shell's manually driven tweens (sidebar width, titlebar cluster)
 /// and this render pass's motion bookkeeping.
+#[derive(Default)]
 struct ShellMotion {
     sidebar_tween: Option<WidthTween>,
     /// 200ms ease-out tween of the cluster start on fullscreen toggles.
@@ -1173,6 +1179,7 @@ struct ShellMotion {
 
 /// What the titlebar tracks: fullscreen (the traffic-light inset) and a
 /// window drag armed from its strip.
+#[derive(Default)]
 struct TitlebarState {
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
@@ -1207,6 +1214,7 @@ struct CommentUi {
 
 /// What drives the user's attention outside the window: session chimes,
 /// the Dock badge, and the desktop activity the engine is told about.
+#[derive(Default)]
 struct Attention {
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
@@ -1460,36 +1468,14 @@ impl Shell {
             state,
             workspace: crate::workspace::Workspace::new(),
             tiles: SlotTable {
-                slots: std::collections::HashMap::new(),
-                next_slot_id: 0,
-                shown_slots: Vec::new(),
-                followed: None,
-                focus_pending: false,
-                boot_landed: false,
                 saved_workspace,
+                ..Default::default()
             },
-            closed_tabs: ClosedTabStash {
-                drafts: std::collections::HashMap::new(),
-                terminals: std::collections::HashMap::new(),
-            },
+            closed_tabs: ClosedTabStash::default(),
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
-            geometry: TileGeometry {
-                tile_tab_scroll: std::collections::HashMap::new(),
-                split_bounds: Default::default(),
-                rail_focus: (None, 0),
-                tile_bounds: Default::default(),
-                tab_drop: None,
-            },
-            menus: ShellMenus {
-                right_plus: popover::Popup::default(),
-                layout: popover::Popup::default(),
-                chat: popover::Popup::default(),
-                space: popover::Popup::default(),
-                sidebar_view: popover::Popup::default(),
-                space_style: popover::Popup::default(),
-                user: popover::Popup::default(),
-            },
+            geometry: TileGeometry::default(),
+            menus: ShellMenus::default(),
             route,
             nav,
             pages: SettingsPages {
@@ -1518,15 +1504,7 @@ impl Shell {
                 open_dialog: debug_dialog,
                 gate: debug_gate,
             },
-            dialogs: ShellDialogs {
-                rename_chat: None,
-                delete_chat: None,
-                quick_chat: None,
-                delete_worktree: None,
-                rename_space: None,
-                delete_space: None,
-                add_space: None,
-            },
+            dialogs: ShellDialogs::default(),
             updates: UpdateUi {
                 relaunch_quit_sent: false,
                 flow: UpdateFlow::Idle,
@@ -1550,12 +1528,7 @@ impl Shell {
                 collapsed: std::collections::HashSet::new(),
             },
             space_boot_applied: false,
-            attention: Attention {
-                sound_prev: std::collections::HashMap::new(),
-                dock_badge: None,
-                was_window_active: false,
-                notification_activity: Default::default(),
-            },
+            attention: Attention::default(),
             fork_request_ids: std::collections::HashMap::new(),
             sync: SyncUi {
                 org: None,
@@ -1571,16 +1544,8 @@ impl Shell {
             boot,
             data_dir,
             settings,
-            motion: ShellMotion {
-                sidebar_tween: None,
-                titlebar_tween: None,
-                reduced_motion: false,
-                active: std::cell::Cell::new(false),
-            },
-            titlebar: TitlebarState {
-                fullscreen: None,
-                should_move: false,
-            },
+            motion: ShellMotion::default(),
+            titlebar: TitlebarState::default(),
             splash: Splash {
                 phase: SplashPhase::Visible,
                 task: None,
