@@ -1,5 +1,5 @@
 //! The device-frame codec: `uleb128(header_len) ‖ JSON header ‖ payload`,
-//! byte-identical to `edge/src/device-room.ts`.
+//! byte-identical to `apps/edge/src/device/device-frame.ts`.
 
 use serde::{Deserialize, Serialize};
 

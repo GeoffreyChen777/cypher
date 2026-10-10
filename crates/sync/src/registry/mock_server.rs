@@ -1,5 +1,5 @@
 //! In-process registry server speaking the same JSON WS protocol as
-//! `apps/edge/src/registry-room.ts`, built on the SAME merge fn the client uses
+//! `apps/edge/src/registry/registry-room.ts`, built on the SAME merge fn the client uses
 //! (`cypher_doc::apply_op`). Test infrastructure only (`mock-server` feature):
 //! cypher-sync's client tests and cypher-engine's two-engine integration tests
 //! run against this; TS↔Rust interop is proven separately against a real DO

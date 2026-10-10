@@ -1,9 +1,9 @@
 //! The registry's mirrored CRDT core: HLC stamps, rows, ops and the per-op
 //! merge. Pure data and functions — no doc state, no I/O.
 //!
-//! Mirrored 1:1 by `edge/src/registry-core.ts` (the server merge) and
+//! Mirrored 1:1 by `apps/edge/src/registry/registry-core.ts` (the server merge) and
 //! `apps/ios/Cypher/Sync/RegistryCore.swift`; the shared test vectors live in
-//! `registry/tests.rs`, `edge/src/registry-core.test.ts` and
+//! `registry/tests.rs`, `apps/edge/src/registry/registry-core.test.ts` and
 //! `CypherTests/RegistryCoreTests.swift`. Change all three together.
 
 use std::collections::BTreeMap;
@@ -52,7 +52,7 @@ impl HlcClock {
     }
 }
 
-// ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
+// ── rows and ops (wire-compatible with apps/edge/src/registry/registry-core.ts) ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,7 +138,7 @@ impl RowOp {
 }
 
 /// Apply one op to a row — the 1:1 mirror of `applyOp` in
-/// `edge/src/registry-core.ts`. Returns the new row (`None` only for an
+/// `apps/edge/src/registry/registry-core.ts`. Returns the new row (`None` only for an
 /// `update` on a missing row) and whether anything changed.
 pub fn apply_op(row: Option<&RegistryRow>, op: &RowOp) -> (Option<RegistryRow>, bool) {
     if op.op == OpKind::Delete {

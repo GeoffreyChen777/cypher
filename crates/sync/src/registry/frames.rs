@@ -1,5 +1,5 @@
 //! Registry wire frames (JSON text) — the Rust side of
-//! `edge/src/registry-room.ts`; the two change together.
+//! `apps/edge/src/registry/registry-room.ts`; the two change together.
 
 use std::collections::HashMap;
 

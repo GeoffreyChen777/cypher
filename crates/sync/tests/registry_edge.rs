@@ -1,6 +1,6 @@
 //! Live-edge interop: two Rust `RegistryClient`s converge through a REAL
 //! RegistryRoom Durable Object (the TS implementation in
-//! apps/edge/src/registry-room.ts), proving the JSON protocol and the mirrored
+//! apps/edge/src/registry/registry-room.ts), proving the JSON protocol and the mirrored
 //! merge semantics are byte-compatible across the language boundary.
 //!
 //! Ignored by default — requires the TS edge running (`wrangler dev` in

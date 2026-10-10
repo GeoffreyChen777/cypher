@@ -1,5 +1,5 @@
 //! Codec, relay-code and URL tests; the codec vectors are ported from
-//! `edge/src/device-frame.test.ts`.
+//! `apps/edge/src/device/device-frame.test.ts`.
 
 use super::frames::relay_error_code;
 use super::links::credential_transport_allowed;
