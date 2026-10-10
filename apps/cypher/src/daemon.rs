@@ -338,6 +338,7 @@ pub(crate) fn enable_setup_service() -> anyhow::Result<()> {
 }
 
 pub(crate) fn linger_enabled() -> bool {
+    // SAFETY: getuid takes no arguments and cannot fail.
     let uid = unsafe { libc::getuid() }.to_string();
     bounded_command(
         "loginctl",
@@ -348,6 +349,7 @@ pub(crate) fn linger_enabled() -> bool {
 }
 
 pub(crate) fn enable_linger(sudo: bool) -> bool {
+    // SAFETY: getuid takes no arguments and cannot fail.
     let uid = unsafe { libc::getuid() }.to_string();
     if !sudo {
         return run_quiet("loginctl", &["--no-ask-password", "enable-linger", &uid]).is_ok()

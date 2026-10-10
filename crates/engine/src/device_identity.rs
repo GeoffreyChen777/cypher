@@ -167,6 +167,7 @@ impl DeviceIdentityLock {
         {
             use std::os::unix::io::AsRawFd;
             loop {
+                // SAFETY: flock on a descriptor `file` owns for this call.
                 if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
                     break;
                 }

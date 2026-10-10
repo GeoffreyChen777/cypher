@@ -45,6 +45,7 @@ impl InstanceLock {
             // well within the budget.
             let mut retries = 40u32; // × 25ms = 1s budget
             loop {
+                // SAFETY: flock on a descriptor `file` owns for this call.
                 let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
                 if rc == 0 {
                     break;
@@ -98,10 +99,12 @@ impl InstanceLock {
                 .truncate(false)
                 .open(&path)
                 .ok()?;
+            // SAFETY: flock on a descriptor `file` owns for this call.
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc == 0 {
                 // We took it: nothing is running. Closing the fd releases it, but
                 // unlock explicitly so the window is as small as possible.
+                // SAFETY: as above; `file` is still open.
                 unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
                 return None;
             }

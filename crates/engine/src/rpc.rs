@@ -32,7 +32,7 @@ use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_param
 
 use crate::auth::Auth;
 use crate::git::diff_sync::CheckoutDiffSync;
-use crate::git::repos::{Repos, expand_home, home_dir};
+use crate::git::repos::{Repos, expand_home};
 use crate::host::doc_host::DocHost;
 use crate::host::workspace_host::WorkspaceHost;
 use crate::registry::HarnessRegistry;

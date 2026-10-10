@@ -68,19 +68,6 @@ pub struct CheckoutIdentity {
     pub git_dir: PathBuf,
 }
 
-/// Best-effort home directory (the `ListFolders` default and worktree root base).
-pub(crate) fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from("/"))
-}
-
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
 ///
 /// A project-less chat stores the literal `~` (the creating device cannot know
@@ -88,10 +75,11 @@ pub(crate) fn home_dir() -> PathBuf {
 /// or compares one against a real path — has to expand it here, on the host.
 pub(crate) fn expand_home(cwd: &str) -> String {
     match cwd.strip_prefix('~') {
-        Some("") => home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => {
-            home_dir().join(&rest[1..]).to_string_lossy().into_owned()
-        }
+        Some("") => cypher_env::home_dir().to_string_lossy().into_owned(),
+        Some(rest) if rest.starts_with('/') => cypher_env::home_dir()
+            .join(&rest[1..])
+            .to_string_lossy()
+            .into_owned(),
         _ => cwd.to_string(),
     }
 }
@@ -1036,7 +1024,7 @@ impl Repos {
     ) -> Result<FolderListing, EngineError> {
         let target = match path.filter(|p| !p.trim().is_empty()) {
             Some(p) => absolutize(Path::new(&p)),
-            None => home_dir(),
+            None => cypher_env::home_dir(),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spawned = std::thread::Builder::new()

@@ -365,6 +365,7 @@ async fn run_foreground(config: &EngineConfig, cancel: &Cancel) -> anyhow::Resul
         _=cancelled(cancel.clone())=>{
             if let Some(pid)=child.id() {
                 #[cfg(unix)]
+                // SAFETY: kill only sends a signal to our own child's pid.
                 unsafe { libc::kill(pid as libc::pid_t,libc::SIGTERM); }
             }
             if tokio::time::timeout(Duration::from_secs(10),child.wait()).await.is_err() {

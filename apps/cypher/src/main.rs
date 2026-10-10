@@ -110,12 +110,12 @@ const PRODUCTION_EDGE_URL: &str = "https://edge.letscypher.app";
 ///    edge is exactly [`PRODUCTION_EDGE_URL`]; any custom `CYPHER_EDGE_URL`
 ///    without an explicit client id disables WorkOS.
 fn workos_client_id_from_env(edge_url: &str, edge_token: &Option<String>) -> Option<String> {
-    match std::env::var("CYPHER_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) if edge_url != PRODUCTION_EDGE_URL => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
+    match cypher_env::var_raw("WORKOS_CLIENT_ID") {
+        Some(v) if v.trim().is_empty() => None,
+        Some(v) => Some(v),
+        None if edge_token.is_some() => None,
+        None if edge_url != PRODUCTION_EDGE_URL => None,
+        None => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
     }
 }
 
@@ -285,7 +285,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     validate_development_environment()?;
     anyhow::ensure!(
-        std::env::var_os("CYPHER_IPC_PORT").is_none(),
+        !cypher_env::is_set("IPC_PORT"),
         "CYPHER_IPC_PORT has been removed. Unset it; local IPC uses a private Unix socket selected by CYPHER_DATA_DIR."
     );
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
@@ -668,6 +668,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
             .truncate(false)
             .open(&path)
             .ok()?;
+        // SAFETY: flock on a descriptor `existing` owns for this call.
         let rc = unsafe { libc::flock(existing.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             // A live process owns the canonical log — leave it alone.
@@ -684,6 +685,7 @@ fn open_log_file_in(dir: &std::path::Path, mode: &str) -> Option<std::fs::File> 
             let _ = std::fs::rename(&path, dir.join(format!("cypher-{mode}.log.old")));
         }
         let file = std::fs::File::create(&path).ok()?;
+        // SAFETY: flock on a descriptor `file` owns for this call.
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         sweep_stale_pid_logs(dir, mode);
         Some(file)
@@ -770,6 +772,8 @@ mod workos_resolver_tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn set(key: &str, value: Option<&str>) {
+        // SAFETY: callers hold ENV_LOCK, serializing these writes; nothing in
+        // this binary holds a raw pointer into the environment.
         match value {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },

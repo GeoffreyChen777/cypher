@@ -304,7 +304,7 @@ impl Engine {
                 .with_viewport_activity(auth.viewport_activity())
         });
         #[cfg(feature = "development")]
-        if std::env::var("CYPHER_DEV_STREAM_PREVIEW").as_deref() == Ok("1") {
+        if cypher_env::var_raw("DEV_STREAM_PREVIEW").as_deref() == Some("1") {
             let url = reqwest::Url::parse(&config.edge_url)
                 .map_err(|err| EngineError::Other(err.to_string()))?;
             if !(is_development_edge(&config.edge_url)
@@ -316,7 +316,7 @@ impl Engine {
                     "Preview requires an isolated development Edge".into(),
                 ));
             }
-            let token = std::env::var("CYPHER_DEV_PREVIEW_PUBLISH_TOKEN").ok();
+            let token = cypher_env::var_raw("DEV_PREVIEW_PUBLISH_TOKEN");
             if !token.as_ref().is_none_or(|t| {
                 t.len() == 64
                     && t.bytes()

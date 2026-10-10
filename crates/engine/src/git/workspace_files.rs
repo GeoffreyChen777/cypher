@@ -178,6 +178,7 @@ mod anchored {
         let raw = unsafe { libc::fdopendir(fd) };
         if raw.is_null() {
             let error = io::Error::last_os_error();
+            // SAFETY: fdopendir failed, so fd is still ours to close, once.
             unsafe {
                 libc::close(fd);
             }
@@ -208,6 +209,8 @@ mod anchored {
                 truncated = false;
                 break;
             }
+            // SAFETY: entry is non-null and d_name is NUL-terminated; it stays
+            // valid until the next readdir on this stream.
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             let Ok(name_text) = name.to_str() else {
                 continue;
@@ -216,6 +219,8 @@ mod anchored {
                 continue;
             }
             let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: dir.0 is an open stream, name is NUL-terminated and stat
+            // points to writable storage of the right type.
             let result = unsafe {
                 libc::fstatat(
                     libc::dirfd(dir.0),
@@ -227,6 +232,7 @@ mod anchored {
             if result != 0 {
                 continue;
             } // removed while enumerating
+            // SAFETY: fstatat returned 0, so it initialized stat.
             let mode = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
             if mode != libc::S_IFDIR && mode != libc::S_IFREG {
                 continue;
@@ -382,6 +388,7 @@ mod tests {
                 .any(|e| [".git", "escape", "link"].contains(&e.name.as_str()))
         );
         let fifo = std::ffi::CString::new(root.join("fifo").to_str().unwrap()).unwrap();
+        // SAFETY: fifo is a NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(text(&root, "fifo").is_err());
     }
@@ -423,6 +430,7 @@ mod tests {
             "fn main() {}"
         );
         let fifo = std::ffi::CString::new(root.join("fifo").to_str().unwrap()).unwrap();
+        // SAFETY: fifo is a NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(replace(&root, "fifo", "x").is_err());
     }

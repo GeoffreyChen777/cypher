@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn expand_home_only_rewrites_a_leading_tilde() {
-    let home = home_dir().to_string_lossy().into_owned();
+    let home = cypher_env::home_dir().to_string_lossy().into_owned();
     assert_eq!(expand_home("~"), home);
     assert_eq!(expand_home("~/code"), format!("{home}/code"));
     // Absolute paths, relative paths, and a `~user` form (which this host

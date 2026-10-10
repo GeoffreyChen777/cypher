@@ -562,13 +562,16 @@ fn the_cypher_app_is_the_default_and_env_can_override_or_disable_it() {
         GithubConfig::detect().client_id.as_deref(),
         Some(DEFAULT_GITHUB_CLIENT_ID)
     );
+    // SAFETY: as above.
     unsafe { std::env::set_var("CYPHER_GITHUB_CLIENT_ID", "Iv1.other") };
     assert_eq!(
         GithubConfig::detect().client_id.as_deref(),
         Some("Iv1.other")
     );
+    // SAFETY: as above.
     unsafe { std::env::set_var("CYPHER_GITHUB_CLIENT_ID", "") };
     assert_eq!(GithubConfig::detect().client_id, None);
+    // SAFETY: as above.
     unsafe { std::env::remove_var("CYPHER_GITHUB_CLIENT_ID") };
 }
 

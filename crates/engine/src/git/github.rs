@@ -83,9 +83,9 @@ impl GithubConfig {
                 .map(str::to_string)
         };
         Self {
-            client_id: match std::env::var("CYPHER_GITHUB_CLIENT_ID") {
-                Ok(value) => nonempty(Some(&value)),
-                Err(_) => Some(DEFAULT_GITHUB_CLIENT_ID.to_string()),
+            client_id: match cypher_env::var_raw("GITHUB_CLIENT_ID") {
+                Some(value) => nonempty(Some(&value)),
+                None => Some(DEFAULT_GITHUB_CLIENT_ID.to_string()),
             },
             app_slug: cypher_env::var("GITHUB_APP_SLUG")
                 .or_else(|| nonempty(option_env!("CYPHER_GITHUB_APP_SLUG"))),
