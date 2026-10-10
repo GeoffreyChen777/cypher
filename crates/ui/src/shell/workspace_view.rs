@@ -554,7 +554,7 @@ impl Shell {
     ) {
         let drag = event.drag(cx);
         let (path, boundary) = (drag.path.clone(), drag.boundary);
-        let Some(bounds) = self.split_bounds.borrow().get(&path).copied() else {
+        let Some(bounds) = self.geometry.split_bounds.borrow().get(&path).copied() else {
             return;
         };
         let Some(Node::Split { axis, children }) = self.workspace.root().at(&path) else {
@@ -592,6 +592,7 @@ impl Shell {
         let pointer = event.event.position;
         let tab = event.drag(cx).tab.clone();
         let hit = self
+            .geometry
             .tile_bounds
             .borrow()
             .iter()
@@ -599,8 +600,8 @@ impl Shell {
         let hover = hit.and_then(|(group, zone)| {
             effective_drop(&self.workspace, &tab, group, zone).map(|drop| (group, drop))
         });
-        if self.tab_drop.as_ref().map(|state| state.hover) != Some(hover) {
-            self.tab_drop = Some(TabDropState { hover });
+        if self.geometry.tab_drop.as_ref().map(|state| state.hover) != Some(hover) {
+            self.geometry.tab_drop = Some(TabDropState { hover });
             cx.notify();
         }
     }
@@ -613,7 +614,7 @@ impl Shell {
         placement: Placement,
         cx: &mut Context<Self>,
     ) {
-        self.tab_drop = None;
+        self.geometry.tab_drop = None;
         self.route = Route::Chat;
         route_drop(&mut self.workspace, drag.tab.clone(), group, placement);
         self.tiles.focus_pending = true;
@@ -629,6 +630,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let zone = self
+            .geometry
             .tile_bounds
             .borrow()
             .get(&group)
@@ -647,14 +649,16 @@ impl Shell {
     ) -> AnyElement {
         // A drag that ended off every drop target leaves no catchers
         // behind; tile bodies re-measure at paint.
-        if self.tab_drop.is_some() && !cx.has_active_drag() {
-            self.tab_drop = None;
+        if self.geometry.tab_drop.is_some() && !cx.has_active_drag() {
+            self.geometry.tab_drop = None;
         }
-        self.tile_bounds.borrow_mut().clear();
+        self.geometry.tile_bounds.borrow_mut().clear();
         let workspace = &self.workspace;
-        self.tile_tab_scroll
+        self.geometry
+            .tile_tab_scroll
             .retain(|group, _| workspace.group(*group).is_some());
-        self.split_bounds
+        self.geometry
+            .split_bounds
             .borrow_mut()
             .retain(|path, _| matches!(workspace.root().at(path), Some(Node::Split { .. })));
         let body = match self.workspace.zoomed() {
@@ -696,7 +700,7 @@ impl Shell {
             Node::Split { axis, children } => {
                 let axis = *axis;
                 let count = children.len();
-                let measured = self.split_bounds.clone();
+                let measured = self.geometry.split_bounds.clone();
                 let key = path.clone();
                 let mut split = div()
                     .size_full()
@@ -821,10 +825,11 @@ impl Shell {
             } else {
                 super::dock::RAIL_MARGIN
             };
-            if self.rail_focus.0 != Some(group) {
-                self.rail_focus = (Some(group), self.rail_focus.1.wrapping_add(1));
+            if self.geometry.rail_focus.0 != Some(group) {
+                self.geometry.rail_focus =
+                    (Some(group), self.geometry.rail_focus.1.wrapping_add(1));
             }
-            let epoch = self.rail_focus.1;
+            let epoch = self.geometry.rail_focus.1;
             let rail = self.render_session_rail(sid, top, cx);
             // Absolute, fixed width: the fade cannot change anyone's layout.
             // A top-right Windows tile starts the buttons under the caption
@@ -852,11 +857,12 @@ impl Shell {
             Some(sid) => self.render_session(sid, window, cx),
             None => self.render_empty_tile(group, cx),
         };
-        let measured = self.tile_bounds.clone();
+        let measured = self.geometry.tile_bounds.clone();
         // While a session tab drags: a catcher over the body takes the drop
         // (and blocks the session's own hover effects) and previews it.
-        let catcher = (self.tab_drop.is_some() && cx.has_active_drag()).then(|| {
+        let catcher = (self.geometry.tab_drop.is_some() && cx.has_active_drag()).then(|| {
             let hover = self
+                .geometry
                 .tab_drop
                 .as_ref()
                 .and_then(|state| state.hover)
@@ -969,6 +975,7 @@ impl Shell {
         // row scrolls. A newly active tab (opened, activated, or a tab count
         // change) is scrolled fully into view once.
         let (scroll, scrolled_to) = self
+            .geometry
             .tile_tab_scroll
             .entry(group)
             .or_insert_with(|| (gpui::ScrollHandle::new(), None));

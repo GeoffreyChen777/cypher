@@ -986,27 +986,9 @@ struct ClosedTabStash {
     terminals: std::collections::HashMap<String, Entity<TerminalPanel>>,
 }
 
-pub struct Shell {
-    /// The window's main state: lists (sidebar, spaces, sessions) in
-    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
-    /// session (sidebar highlight, nav history, cycle order, space
-    /// implication). Each tile renders from its own session context.
-    state: Entity<AppState>,
-    /// The tiled session layout (docs/design/workspace-layout.md).
-    workspace: crate::workspace::Workspace,
-    /// The session slots behind the workspace's tabs, and how main follows
-    /// the focused one.
-    tiles: SlotTable,
-    /// What closed session tabs leave behind for their next slot.
-    closed_tabs: ClosedTabStash,
-    /// The main state's chats generation `prune_tabs` last judged: only a
-    /// NEW chats frame may close a tab whose chat is missing from the list.
-    seen_chats_generation: u64,
-    /// Chats this window just created (a fork, a promoted side chat) whose
-    /// row may trail a chats frame or two, by creation time: their tabs
-    /// aren't closed as deleted until a frame lists them (which clears the
-    /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
-    expected_chats: std::collections::HashMap<String, std::time::Instant>,
+/// Measured tile geometry (paint-time canvases) and the per-tile state that
+/// reads it: tab-strip scrolling, the session rail's entrance, tab drags.
+struct TileGeometry {
     /// Per tile: its tab strip's scroll handle and the (active tab, tab
     /// count) last scrolled into view — a change scrolls the active tab
     /// fully into view once.
@@ -1035,6 +1017,31 @@ pub struct Shell {
     >,
     /// A live session-tab drag (tile drop catchers mount while `Some`).
     tab_drop: Option<workspace_view::TabDropState>,
+}
+
+pub struct Shell {
+    /// The window's main state: lists (sidebar, spaces, sessions) in
+    /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
+    /// session (sidebar highlight, nav history, cycle order, space
+    /// implication). Each tile renders from its own session context.
+    state: Entity<AppState>,
+    /// The tiled session layout (docs/design/workspace-layout.md).
+    workspace: crate::workspace::Workspace,
+    /// The session slots behind the workspace's tabs, and how main follows
+    /// the focused one.
+    tiles: SlotTable,
+    /// What closed session tabs leave behind for their next slot.
+    closed_tabs: ClosedTabStash,
+    /// The main state's chats generation `prune_tabs` last judged: only a
+    /// NEW chats frame may close a tab whose chat is missing from the list.
+    seen_chats_generation: u64,
+    /// Chats this window just created (a fork, a promoted side chat) whose
+    /// row may trail a chats frame or two, by creation time: their tabs
+    /// aren't closed as deleted until a frame lists them (which clears the
+    /// entry) or [`tabs::EXPECTED_CHAT_TTL`] passes.
+    expected_chats: std::collections::HashMap<String, std::time::Instant>,
+    /// Tile measurements and the tab-strip, rail and tab-drag state they drive.
+    geometry: TileGeometry,
     /// The dock surface strip's `+` menu, for the slot that opened it (one
     /// menu is open at a time).
     right_plus: popover::Popup<session::SlotId>,
@@ -1378,11 +1385,13 @@ impl Shell {
             },
             seen_chats_generation: 0,
             expected_chats: std::collections::HashMap::new(),
-            tile_tab_scroll: std::collections::HashMap::new(),
-            split_bounds: Default::default(),
-            rail_focus: (None, 0),
-            tile_bounds: Default::default(),
-            tab_drop: None,
+            geometry: TileGeometry {
+                tile_tab_scroll: std::collections::HashMap::new(),
+                split_bounds: Default::default(),
+                rail_focus: (None, 0),
+                tile_bounds: Default::default(),
+                tab_drop: None,
+            },
             right_plus: popover::Popup::default(),
             layout_menu: popover::Popup::default(),
             route,
