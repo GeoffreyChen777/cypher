@@ -91,23 +91,24 @@ impl Changes {
                 let Some(h) = file_diff.hunks.get(hunk as usize) else {
                     return gpui::Empty.into_any_element();
                 };
+                let split = SplitRow {
+                    row: ix,
+                    highlights: highlight.as_deref(),
+                    gutter: gutter_width(file_diff),
+                };
                 let left = self.split_cell(
-                    ix,
+                    &split,
                     Side::Old,
                     old.and_then(|i| h.lines.get(i as usize)),
                     old.map(|i| format!("{}:old", diff_line_key(&self.owner, file, hunk, i))),
-                    highlight.as_deref(),
-                    gutter_width(file_diff),
                     &theme,
                     cx,
                 );
                 let right = self.split_cell(
-                    ix,
+                    &split,
                     Side::New,
                     new.and_then(|i| h.lines.get(i as usize)),
                     new.map(|i| format!("{}:new", diff_line_key(&self.owner, file, hunk, i))),
-                    highlight.as_deref(),
-                    gutter_width(file_diff),
                     &theme,
                     cx,
                 );
