@@ -28,31 +28,31 @@ impl Shell {
         crate::settings::setup::setup_should_show(
             self.settings.pi_runtime_setup_version >= 1,
             self.debug_setup,
-            self.setup_dismissed,
+            self.pages.setup_dismissed,
         )
     }
 
     fn ensure_setup_page(&mut self, cx: &mut Context<Self>) {
-        if self.setup_page.is_some() {
+        if self.pages.setup.is_some() {
             return;
         }
         let state = self.state.clone();
         let page = cx.new(|cx| SetupPage::new(state, cx));
-        self.setup_sub = Some(cx.subscribe(&page, |this, _, event: &SetupEvent, cx| {
+        self.pages.setup_sub = Some(cx.subscribe(&page, |this, _, event: &SetupEvent, cx| {
             this.complete_setup(cx);
             if matches!(event, SetupEvent::ConfigureProviders) {
                 this.open_providers(ProviderIntent::Add, cx);
             }
         }));
-        self.setup_page = Some(page);
+        self.pages.setup = Some(page);
     }
 
     fn complete_setup(&mut self, cx: &mut Context<Self>) {
         self.settings.setup_completed = true;
         self.settings.pi_runtime_setup_version = 1;
-        self.setup_dismissed = true;
-        self.setup_page = None;
-        self.setup_sub = None;
+        self.pages.setup_dismissed = true;
+        self.pages.setup = None;
+        self.pages.setup_sub = None;
         self.schedule_save(cx);
         cx.notify();
     }
@@ -60,7 +60,7 @@ impl Shell {
     pub(super) fn render_setup_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_setup_page(cx);
         let theme = Theme::of(cx).clone();
-        let inner = match &self.setup_page {
+        let inner = match &self.pages.setup {
             Some(page) => page.clone().into_any_element(),
             None => Empty.into_any_element(),
         };
@@ -86,7 +86,7 @@ impl Shell {
 
     pub(super) fn open_providers(&mut self, intent: ProviderIntent, cx: &mut Context<Self>) {
         if self.is_project_window() {
-            let target = self.settings_target.read(cx).id().map(str::to_string);
+            let target = self.pages.target.read(cx).id().map(str::to_string);
             self.forward_to_main(cx, move |main, cx| {
                 main.aim_settings_target(target, cx);
                 main.open_providers(intent, cx);
@@ -95,55 +95,55 @@ impl Shell {
         }
         self.open_settings(SettingsSection::Providers, cx);
         let state = self.state.clone();
-        let target = self.settings_target.clone();
-        self.providers_page = Some(cx.new(|cx| ProvidersPage::new(state, target, intent, cx)));
+        let target = self.pages.target.clone();
+        self.pages.providers = Some(cx.new(|cx| ProvidersPage::new(state, target, intent, cx)));
     }
 
     pub(super) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         // Settings are app-wide: a project window opens them in the main
         // window, carrying over the device its composer aimed them at.
         if self.is_project_window() {
-            let target = self.settings_target.read(cx).id().map(str::to_string);
+            let target = self.pages.target.read(cx).id().map(str::to_string);
             self.forward_to_main(cx, move |main, cx| {
                 main.aim_settings_target(target, cx);
                 main.open_settings(section, cx);
             });
             return;
         }
-        if let Some(page) = &self.providers_page {
+        if let Some(page) = &self.pages.providers {
             page.update(cx, |page, cx| page.dismiss(cx));
         }
         if section == SettingsSection::Providers {
-            self.providers_page = None;
+            self.pages.providers = None;
         }
         if section == SettingsSection::Titles {
-            self.titles_page = None;
+            self.pages.titles = None;
         }
         // Persisted chat preferences live in the global, not in this editor.
         // Re-enter without a stale font popup or an unfinished HEX draft.
         if section == SettingsSection::Appearance {
-            self.appearance_page = None;
+            self.pages.appearance = None;
         }
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
-            self.harnesses_page = None;
+            self.pages.harnesses = None;
         }
         if section == SettingsSection::Commands {
-            self.commands_page = None;
+            self.pages.commands = None;
         }
         if section == SettingsSection::Mcp {
-            self.mcp_page = None;
+            self.pages.mcp = None;
         }
         // Same reason as the pages above: the profiles are files on the target
         // device, so a fresh visit re-reads them.
         if section == SettingsSection::Subagents {
-            self.subagents_page = None;
+            self.pages.subagents = None;
         }
         // Re-read the sign-in on every visit: a `gh auth login` in a terminal
         // or an expired token should show without restarting.
         if section == SettingsSection::Github {
-            self.github_page = None;
+            self.pages.github = None;
         }
         self.dismiss_comment_popup(cx);
         self.route = Route::Settings(section);
@@ -158,7 +158,8 @@ impl Shell {
     fn aim_settings_target(&mut self, device: Option<String>, cx: &mut Context<Self>) {
         if device.is_some() {
             let result = self
-                .settings_target
+                .pages
+                .target
                 .update(cx, |target, cx| target.select(device, cx));
             if let Err(error) = result {
                 tracing::debug!(%error, "settings target unchanged");
@@ -167,7 +168,7 @@ impl Shell {
     }
 
     pub(super) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(page) = &self.providers_page {
+        if let Some(page) = &self.pages.providers {
             page.update(cx, |page, cx| page.dismiss(cx));
         }
         self.route = Route::Chat;
@@ -193,7 +194,7 @@ impl Shell {
     /// points at `entry` (back/forward moved the index); the selection change
     /// this triggers dedups against `current()` in [`Self::on_state_changed`].
     fn apply_nav(&mut self, entry: NavEntry, cx: &mut Context<Self>) {
-        if let Some(page) = &self.providers_page {
+        if let Some(page) = &self.pages.providers {
             page.update(cx, |page, cx| page.dismiss(cx));
         }
         match entry {
@@ -221,61 +222,63 @@ impl Shell {
     ) -> AnyElement {
         match section {
             SettingsSection::Titles => {
-                if self.titles_page.is_none() {
+                if self.pages.titles.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.titles_page = Some(
+                    let target = self.pages.target.clone();
+                    self.pages.titles = Some(
                         cx.new(|cx| crate::settings::titles::TitlesPage::new(state, target, cx)),
                     );
                 }
-                self.titles_page
+                self.pages
+                    .titles
                     .as_ref()
                     .unwrap()
                     .clone()
                     .into_any_element()
             }
             SettingsSection::Providers => {
-                if self.providers_page.is_none() {
+                if self.pages.providers.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.providers_page = Some(
+                    let target = self.pages.target.clone();
+                    self.pages.providers = Some(
                         cx.new(|cx| ProvidersPage::new(state, target, ProviderIntent::List, cx)),
                     );
                 }
-                self.providers_page
+                self.pages
+                    .providers
                     .as_ref()
                     .unwrap()
                     .clone()
                     .into_any_element()
             }
             SettingsSection::Devices => {
-                if self.devices_page.is_none() {
+                if self.pages.devices.is_none() {
                     let state = self.state.clone();
-                    self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
+                    self.pages.devices = Some(cx.new(|cx| DevicesPage::new(state, cx)));
                 }
-                match &self.devices_page {
+                match &self.pages.devices {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Harnesses => {
-                if self.harnesses_page.is_none() {
+                if self.pages.harnesses.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, target, cx)));
+                    let target = self.pages.target.clone();
+                    self.pages.harnesses = Some(cx.new(|cx| HarnessesPage::new(state, target, cx)));
                 }
-                match &self.harnesses_page {
+                match &self.pages.harnesses {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Commands => {
-                if self.commands_page.is_none() {
+                if self.pages.commands.is_none() {
                     let state = self.state.clone();
                     let shown = self.settings.shown_slash_commands.clone();
-                    let target = self.settings_target.clone();
+                    let target = self.pages.target.clone();
                     let page = cx.new(|cx| CommandsPage::new(state, target, shown, cx));
-                    self.commands_sub = Some(cx.subscribe(
+                    self.pages.commands_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &CommandsEvent, cx| {
                             let CommandsEvent::Changed(shown) = event;
@@ -285,59 +288,59 @@ impl Shell {
                             cx.notify();
                         },
                     ));
-                    self.commands_page = Some(page);
+                    self.pages.commands = Some(page);
                 }
-                match &self.commands_page {
+                match &self.pages.commands {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Mcp => {
-                if self.mcp_page.is_none() {
+                if self.pages.mcp.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.mcp_page = Some(cx.new(|cx| McpPage::new(state, target, cx)));
+                    let target = self.pages.target.clone();
+                    self.pages.mcp = Some(cx.new(|cx| McpPage::new(state, target, cx)));
                 }
-                match &self.mcp_page {
+                match &self.pages.mcp {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Subagents => {
-                if self.subagents_page.is_none() {
+                if self.pages.subagents.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.subagents_page = Some(cx.new(|cx| SubagentsPage::new(state, target, cx)));
+                    let target = self.pages.target.clone();
+                    self.pages.subagents = Some(cx.new(|cx| SubagentsPage::new(state, target, cx)));
                 }
-                match &self.subagents_page {
+                match &self.pages.subagents {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Github => {
-                if self.github_page.is_none() {
+                if self.pages.github.is_none() {
                     let state = self.state.clone();
-                    let target = self.settings_target.clone();
-                    self.github_page = Some(
+                    let target = self.pages.target.clone();
+                    self.pages.github = Some(
                         cx.new(|cx| crate::settings::github::GithubPage::new(state, target, cx)),
                     );
                 }
-                match &self.github_page {
+                match &self.pages.github {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Appearance => {
-                if self.appearance_page.is_none() {
-                    self.appearance_page = Some(cx.new(AppearancePage::new));
+                if self.pages.appearance.is_none() {
+                    self.pages.appearance = Some(cx.new(AppearancePage::new));
                 }
-                match &self.appearance_page {
+                match &self.pages.appearance {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Notifications => {
-                if self.notifications_page.is_none() {
+                if self.pages.notifications.is_none() {
                     let page = cx.new(|cx| {
                         NotificationsPage::new(
                             self.settings.sound_enabled,
@@ -348,7 +351,7 @@ impl Shell {
                         )
                     });
                     // Persist the flags whenever the page flips one.
-                    self.notifications_sub = Some(cx.subscribe(
+                    self.pages.notifications_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &NotificationsEvent, cx| {
                             let NotificationsEvent::Changed {
@@ -366,20 +369,20 @@ impl Shell {
                             cx.notify();
                         },
                     ));
-                    self.notifications_page = Some(page);
+                    self.pages.notifications = Some(page);
                 }
-                match &self.notifications_page {
+                match &self.pages.notifications {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Shortcuts => {
-                if self.shortcuts_page.is_none() {
+                if self.pages.shortcuts.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
                     let page = cx.new(|cx| ShortcutsPage::new(state, keymap, cx));
                     // Persist + re-apply the keymap whenever the page changes it.
-                    self.shortcuts_sub = Some(cx.subscribe(
+                    self.pages.shortcuts_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
                             let ShortcutsEvent::Changed(keymap) = event;
@@ -389,19 +392,19 @@ impl Shell {
                             cx.notify();
                         },
                     ));
-                    self.shortcuts_page = Some(page);
+                    self.pages.shortcuts = Some(page);
                 }
-                match &self.shortcuts_page {
+                match &self.pages.shortcuts {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
             SettingsSection::Archived => {
-                if self.archived_page.is_none() {
+                if self.pages.archived.is_none() {
                     let state = self.state.clone();
-                    self.archived_page = Some(cx.new(|cx| ArchivedPage::new(state, cx)));
+                    self.pages.archived = Some(cx.new(|cx| ArchivedPage::new(state, cx)));
                 }
-                match &self.archived_page {
+                match &self.pages.archived {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }

@@ -86,7 +86,7 @@ impl Shell {
         // The state arrives attached and populated — no boot splash, and no
         // first-run setup (the main window owns that flow).
         shell.splash = SplashPhase::Gone;
-        shell.setup_dismissed = true;
+        shell.pages.setup_dismissed = true;
         shell.space_boot_applied = true;
         cx.on_release(move |_, cx| {
             let Some(project) = project else {

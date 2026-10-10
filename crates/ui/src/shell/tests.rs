@@ -577,7 +577,7 @@ fn a_split_workspace_renders(cx: &mut gpui::TestAppContext) {
     });
     vcx.run_until_parked();
     shell.update(vcx, |shell, cx| {
-        shell.setup_dismissed = true;
+        shell.pages.setup_dismissed = true;
         // Boot landed one of them; the other splits off to the right.
         shell.open_chat_with("a".into(), true, cx);
         shell.open_chat_with("b".into(), true, cx);

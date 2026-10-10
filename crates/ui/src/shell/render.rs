@@ -456,7 +456,7 @@ impl Shell {
                             .text_color(theme.text)
                             .child(SharedString::from("Settings")),
                     )
-                    .child(self.settings_target.clone()),
+                    .child(self.pages.target.clone()),
             )
             .child(groups)
             // Neither the device selector nor Back scroll with the sections.
@@ -1177,7 +1177,7 @@ impl Render for Shell {
         // A sidebar chat selection can leave settings without close_settings.
         // Do not retain a hidden credential field in the cached page entity.
         if self.route != Route::Settings(SettingsSection::Providers)
-            && let Some(page) = &self.providers_page
+            && let Some(page) = &self.pages.providers
         {
             page.update(cx, |page, cx| page.dismiss(cx));
         }

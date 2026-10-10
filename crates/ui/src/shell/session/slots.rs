@@ -472,7 +472,7 @@ impl Shell {
         };
         match event {
             ComposerEvent::OpenAgentSettings { target_device } => {
-                let result = self.settings_target.update(cx, |target, cx| {
+                let result = self.pages.target.update(cx, |target, cx| {
                     target.select(Some(target_device.clone()), cx)
                 });
                 match result {
@@ -483,7 +483,7 @@ impl Shell {
                 }
             }
             ComposerEvent::OpenGithubSettings { target_device } => {
-                let result = self.settings_target.update(cx, |target, cx| {
+                let result = self.pages.target.update(cx, |target, cx| {
                     target.select(Some(target_device.clone()), cx)
                 });
                 match result {
@@ -498,7 +498,8 @@ impl Shell {
                 target_device,
             } => {
                 let result = self
-                    .settings_target
+                    .pages
+                    .target
                     .update(cx, |target, cx| target.select(target_device.clone(), cx));
                 match result {
                     Ok(()) => self.open_providers(intent.clone(), cx),
