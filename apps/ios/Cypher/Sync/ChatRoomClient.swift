@@ -338,6 +338,11 @@ actor ChatRoomClient {
 
     private func connect() {
         guard !closed else { return }
+        // A redial over a live socket (kick) replaces it: close it and stop
+        // its timers rather than leave them running unowned.
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        cancelTasks()
         generation += 1
         let gen = generation
         joined = false
@@ -417,7 +422,9 @@ actor ChatRoomClient {
 
     private func onSocketError(gen: Int) async {
         if previewEnabled, gen == generation { _ = await delegate.preview(nil) }
-        guard gen == generation, !closed else { return }
+        // `socket == nil`: this session was already torn down, and this is
+        // the cancelled socket's own receive error.
+        guard gen == generation, !closed, socket != nil else { return }
         roomLog.warning("chat2 \(self.chatId, privacy: .public): session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
         joined = false
         await delegate.event(.disconnected)
@@ -433,8 +440,15 @@ actor ChatRoomClient {
         backoffMs = min(backoffMs * 2, ChatRoomClient.backoffCapMs)
         Task { [clock] in
             await clock.sleep(nanoseconds: UInt64(delay) * 1_000_000)
-            await self.connect()
+            await self.reconnect(gen: gen)
         }
+    }
+
+    /// The backoff timer's redial, unless something (kick, stop) already
+    /// moved on from that session.
+    private func reconnect(gen: Int) {
+        guard gen == generation else { return }
+        connect()
     }
 
     // MARK: Timers

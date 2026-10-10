@@ -185,4 +185,27 @@ final class ChatRoomClientLifecycleTests: XCTestCase {
         transport.sockets[2].fail()
         await expectRedial(after: 250, sockets: 4)
     }
+
+    func testDeadlineTeardownRedialsOnce() async {
+        let socket = await open()
+        await advance(seconds: 14)
+        await advance(upTo: 3) { socket.closeCode == .abnormalClosure }
+        await expectRedial(after: 250, sockets: 2)
+        clock.advance(nanoseconds: 1_000 * Self.ms)
+        await settle()
+        XCTAssertEqual(transport.sockets.count, 2, "the torn-down socket's own error must not redial again")
+        XCTAssertEqual(log.count("disconnected"), 1)
+    }
+
+    func testKickDuringBackoffDialsOnce() async {
+        let first = await open()
+        first.fail()
+        await eventually { clock.hasSleeper(lasting: 250 * Self.ms) }
+        await client.kick()
+        await eventually { transport.sockets.count == 2 }
+        clock.advance(nanoseconds: 300 * Self.ms)
+        await settle()
+        XCTAssertEqual(transport.sockets.count, 2, "the superseded backoff timer must not dial again")
+        XCTAssertNil(transport.sockets[1].closeCode)
+    }
 }
