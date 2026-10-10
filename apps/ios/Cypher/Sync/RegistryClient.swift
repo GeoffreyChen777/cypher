@@ -1,6 +1,6 @@
 // Registry room client — a Swift port of crates/sync/src/registry.rs, the
-// text-frame sibling of RoomClient (which still carries the Loro session
-// docs). JSON text frames over one WebSocket to /registry/{orgId}/ws:
+// text-frame sibling of ChatRoomClient. JSON text frames over one WebSocket
+// to /registry/{orgId}/ws:
 // hello/cursor handshake, push/ack for pending op batches, merged-row
 // broadcasts, presence beats, probe/redial liveness, reconnect with backoff.
 //
@@ -271,8 +271,8 @@ actor RegistryClient {
             break  // liveness proven; clocks already advanced above
 
         case .error(let code, let message):
-            // Rejections are server-attributed per device; surface loudly
-            // (2026-07-31: silent rejects looked exactly like a working app).
+            // Rejections are server-attributed per device; surface loudly —
+            // a silent reject looks exactly like a working app.
             roomLog.error("registry: server rejected a frame: \(code, privacy: .public): \(message, privacy: .public)")
         }
     }

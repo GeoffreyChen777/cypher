@@ -46,7 +46,7 @@ struct CypherApp: App {
                         // failure path — without this kick the workspace
                         // room stays dead after foregrounding while chat
                         // views reconnect on open (frozen sidebar/Working
-                        // indicators against live transcripts, 2026-08-04).
+                        // indicators against live transcripts).
                         model.foregrounded()
                     }
                 }

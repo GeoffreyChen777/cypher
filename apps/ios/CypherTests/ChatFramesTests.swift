@@ -77,7 +77,7 @@ final class ChatFramesTests: XCTestCase {
         XCTAssertEqual(chatPlanCatchUp(cursor: 20, state: state(10, 0, 0), frontierContained: false),
                        .rowsOnly(after: 0))
         // A freshly SEEDED room: checkpoint covers seq 0 but has SIZE — it
-        // must not be misread as "no checkpoint" (2026-08-10 cutover gauntlet).
+        // must not be misread as "no checkpoint".
         XCTAssertEqual(chatPlanCatchUp(cursor: 0, state: state(0, 0, 5_000), frontierContained: false),
                        .checkpointThenRows(after: 0))
     }

@@ -444,9 +444,9 @@ extension AppModel {
     }
 
     /// Foreground hook: kick every room NOW (see ChatRoomClient.kick) — after
-    /// a suspension the workspace room in particular stayed dead while chat
-    /// views reconnected on open, freezing sidebar rows and Working
-    /// indicators against perfectly live transcripts (2026-08-04).
+    /// a suspension the workspace room in particular stays dead while chat
+    /// views reconnect on open, freezing sidebar rows and Working indicators
+    /// against perfectly live transcripts.
     func foregrounded() {
         trimSessionStores()
         kickAllRooms()

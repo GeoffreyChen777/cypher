@@ -2,10 +2,8 @@ import XCTest
 @preconcurrency import UserNotifications
 @testable import Cypher
 
-/// Regression for a TestFlight crash reported twice by the same tester
-/// (0.1.5 build 2 on 2026-09-10, 0.2.0 build 13 on 2026-09-19): tapping a
-/// notification killed the app with SIGABRT 0.28s into the cold launch it
-/// had just triggered.
+/// Regression for a TestFlight crash: tapping a notification killed the app
+/// with SIGABRT 0.28s into the cold launch it had just triggered.
 ///
 /// `PushAppDelegate`'s delegate methods were `nonisolated ... async`, so the
 /// compiler-generated ObjC thunk invoked UIKit's completion handler from the
