@@ -1119,8 +1119,8 @@ struct AddSpaceInputs {
     rows: Vec<cypher_proto::FolderEntry>,
 }
 
-/// A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
-fn key_chip(theme: &Theme) -> gpui::Div {
+/// A quiet mono key-cap chip ("⌘K" / "esc") for the palettes' header bands.
+pub(super) fn key_chip(theme: &Theme) -> gpui::Div {
     div()
         .h(px(22.0))
         .px(px(6.0))
