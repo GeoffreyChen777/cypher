@@ -1,3 +1,6 @@
+// Changes viewer: renders a file's git patch in the bundled offline
+// DiffRenderer web page (unified or split).
+
 import SwiftUI
 import WebKit
 

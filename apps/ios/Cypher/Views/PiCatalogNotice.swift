@@ -1,3 +1,5 @@
+// Notice shown while the host's Pi model catalog is loading or has failed.
+
 import SwiftUI
 
 struct PiCatalogNotice: View {

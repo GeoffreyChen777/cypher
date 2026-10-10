@@ -1,3 +1,6 @@
+// Dev App cloud interop probe: drives one desktop-hosted chat end to end and
+// writes the outcome to Documents/development-interop.json.
+
 #if CYPHER_DEVELOPMENT
 import Foundation
 

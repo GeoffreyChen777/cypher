@@ -1,3 +1,6 @@
+// Pending review comments: the composer's comments bar and the panel that
+// lists and edits them (crates/ui/src/comments.rs).
+
 import SwiftUI
 import UIKit
 

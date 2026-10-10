@@ -1,3 +1,6 @@
+// Files / Changes browser sheet for a session's working directory on its host
+// device: directory listing, changes list and file preview.
+
 import SwiftUI
 
 enum WorkspaceDestination: String, Identifiable {

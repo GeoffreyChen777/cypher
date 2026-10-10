@@ -1,3 +1,6 @@
+// Data source for one Files / Changes sheet: host RPCs (or the demo dataset)
+// bound to a single chat's device, checkout and account.
+
 import Foundation
 
 enum WorkspaceBrowserError: LocalizedError {

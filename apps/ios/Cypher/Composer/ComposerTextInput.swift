@@ -1,3 +1,6 @@
+// The composer's native UITextView editor: focus ownership, inline @mention
+// chips, IME-safe text binding and a height capped at seven lines.
+
 import SwiftUI
 import UIKit
 

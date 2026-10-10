@@ -1,3 +1,5 @@
+// Light / dark / system appearance preference and its picker.
+
 import SwiftUI
 
 /// Client-local only: appearance never changes synced workspace preferences.

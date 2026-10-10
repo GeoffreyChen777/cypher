@@ -1,3 +1,6 @@
+// Subagent status accessory and detail sheet for a session
+// (crates/ui/src/subagents.rs).
+
 import SwiftUI
 
 private extension SubagentPanelStatus {

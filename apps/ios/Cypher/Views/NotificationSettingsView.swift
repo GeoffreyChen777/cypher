@@ -1,3 +1,5 @@
+// Notification settings sheet and the in-app banner for foreground pushes.
+
 import SwiftUI
 
 struct NotificationSettingsView: View {

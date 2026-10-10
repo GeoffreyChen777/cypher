@@ -1,3 +1,5 @@
+// Read-only source viewer for a workspace file, using the DiffRenderer page.
+
 import SwiftUI
 
 /// A code reader, not an editor. It shares Changes' offline renderer and never

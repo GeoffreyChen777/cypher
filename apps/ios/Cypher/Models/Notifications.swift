@@ -1,3 +1,6 @@
+// Notification wire and persisted types: APNs payload, badge, preferences and
+// device registration state.
+
 import Foundation
 
 struct NotificationBadge: Decodable, Equatable {

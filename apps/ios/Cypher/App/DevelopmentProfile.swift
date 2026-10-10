@@ -1,3 +1,5 @@
+// Dev bundle edge endpoint and fixed identity (CYPHER_DEVELOPMENT builds only).
+
 import Foundation
 
 /// The Dev bundle's Edge and identity, mirroring the desktop development

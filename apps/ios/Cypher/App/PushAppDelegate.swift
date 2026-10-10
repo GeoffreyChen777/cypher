@@ -1,3 +1,6 @@
+// UIKit app delegate for push: forwards APNs tokens and notification taps to
+// NotificationController, buffering them until the controller is attached.
+
 import UIKit
 import UserNotifications
 

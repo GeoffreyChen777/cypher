@@ -1,3 +1,6 @@
+// Session readiness: resolves transport and Pi catalog state into one phase
+// and shows a delayed notice while the session cannot accept a prompt.
+
 import SwiftUI
 
 enum SessionConnectionPhase: Equatable {

@@ -1,3 +1,6 @@
+// Wire types for the host's workspace file/changes RPCs, plus the git patch
+// indexing and path validation the Files / Changes browser relies on.
+
 import Foundation
 
 struct WorkspaceFileEntry: Decodable, Hashable, Identifiable {

@@ -1,3 +1,6 @@
+// Display model for QuestionPanel: splits Pi's dialog prompt into header,
+// context and selection, and holds the in-progress answer draft.
+
 import Foundation
 
 /// Presentation only: Pi's dialog fallback puts the entire prompt in both

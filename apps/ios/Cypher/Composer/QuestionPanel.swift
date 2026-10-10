@@ -1,3 +1,5 @@
+// Card for an agent's user-input request (questions with options), shown above the composer.
+
 import SwiftUI
 
 /// A bounded decision card: quiet chrome, one prompt, optional context and a

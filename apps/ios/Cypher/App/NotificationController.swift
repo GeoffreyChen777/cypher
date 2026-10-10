@@ -1,3 +1,6 @@
+// Push notifications: permission, APNs registration with the edge, synced
+// notification preferences, badge count, in-app banners and tap navigation.
+
 import Foundation
 import Observation
 import UIKit
