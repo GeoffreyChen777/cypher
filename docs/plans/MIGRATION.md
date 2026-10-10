@@ -26,7 +26,7 @@
 > - 存储用 **Postgres**；**不用 Redis**。
 > - **保留 WorkOS** 作为 IdP；**保留主机名 `edge.letscypher.app`**（`apps/cypher/src/main.rs:100-117` 以它门控 WorkOS；iOS 持久化它）。
 > - **保留 room-actor 形态**：每个 room 一个单写者内存 actor，拥有自己的 socket；fan-out 是本地循环；串行化由 actor 完成，Postgres 只负责持久化；`seq` 排序**永不**依赖数据库锁。
-> - **保留 local-first 契约**：服务端不含 CRDT 逻辑，载荷保持不透明（`apps/edge/src/chat-frames.ts:1-13`）。
+> - **保留 local-first 契约**：服务端不含 CRDT 逻辑，载荷保持不透明（`apps/edge/src/chat/chat-frames.ts:1-13`）。
 > - 大对象（checkpoint、sidecar、附件、发布产物）放**自托管 MinIO**（S3 API，同机部署）；Postgres 只存指针。
 > - **保留现有 room 命名前缀**（`chat2/`、`reg1/`、`d2/`、`apns/`）原样导入，不在迁移中改名（§1.4、§2.5）。
 > - 初期一台 Linux 服务器（100+ 核、500 GB 内存、NVMe）；地点待定（§11）。
@@ -47,7 +47,7 @@
 | 预计工期 | **约 29–38 个工作日（6–7.5 周，一人）**；关键路径是 WP1 → WP3（Registry + 通知 + 推送）→ WP6（差分测试）→ WP9 → WP11；除切换本身外全部工作包可在窗口前完成并演练（§10）。 |
 | 切换后 | UX-1：客户端 2 秒合并窗口降到约 0（自托管后 rows 免费），感知延迟降为 120 ms 提交节拍 + RTT；UX-2：把已建成但默认关闭的 `ephemeral-stream-v1` 上生产，前提是设计设备绑定的发布者身份（§13）。 |
 
-一句话理由：服务端全部协议语义定义在约 4,000 行 TypeScript 里，且 Rust/Swift 客户端已通过共享或镜像的测试向量与之字节级对齐（`apps/edge/src/chat-frames.ts:11-13`、`apps/edge/src/registry-core.ts:1-6`、`crates/rpc/src/device_room.rs:6-14`）；本设计接受"第三份服务端实现"的重写风险，换取一个没有私有运行时层、与客户端同语言、天然多线程的长期形态，并把重写风险收敛到 §12 的可枚举清单和差分测试上。当前负载（月约 131 万次 DO 调用，折合约 0.5 次/秒）余量两个数量级以上，"用满 100 核"不是选型依据；选 Postgres 的理由是**可用性路径**（流复制热备 + PITR）与单一备份口径，不是吞吐。
+一句话理由：服务端全部协议语义定义在约 4,000 行 TypeScript 里，且 Rust/Swift 客户端已通过共享或镜像的测试向量与之字节级对齐（`apps/edge/src/chat/chat-frames.ts:11-13`、`apps/edge/src/registry/registry-core.ts:1-6`、`crates/rpc/src/device_room.rs:6-14`）；本设计接受"第三份服务端实现"的重写风险，换取一个没有私有运行时层、与客户端同语言、天然多线程的长期形态，并把重写风险收敛到 §12 的可枚举清单和差分测试上。当前负载（月约 131 万次 DO 调用，折合约 0.5 次/秒）余量两个数量级以上，"用满 100 核"不是选型依据；选 Postgres 的理由是**可用性路径**（流复制热备 + PITR）与单一备份口径，不是吞吐。
 
 ---
 
@@ -76,8 +76,8 @@
 
 1. **主机名门控 WorkOS**：`apps/cypher/src/main.rs:83` `DEFAULT_EDGE_URL`、`:100` `PRODUCTION_EDGE_URL`、`:116-117`：没有显式 `CYPHER_WORKOS_CLIENT_ID` 时，只有 edge URL 精确等于 `https://edge.letscypher.app` 才启用内置 client id；否则退化为 dev 模式。
 2. **iOS 默认 URL**：`apps/ios/Cypher/App/AppModel.swift:32`（`@AppStorage("edgeURL")` 默认值）、`:84-86`（旧主机名迁移到新主机名）、`Views/SignInView.swift:17,29`（WorkOS redirect_uri 为 `https://edge.letscypher.app/auth/ios/callback`）。
-3. **WorkOS 授权 URL 由设备自建**：`crates/engine/src/auth.rs:723`（`provider=GitHubOAuth`、PKCE S256），服务端只做持密钥的 exchange/refresh（`auth.rs:807,1000`）。access token 默认按 `exp-iat` 计算 TTL，缺省 240 秒（`auth.rs:217`），到期前 60 秒刷新（`auth.rs:481`）。**服务端必须能出站访问 `api.workos.com`**（JWKS：`apps/edge/src/auth.ts:53-57`；认证 API：`workos.ts:14`）。
-4. **WS 鉴权走查询串**：`apps/edge/src/auth.ts:36` 接受 `?token=`；桌面 `crates/engine/src/doc_host.rs:151-153`（拼 `?token=&device=`）、`crates/rpc/src/device_room.rs:168-179`、iOS `App/AppConfig.swift:175-188`。HTTP 请求用 `Authorization: Bearer`。→ 新入口的访问日志必须脱敏 `token` 参数。
+3. **WorkOS 授权 URL 由设备自建**：`crates/engine/src/auth.rs:723`（`provider=GitHubOAuth`、PKCE S256），服务端只做持密钥的 exchange/refresh（`auth.rs:807,1000`）。access token 默认按 `exp-iat` 计算 TTL，缺省 240 秒（`auth.rs:217`），到期前 60 秒刷新（`auth.rs:481`）。**服务端必须能出站访问 `api.workos.com`**（JWKS：`apps/edge/src/auth/auth.ts:53-57`；认证 API：`workos.ts:14`）。
+4. **WS 鉴权走查询串**：`apps/edge/src/auth/auth.ts:36` 接受 `?token=`；桌面 `crates/engine/src/doc_host.rs:151-153`（拼 `?token=&device=`）、`crates/rpc/src/device_room.rs:168-179`、iOS `App/AppConfig.swift:175-188`。HTTP 请求用 `Authorization: Bearer`。→ 新入口的访问日志必须脱敏 `token` 参数。
 5. **TLS 信任根**：Rust 侧 `Cargo.toml:80`（`tokio-tungstenite` `rustls-tls-webpki-roots`）、`:110`（`reqwest` `rustls-tls`）—— 只信 webpki 根集，Let's Encrypt（ISRG Root X1）在内；iOS 用系统信任。
 6. **发布/更新/运行时下载**：`crates/update/src/lib.rs:195-215`（`/releases/{channel}/manifest.json`、`manifest.json`）、`crates/engine/src/pi_runtime.rs:550-551`（`/releases/runtimes/pi`）、`apps/edge/src/install.sh:15`（`CYPHER_BASE_URL` 默认同主机名）、`scripts/ci/release.py:692`（`--base-url` 默认值）。
 7. **遗留路由已删除**：桌面自 `3830a0f` 起不再 `POST {edge}/diff/{chatId}`；Edge 已删除 `/session/*`、`/workspace/*` 及顶层 `/tail`、`/stats`、`/diff`、`/snapshot`、`/append` 路由（SessionRoom 类仍作为 410 存根绑定）。`crates`、`apps/ios` 中无调用点。
@@ -675,9 +675,9 @@ DO 存储没有官方 dump API。做法：
 
 | 契约 | TS | Rust | Swift | 形态 |
 |---|---|---|---|---|
-| chat2 帧封装 `[type u8][len u32 LE][header][payload]`、拒绝畸形/超长 header | `apps/edge/src/chat-frames.test.ts`（5 例） | `crates/sync/src/chat_frames.rs:151-209`（3 例） | `apps/ios/CypherTests/ChatFramesTests.swift`（4 例，头注释声明三端镜像） | 镜像 |
-| 注册表合并核心（HLC 序、字段 LWW、tombstone/revive、guard tombstone、re-seed 保留时钟、任意到达序收敛、`validateOp`、`maxClock`） | `apps/edge/src/registry-core.test.ts`（13 例） | `crates/doc/src/registry/tests.rs`（31 例，`:1-2` 声明镜像） | `apps/ios/CypherTests/RegistryCoreTests.swift`（16 例，`:1-4` 声明三端向量） | 镜像 |
-| 设备帧 `uleb128(len) ‖ JSON ‖ payload`、relay 错误载荷 | `apps/edge/src/device-frame.test.ts`（2 例） | `crates/rpc/src/device_room.rs:973-1088`（7 例，含 `byte_parity_with_ts_encoder`） | **无独立测试文件**（`DeviceRelayClient.swift:5-10` 只有注释） | 镜像（Swift 缺） |
+| chat2 帧封装 `[type u8][len u32 LE][header][payload]`、拒绝畸形/超长 header | `apps/edge/src/chat/chat-frames.test.ts`（5 例） | `crates/sync/src/chat_frames.rs:151-209`（3 例） | `apps/ios/CypherTests/ChatFramesTests.swift`（4 例，头注释声明三端镜像） | 镜像 |
+| 注册表合并核心（HLC 序、字段 LWW、tombstone/revive、guard tombstone、re-seed 保留时钟、任意到达序收敛、`validateOp`、`maxClock`） | `apps/edge/src/registry/registry-core.test.ts`（13 例） | `crates/doc/src/registry/tests.rs`（31 例，`:1-2` 声明镜像） | `apps/ios/CypherTests/RegistryCoreTests.swift`（16 例，`:1-4` 声明三端向量） | 镜像 |
+| 设备帧 `uleb128(len) ‖ JSON ‖ payload`、relay 错误载荷 | `apps/edge/src/device/device-frame.test.ts`（2 例） | `crates/rpc/src/device_room.rs:973-1088`（7 例，含 `byte_parity_with_ts_encoder`） | **无独立测试文件**（`DeviceRelayClient.swift:5-10` 只有注释） | 镜像（Swift 缺） |
 | 预览帧 wire + 状态机 | `crates/sync/tests/fixtures/stream-preview-v1.json`（48 例；TS codec 已删除） | `crates/sync/src/stream_preview.rs:116-117`（48）、`preview_link.rs:571-573` 读 `preview-reducer-v1.json`（13） | `CypherTests/StreamPreviewTests.swift:9`、`PreviewProjectionTests.swift:8`；CI macOS "Preview protocol" 步骤独立编译 Swift 跑同一 JSON | **共享 JSON** |
 
 Rust 服务端复用 `cypher-sync`/`cypher-doc`/`cypher-rpc` 的这些 codec/核心后，上表自动覆盖服务端；需要补的是 Swift 设备帧向量（不阻塞切换，客户端已在线上验证）。
@@ -690,8 +690,8 @@ Rust 服务端复用 `cypher-sync`/`cypher-doc`/`cypher-rpc` 的这些 codec/核
 | ChatRoom WS：hello→`state` 六字段 + frontier 载荷、`hello_first`、`ack{dup}`、错误帧带 `batchId`、配额帧、presence 仅转发他人、probe→`probeOk`、1003/1009/4410、`bad_frame`（`chat-room.ts:340-513`） | **无直接测试**（仅 e2e-smoke 与预览 workerd 测试间接覆盖） | **无** | 新写 golden（从 TS 行为推导）+ 差分 |
 | ChatRoom HTTP：owner claim/403/404 分支、checkpoint GET 200/206/416 + 头、POST checkpoint 400/409/413、rows GET 帧流与 4 MiB 截断、rows POST dup-before-quota + 429、tail/diff content-type 回放、stats JSON、reset（`chat-room.ts:95-336`） | **无** | **无** | 同上 |
 | RegistryRoom：`full` 判定三条件、rows-before-ack、`ack{batch,seq,applied}`、`bad_push`/`invalid_op` 整批拒绝、500 ops 上限、1,000,000 字符→1009、非文本→1003、坏 JSON→1002、`/rows?beat=1` presence、reset→4410、墓碑 GC 与 `gcFloor`、`seq` 仅在 `applied>0` 时递增（`registry-room.ts`） | 仅通过通知 workerd 测试间接触达 | **无** | 新写 golden + 差分 |
-| DeviceRoom：`from` 打戳/`to` 剥离、`host_offline|client_gone|client_closed|host_closed`、`host_closed` 仅在无存活 host 时、4409、1002、nudge 队列（去重/256 丢最旧/升序回放/回放后清空）、status、sidecar（`device-room.ts:143-306`） | `pickLiveHost` 纯函数 9 例（`device-host-liveness.test.ts`）；其余**无** | **无** | `pickLiveHost` 镜像为 Rust 单元；其余新写 golden + 差分 |
-| Notifications 状态机：`event` 路径（5 分钟时钟窗、`eventState` 去重、`run:` 标记、short-run 30 秒、`enqueued` 去重、iOS 前台即读）、`observe` 路径（host 归属、`childrenSettled`）、`flush`（每次 alarm 2 条、`defer` 15 秒、目标平台选择、每次 await 后重读、5 次重试 5·2ⁿ 秒封顶 120 秒）、徽标 job（`notifications.ts`、`notifications-model.ts`） | `apps/edge/test/workerd/notifications*.workerd.test.ts`（16 例，真实 SQLite）+ `notifications-model.test.ts`（5）+ `notification-routes.test.ts`（2） | **无**（iOS 的 `NotificationTests` 测客户端） | **逐例移植为 Rust golden**，且 Rust 侧注入时钟以复现时间分支；差分只覆盖非时间路径 |
+| DeviceRoom：`from` 打戳/`to` 剥离、`host_offline|client_gone|client_closed|host_closed`、`host_closed` 仅在无存活 host 时、4409、1002、nudge 队列（去重/256 丢最旧/升序回放/回放后清空）、status、sidecar（`device-room.ts:143-306`） | `pickLiveHost` 纯函数 9 例（`device/device-room.test.ts`）；其余**无** | **无** | `pickLiveHost` 镜像为 Rust 单元；其余新写 golden + 差分 |
+| Notifications 状态机：`event` 路径（5 分钟时钟窗、`eventState` 去重、`run:` 标记、short-run 30 秒、`enqueued` 去重、iOS 前台即读）、`observe` 路径（host 归属、`childrenSettled`）、`flush`（每次 alarm 2 条、`defer` 15 秒、目标平台选择、每次 await 后重读、5 次重试 5·2ⁿ 秒封顶 120 秒）、徽标 job（`notifications.ts`、`notifications-model.ts`） | `apps/edge/test/workerd/notifications*.workerd.test.ts`（16 例，真实 SQLite）+ `notifications-model.test.ts`（5）+ `index.test.ts`（2，另有路由黄金表） | **无**（iOS 的 `NotificationTests` 测客户端） | **逐例移植为 Rust golden**，且 Rust 侧注入时钟以复现时间分支；差分只覆盖非时间路径 |
 | PushDevice：注册 epoch/`retired` 水位、lease、`stale` 409、`permanent`、`delivery:` 状态与 20 秒 `sending` 窗、512 条/24 小时 GC、徽标归一化（`push-device.ts`） | 含于通知 workerd 测试（"global APNs token ownership" 2 例 + badges） | **无** | 同上 |
 | APNs 请求形状（头、collapse id、payload）、三态返回、白名单诊断（`apns.ts`） | `apns.test.ts`（7 例） | **无** | 移植为 Rust 单元（mock HTTP） |
 | auth-routes / WorkOS：错误信封 `{error, code, retryable}`、`invalid_grant` 唯一吊销码、邮箱验证续流、callback 页面（`auth-routes.ts`、`workos.ts`） | `auth-routes.test.ts`（39 例） | **无** | 移植为 Rust 单元（录制的 WorkOS 响应作 fixture） |

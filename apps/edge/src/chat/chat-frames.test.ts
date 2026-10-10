@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, FRAME, MAX_HEADER_BYTES } from "./chat-frames";
-import { bytesOf } from "./testing/bytes";
+import { bytesOf } from "../../test/support/bytes";
 
 /** The chat2 wire codec is a cross-language contract (Rust + Swift clients
  * re-implement it); these vectors pin the layout, not just round-tripping. */

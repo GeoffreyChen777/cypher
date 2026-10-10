@@ -19,7 +19,7 @@
  * device session.
  */
 import { bearerFromRequest, verifyToken } from "./auth";
-import { json, type Env } from "./env";
+import { json, type Env } from "../env";
 import {
   WorkOsAuthError,
   WorkOsEmailVerificationRequired,

@@ -15,7 +15,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; the daily alarm does the nightly R2 backup only.
  */
-import { createBlobStore, type BlobStore } from "./blobs";
+import { createBlobStore, type BlobStore } from "../blobs";
 import {
   appendRow,
   CHECKPOINT_BLOB,
@@ -31,7 +31,7 @@ import {
   setMeta
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
-import { AUTH_USER_HEADER, json, type Env } from "./env";
+import { AUTH_USER_HEADER, json, type Env } from "../env";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */

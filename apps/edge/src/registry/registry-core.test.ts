@@ -197,20 +197,19 @@ describe("applyOp", () => {
         outcomes.push(row as Row);
         return;
       }
-      for (let i = 0; i < rest.length; i++) {
-        permute([...rest.slice(0, i), ...rest.slice(i + 1)], [...acc, rest[i]]);
-      }
+      rest.forEach((op, i) => permute([...rest.slice(0, i), ...rest.slice(i + 1)], [...acc, op]));
     };
     permute(races, []);
     expect(outcomes).toHaveLength(6);
+    const [first] = outcomes;
     for (const outcome of outcomes) {
-      expect(outcome.fields).toEqual(outcomes[0].fields);
-      expect(outcome.clocks).toEqual(outcomes[0].clocks);
+      expect(outcome.fields).toEqual(first?.fields);
+      expect(outcome.clocks).toEqual(first?.clocks);
       expect(outcome.deleted).toBe(false);
     }
-    expect(outcomes[0].fields.title).toBe("renamed");
-    expect(outcomes[0].fields.archived).toBe(true);
-    expect(outcomes[0].fields.cwd).toBe("/tmp");
+    expect(first?.fields.title).toBe("renamed");
+    expect(first?.fields.archived).toBe(true);
+    expect(first?.fields.cwd).toBe("/tmp");
   });
 
   it("drops an update that outruns its row's create (never invent rows)", () => {

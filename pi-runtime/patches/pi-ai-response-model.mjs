@@ -17,7 +17,7 @@
 // Lifetime
 // --------
 // Until pi-ai records it itself. Pinned to the bundled version: a version bump
-// must re-check the anchors (and the behaviour — response-model.test.mjs feeds
+// must re-check the anchors (and the behaviour — response-model.staged.test.mjs feeds
 // the patched stream).
 //
 // Failure policy: hard. A missing anchor means pi-ai changed shape; shipping

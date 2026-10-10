@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleAuthRoute } from "./auth-routes";
-import type { Env } from "./env";
+import type { Env } from "../env";
 
 /** The iOS callback touches no bindings; any env shape works. */
 const env = {} as unknown as Env;
@@ -116,8 +116,8 @@ describe("POST /auth/exchange", () => {
       // The single WorkOS call carries the PKCE verifier (snake_case) plus
       // the client credentials the edge alone holds.
       expect(calls).toHaveLength(1);
-      expect(calls[0].url).toBe("https://api.workos.com/user_management/authenticate");
-      const sent = calls[0].body as Record<string, unknown>;
+      expect(calls[0]?.url).toBe("https://api.workos.com/user_management/authenticate");
+      const sent = calls[0]?.body as Record<string, unknown>;
       expect(sent.code).toBe("some-code");
       expect(sent.code_verifier).toBe(VALID_VERIFIER);
       expect(sent.grant_type).toBe("authorization_code");

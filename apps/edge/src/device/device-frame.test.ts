@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeDeviceFrame, encodeDeviceFrame } from "./device-room";
+import { decodeDeviceFrame, encodeDeviceFrame } from "./device-frame";
 
 describe("device frame codec", () => {
   it("round-trips header + payload", () => {

@@ -1,5 +1,5 @@
-import type { Env } from "./env";
-import type { Row } from "./registry-core";
+import type { Env } from "../env";
+import type { Row } from "../registry/registry-core";
 import { notificationsAvailable } from "./apns";
 import type { BadgeSnapshot } from "./apns";
 import {
@@ -89,7 +89,7 @@ export class Notifications {
   private scope(): string { return this.ctx.id.toString(); }
   private badge(): BadgeSnapshot {
     return {
-      badgeCount: Number([...this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM notify_unread")][0].count),
+      badgeCount: Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM notify_unread").one().count),
       badgeRevision: this.get<number>("badgeRevision") ?? 0
     };
   }
@@ -284,7 +284,9 @@ export class Notifications {
           this.schedule();
           return json({ ok: true, read: true });
         }
-        if (this.events().length >= 256) this.remove(this.events()[0].notice.id);
+        const queued = this.events();
+        const oldest = queued[0];
+        if (queued.length >= 256 && oldest) this.remove(oldest.notice.id);
         this.put(notice, Date.now() + NOTICE_DELAY_MS);
         this.markUnread(notice);
         this.schedule();

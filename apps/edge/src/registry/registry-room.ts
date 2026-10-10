@@ -1,7 +1,7 @@
 /**
  * RegistryRoom — one Durable Object per per-user workspace registry
  * (`reg1/{orgId}/{userId}`), the wedge-proof replacement for the Loro
- * workspace doc (docs/registry-sync.md).
+ * workspace doc (docs/design/registry-sync.md).
  *
  * The DO is the authority: it stores CURRENT row state in its SQLite (no
  * update log, no replay, no wasm), applies pushed ops with per-field LWW
@@ -20,8 +20,8 @@
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { AUTH_USER_HEADER, type Env } from "./env";
-import { Notifications } from "./notifications";
+import { AUTH_USER_HEADER, type Env } from "../env";
+import { Notifications } from "../notifications/notifications";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -399,7 +399,7 @@ export class RegistryRoom implements DurableObject {
     const originals = new Map<string, Row | undefined>();
     let applied = 0;
     for (const op of ops) {
-      const key = `${op.kind} ${op.id}`;
+      const key = `${op.kind}\u0000${op.id}`;
       const before = touched.get(key) ?? this.loadRow(op.kind, op.id);
       if (!originals.has(key)) originals.set(key, before);
       const { row, changed } = applyOp(before, op);

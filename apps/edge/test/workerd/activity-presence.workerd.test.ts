@@ -14,7 +14,7 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vitest";
-import { RegistryRoom } from "../../src/registry-room";
+import { RegistryRoom } from "../../src/registry/registry-room";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
 import { APNS_TEST_ENV, peer } from "./support";
 

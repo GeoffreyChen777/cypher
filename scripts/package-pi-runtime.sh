@@ -190,10 +190,10 @@ PI_PACKAGE_DIR="$STAGE/pi" \
 "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs"
 # Loads the real squad and bridge in both orders: what reaches Claude Code.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
-  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.test.mjs"
+  "$STAGE/bin/node" --test "$SPEC/patches/pi-agent-squad-prompt-options.staged.test.mjs"
 # Feeds the patched Responses stream; loads the patched bridge.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
-  "$STAGE/bin/node" --test "$SPEC/patches/response-model.test.mjs"
+  "$STAGE/bin/node" --test "$SPEC/patches/response-model.staged.test.mjs"
 # Language gating decides whether a message costs a translation request at all,
 # so it is covered here rather than only through a live session.
 "$STAGE/bin/node" --test "$SPEC/extensions/cypher-translation.test.mjs"
@@ -202,7 +202,7 @@ CYPHER_PI_RUNTIME_STAGE="$STAGE" \
 # Settings → MCP signs in through Pi's built-in `/mcp login`: the RPC dialog
 # shapes and the credential key the engine reads, against a local OAuth fixture.
 CYPHER_PI_RUNTIME_STAGE="$STAGE" \
-  "$STAGE/bin/node" --test "$SPEC/mcp-login.test.mjs"
+  "$STAGE/bin/node" --test "$SPEC/mcp-login.staged.test.mjs"
 
 # The archive has one root directory; the installer validates every listed
 # path, then extracts with --strip-components=1.

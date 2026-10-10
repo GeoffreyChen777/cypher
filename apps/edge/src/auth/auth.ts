@@ -9,9 +9,9 @@
  * membership = claim equals the room's orgId.
  */
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import type { Env } from "./env";
+import type { Env } from "../env";
 
-interface Verified {
+export interface Verified {
   readonly userId: string;
   readonly sessionId?: string;
   /** WorkOS `org_id` claim — the org the caller's session is scoped to. */

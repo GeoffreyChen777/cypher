@@ -1,8 +1,9 @@
 // Cross-language convergence: JS Loro peer seeds a chat2 room (rows +
 // checkpoint), the REAL Rust ChatClient joins (checkpoint-then-rows leg),
 // pushes a live edit, and JS verifies byte-level convergence both ways.
-// Run from edge/ so loro-crdt resolves. Usage: node crosscheck.mjs <baseUrl>
+// Run from apps/edge/ so loro-crdt resolves. Usage: node crosscheck.mjs <baseUrl>
 import { LoroDoc } from "loro-crdt";
+import { decodeFrame, encodeFrame, FRAME } from "../src/chat/chat-frames.ts";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -15,27 +16,16 @@ const wsBase = base.replace(/^http/, "ws");
 const user = "e2e-cross-user";
 const chat = `cross-${randomUUID().slice(0, 12)}`;
 
-const FRAME = { hello: 0x01, rowsReq: 0x03, row: 0x04, rowsDone: 0x05, push: 0x06, ack: 0x07 };
-const enc = (type, header, payload = new Uint8Array(0)) => {
-  const h = new TextEncoder().encode(JSON.stringify(header));
-  const out = new Uint8Array(5 + h.length + payload.length);
-  out[0] = type;
-  new DataView(out.buffer).setUint32(1, h.length, true);
-  out.set(h, 5); out.set(payload, 5 + h.length);
-  return out;
-};
-const dec = (data) => {
-  const b = new Uint8Array(data);
-  const len = new DataView(b.buffer, b.byteOffset).getUint32(1, true);
-  return { type: b[0], header: JSON.parse(new TextDecoder().decode(b.subarray(5, 5 + len))), payload: b.subarray(5 + len) };
-};
 const http = (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${user}`, ...(init.headers ?? {}) } });
 
 const connect = async (device) => {
   const ws = new WebSocket(`${wsBase}/chat2/${chat}/ws?device=${device}&token=${user}`);
   ws.binaryType = "arraybuffer";
   const inbox = [];
-  ws.onmessage = (ev) => inbox.push(dec(ev.data));
+  ws.onmessage = (ev) => {
+    const frame = decodeFrame(new Uint8Array(ev.data));
+    if (frame) inbox.push(frame);
+  };
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   const wait = async (type, timeout = 8000) => {
     const start = Date.now();
@@ -46,7 +36,7 @@ const connect = async (device) => {
       await new Promise((r) => setTimeout(r, 80));
     }
   };
-  return { ws, inbox, wait, send: (t, h, p) => ws.send(enc(t, h, p)) };
+  return { ws, inbox, wait, send: (t, h, p) => ws.send(encodeFrame(t, h, p)) };
 };
 
 let pass = 0, fail = 0;

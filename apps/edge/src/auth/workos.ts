@@ -8,7 +8,7 @@
  * Without WORKOS_API_KEY configured the routes answer 501; in dev mode
  * backends use their userId as the bearer and never call these.
  */
-import type { Env } from "./env";
+import type { Env } from "../env";
 
 const API = "https://api.workos.com";
 

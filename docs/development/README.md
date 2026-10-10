@@ -20,7 +20,7 @@ product works; this guide is about working on it.
 | `crates/engine` | `cypher-engine`: the engine — sessions, doc host, repos, terminals, auth, RPC service |
 | `crates/ui` | `cypher-ui`: the gpui desktop app |
 | `apps/cypher` | the `cypher` binary: headed app, `headless` engine and the CLI |
-| `apps/edge` | the Cloudflare Worker and Durable Objects (TypeScript) |
+| `apps/edge` | the Cloudflare Worker and Durable Objects (TypeScript; [README](../../apps/edge/README.md)) |
 | `apps/ios` | the SwiftUI iPhone client ([apps/ios/README.md](../../apps/ios/README.md)) |
 | `apps/landing`, `apps/www-redirect` | the landing page and the www redirect Workers |
 | `pi-runtime/` | the curated Pi runtime bundle: extensions, patches, release metadata ([README](../../pi-runtime/README.md)) |
@@ -83,10 +83,14 @@ Tests per platform:
   need a feature: `cypher-sync --features mock-server` (registry transport),
   `cypher-engine --features development` and `cypher --features development`.
   `cargo test --workspace` runs every default-feature suite on a Mac.
-- **Edge**: `npm --prefix apps/edge test` runs the vitest unit tests (`src/*.test.ts`)
-  and the workerd tests (`test/workerd/`) against real Durable Object SQLite.
-- **Pi runtime**: `node --test` beside each module; the staged-runtime suites run
-  inside `scripts/package-pi-runtime.sh`.
+- **Edge**: `npm --prefix apps/edge test` runs the vitest unit tests beside each
+  module (`src/**/*.test.ts`, including the golden route table in
+  `src/index.test.ts`) and the workerd tests (`test/workerd/`) against real
+  Durable Object SQLite; see [apps/edge/README.md](../../apps/edge/README.md).
+- **Pi runtime**: `npm --prefix pi-runtime test` runs the `*.test.mjs` suites
+  beside each module; the `*.staged.test.mjs` suites need a staged runtime and run
+  inside `scripts/package-pi-runtime.sh` (see
+  [pi-runtime/README.md](../../pi-runtime/README.md#tests)).
 - **iOS**: `bash scripts/check.sh ios`, or Xcode; see
   [apps/ios/README.md](../../apps/ios/README.md).
 - **Cross-language vectors**: the registry merge vectors (Rust, TS, Swift) and the
@@ -158,7 +162,13 @@ local suppression.
 
 - Kebab-case file names, ESM, 2-space indent, double quotes, semicolons,
   `import type` for types.
-- Unit tests beside the module (`*.test.ts`); workerd tests in `test/workerd/`.
+- Unit tests beside the module and named after it (`*.test.ts`; `*.test.mjs`
+  in `pi-runtime`); workerd tests in `test/workerd/`, shared test helpers in
+  `test/support/`.
+- No raw control characters in source; comments describe current behaviour.
+- The edge layout, handler chain and its extra rules (one Durable Object class
+  per file, `Response | undefined` handlers, one identifier module, strict
+  indexing) are in [apps/edge/README.md](../../apps/edge/README.md).
 
 ### Other files
 

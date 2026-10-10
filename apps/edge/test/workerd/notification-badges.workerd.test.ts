@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { Notifications } from "../../src/notifications";
-import { PushDevice } from "../../src/push-device";
-import { defaultNotificationSettings } from "../../src/notifications-model";
-import type { BadgeSnapshot, PushMessage } from "../../src/apns";
+import { Notifications } from "../../src/notifications/notifications";
+import { PushDevice } from "../../src/notifications/push-device";
+import { defaultNotificationSettings } from "../../src/notifications/notifications-model";
+import type { BadgeSnapshot, PushMessage } from "../../src/notifications/apns";
 import type { Env } from "../../src/env";
-import type { Row } from "../../src/registry-core";
+import type { Row } from "../../src/registry/registry-core";
 import { pushEnv, row } from "./support";
 
 function fixture(state: DurableObjectState) {
@@ -151,7 +151,7 @@ describe("durable unread-conversation badges", () => {
         const chat = f.rows.get("chats/one")!;
         chat.fields = { ...chat.fields, lastSeenAt: start + 5_000 };
         // A legacy row without eventAt falls back to the latest message.
-        const legacy = [...state.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id='two'")][0];
+        const legacy = state.storage.sql.exec("SELECT value FROM notify_unread WHERE chat_id='two'").one();
         const { eventAt: _, ...old } = JSON.parse(legacy.value as string);
         state.storage.sql.exec("UPDATE notify_unread SET value=? WHERE chat_id='two'", JSON.stringify(old));
         const two = f.rows.get("chats/two")!;
@@ -250,7 +250,7 @@ describe("durable unread-conversation badges", () => {
       await f.enqueue("one");
       f.config.NOTIFICATIONS_ENABLED = "false";
       await f.flush();
-      expect([...state.storage.sql.exec("SELECT value FROM notify_kv WHERE key='badgeJob'")][0].value).toBe("null");
+      expect(state.storage.sql.exec("SELECT value FROM notify_kv WHERE key='badgeJob'").one().value).toBe("null");
       expect(f.calls).toHaveLength(0);
     });
   });

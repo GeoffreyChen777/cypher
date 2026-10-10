@@ -3,6 +3,10 @@
   "private": true,
   "version": "1.0.0",
   "description": "Pinned Pi and extension set for Cypher's isolated runtime",
+  "scripts": {
+    "test": "node --test provider-service.test.mjs patches/pi-agent-squad-cypher-host/cypher-host.test.mjs extensions/cypher-translation.test.mjs extensions/cypher-fast-mode.test.mjs extensions/cypher-codemode.test.mjs",
+    "test:staged": "node --test patches/pi-agent-squad-prompt-options.staged.test.mjs patches/response-model.staged.test.mjs mcp-login.staged.test.mjs"
+  },
   "dependencies": {
     "@earendil-works/pi-ai": "1.0.1",
     "@earendil-works/pi-coding-agent": "1.0.1",

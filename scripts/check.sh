@@ -91,12 +91,9 @@ stage_scripts() {
 }
 
 stage_runtime() {
-  run "$NODE" --test pi-runtime/provider-service.test.mjs
-  run "$NODE" --test pi-runtime/patches/pi-agent-squad-cypher-host/cypher-host.test.mjs
-  # The extension suites import their .ts sources directly (Node type
-  # stripping) and need no staged runtime.
-  run "$NODE" --test pi-runtime/extensions/cypher-translation.test.mjs \
-    pi-runtime/extensions/cypher-fast-mode.test.mjs pi-runtime/extensions/cypher-codemode.test.mjs
+  # node --test only: the pure suites import their sources directly (Node
+  # type stripping) and need neither an install nor a staged runtime.
+  run npm --prefix pi-runtime test
 }
 
 stage_workflows() {

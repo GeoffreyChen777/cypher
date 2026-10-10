@@ -1,3 +1,5 @@
+import { ID_RE } from "../identifiers";
+
 /** Notification data intentionally excludes prompts, titles and model output. */
 export const NOTICE_DELAY_MS = 10_000;
 export const ACTIVITY_LEASE_MS = 45_000;
@@ -6,7 +8,6 @@ export const ACTIVITY_LEASE_MS = 45_000;
 export const SEEN_SLACK_MS = 2_000;
 const INTERACTION_MS = 120_000;
 export const SHORT_RUN_MS = 30_000;
-export const ID = /^[A-Za-z0-9_-]{1,128}$/;
 export type NoticeKind = "completed" | "failed" | "input";
 export interface NotificationSettings {
   mode: "smart" | "actionable" | "always" | "off";
@@ -51,7 +52,7 @@ export function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 export function identifier(value: unknown): string {
-  if (typeof value !== "string" || !ID.test(value)) throw new Error("invalid identifier");
+  if (typeof value !== "string" || !ID_RE.test(value)) throw new Error("invalid identifier");
   return value;
 }
 export function parseSettings(value: unknown): NotificationSettings {

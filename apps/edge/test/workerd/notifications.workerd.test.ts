@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { Notifications } from "../../src/notifications";
-import { PushDevice } from "../../src/push-device";
-import { defaultNotificationSettings } from "../../src/notifications-model";
-import type { Row } from "../../src/registry-core";
+import { Notifications } from "../../src/notifications/notifications";
+import { PushDevice } from "../../src/notifications/push-device";
+import { defaultNotificationSettings } from "../../src/notifications/notifications-model";
+import type { Row } from "../../src/registry/registry-core";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
-import { RegistryRoom } from "../../src/registry-room";
+import { RegistryRoom } from "../../src/registry/registry-room";
 import { APNS_TEST_ENV, recordingPushEnv, row, seedRecipient } from "./support";
 
 
@@ -60,7 +60,7 @@ describe("notification outbox on real Durable Object SQLite", () => {
         clock.mockReturnValue(finishedAt + 11_000);
         await service.flush();
         expect(sent).toHaveLength(1);
-        expect(sent[0].message.kind).toBe(status === "done" ? "completed" : "failed");
+        expect(sent[0]?.message.kind).toBe(status === "done" ? "completed" : "failed");
       } finally { clock.mockRestore(); }
     });
   });

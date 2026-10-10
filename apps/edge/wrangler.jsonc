@@ -24,7 +24,7 @@
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
   "durable_objects": {
     "bindings": [
-      // Retired: src/session-room.ts is a 410 stub kept bound so the stored
+      // Retired: src/legacy/session-room.ts is a 410 stub kept bound so the stored
       // legacy rooms are not deleted. Removing it needs a deleted_classes
       // migration.
       { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },

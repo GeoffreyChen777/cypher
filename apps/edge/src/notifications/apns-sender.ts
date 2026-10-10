@@ -1,10 +1,10 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { Env } from "./env";
+import type { Env } from "../env";
 import { sendAPNs, type PushMessage } from "./apns";
 
 /** Internal RPC entrypoint in this same Worker. No public HTTP send route. */
 export class APNsSender extends WorkerEntrypoint<Env> {
-  async fetch(request: Request): Promise<Response> {
+  override async fetch(request: Request): Promise<Response> {
     if (new URL(request.url).pathname !== "/send" || request.method !== "POST") {
       return new Response("not found", { status: 404 });
     }
