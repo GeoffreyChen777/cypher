@@ -9,7 +9,7 @@
  * membership = claim equals the room's orgId.
  */
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import type { Env } from "./env";
+import type { Env } from "../env";
 
 export interface Verified {
   readonly userId: string;

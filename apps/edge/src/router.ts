@@ -3,7 +3,7 @@
  * answers `Response | undefined`; `undefined` passes the request on to the
  * next handler.
  */
-import type { Verified } from "./auth";
+import type { Verified } from "./auth/auth";
 import { AUTH_USER_HEADER, json, type Env } from "./env";
 import { ID_RE } from "./identifiers";
 

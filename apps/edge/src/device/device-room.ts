@@ -14,9 +14,9 @@
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
  */
-import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
+import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "../blobs";
 import { decodeDeviceFrame, encodeDeviceFrame, type DeviceFrameHeader } from "./device-frame";
-import { AUTH_USER_HEADER, json, type Env } from "./env";
+import { AUTH_USER_HEADER, json, type Env } from "../env";
 
 interface SocketState {
   userId: string;
@@ -48,7 +48,7 @@ const clientTag = (connId: string) => `client:${connId}`;
 const HOST_LIVENESS_MS = 75_000;
 
 /** Control frames the relay itself emits (kind " relay"). */
-// MUST byte-match packages/rpc device-frames.ts RELAY_KIND — clients compare
+// MUST byte-match RELAY_KIND in crates/rpc/src/device_room.rs — clients compare
 // with ===; a mismatch makes host_offline/host_closed invisible to them.
 const RELAY_KIND = " relay";
 

@@ -5,7 +5,7 @@
  * send a notification.
  */
 import { json } from "./env";
-import { object, readNotificationJSON } from "./notifications-model";
+import { object, readNotificationJSON } from "./notifications/notifications-model";
 import type { RouteContext } from "./router";
 
 export const handleRevokeRoute = async ({ request, env, url }: RouteContext): Promise<Response | undefined> => {

@@ -1,5 +1,5 @@
 import { importPKCS8, SignJWT } from "jose";
-import type { Env } from "./env";
+import type { Env } from "../env";
 import { noticeText, type NoticeKind } from "./notifications-model";
 
 export const APNS_TOPIC = "ai.mvp-lab.cypher.ios";

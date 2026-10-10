@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("./apns-sender", () => ({ APNsSender: class {} }));
+vi.mock("./notifications/apns-sender", () => ({ APNsSender: class {} }));
 vi.mock("./install.sh", () => ({ default: "" }));
 import worker from "./index";
 import type { Env } from "./env";

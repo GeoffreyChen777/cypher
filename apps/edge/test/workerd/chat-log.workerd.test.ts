@@ -12,7 +12,7 @@ import {
   MAX_ROW_BYTES,
   rowsAfter,
   seqFloor
-} from "../../src/chat-log";
+} from "../../src/chat/chat-log";
 import { bytesOf, sameBytes } from "../support/bytes";
 
 /** chat2 log model (docs/design/chat2-sync.md B) against real DO SQLite — the same

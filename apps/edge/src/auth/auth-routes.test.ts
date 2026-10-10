@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleAuthRoute } from "./auth-routes";
-import type { Env } from "./env";
+import type { Env } from "../env";
 
 /** The iOS callback touches no bindings; any env shape works. */
 const env = {} as unknown as Env;

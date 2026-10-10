@@ -1,8 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { ChatRoom } from "../../src/chat-room";
+import { ChatRoom } from "../../src/chat/chat-room";
 import type { Env } from "../../src/env";
-import { decodeFrame, encodeFrame, type FrameType } from "../../src/chat-frames";
+import { decodeFrame, encodeFrame, type FrameType } from "../../src/chat/chat-frames";
 
 const binary = (bytes: Uint8Array) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 

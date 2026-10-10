@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exportPKCS8, generateKeyPair } from "jose";
 import { APNS_TOPIC, notificationsAvailable, sendAPNs, type PushMessage } from "./apns";
-import type { Env } from "./env";
+import type { Env } from "../env";
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 async function configured(): Promise<Env> {
   const key = await generateKeyPair("ES256", { extractable: true });

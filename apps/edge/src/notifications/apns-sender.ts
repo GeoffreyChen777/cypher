@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { Env } from "./env";
+import type { Env } from "../env";
 import { sendAPNs, type PushMessage } from "./apns";
 
 /** Internal RPC entrypoint in this same Worker. No public HTTP send route. */

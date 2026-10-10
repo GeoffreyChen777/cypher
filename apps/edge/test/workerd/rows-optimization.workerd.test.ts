@@ -9,9 +9,9 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, it, vi } from "vitest";
-import { ChatRoom } from "../../src/chat-room";
-import { RegistryRoom } from "../../src/registry-room";
-import { encodeFrame, FRAME } from "../../src/chat-frames";
+import { ChatRoom } from "../../src/chat/chat-room";
+import { RegistryRoom } from "../../src/registry/registry-room";
+import { encodeFrame, FRAME } from "../../src/chat/chat-frames";
 import { AUTH_USER_HEADER, type Env } from "../../src/env";
 import { peer } from "./support";
 

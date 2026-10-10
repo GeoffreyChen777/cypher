@@ -1,5 +1,5 @@
-import type { Env } from "./env";
-import type { Row } from "./registry-core";
+import type { Env } from "../env";
+import type { Row } from "../registry/registry-core";
 import { notificationsAvailable } from "./apns";
 import type { BadgeSnapshot } from "./apns";
 import {

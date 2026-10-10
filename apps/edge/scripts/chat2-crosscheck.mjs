@@ -3,7 +3,7 @@
 // pushes a live edit, and JS verifies byte-level convergence both ways.
 // Run from apps/edge/ so loro-crdt resolves. Usage: node crosscheck.mjs <baseUrl>
 import { LoroDoc } from "loro-crdt";
-import { decodeFrame, encodeFrame, FRAME } from "../src/chat-frames.ts";
+import { decodeFrame, encodeFrame, FRAME } from "../src/chat/chat-frames.ts";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";

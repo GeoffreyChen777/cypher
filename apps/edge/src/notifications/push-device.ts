@@ -1,7 +1,7 @@
 /** Global token ownership: stale per-user rooms cannot deliver after logout
  * or account switching. Registration/send are internal; public revocation
  * requires the exact opaque lease capability. */
-import type { Env } from "./env";
+import type { Env } from "../env";
 import { type PushMessage, validBadge, type BadgeSnapshot } from "./apns";
 import { notificationJSON as json, object, identifier, readNotificationJSON } from "./notifications-model";
 

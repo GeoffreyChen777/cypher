@@ -39,7 +39,7 @@ const until = async (fn, what, ms = 8000) => {
 
 // ── device room ───────────────────────────────────────────────────────────
 {
-  const { encodeDeviceFrame, decodeDeviceFrame } = await import("../src/device-frame.ts");
+  const { encodeDeviceFrame, decodeDeviceFrame } = await import("../src/device/device-frame.ts");
   const host = new WebSocket(`${wsBase}/device/${deviceId}/ws?token=${token}&role=host`);
   host.binaryType = "arraybuffer";
   await new Promise((resolve, reject) => {

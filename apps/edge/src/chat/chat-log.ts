@@ -9,7 +9,7 @@
  * replay in the DO) cannot exist here by construction.
  */
 
-import type { BlobStore } from "./blobs";
+import type { BlobStore } from "../blobs";
 
 /** Per-row byte cap, rejected at the frame header. Post-strip updates are
  * KB-scale; a full checkpoint travels over HTTP, never as a row. Well under

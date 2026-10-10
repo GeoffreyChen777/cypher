@@ -1,5 +1,5 @@
 import type { Env } from "../../src/env";
-import type { Row } from "../../src/registry-core";
+import type { Row } from "../../src/registry/registry-core";
 
 export const row = (kind: string, id: string, fields: Row["fields"]): Row =>
   ({ kind, id, seq: 1, deleted: false, fields, clocks: {} });

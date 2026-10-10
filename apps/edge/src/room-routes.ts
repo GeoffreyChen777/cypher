@@ -9,7 +9,7 @@
  * those matched segments, and the forwarded query is empty unless the entry
  * says otherwise. The DO trusts the stamped user header (router.ts forward).
  */
-import type { Verified } from "./auth";
+import type { Verified } from "./auth/auth";
 import { json } from "./env";
 import { ID_RE, SIDECAR_NAME_RE } from "./identifiers";
 import { deviceParam, forward, requireWebSocket, type AuthedContext } from "./router";

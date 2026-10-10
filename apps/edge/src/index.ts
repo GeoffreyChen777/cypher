@@ -17,8 +17,8 @@
  * Durable Object classes and the APNs entrypoint are exported here only;
  * wrangler.jsonc binds them by these names.
  */
-import { authenticate } from "./auth";
-import { handleAuthRoute } from "./auth-routes";
+import { authenticate } from "./auth/auth";
+import { handleAuthRoute } from "./auth/auth-routes";
 import { handleBlobRoute } from "./blob-route";
 import { json, type Env } from "./env";
 import { handleRetiredAttachments } from "./legacy/attachments-route";
@@ -27,12 +27,12 @@ import { handleRevokeRoute } from "./revoke-route";
 import { handleRoomRoute } from "./room-routes";
 import { routeContext } from "./router";
 
-export { APNsSender } from "./apns-sender";
-export { ChatRoom } from "./chat-room";
-export { DeviceRoom } from "./device-room";
-export { PushDevice } from "./push-device";
-export { RegistryRoom } from "./registry-room";
-export { SessionRoom } from "./session-room";
+export { APNsSender } from "./notifications/apns-sender";
+export { ChatRoom } from "./chat/chat-room";
+export { DeviceRoom } from "./device/device-room";
+export { PushDevice } from "./notifications/push-device";
+export { RegistryRoom } from "./registry/registry-room";
+export { SessionRoom } from "./legacy/session-room";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

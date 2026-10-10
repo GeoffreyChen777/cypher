@@ -20,8 +20,8 @@
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
-import { AUTH_USER_HEADER, type Env } from "./env";
-import { Notifications } from "./notifications";
+import { AUTH_USER_HEADER, type Env } from "../env";
+import { Notifications } from "../notifications/notifications";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge

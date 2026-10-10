@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { Notifications } from "../../src/notifications";
-import { PushDevice } from "../../src/push-device";
-import { defaultNotificationSettings } from "../../src/notifications-model";
-import type { BadgeSnapshot, PushMessage } from "../../src/apns";
+import { Notifications } from "../../src/notifications/notifications";
+import { PushDevice } from "../../src/notifications/push-device";
+import { defaultNotificationSettings } from "../../src/notifications/notifications-model";
+import type { BadgeSnapshot, PushMessage } from "../../src/notifications/apns";
 import type { Env } from "../../src/env";
-import type { Row } from "../../src/registry-core";
+import type { Row } from "../../src/registry/registry-core";
 import { pushEnv, row } from "./support";
 
 function fixture(state: DurableObjectState) {

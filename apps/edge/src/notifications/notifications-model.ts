@@ -1,4 +1,4 @@
-import { ID_RE } from "./identifiers";
+import { ID_RE } from "../identifiers";
 
 /** Notification data intentionally excludes prompts, titles and model output. */
 export const NOTICE_DELAY_MS = 10_000;
