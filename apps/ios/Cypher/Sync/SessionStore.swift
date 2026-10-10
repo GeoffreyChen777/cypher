@@ -94,6 +94,8 @@ final class SessionStore {
         return try await uploadAttachmentChunked(relay: relay, name: name, data: data)
     }
 
+    // MARK: Lifecycle
+
     /// Demo-mode injection point (also used by SwiftUI previews).
     func setEntries(_ new: [MessageEntry]) {
         durableEntries = new
