@@ -13,11 +13,12 @@ use gpui::{
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use cypher_proto::WorkspaceScope;
+use cypher_proto::{Device, WorkspaceScope};
 use cypher_rpc::methods;
 
 use crate::kit::popover;
 use crate::kit::theme::{MonoStyled, Theme};
+use crate::settings::widgets;
 use crate::state::{AppState, device_online};
 use crate::widgets::text_input::{TextInput, TextInputEvent};
 
@@ -544,7 +545,6 @@ pub fn short_id(id: &str) -> String {
 
 impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::settings::widgets;
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let (devices, local_id, workspace_scope) = {
@@ -559,7 +559,6 @@ impl Render for DevicesPage {
         let viewport = window.viewport_size();
         let dialog = self.render_rename_dialog(viewport, cx);
         let delete_dialog = self.render_delete_dialog(viewport, cx);
-        let emerald = theme.success; // emerald-400
         let count = devices.len();
         if !self.auto_checked && count > 0 && self.state.read(cx).engine().is_some() {
             self.auto_checked = true;
@@ -574,239 +573,17 @@ impl Render for DevicesPage {
             .values()
             .any(|phase| matches!(phase, DeviceUpdate::Checking));
 
+        let ctx = DeviceRowContext {
+            now,
+            local_id,
+            copied,
+            workspace_scope,
+            updates: &updates,
+        };
         let rows: Vec<AnyElement> = devices
             .into_iter()
             .enumerate()
-            .map(|(ix, device)| {
-                let online = device_online(device.last_seen_at, now);
-                let is_local = local_id.as_deref() == Some(device.id.as_str());
-                let id_copied = copied.as_deref() == Some(device.id.as_str());
-                let copy_id = device.id.clone();
-                let rename_id = device.id.clone();
-                let rename_name = device.name.clone();
-                let remove_id = device.id.clone();
-                let update_id = device.id.clone();
-                let show_remove = can_remove_device(workspace_scope, is_local);
-                let phase = updates.get(&device.id).cloned();
-                let update_action: Option<(&'static str, bool)> = match &phase {
-                    Some(DeviceUpdate::Available(_)) => Some(("Update", false)),
-                    Some(DeviceUpdate::Failed { busy: true, .. }) => Some(("Update anyway", true)),
-                    Some(DeviceUpdate::Failed { busy: false, .. }) => Some(("Retry", false)),
-                    _ => None,
-                };
-                let platform_icon = match device.platform.as_str() {
-                    "macos" | "darwin" => crate::kit::icons::LAPTOP,
-                    "web" => crate::kit::icons::GLOBAL,
-                    "ios" | "android" => crate::kit::icons::SMARTPHONE,
-                    _ => crate::kit::icons::MONITOR,
-                };
-                // Presence lives ON the identity tile: a corner dot (emerald
-                // online with a soft glow, faint offline), ringed by the card
-                // tone so it "cuts" the tile — zeron settings.devices.tsx
-                // `border-2 border-[var(--card)]` +
-                // `shadow-[0_0_6px_rgba(52,211,153,0.55)]`.
-                let tile = widgets::row_tile(&theme, platform_icon).relative().child(
-                    div()
-                        .absolute()
-                        .bottom(px(-3.0))
-                        .right(px(-3.0))
-                        .size(px(9.0))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(theme.surface)
-                        .when(online, |el| {
-                            el.bg(emerald).shadow(vec![gpui::BoxShadow {
-                                color: emerald.opacity(0.55),
-                                offset: gpui::point(px(0.0), px(0.0)),
-                                blur_radius: px(6.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }])
-                        })
-                        .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
-                );
-                // One quiet meta line: platform · version · (offline: last
-                // seen) · id chip.
-                let mut meta: Vec<AnyElement> = vec![
-                    div()
-                        .child(SharedString::from(
-                            platform_label(&device.platform).to_string(),
-                        ))
-                        .into_any_element(),
-                ];
-                if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
-                    meta.push(
-                        div()
-                            .child(SharedString::from(format!("v{version}")))
-                            .into_any_element(),
-                    );
-                }
-                // Update state rides a right-aligned pill (below), never the
-                // meta line: a long status pushed the id chip onto its own
-                // row and rows stopped lining up.
-                let status_pill = phase.as_ref().map(|phase| {
-                    let tone = match phase {
-                        DeviceUpdate::Available(_) => theme.accent,
-                        DeviceUpdate::Failed { .. } => theme.danger,
-                        DeviceUpdate::UpToDate => theme.success_muted,
-                        _ => theme.text_muted,
-                    };
-                    div()
-                        .flex_none()
-                        .max_w(px(220.0))
-                        .px(px(8.0))
-                        .py(px(2.0))
-                        .rounded_full()
-                        .bg(tone.opacity(0.10))
-                        .text_size(px(10.5))
-                        .text_color(tone)
-                        .truncate()
-                        .child(SharedString::from(update_badge(phase)))
-                });
-                if !online {
-                    meta.push(
-                        div()
-                            .child(SharedString::from(format!(
-                                "Last seen {}",
-                                format_last_seen(device.last_seen_at, now)
-                            )))
-                            .into_any_element(),
-                    );
-                }
-                // "Added {time ago}" — always present (zeron settings.devices.tsx).
-                if let Some(created) = device.created_at {
-                    meta.push(
-                        div()
-                            .child(SharedString::from(format!(
-                                "Added {}",
-                                format_last_seen(Some(created), now)
-                            )))
-                            .into_any_element(),
-                    );
-                }
-                // The id chip ends the meta line; with the update state on
-                // its own pill the line is short enough to stay one row.
-                let id_chip = div()
-                    .id(("device-id", ix))
-                    .flex_none()
-                    .mono(&theme)
-                    .text_size(px(10.5))
-                    .text_color(if id_copied {
-                        theme.success_muted.opacity(0.9)
-                    } else {
-                        theme.text_muted.opacity(0.5)
-                    })
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text_muted))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_id(copy_id.clone(), cx);
-                    }))
-                    .child(SharedString::from(if id_copied {
-                        "Copied".to_string()
-                    } else {
-                        short_id(&device.id)
-                    }));
-                meta.push(id_chip.into_any_element());
-
-                widgets::card_row(&theme, ix == 0)
-                    .child(tile)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(widgets::row_title(&theme, device.name.clone()))
-                            .child(widgets::meta_line(&theme, meta)),
-                    )
-                    .when_some(status_pill, |el, pill| el.child(pill))
-                    .when(is_local, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_muted)
-                                .child(if workspace_scope == Some(WorkspaceScope::Local) {
-                                    "Local only"
-                                } else {
-                                    "This device"
-                                }),
-                        )
-                    })
-                    .when_some(update_action, |el, (label, force)| {
-                        let retry_check = label == "Retry";
-                        let id = update_id.clone();
-                        el.child(
-                            widgets::ghost_action(&theme)
-                                .id(("device-update", ix))
-                                .text_color(theme.accent)
-                                .hover(|s| {
-                                    s.bg(theme.accent.opacity(0.10)).text_color(theme.accent)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if retry_check {
-                                        this.check_device(id.clone(), cx);
-                                    } else {
-                                        this.apply_device(id.clone(), force, cx);
-                                    }
-                                }))
-                                .child(
-                                    crate::kit::icons::icon(
-                                        crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
-                                    )
-                                    .size(px(14.0))
-                                    .text_color(theme.accent),
-                                )
-                                .child(SharedString::from(label)),
-                        )
-                    })
-                    .child(
-                        // `opacity-70 hover:opacity-100` (zeron: also rises on
-                        // row hover — gpui has no group-hover, so the button's
-                        // own hover carries the reveal).
-                        widgets::ghost_action(&theme)
-                            .id(("device-rename", ix))
-                            .opacity(0.7)
-                            .hover(|s| {
-                                s.opacity(1.0)
-                                    .bg(crate::kit::theme::ink(0.06))
-                                    .text_color(theme.text)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_rename(rename_id.clone(), rename_name.clone(), cx);
-                            }))
-                            .child(
-                                crate::kit::icons::icon(crate::kit::icons::PEN)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Rename")),
-                    )
-                    .when(show_remove, |el| {
-                        el.child(
-                            widgets::ghost_action(&theme)
-                                .id(("device-remove", ix))
-                                .opacity(0.7)
-                                .hover(|s| {
-                                    s.opacity(1.0)
-                                        .bg(theme.danger.opacity(0.08))
-                                        .text_color(theme.danger)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_delete(remove_id.clone(), cx);
-                                }))
-                                .child(
-                                    crate::kit::icons::icon(
-                                        crate::kit::icons::TRASH_BIN_MINIMALISTIC,
-                                    )
-                                    .size(px(14.0))
-                                    .text_color(theme.danger),
-                                )
-                                .child(SharedString::from("Remove")),
-                        )
-                    })
-                    .into_any_element()
-            })
+            .map(|(ix, device)| self.device_row(ix, device, &ctx, &theme, cx))
             .collect();
 
         let card = widgets::section_card(&theme);
@@ -844,54 +621,7 @@ impl Render for DevicesPage {
                     // release and restarts itself; iOS updates through
                     // TestFlight and is left out.
                     .when(count > 0, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .pb(px(12.0))
-                                .child(
-                                    widgets::ghost_action(&theme)
-                                        .id("devices-check-updates")
-                                        .when(checking, |el| el.opacity(0.6))
-                                        .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
-                                        .child(
-                                            crate::kit::icons::icon(crate::kit::icons::REFRESH)
-                                                .size(px(14.0))
-                                                .text_color(theme.text_muted),
-                                        )
-                                        .child(SharedString::from(if checking {
-                                            "Checking…"
-                                        } else {
-                                            "Check for updates"
-                                        })),
-                                )
-                                .when(available_count > 0, |el| {
-                                    el.child(
-                                        widgets::ghost_action(&theme)
-                                            .id("devices-update-all")
-                                            .text_color(theme.accent)
-                                            .hover(|s| {
-                                                s.bg(theme.accent.opacity(0.10))
-                                                    .text_color(theme.accent)
-                                            })
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.apply_all(cx)),
-                                            )
-                                            .child(
-                                                crate::kit::icons::icon(
-                                                    crate::kit::icons::ARCHIVE_UP_MINIMALISTIC,
-                                                )
-                                                .size(px(14.0))
-                                                .text_color(theme.accent),
-                                            )
-                                            .child(SharedString::from(format!(
-                                                "Update all ({available_count})"
-                                            ))),
-                                    )
-                                }),
-                        )
+                        el.child(fleet_update_controls(checking, available_count, &theme, cx))
                     })
                     .when_some(self.error.clone(), |el, message| {
                         el.child(
@@ -909,6 +639,330 @@ impl Render for DevicesPage {
             .when_some(dialog, |el, dialog| el.child(dialog))
             .when_some(delete_dialog, |el, dialog| el.child(dialog))
     }
+}
+
+impl DevicesPage {
+    /// One device card row: identity tile, name over the meta line, the
+    /// update pill and the row's actions.
+    fn device_row(
+        &self,
+        ix: usize,
+        device: Device,
+        ctx: &DeviceRowContext<'_>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let DeviceRowContext {
+            now,
+            local_id,
+            copied,
+            workspace_scope,
+            updates,
+        } = ctx;
+        let (now, workspace_scope) = (*now, *workspace_scope);
+        let online = device_online(device.last_seen_at, now);
+        let is_local = local_id.as_deref() == Some(device.id.as_str());
+        let id_copied = copied.as_deref() == Some(device.id.as_str());
+        let rename_id = device.id.clone();
+        let rename_name = device.name.clone();
+        let remove_id = device.id.clone();
+        let update_id = device.id.clone();
+        let show_remove = can_remove_device(workspace_scope, is_local);
+        let phase = updates.get(&device.id).cloned();
+        let update_action: Option<(&'static str, bool)> = match &phase {
+            Some(DeviceUpdate::Available(_)) => Some(("Update", false)),
+            Some(DeviceUpdate::Failed { busy: true, .. }) => Some(("Update anyway", true)),
+            Some(DeviceUpdate::Failed { busy: false, .. }) => Some(("Retry", false)),
+            _ => None,
+        };
+        let platform_icon = match device.platform.as_str() {
+            "macos" | "darwin" => crate::kit::icons::LAPTOP,
+            "web" => crate::kit::icons::GLOBAL,
+            "ios" | "android" => crate::kit::icons::SMARTPHONE,
+            _ => crate::kit::icons::MONITOR,
+        };
+        let tile = device_tile(online, platform_icon, theme);
+        let meta = device_meta(ix, &device, online, now, id_copied, theme, cx);
+        // Update state rides a right-aligned pill (below), never the
+        // meta line: a long status pushed the id chip onto its own
+        // row and rows stopped lining up.
+        let status_pill = phase.as_ref().map(|phase| update_status_pill(phase, theme));
+
+        widgets::card_row(theme, ix == 0)
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::row_title(theme, device.name.clone()))
+                    .child(widgets::meta_line(theme, meta)),
+            )
+            .when_some(status_pill, |el, pill| el.child(pill))
+            .when(is_local, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted)
+                        .child(if workspace_scope == Some(WorkspaceScope::Local) {
+                            "Local only"
+                        } else {
+                            "This device"
+                        }),
+                )
+            })
+            .when_some(update_action, |el, (label, force)| {
+                let retry_check = label == "Retry";
+                let id = update_id.clone();
+                el.child(
+                    widgets::ghost_action(theme)
+                        .id(("device-update", ix))
+                        .text_color(theme.accent)
+                        .hover(|s| s.bg(theme.accent.opacity(0.10)).text_color(theme.accent))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if retry_check {
+                                this.check_device(id.clone(), cx);
+                            } else {
+                                this.apply_device(id.clone(), force, cx);
+                            }
+                        }))
+                        .child(
+                            crate::kit::icons::icon(crate::kit::icons::ARCHIVE_UP_MINIMALISTIC)
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                        .child(SharedString::from(label)),
+                )
+            })
+            .child(
+                // `opacity-70 hover:opacity-100` (zeron: also rises on
+                // row hover — gpui has no group-hover, so the button's
+                // own hover carries the reveal).
+                widgets::ghost_action(theme)
+                    .id(("device-rename", ix))
+                    .opacity(0.7)
+                    .hover(|s| {
+                        s.opacity(1.0)
+                            .bg(crate::kit::theme::ink(0.06))
+                            .text_color(theme.text)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_rename(rename_id.clone(), rename_name.clone(), cx);
+                    }))
+                    .child(
+                        crate::kit::icons::icon(crate::kit::icons::PEN)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from("Rename")),
+            )
+            .when(show_remove, |el| {
+                el.child(
+                    widgets::ghost_action(theme)
+                        .id(("device-remove", ix))
+                        .opacity(0.7)
+                        .hover(|s| {
+                            s.opacity(1.0)
+                                .bg(theme.danger.opacity(0.08))
+                                .text_color(theme.danger)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_delete(remove_id.clone(), cx);
+                        }))
+                        .child(
+                            crate::kit::icons::icon(crate::kit::icons::TRASH_BIN_MINIMALISTIC)
+                                .size(px(14.0))
+                                .text_color(theme.danger),
+                        )
+                        .child(SharedString::from("Remove")),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// One quiet meta line: platform · version · (offline: last seen) · added ·
+/// id chip.
+fn device_meta(
+    ix: usize,
+    device: &Device,
+    online: bool,
+    now: DateTime<Utc>,
+    id_copied: bool,
+    theme: &Theme,
+    cx: &mut Context<DevicesPage>,
+) -> Vec<AnyElement> {
+    let mut meta: Vec<AnyElement> = vec![
+        div()
+            .child(SharedString::from(
+                platform_label(&device.platform).to_string(),
+            ))
+            .into_any_element(),
+    ];
+    if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
+        meta.push(
+            div()
+                .child(SharedString::from(format!("v{version}")))
+                .into_any_element(),
+        );
+    }
+    if !online {
+        meta.push(
+            div()
+                .child(SharedString::from(format!(
+                    "Last seen {}",
+                    format_last_seen(device.last_seen_at, now)
+                )))
+                .into_any_element(),
+        );
+    }
+    // "Added {time ago}" — always present (zeron settings.devices.tsx).
+    if let Some(created) = device.created_at {
+        meta.push(
+            div()
+                .child(SharedString::from(format!(
+                    "Added {}",
+                    format_last_seen(Some(created), now)
+                )))
+                .into_any_element(),
+        );
+    }
+    // The id chip ends the meta line; with the update state on
+    // its own pill the line is short enough to stay one row.
+    let copy_id = device.id.clone();
+    let id_chip = div()
+        .id(("device-id", ix))
+        .flex_none()
+        .mono(theme)
+        .text_size(px(10.5))
+        .text_color(if id_copied {
+            theme.success_muted.opacity(0.9)
+        } else {
+            theme.text_muted.opacity(0.5)
+        })
+        .cursor_pointer()
+        .hover(|s| s.text_color(theme.text_muted))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.copy_id(copy_id.clone(), cx);
+        }))
+        .child(SharedString::from(if id_copied {
+            "Copied".to_string()
+        } else {
+            short_id(&device.id)
+        }));
+    meta.push(id_chip.into_any_element());
+    meta
+}
+
+/// What every device row reads from the page.
+struct DeviceRowContext<'a> {
+    now: DateTime<Utc>,
+    local_id: Option<String>,
+    copied: Option<String>,
+    workspace_scope: Option<WorkspaceScope>,
+    updates: &'a HashMap<String, DeviceUpdate>,
+}
+
+/// The device's identity tile. Presence lives ON the tile: a corner dot
+/// (emerald online with a soft glow, faint offline), ringed by the card
+/// tone so it "cuts" the tile — zeron settings.devices.tsx
+/// `border-2 border-[var(--card)]` +
+/// `shadow-[0_0_6px_rgba(52,211,153,0.55)]`.
+fn device_tile(online: bool, platform_icon: &'static str, theme: &Theme) -> gpui::Div {
+    let emerald = theme.success; // emerald-400
+    widgets::row_tile(theme, platform_icon).relative().child(
+        div()
+            .absolute()
+            .bottom(px(-3.0))
+            .right(px(-3.0))
+            .size(px(9.0))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.surface)
+            .when(online, |el| {
+                el.bg(emerald).shadow(vec![gpui::BoxShadow {
+                    color: emerald.opacity(0.55),
+                    offset: gpui::point(px(0.0), px(0.0)),
+                    blur_radius: px(6.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+            })
+            .when(!online, |el| el.bg(crate::kit::theme::ink(0.22))),
+    )
+}
+
+/// The right-aligned pill naming a device's update state.
+fn update_status_pill(phase: &DeviceUpdate, theme: &Theme) -> gpui::Div {
+    let tone = match phase {
+        DeviceUpdate::Available(_) => theme.accent,
+        DeviceUpdate::Failed { .. } => theme.danger,
+        DeviceUpdate::UpToDate => theme.success_muted,
+        _ => theme.text_muted,
+    };
+    div()
+        .flex_none()
+        .max_w(px(220.0))
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded_full()
+        .bg(tone.opacity(0.10))
+        .text_size(px(10.5))
+        .text_color(tone)
+        .truncate()
+        .child(SharedString::from(update_badge(phase)))
+}
+
+/// Fleet updates: check every online device, update the ones with a newer
+/// release. Each device applies its own release and restarts itself; iOS
+/// updates through TestFlight and is left out.
+fn fleet_update_controls(
+    checking: bool,
+    available_count: usize,
+    theme: &Theme,
+    cx: &mut Context<DevicesPage>,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .pb(px(12.0))
+        .child(
+            widgets::ghost_action(theme)
+                .id("devices-check-updates")
+                .when(checking, |el| el.opacity(0.6))
+                .on_click(cx.listener(|this, _, _, cx| this.check_all(cx)))
+                .child(
+                    crate::kit::icons::icon(crate::kit::icons::REFRESH)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from(if checking {
+                    "Checking…"
+                } else {
+                    "Check for updates"
+                })),
+        )
+        .when(available_count > 0, |el| {
+            el.child(
+                widgets::ghost_action(theme)
+                    .id("devices-update-all")
+                    .text_color(theme.accent)
+                    .hover(|s| s.bg(theme.accent.opacity(0.10)).text_color(theme.accent))
+                    .on_click(cx.listener(|this, _, _, cx| this.apply_all(cx)))
+                    .child(
+                        crate::kit::icons::icon(crate::kit::icons::ARCHIVE_UP_MINIMALISTIC)
+                            .size(px(14.0))
+                            .text_color(theme.accent),
+                    )
+                    .child(SharedString::from(format!(
+                        "Update all ({available_count})"
+                    ))),
+            )
+        })
 }
 
 #[cfg(test)]
