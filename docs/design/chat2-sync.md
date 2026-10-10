@@ -128,7 +128,7 @@ root).
   concurrent ops must never land behind a shallow root).
 - Sidecars: hosts publish neither a tail nor a diff sidecar. Nothing read the tail once
   iOS spoke chat2 natively, and it had grown to 18% of the Durable Object bill; the
-  route remains for a future instant-open reader (`docs/development/local-edge.md`). Remote
+  route remains for a future instant-open reader (`docs/operations/cloudflare-billing.md`). Remote
   clients read working-tree diffs through the device relay.
 - Non-host owner devices may checkpoint as fallback if floor lag exceeds a high-water
   mark (any device holds the full doc; ~20 lines, ships later if ever needed — hosts

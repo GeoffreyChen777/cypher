@@ -3,7 +3,7 @@
 > 状态：设计决定 + 实施计划（2026-09-20）。本文件不改动任何代码。
 >
 > **本文是下一阶段的计划，不是当前正在做的事。** 当前进行中的是 Cloudflare 上的
-> 持续测量—优化循环（`docs/development/local-edge.md`：本地 `wrangler dev` +
+> 持续测量—优化循环（`docs/operations/cloudflare-billing.md`：本地 `wrangler dev` +
 > `scripts/ops/edge-billing-local.mjs`，按实测排优先级）。本文描述的 Rust + Postgres
 > 自建服务端**尚未开工**，§11 的 WP0 前置问题也还没回答；在那之前不要按本文的
 > 工作包表安排实施。
