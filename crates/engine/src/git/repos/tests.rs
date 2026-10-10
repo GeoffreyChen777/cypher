@@ -1,3 +1,7 @@
+use super::file_index::{
+    nucleo_path_score, search_files_blocking, search_files_blocking_with_cancel,
+    search_files_cached,
+};
 use super::*;
 
 #[test]
