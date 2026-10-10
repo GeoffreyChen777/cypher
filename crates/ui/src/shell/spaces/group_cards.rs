@@ -220,17 +220,19 @@ impl Shell {
                                 .show_harness
                                 .then(|| chat.config.as_ref().map(|c| c.harness));
                             self.render_chat_row(
-                                chat.id.clone(),
-                                transcript::single_line(
-                                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                                )
-                                .into(),
-                                time_ago,
-                                harness,
-                                *status,
-                                is_selected,
-                                chat.pinned,
-                                !flat,
+                                ChatRow {
+                                    id: chat.id.clone(),
+                                    title: transcript::single_line(
+                                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                                    )
+                                    .into(),
+                                    time_ago,
+                                    harness,
+                                    status: *status,
+                                    selected: is_selected,
+                                    pinned: chat.pinned,
+                                    nested: !flat,
+                                },
                                 theme,
                                 cx,
                             )

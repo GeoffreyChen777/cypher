@@ -512,57 +512,23 @@ impl Shell {
     /// `harness` is `None` when the sidebar hides agent marks (one runtime
     /// throughout): the title then starts in line with the project title.
     /// `Some(None)` keeps the mark's slot empty so titles stay aligned.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_chat_row(
         &self,
-        id: String,
-        title: SharedString,
-        time_ago: SharedString,
-        harness: Option<Option<cypher_proto::HarnessId>>,
-        status: ChatIndicator,
-        selected: bool,
-        pinned: bool,
-        nested: bool,
+        row: ChatRow,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Status corner shares the relative-time slot so the compact row's
-        // width stays stable: spinner while working, amber question mark while
-        // the agent waits on the user, emerald check for an unseen finished
-        // turn ("ready for you"), time otherwise. The pulse clock drives the
-        // spinner while it stays mounted.
-        let corner: AnyElement = match status {
-            ChatIndicator::Working => div()
-                .flex_none()
-                .child(loaders::mini_gradient_spinner(
-                    format!("chat-working-{id}"),
-                    2.0,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .into_any_element(),
-            // The turn is parked on a question, so the spinner has stopped —
-            // without a corner of its own the row fell back to the relative
-            // time and read exactly like an idle session (user report). Amber
-            // is the tone the theme reserves for awaiting-input; the glyph is
-            // slightly larger than the check because it carries inner detail.
-            ChatIndicator::AwaitingInput => icon(icons::QUESTION_CIRCLE)
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.warning)
-                .into_any_element(),
-            ChatIndicator::Completed => icon(icons::CHECK)
-                .size(px(11.0))
-                .flex_none()
-                .text_color(theme.success.opacity(0.9))
-                .into_any_element(),
-            _ => div()
-                .flex_none()
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(time_ago)
-                .into_any_element(),
-        };
+        let ChatRow {
+            id,
+            title,
+            time_ago,
+            harness,
+            status,
+            selected,
+            pinned,
+            nested,
+        } = row;
+        let corner = chat_row_corner(&id, time_ago, status, theme, cx);
         let (hover, text) = (
             crate::appearance::surface_style::sidebar_hover(theme),
             theme.text,
@@ -882,6 +848,65 @@ impl Shell {
             })
             .into_any_element()
     }
+}
+
+/// A chat row's status corner. It shares the relative-time slot so the
+/// compact row's width stays stable: spinner while working, amber question
+/// mark while the agent waits on the user, emerald check for an unseen
+/// finished turn ("ready for you"), time otherwise. The pulse clock drives
+/// the spinner while it stays mounted.
+fn chat_row_corner(
+    id: &str,
+    time_ago: SharedString,
+    status: ChatIndicator,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    match status {
+        ChatIndicator::Working => div()
+            .flex_none()
+            .child(loaders::mini_gradient_spinner(
+                format!("chat-working-{id}"),
+                2.0,
+                cx.entity_id(),
+                cx,
+            ))
+            .into_any_element(),
+        // The turn is parked on a question, so the spinner has stopped —
+        // without a corner of its own the row fell back to the relative
+        // time and read exactly like an idle session (user report). Amber
+        // is the tone the theme reserves for awaiting-input; the glyph is
+        // slightly larger than the check because it carries inner detail.
+        ChatIndicator::AwaitingInput => icon(icons::QUESTION_CIRCLE)
+            .size(px(12.0))
+            .flex_none()
+            .text_color(theme.warning)
+            .into_any_element(),
+        ChatIndicator::Completed => icon(icons::CHECK)
+            .size(px(11.0))
+            .flex_none()
+            .text_color(theme.success.opacity(0.9))
+            .into_any_element(),
+        _ => div()
+            .flex_none()
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(time_ago)
+            .into_any_element(),
+    }
+}
+
+/// One sidebar session row's content and state (see
+/// [`Shell::render_chat_row`]).
+pub(super) struct ChatRow {
+    pub id: String,
+    pub title: SharedString,
+    pub time_ago: SharedString,
+    pub harness: Option<Option<cypher_proto::HarnessId>>,
+    pub status: ChatIndicator,
+    pub selected: bool,
+    pub pinned: bool,
+    pub nested: bool,
 }
 
 /// The sign-in gate's faint grid backdrop (zeron styles.css `.bg-grid`):
