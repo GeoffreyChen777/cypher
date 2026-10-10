@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class ComposerFocusUITests: XCTestCase {
     func testRepeatedBottomDragsLeaveTheTailVisibleAndComposerUsable() {
         let app = XCUIApplication()

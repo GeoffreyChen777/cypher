@@ -251,7 +251,7 @@ struct ChatRow: View {
                 // Idle keeps the slot, so every title starts on the same edge.
                 SessionStatusMark(indicator: model.indicator(for: chat))
                     .frame(width: 10)
-                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + markLift }
+                    .alignmentGuide(.firstTextBaseline) { [markLift] in $0[VerticalAlignment.center] + markLift }
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(chat.displayTitle)

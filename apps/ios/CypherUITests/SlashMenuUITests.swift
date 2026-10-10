@@ -3,6 +3,7 @@ import XCTest
 /// The composer's `/` menu by real taps on the offline demo: the stateful
 /// commands under their headings with what each controls, a command's
 /// choices, and a typed name finding the rest.
+@MainActor
 final class SlashMenuUITests: XCTestCase {
     private func launch(_ appearance: String = "dark") -> XCUIApplication {
         .launchDemo(["-route", "chat:chat-tabs", "-appAppearance", appearance])

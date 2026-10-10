@@ -1,6 +1,7 @@
 import XCTest
 
 /// Real typing and taps through the `@` menu, on the offline demo.
+@MainActor
 final class MentionMenuUITests: XCTestCase {
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch

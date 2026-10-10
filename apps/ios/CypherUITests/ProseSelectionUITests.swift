@@ -2,6 +2,7 @@ import XCTest
 
 /// A drag selection in a reply crosses its paragraphs and list items: they
 /// are one selectable text. Real touches on the offline demo.
+@MainActor
 final class ProseSelectionUITests: XCTestCase {
     func testADragSelectionCrossesAParagraphIntoAList() {
         let app = XCUIApplication()

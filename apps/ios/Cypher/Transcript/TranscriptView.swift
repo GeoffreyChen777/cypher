@@ -32,9 +32,9 @@ struct TranscriptView: View {
         _hydrated = State(initialValue: !store.entries.isEmpty || !store.pendingSends.isEmpty)
     }
 
-    static let gapTurn: CGFloat = 14
-    static let gapExchange: CGFloat = 36
-    static let gapBlock: CGFloat = 8
+    nonisolated static let gapTurn: CGFloat = 14
+    nonisolated static let gapExchange: CGFloat = 36
+    nonisolated static let gapBlock: CGFloat = 8
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
     static let jumpThreshold: CGFloat = 320

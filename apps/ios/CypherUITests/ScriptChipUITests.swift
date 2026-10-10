@@ -3,6 +3,7 @@ import XCTest
 /// A Pi codemode script in the transcript, by real taps on the offline demo:
 /// its calls nest under it and its chip opens onto the code. Every chip shows
 /// its call's status.
+@MainActor
 final class ScriptChipUITests: XCTestCase {
     private func text(_ app: XCUIApplication, containing fragment: String) -> XCUIElement {
         app.descendants(matching: .any)

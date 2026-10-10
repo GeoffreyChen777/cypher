@@ -22,7 +22,8 @@ private func expiredJWT(exp: TimeInterval = 1_000) -> String {
 
 /// A recording HTTP transport for AuthClient: returns canned status/body and
 /// records every request for inspection.
-private final class RecordingTransport {
+/// `@unchecked Sendable`: each test drives one transport serially.
+private final class RecordingTransport: @unchecked Sendable {
     var requests: [URLRequest] = []
     var status = 200
     var body = Data()

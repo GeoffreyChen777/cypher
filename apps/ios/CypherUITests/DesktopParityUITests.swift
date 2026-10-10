@@ -1,6 +1,7 @@
 import XCTest
 
 /// Real taps through the desktop-parity features, on the offline demo.
+@MainActor
 final class DesktopParityUITests: XCTestCase {
     private func launch(_ args: [String]) -> XCUIApplication {
         .launchDemo(args)

@@ -152,11 +152,13 @@ final class FakeWebSocketTransport: WebSocketTransport, @unchecked Sendable {
 /// Lets queued actor and task work run. The clients hop between their actor,
 /// the main actor and detached timer tasks, so a few real milliseconds are
 /// needed rather than a fixed number of yields.
+@MainActor
 func settle() async {
     for _ in 0..<10 { try? await Task.sleep(nanoseconds: 1_000_000) }
 }
 
 /// Polls `condition` until it holds or two seconds pass.
+@MainActor
 func eventually(_ message: String = "condition never held", file: StaticString = #filePath, line: UInt = #line,
                 _ condition: () async -> Bool) async {
     let deadline = Date().addingTimeInterval(2)

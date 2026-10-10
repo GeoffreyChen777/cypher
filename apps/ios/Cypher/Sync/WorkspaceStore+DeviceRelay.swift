@@ -36,7 +36,7 @@ extension WorkspaceStore {
     }
 
     /// Only the read-only browser's fixed RPC set, on the chat's host device.
-    func workspaceBrowserCall<T: Decodable>(deviceId: String, method: String,
+    func workspaceBrowserCall<T: Decodable & Sendable>(deviceId: String, method: String,
                                             params: [String: Any]) async throws -> T {
         guard ["ListWorkspaceFiles", "ReadWorkspaceFile", "GetCheckoutDiff"].contains(method) else {
             throw RelayError.notConnected

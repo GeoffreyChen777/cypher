@@ -40,7 +40,7 @@ final class WorkspaceBrowserSession {
         guard let cwd = chat.cwd, !cwd.isEmpty else { throw WorkspaceBrowserError.missingDirectory }
     }
 
-    private func call<T: Decodable>(_ method: String, path: String? = nil) async throws -> T {
+    private func call<T: Decodable & Sendable>(_ method: String, path: String? = nil) async throws -> T {
         try check()
         guard let workspace else { throw WorkspaceBrowserError.unavailable }
         var params: [String: Any] = ["chatId": chat.id, "cwd": chat.cwd ?? ""]

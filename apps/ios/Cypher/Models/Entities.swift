@@ -218,7 +218,9 @@ struct UserInputAnswer: Hashable, Codable {
 }
 
 /// Render-only sanitized tool call (packages render-parts policy).
-struct RenderToolCall: Hashable {
+/// `@unchecked Sendable`: `fields` only ever holds JSON scalars and string
+/// lists (SessionStore's decoder), all immutable values.
+struct RenderToolCall: Hashable, @unchecked Sendable {
     var tag: String
     /// Loose payload — only render-relevant fields survive in the doc.
     var fields: [String: AnyHashable]

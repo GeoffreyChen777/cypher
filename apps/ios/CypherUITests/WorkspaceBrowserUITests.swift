@@ -1,5 +1,6 @@
 import XCTest
 
+@MainActor
 final class WorkspaceBrowserUITests: XCTestCase {
     func testChangesPresentationStates() {
         let app = XCUIApplication()

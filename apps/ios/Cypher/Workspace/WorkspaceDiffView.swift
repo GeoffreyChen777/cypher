@@ -297,7 +297,7 @@ struct WorkspaceDiffWebView: UIViewRepresentable {
             }
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                     decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             let allowed = navigationAction.targetFrame?.isMainFrame == true
                 && navigationAction.navigationType == .other
                 && navigationAction.request.url == WorkspaceDiffWebView.resourceURL

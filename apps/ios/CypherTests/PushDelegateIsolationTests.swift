@@ -34,7 +34,8 @@ final class PushDelegateIsolationTests: XCTestCase {
         @escaping @convention(block) (UNNotificationPresentationOptions) -> Void
     ) -> Void
 
-    private static let validPayload: [AnyHashable: Any] = [
+    // Never mutated; `[AnyHashable: Any]` just isn't Sendable.
+    nonisolated(unsafe) private static let validPayload: [AnyHashable: Any] = [
         "cypher": [
             "version": 1,
             "scope": String(repeating: "a", count: 64),

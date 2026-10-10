@@ -199,7 +199,7 @@ actor RegistryClient {
                 // confusing silent failure: everything cached renders, nothing
                 // syncs. Say so and back off.
                 roomLog.error("registry: no socket URL (token unavailable); backing off")
-                await self.life.scheduleReconnect(gen: gen, owner: self)
+                self.life.scheduleReconnect(gen: gen, owner: self)
                 return
             }
             await self.openSocket(url: url, gen: gen)

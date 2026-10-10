@@ -77,10 +77,10 @@ struct ContextArc: View {
     let usage: ContextUsage
     let expanded: Bool
 
-    static let span: Double = 60
-    static let stroke: CGFloat = 2
+    nonisolated static let span: Double = 60
+    nonisolated static let stroke: CGFloat = 2
     /// The band's centerline: the 20pt button, 4.5pt clear, half the stroke.
-    static let radius: CGFloat = 20 + 4.5 + stroke / 2
+    nonisolated static let radius: CGFloat = 20 + 4.5 + stroke / 2
 
     var body: some View {
         let center: Double = expanded ? 45 : 0

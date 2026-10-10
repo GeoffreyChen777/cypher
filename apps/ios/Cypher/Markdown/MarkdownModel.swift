@@ -246,7 +246,8 @@ final class IncrementalMarkdownParser {
         return String(text[index...])
     }
 
-    private static let linkDefPattern = /(?m)^\s{0,3}\[[^\]]+\]:/
+    // A regex literal is never mutated; `Regex` just isn't marked Sendable.
+    nonisolated(unsafe) private static let linkDefPattern = /(?m)^\s{0,3}\[[^\]]+\]:/
     static func hasLinkDefs(_ text: String) -> Bool {
         text.contains(linkDefPattern)
     }

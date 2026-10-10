@@ -113,7 +113,7 @@ final class WorkspaceDiffWebTests: XCTestCase {
         XCTAssertEqual(result?["injected"] as? Bool, false)
         XCTAssertEqual(result?["elements"] as? Int, 0)
         XCTAssertEqual(result?["literal"] as? Bool, true)
-        let blocked: Any = try await withCheckedThrowingContinuation { continuation in
+        let blocked: String? = try await withCheckedThrowingContinuation { continuation in
             web.callAsyncJavaScript("""
             return await new Promise(resolve => {
               document.addEventListener('securitypolicyviolation',
@@ -121,9 +121,9 @@ final class WorkspaceDiffWebTests: XCTestCase {
               fetch('https://example.invalid/blocked').catch(() => {});
               setTimeout(() => resolve('timeout'), 2000);
             });
-            """, arguments: [:], in: nil, in: .page) { continuation.resume(with: $0) }
+            """, arguments: [:], in: nil, in: .page) { continuation.resume(with: $0.map { $0 as? String }) }
         }
-        XCTAssertEqual(blocked as? String, "connect-src")
+        XCTAssertEqual(blocked, "connect-src")
         web.load(URLRequest(url: URL(string: "https://example.invalid/navigation")!))
         try await Task.sleep(for: .milliseconds(250))
         XCTAssertEqual(web.url, WorkspaceDiffWebView.resourceURL)

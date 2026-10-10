@@ -2,6 +2,7 @@ import XCTest
 
 /// Long transcripts: `-big` is 120 synthetic turns (~1,200 rows), so only the
 /// last 200-row window renders on open.
+@MainActor
 final class TranscriptWindowUITests: XCTestCase {
     private func launchBig() -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication.launchDemo(["-route", "chat:chat-veil", "-big"])

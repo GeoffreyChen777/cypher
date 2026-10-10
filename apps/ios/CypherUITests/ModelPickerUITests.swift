@@ -2,6 +2,7 @@ import XCTest
 
 /// The composer's one model chip and the card it opens, by real taps on the
 /// offline demo: providers, models and the thinking level in one place.
+@MainActor
 final class ModelPickerUITests: XCTestCase {
     private func element(_ app: XCUIApplication, _ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch

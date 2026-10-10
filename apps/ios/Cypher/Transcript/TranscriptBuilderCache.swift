@@ -76,7 +76,7 @@ final class TranscriptBuilderCache {
         guard !jobs.isEmpty else { return }
         prewarming = true
         Task { @MainActor [weak self] in
-            let parsed = await Task.detached(priority: .userInitiated) {
+            let parsed = await Task.detached(priority: .userInitiated) { [jobs] in
                 jobs.map { (key: $0.key, text: $0.text, blocks: MarkdownParser.parse($0.text)) }
             }.value
             guard let self else { return }

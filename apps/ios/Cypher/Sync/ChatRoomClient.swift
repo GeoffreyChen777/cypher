@@ -314,7 +314,7 @@ actor ChatRoomClient {
                 // confusing silent failure: everything cached renders,
                 // nothing syncs. Say so and back off.
                 roomLog.error("chat2 \(self.chatId, privacy: .public): no socket URL (token unavailable); backing off")
-                await self.life.scheduleReconnect(gen: gen, owner: self)
+                self.life.scheduleReconnect(gen: gen, owner: self)
                 return
             }
             await self.openSocket(url: url, gen: gen)
