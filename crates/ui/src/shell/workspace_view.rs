@@ -677,7 +677,7 @@ impl Shell {
             // bottom inset (the bottom tiles ran into the window edge).
             // The card insets the old chat card had: 8px on the window
             // edges, 4px on the sidebar seam.
-            .ml(px(4.0))
+            .ml(px(self.workspace_left_inset()))
             .mt(px(PANEL_EDGE_INSET))
             .mb(px(PANEL_EDGE_INSET))
             .mr(px(PANEL_EDGE_INSET))
@@ -1020,7 +1020,7 @@ impl Shell {
         // The top-left tile clears the window-control cluster (and the
         // traffic lights) while the sidebar is collapsed: the cluster
         // overlays the window's top-left, and the tile starts at the
-        // sidebar's (animating) right edge plus the 4px seam.
+        // sidebar's (animating) right edge plus the seam gutter.
         // Same inset as the terminal tab bar below, so the first tabs line up.
         let mut left = 6.0;
         if touch.top && touch.left {
@@ -1028,7 +1028,7 @@ impl Shell {
             let plus_inset = 26.0 * self.titlebar_plus_alpha();
             // + the cluster's Layout button slot.
             let cluster_end = self.title_bar_content_start() + plus_inset + 26.0;
-            let tile_left = sidebar_now + 4.0;
+            let tile_left = sidebar_now + self.workspace_left_inset();
             left = (cluster_end - tile_left).max(left);
         }
         let right = tile_header_right_inset(touch, rail, cfg!(target_os = "windows"));

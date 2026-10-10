@@ -1391,11 +1391,32 @@ fn synced_sign_out_blocks_every_viewport_and_cannot_switch_accounts() {
 
 #[test]
 fn titlebar_cluster_matches_cypher_window_controls() {
-    // zeron window-controls.tsx: `left: fullscreen ? 12 : 88` — the
-    // cluster clears the {14,15} traffic lights, and reclaims the inset
-    // when fullscreen hides them.
-    assert_eq!(titlebar_cluster_start(false), 88.0);
-    assert_eq!(titlebar_cluster_start(true), 12.0);
+    // The cluster clears the traffic lights by 14px (open: lights 14..74 →
+    // 88, zeron window-controls.tsx; collapsed: 21..81 → 95), and reclaims
+    // the inset when fullscreen hides them.
+    assert_eq!(
+        titlebar_cluster_start(false, TRAFFIC_LIGHT_INSET_OPEN),
+        88.0
+    );
+    assert_eq!(
+        titlebar_cluster_start(false, TRAFFIC_LIGHT_INSET_COLLAPSED),
+        95.0
+    );
+    assert_eq!(titlebar_cluster_start(true, TRAFFIC_LIGHT_INSET_OPEN), 12.0);
+}
+
+#[test]
+fn collapsed_chrome_controls_share_the_tab_strip_center_line() {
+    // Tabs: a 40px header in a card inset 8px → centre 28. Collapsed, the
+    // 14px traffic lights sit at {21,21} (centre 28, square in the corner)
+    // and the cluster centres on the same line; open, both centre on 21.
+    assert_eq!(CHROME_CENTER_Y, 28.0);
+    assert_eq!(TRAFFIC_LIGHT_INSET_COLLAPSED, 21.0);
+    assert_eq!(
+        chrome_center_y(TRAFFIC_LIGHT_INSET_COLLAPSED),
+        CHROME_CENTER_Y
+    );
+    assert_eq!(chrome_center_y(TRAFFIC_LIGHT_INSET_OPEN), 21.0);
 }
 
 #[test]
@@ -1407,12 +1428,21 @@ fn windows_caption_controls_reserve_titlebar_space() {
 #[test]
 fn cluster_buttons_start_per_platform() {
     // Linux: buttons at 10..86.
-    assert_eq!(cluster_buttons_start(false, false), 10.0);
+    assert_eq!(
+        cluster_buttons_start(false, false, TRAFFIC_LIGHT_INSET_OPEN),
+        10.0
+    );
     assert_eq!(CLUSTER_BUTTONS_WIDTH, 76.0);
-    // macOS: buttons start at the 88px traffic-light cluster start…
-    assert_eq!(cluster_buttons_start(true, false), 88.0);
+    // macOS: buttons start at the traffic-light cluster start…
+    assert_eq!(
+        cluster_buttons_start(true, false, TRAFFIC_LIGHT_INSET_OPEN),
+        88.0
+    );
     // …and reclaim the inset in fullscreen (starts at 12).
-    assert_eq!(cluster_buttons_start(true, true), 12.0);
+    assert_eq!(
+        cluster_buttons_start(true, true, TRAFFIC_LIGHT_INSET_OPEN),
+        12.0
+    );
 }
 
 // ---- sidebar resort FLIP diff ----

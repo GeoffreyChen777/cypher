@@ -23,7 +23,6 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         bottom,
         left: false,
         right: false,
-        scroll_y: None,
         scroll_x: None,
         child: child.into_any_element(),
     }
@@ -37,7 +36,6 @@ pub struct EdgeFaded {
     bottom: bool,
     left: bool,
     right: bool,
-    scroll_y: Option<ScrollHandle>,
     scroll_x: Option<ScrollHandle>,
     child: AnyElement,
 }
@@ -67,21 +65,14 @@ impl EdgeFaded {
         self
     }
 
-    /// Gate the vertical fades on the handle's overflow, read at PAINT time —
-    /// after the tracked div's prepaint has clamped the offset for this frame.
-    /// Render-time gating rides the LAST frame's offset, which goes stale on
-    /// the final frame of a content shrink (rows removed while scrolled):
-    /// prepaint clamps the offset to fit, nothing re-renders, and a fade with
-    /// no overflow sticks on screen (user report). `top`/`bottom` become
-    /// enables; the handle decides per frame.
-    pub fn fade_overflow_y(mut self, handle: &ScrollHandle) -> Self {
-        self.scroll_y = Some(handle.clone());
-        self
-    }
-
-    /// [`Self::fade_overflow_y`] for the HORIZONTAL edges — gates
-    /// [`Self::fade_left`]/[`Self::fade_right`] on the handle's x overflow at
-    /// paint time (the right-pane surface-tab strip).
+    /// Gate [`Self::fade_left`]/[`Self::fade_right`] on the handle's x
+    /// overflow, read at PAINT time — after the tracked div's prepaint has
+    /// clamped the offset for this frame. Render-time gating rides the LAST
+    /// frame's offset, which goes stale on the final frame of a content
+    /// shrink: prepaint clamps the offset to fit, nothing re-renders, and a
+    /// fade with no overflow sticks on screen (user report). `left`/`right`
+    /// become enables; the handle decides per frame (the right-pane
+    /// surface-tab strip).
     pub fn fade_overflow_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self
@@ -132,13 +123,7 @@ impl Element for EdgeFaded {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (mut top, mut bottom) = (self.top, self.bottom);
-        if let Some(scroll) = &self.scroll_y {
-            let scrolled = -f32::from(scroll.offset().y);
-            let max_scroll = f32::from(scroll.max_offset().y);
-            top &= scrolled > 1.0;
-            bottom &= scrolled < max_scroll - 1.0;
-        }
+        let (top, bottom) = (self.top, self.bottom);
         let (mut left, mut right) = (self.left, self.right);
         if let Some(scroll) = &self.scroll_x {
             let scrolled = -f32::from(scroll.offset().x);

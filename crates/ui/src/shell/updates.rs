@@ -52,8 +52,8 @@ impl Shell {
         let mut strip = div()
             .id("update-strip")
             .mx(px(Theme::SPACE_SM))
-            // No bottom margin: the user-menu block below carries its own
-            // SPACE_SM padding — doubling it read as a hole (user report).
+            // No bottom margin: the sidebar's strip block carries the
+            // SPACE_SM bottom gutter — doubling it read as a hole (user report).
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .rounded(px(Theme::CONTROL_RADIUS))

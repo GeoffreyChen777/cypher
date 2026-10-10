@@ -169,12 +169,50 @@ pub fn layout_action(preset: crate::workspace::Preset) -> Box<dyn gpui::Action> 
 // Traffic-light-aware titlebar layout
 // ---------------------------------------------------------------------------
 
+/// The workspace tiles' tab-strip center line: a
+/// [`crate::terminal::panel::TAB_BAR_HEIGHT`] header at the top of a card
+/// inset [`PANEL_EDGE_INSET`].
+pub const CHROME_CENTER_Y: f32 = PANEL_EDGE_INSET + crate::terminal::panel::TAB_BAR_HEIGHT / 2.0;
+
+/// The top band down to the tab strip's bottom edge (the settings titlebar
+/// drag strip).
+const CHROME_BAND: f32 = PANEL_EDGE_INSET + crate::terminal::panel::TAB_BAR_HEIGHT;
+
+/// The open sidebar's titlebar band, above its header row: clears the
+/// compact control cluster.
+const SIDEBAR_TITLEBAR_BAND: f32 = 38.0;
+
+/// AppKit's standard window buttons: 14px squares, 9px apart.
+const TRAFFIC_LIGHT_SIZE: f32 = 14.0;
+const TRAFFIC_LIGHT_GAP: f32 = 9.0;
+
+/// The macOS traffic lights' origin (both axes) beside an OPEN sidebar: the
+/// compact hiddenInset corner spot.
+pub const TRAFFIC_LIGHT_INSET_OPEN: f32 = 14.0;
+/// …and with the sidebar COLLAPSED: centred on [`CHROME_CENTER_Y`], level
+/// with the tile tabs they then sit beside, and as far from the window's left
+/// edge as from its top — square in the card's corner. The lights and the
+/// control cluster glide between the two on the sidebar tween
+/// ([`Shell::traffic_light_inset`]); the collapsed spot read too airy beside
+/// an open sidebar (user report).
+pub const TRAFFIC_LIGHT_INSET_COLLAPSED: f32 = CHROME_CENTER_Y - TRAFFIC_LIGHT_SIZE / 2.0;
+
+/// The control cluster's vertical center for a traffic-light inset: level
+/// with the lights.
+pub fn chrome_center_y(light_inset: f32) -> f32 {
+    light_inset + TRAFFIC_LIGHT_SIZE / 2.0
+}
+
 /// Where the top-left window-control cluster starts, in px from the window's
-/// left edge (zeron window-controls.tsx: `left: fullscreen ? 12 : 88`). The
-/// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
-/// fullscreen hides them and the cluster reclaims the inset.
-pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
-    if fullscreen { 12.0 } else { 88.0 }
+/// left edge: 14px past the traffic lights at `light_inset` (zeron
+/// window-controls.tsx's spacing). Fullscreen hides the lights and the
+/// cluster reclaims the inset.
+pub fn titlebar_cluster_start(fullscreen: bool, light_inset: f32) -> f32 {
+    if fullscreen {
+        12.0
+    } else {
+        light_inset + 3.0 * TRAFFIC_LIGHT_SIZE + 2.0 * TRAFFIC_LIGHT_GAP + 14.0
+    }
 }
 
 /// Width of the persistent top-left button cluster itself (sidebar toggle +
@@ -182,14 +220,18 @@ pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + 2.0 * 2.0;
 
 const PANEL_EDGE_INSET: f32 = 8.0;
+/// The workspace card's inset from an open sidebar's seam (half the
+/// window-edge inset; see [`Shell::workspace_left_inset`]). The sidebar's
+/// frosted top chrome runs across it to the card edge.
+const SIDEBAR_SEAM_GUTTER: f32 = 4.0;
 const PANEL_CORNER_RADIUS: f32 = 12.0;
 const RIGHT_TAB_RADIUS: f32 = 6.0;
 const RIGHT_TAB_HEIGHT: f32 = 24.0;
 
 /// Where the cluster's first button starts, from the window's left edge.
-pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
+pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, light_inset: f32) -> f32 {
     if is_macos {
-        titlebar_cluster_start(fullscreen)
+        titlebar_cluster_start(fullscreen, light_inset)
     } else {
         10.0
     }
@@ -512,9 +554,12 @@ const GROUP_CARD_BODY_PADDING: f32 = 4.0;
 /// rhythm; the cards themselves breathe like the main/right cards).
 const GROUP_CARD_GAP: f32 = 8.0;
 
-/// Ramp height of the sidebar's scroll-edge fade (the gpui
-/// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
-const SIDEBAR_GLASS_FADE_BAND: f32 = 32.0;
+/// Height of the sidebar header row (brand + action buttons), below the
+/// titlebar band.
+const SIDEBAR_HEADER_HEIGHT: f32 = 40.0;
+/// Peak backdrop-blur radius of the sidebar's top scroll-edge effect (at the
+/// window's top edge; it eases to zero at the header's bottom).
+const SIDEBAR_FROST_BLUR: f32 = 12.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -1187,6 +1232,9 @@ struct TitlebarState {
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     should_move: bool,
+    /// The traffic-light inset last handed to the window, so the native
+    /// buttons only move when the sidebar tween changes it.
+    light_inset: Option<f32>,
 }
 
 /// Keyboard focus fallback: keyboard shortcuts dispatch through the window

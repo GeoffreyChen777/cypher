@@ -16,37 +16,53 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.menus.user.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync.flow);
-        // Bottom-of-sidebar identity: avatar circle + scope/account label and
-        // its secondary status line.
-        let initial: SharedString = user_line
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
-        let avatar = user_avatar(initial, avatar_url, theme);
-        let mut trigger = div()
-            .id("user-menu")
-            .flex_none()
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .py(px(Theme::SPACE_SM))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
-            .bg(if open {
-                theme.glass_hover()
+        let workspace_scope = self.state.read(cx).workspace_scope;
+        let action = account_menu_action(workspace_scope, self.sync.flow);
+        // Local mode has no account to picture: a settings glyph, tinted like
+        // the header's other icon buttons (user request).
+        let glyph = if matches!(workspace_scope, Some(WorkspaceScope::Local)) {
+            let tint = if open {
+                theme.text
             } else {
                 motion::hover_blend(
                     "user-menu-trigger",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover().opacity(0.8),
+                    theme.text_muted.opacity(0.8),
+                    theme.text,
+                )
+            };
+            icon(icons::SETTINGS_MINIMALISTIC)
+                .size(px(14.0))
+                .text_color(tint)
+                .into_any_element()
+        } else {
+            let initial: SharedString = user_line
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into())
+                .into();
+            user_avatar(initial, avatar_url, 20.0, theme)
+        };
+        // A compact account button at the end of the sidebar header's button
+        // row (the identity row that used to sit at the sidebar's bottom —
+        // merged up, user request). Its name and status line open the menu.
+        let mut trigger = div()
+            .id("user-menu")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            // The header buttons' hover wash; held while the menu is open.
+            .bg(if open {
+                crate::kit::theme::wash(0.14)
+            } else {
+                motion::hover_blend(
+                    "user-menu-trigger",
+                    crate::kit::theme::wash(0.0),
+                    crate::kit::theme::wash(0.14),
                 )
             })
             .on_hover(motion::hover_listener("user-menu-trigger"))
@@ -64,37 +80,12 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(avatar)
-            .child(
-                // Name with an optional status line underneath — no chip on the right.
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .line_height(px(17.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(user_line.clone()),
-                    )
-                    .when_some(trigger_subline, |identity, subline| {
-                        identity.child(
-                            div()
-                                .text_size(px(11.0))
-                                .line_height(px(15.0))
-                                .text_color(theme.text_muted)
-                                .child(subline),
-                        )
-                    }),
-            );
+            .child(glyph);
         if self.menus.user.get().is_some() {
             let closing = self.menus.user.closing_since();
-            let menu = self.render_user_menu_card(menu_identity, action, cx);
-            trigger = trigger.child(popover::anchored_menu_above(
+            let menu =
+                self.render_user_menu_card(user_line, trigger_subline, menu_identity, action, cx);
+            trigger = trigger.child(popover::anchored_menu_below_end(
                 "user-menu-popover",
                 menu,
                 closing,
@@ -103,10 +94,12 @@ impl Shell {
         trigger.into_any_element()
     }
 
-    /// The account menu: the identity line, the scope's account action, then
-    /// Settings.
+    /// The account menu: the account label (and its status line), the
+    /// identity line, the scope's account action, then Settings.
     fn render_user_menu_card(
         &self,
+        user_line: SharedString,
+        trigger_subline: Option<SharedString>,
         menu_identity: SharedString,
         action: Option<AccountMenuAction>,
         cx: &mut Context<Self>,
@@ -115,11 +108,11 @@ impl Shell {
         // independently overridden foreground/background pair.
         let popup_theme = Theme::of(cx).clone();
         let theme = &popup_theme;
-        // user-menu.tsx content: `w-[--radix-dropdown-menu-trigger-width]`
-        // (exactly as wide as the trigger row — sidebar minus its p-2
-        // gutters), `flex-col gap-0.5`, then: one small muted email line
-        // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
-        // the action selected by the runtime scope, then "Settings".
+        // user-menu.tsx content: as wide as the old full-width trigger row
+        // (sidebar minus its p-2 gutters), `flex-col gap-0.5`, then: the
+        // account label the compact trigger no longer shows, one small muted
+        // email line (`px-2 pb-1 text-[11px] text-muted-foreground/70`), the
+        // action selected by the runtime scope, then "Settings".
         popover::popover_card(theme)
             .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -132,6 +125,27 @@ impl Shell {
                 div()
                     .px(px(8.0))
                     .pt(px(6.0))
+                    .text_size(px(13.0))
+                    .line_height(px(17.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .truncate()
+                    .child(user_line),
+            )
+            .when_some(trigger_subline, |menu, subline| {
+                menu.child(
+                    div()
+                        .px(px(8.0))
+                        .text_size(px(11.0))
+                        .line_height(px(15.0))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(subline),
+                )
+            })
+            .child(
+                div()
+                    .px(px(8.0))
                     .pb(px(4.0))
                     .text_size(px(11.0))
                     .text_color(theme.text_muted.opacity(0.7))
@@ -972,7 +986,7 @@ impl Shell {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .ml(px(4.0))
+            .ml(px(self.workspace_left_inset()))
             .mt(px(PANEL_EDGE_INSET))
             .mb(px(PANEL_EDGE_INSET))
             .mr(px(PANEL_EDGE_INSET))
@@ -980,7 +994,11 @@ impl Shell {
             .bg(card_bg)
             .shadow_sm()
             .overflow_hidden()
-            .pt(px(Theme::TITLEBAR_HEIGHT - PANEL_EDGE_INSET))
+            // Content clears the control cluster, which rides lower once
+            // the sidebar collapses and it overlays this card.
+            .pt(px(
+                chrome_center_y(self.traffic_light_inset()) + 17.0 - PANEL_EDGE_INSET
+            ))
             .flex()
             .flex_col()
             .child(div().flex_1().min_h_0().child(outlet))
@@ -1396,6 +1414,7 @@ impl Shell {
 fn user_avatar(
     initial: SharedString,
     avatar_url: Option<SharedString>,
+    size: f32,
     theme: &Theme,
 ) -> AnyElement {
     // Avatar: the GitHub/WorkOS profile picture when one is on the
@@ -1406,14 +1425,14 @@ fn user_avatar(
         let theme = theme.clone();
         move || {
             div()
-                .size(px(26.0))
+                .size(px(size))
                 .flex_none()
                 .rounded_full()
                 .bg(theme.text)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(px(size * 0.46))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.bg)
                 .child(initial.clone())
@@ -1427,7 +1446,7 @@ fn user_avatar(
         Some(url) => {
             let loading = fallback_avatar.clone();
             gpui::img(url)
-                .size(px(26.0))
+                .size(px(size))
                 .flex_none()
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover)

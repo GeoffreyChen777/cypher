@@ -532,12 +532,10 @@ impl Theme {
     /// see [`Self::glass_overlay`], where light coverage steps up to keep menu
     /// text legible over an unknown backdrop.
     pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
-    /// The unified window titlebar (traffic lights + cluster + tabs). Content
-    /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
-    /// matches the perceived gap to the inset card below (border + card body).
+    /// The Windows caption band (caption buttons, their drag strip, and the
+    /// rail clearance under them). The macOS/Linux chrome lines up on
+    /// `shell::CHROME_CENTER_Y` instead.
     pub const TITLEBAR_HEIGHT: f32 = 38.0;
-    /// Downward shift of titlebar content within the bar.
-    pub const TITLEBAR_TOP_PAD: f32 = 2.0;
     /// Reserved status strip under the content outlet (zeron `h-6`) — the
     /// WorkingIndicator row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;

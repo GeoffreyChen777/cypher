@@ -54,7 +54,7 @@ impl Shell {
         // minus the container's own padding.
         let start = self.eval_tween(
             self.motion.titlebar_tween,
-            titlebar_cluster_start(fullscreen),
+            titlebar_cluster_start(fullscreen, self.traffic_light_inset()),
         );
         let width = (start - container_pad).max(0.0);
         Some(div().flex_none().h_full().w(px(width)).into_any_element())
@@ -74,9 +74,31 @@ impl Shell {
         let is_macos = cfg!(target_os = "macos");
         let cluster = self.eval_tween(
             self.motion.titlebar_tween,
-            cluster_buttons_start(is_macos, fullscreen),
+            cluster_buttons_start(is_macos, fullscreen, self.traffic_light_inset()),
         );
         cluster + CLUSTER_BUTTONS_WIDTH + 10.0
+    }
+
+    /// The traffic lights' origin (both axes), riding the sidebar tween: the
+    /// compact corner spot beside an open sidebar, level with the tile tabs
+    /// once it collapses. The control cluster follows (its start and
+    /// [`chrome_center_y`] derive from this).
+    pub(super) fn traffic_light_inset(&self) -> f32 {
+        motion::lerp(
+            TRAFFIC_LIGHT_INSET_OPEN,
+            TRAFFIC_LIGHT_INSET_COLLAPSED,
+            self.titlebar_plus_alpha(),
+        )
+    }
+
+    /// Hand the native traffic lights this frame's inset (only on change —
+    /// the sidebar tween drives it frame by frame).
+    pub(super) fn sync_traffic_lights(&mut self, window: &mut Window) {
+        let inset = self.traffic_light_inset();
+        if self.titlebar.light_inset != Some(inset) {
+            window.set_traffic_light_position(gpui::point(px(inset), px(inset)));
+            self.titlebar.light_inset = Some(inset);
+        }
     }
 
     /// The unified window titlebar. Chat: only a drag strip over the
@@ -89,7 +111,7 @@ impl Shell {
             Route::Chat => {
                 let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
                 let bar = div()
-                    .h(px(Theme::TITLEBAR_HEIGHT))
+                    .h(px(SIDEBAR_TITLEBAR_BAND))
                     .w(px(sidebar_now))
                     .flex_none();
                 self.titlebar_drag_region("chat-titlebar", bar, cx)
@@ -100,13 +122,13 @@ impl Shell {
                     .size_full()
                     .flex()
                     .items_center()
-                    .pt(px(Theme::TITLEBAR_TOP_PAD))
+                    .pt(px(PANEL_EDGE_INSET))
                     .pl(px(self.title_bar_content_start()))
                     .pr(px(titlebar_right_padding(
                         cfg!(target_os = "windows"),
                         Theme::SPACE_LG,
                     )));
-                let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
+                let bar = div().h(px(CHROME_BAND)).flex_none().child(inner);
                 self.titlebar_drag_region("settings-header-titlebar", bar, cx)
                     .into_any_element()
             }
@@ -188,11 +210,12 @@ impl Shell {
             .absolute()
             .top_0()
             .left_0()
-            .h(px(Theme::TITLEBAR_HEIGHT))
+            // Centred level with the traffic lights (and, collapsed, the
+            // tile tabs).
+            .h(px(2.0 * chrome_center_y(self.traffic_light_inset())))
             .flex()
             .flex_row()
             .items_center()
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
             .gap(px(2.0))
             .px(px(10.0))
             .children(self.titlebar_spacer(12.0))
@@ -232,6 +255,14 @@ impl Shell {
                 el.child(self.render_layout_button(&theme, cx))
             })
             .into_any_element()
+    }
+
+    /// The workspace/settings card's left inset: the 4px seam gutter beside
+    /// an open sidebar, easing to the 8px window-edge inset as it collapses
+    /// (riding the sidebar width tween) — a collapsed sidebar left the card
+    /// 4px off the window edge where every other side has 8 (user report).
+    pub(super) fn workspace_left_inset(&self) -> f32 {
+        SIDEBAR_SEAM_GUTTER + (PANEL_EDGE_INSET - SIDEBAR_SEAM_GUTTER) * self.titlebar_plus_alpha()
     }
 
     /// How present the titlebar's new-session + is: 0 with the sidebar open
@@ -307,12 +338,15 @@ impl Shell {
         // card's gutter, tone, and shadow provide the separation without a
         // vertical divider. The content row spans the full window height (the
         // titlebar overlays it), so the column pads itself below the chrome.
+        // Chat lays its list under the titlebar band itself (frosted top
+        // chrome); Settings navigation starts below it.
+        let below_titlebar = matches!(self.route, Route::Settings(_));
         self.pane_container(
             self.motion.sidebar_tween,
             target,
             div()
                 .h_full()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .when(below_titlebar, |el| el.pt(px(SIDEBAR_TITLEBAR_BAND)))
                 .child(inner)
                 .into_any_element(),
         )
@@ -647,14 +681,108 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Chat-mode sidebar: Cypher / Add project header, project-grouped session
-    /// cards (every host together), the notice strip, and the UserMenu.
-    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The chat sidebar's top chrome: the product header + actions (account
+    /// button last) over a macOS-style scroll-edge effect — a progressive
+    /// blur, strongest at the window edge and none at the header's bottom, no
+    /// tint and no scroll gating, so it matches the surface around it and
+    /// nothing ever switches on (user reports). The list scrolls under it;
+    /// the titlebar, traffic lights and control cluster sit on it.
+    ///
+    /// Mounted in the sidebar seam, not the sidebar column: the seam paints
+    /// after the sidebar and before the workspace, and isn't clipped, so the
+    /// pane runs across the 4px gutter to the workspace card's edge and the
+    /// card (ordered after the blur by the seam's
+    /// [`crate::kit::frost::order_barrier`]) covers the blur's cut. `None`
+    /// while the sidebar is shut.
+    fn render_sidebar_top_chrome(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sidebar_now = self.eval_tween(self.motion.sidebar_tween, self.sidebar_target());
+        if !matches!(self.route, Route::Chat) || sidebar_now < 1.0 {
+            return None;
+        }
+        let theme = crate::appearance::surface_style::theme(
+            crate::appearance::surface_style::Region::Sidebar,
+            cx,
+        );
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
             (state.auth_user().cloned(), state.workspace_scope)
         };
+        let (user_line, trigger_subline, menu_identity): (
+            SharedString,
+            Option<SharedString>,
+            SharedString,
+        ) = match workspace_scope {
+            Some(WorkspaceScope::Local) => {
+                let line = if matches!(self.sync.flow, SyncFlow::RestartPending { .. }) {
+                    "Sync ready after restart"
+                } else {
+                    "Local only"
+                };
+                (line.into(), None, "Stored on this device".into())
+            }
+            Some(WorkspaceScope::Development) => (
+                "Development".into(),
+                Some("Local development runtime".into()),
+                "Authentication disabled".into(),
+            ),
+            Some(WorkspaceScope::Synced) | None => {
+                let line: SharedString = user
+                    .as_ref()
+                    .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
+                    .unwrap_or_else(|| SharedString::from("Not signed in"));
+                let email = user
+                    .as_ref()
+                    .map(|u| SharedString::from(u.email.clone()))
+                    .unwrap_or_else(|| line.clone());
+                (line, None, email)
+            }
+        };
+        let avatar_url = user
+            .as_ref()
+            .and_then(|u| u.avatar_url.clone())
+            .map(SharedString::from);
+        let user_menu = self.render_user_menu(
+            user_line.clone(),
+            trigger_subline,
+            menu_identity,
+            avatar_url,
+            &theme,
+            cx,
+        );
 
+        let actions = self.render_sidebar_header(Some(user_menu), &theme, cx);
+        let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
+        let width = sidebar_now + self.workspace_left_inset();
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(-sidebar_now))
+                .w(px(width))
+                .h(px(top_chrome))
+                // Clip like the sidebar's pane container: on collapse the
+                // header is cut from the right, never reflowed.
+                .overflow_hidden()
+                .child(crate::kit::frost::frost_pane(
+                    SIDEBAR_FROST_BLUR,
+                    // Occludes so clicks on its empty stretches never reach
+                    // rows scrolled beneath; the titlebar drag strip and
+                    // control cluster paint later, at the page root, so they
+                    // stay live above it.
+                    div()
+                        .size_full()
+                        .occlude()
+                        .pt(px(SIDEBAR_TITLEBAR_BAND))
+                        .child(div().w(px(self.settings.sidebar_width)).child(actions)),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    /// Chat-mode sidebar: project-grouped session cards (every host
+    /// together) under the top chrome ([`Self::render_sidebar_top_chrome`]),
+    /// then the update and notice strips.
+    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
@@ -711,120 +839,78 @@ impl Shell {
             })
             .collect();
 
-        let (user_line, trigger_subline, menu_identity): (
-            SharedString,
-            Option<SharedString>,
-            SharedString,
-        ) = match workspace_scope {
-            Some(WorkspaceScope::Local) => {
-                let line = if matches!(self.sync.flow, SyncFlow::RestartPending { .. }) {
-                    "Sync ready after restart"
-                } else {
-                    "Local only"
-                };
-                (line.into(), None, "Stored on this device".into())
-            }
-            Some(WorkspaceScope::Development) => (
-                "Development".into(),
-                Some("Local development runtime".into()),
-                "Authentication disabled".into(),
-            ),
-            Some(WorkspaceScope::Synced) | None => {
-                let line: SharedString = user
-                    .as_ref()
-                    .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
-                    .unwrap_or_else(|| SharedString::from("Not signed in"));
-                let email = user
-                    .as_ref()
-                    .map(|u| SharedString::from(u.email.clone()))
-                    .unwrap_or_else(|| line.clone());
-                (line, None, email)
-            }
-        };
-        let avatar_url = user
-            .as_ref()
-            .and_then(|u| u.avatar_url.clone())
-            .map(SharedString::from);
-        let user_menu = self.render_user_menu(
-            user_line.clone(),
-            trigger_subline,
-            menu_identity,
-            avatar_url,
-            theme,
-            cx,
-        );
-
-        // The fixed product header + Add project action lives ABOVE the scroll
-        // region (it must stay reachable no matter how long the card list gets).
-        let actions = self.render_sidebar_header(theme, cx);
+        let top_chrome = SIDEBAR_TITLEBAR_BAND + SIDEBAR_HEADER_HEIGHT;
+        // Update strips — app-wide chrome, the main window's alone — sit
+        // under the list with the sidebar's bottom gutter.
+        let update_strips: Vec<AnyElement> = [
+            self.render_update_strip(theme, cx),
+            self.render_pi_update_strip(theme, cx),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|_| !self.is_project_window())
+        .collect();
 
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
             .flex()
             .flex_col()
-            // (No titlebar strip: the unified window titlebar spans the whole
-            // window above this column.)
-            .child(actions)
-            // The project-grouped card list scrolls inside an EdgeFade scope —
-            // a true per-glyph gradient at active overflow edges. Glass-safe
-            // (no painted overlay can fade content over see-through blur) and
-            // equivalent on opaque themes: alpha→0 reveals the surface tone
-            // underneath, same as the gradient overlays it replaced. Overflow
-            // is read at PAINT time via the scroll handle — render-time gating
-            // rode the previous frame's offset, so the last frame of a content
-            // shrink (row archived while scrolled) left a phantom fade stuck
-            // over an unscrollable list (user report).
             .child(
-                crate::kit::edge_fade::edge_faded(
-                    SIDEBAR_GLASS_FADE_BAND,
-                    true,
-                    true,
-                    div().relative().flex_1().min_h_0().child(
-                        div()
-                            .id("sidebar-lists")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.sidebar.scroll)
-                            .px(px(Theme::SPACE_SM))
-                            .flex()
-                            .flex_col()
-                            // No "Sessions" header (user request) — the list
-                            // is the whole column; a little air stands in.
-                            .pt(px(4.0))
-                            .child(if !list_items.is_empty() {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(GROUP_CARD_GAP))
-                                    .pb(px(Theme::SPACE_SM))
-                                    .children(list_items)
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .px(px(Theme::SPACE_SM))
-                                    .pb(px(Theme::SPACE_SM))
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from("No projects yet"))
-                                    .into_any_element()
-                            }),
-                    ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    // The project-grouped card list runs the full column
+                    // height, padded past the top chrome. Rows rising under
+                    // the chrome fade out toward the window's top edge (the
+                    // per-glyph EdgeFade, always on — at rest nothing sits
+                    // in the band). No bottom mask (user request).
+                    .child(crate::kit::edge_fade::edge_faded(
+                        top_chrome,
+                        true,
+                        false,
+                        div().size_full().child(
+                            div()
+                                .id("sidebar-lists")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.sidebar.scroll)
+                                .px(px(Theme::SPACE_SM))
+                                .flex()
+                                .flex_col()
+                                // No "Sessions" header (user request) —
+                                // the list is the whole column; a little
+                                // air stands in.
+                                .pt(px(top_chrome + 4.0))
+                                .child(if !list_items.is_empty() {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(GROUP_CARD_GAP))
+                                        .pb(px(Theme::SPACE_SM))
+                                        .children(list_items)
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .px(px(Theme::SPACE_SM))
+                                        .pb(px(Theme::SPACE_SM))
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from("No projects yet"))
+                                        .into_any_element()
+                                }),
+                        ),
+                    )),
+            )
+            .when(!update_strips.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .pb(px(Theme::SPACE_SM))
+                        .children(update_strips),
                 )
-                .fade_overflow_y(&self.sidebar.scroll),
-            )
-            // Update strip (above the user menu; below the lists). App-wide
-            // chrome — the main window's alone.
-            .when_some(
-                self.render_update_strip(theme, cx)
-                    .filter(|_| !self.is_project_window()),
-                |el, strip| el.child(strip),
-            )
-            .when_some(
-                self.render_pi_update_strip(theme, cx)
-                    .filter(|_| !self.is_project_window()),
-                |el, strip| el.child(strip),
-            )
+            })
             // Inline mutation-failure notice.
             .when_some(self.sidebar.notice.clone(), |el, notice| {
                 el.child(
@@ -846,9 +932,6 @@ impl Shell {
                         }))
                         .child(notice),
                 )
-            })
-            .when(!self.is_project_window(), |el| {
-                el.child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
             })
             .into_any_element()
     }
@@ -1205,6 +1288,7 @@ impl Render for Shell {
             .unwrap_or_else(|| self.state.read(cx).gate());
 
         self.track_fullscreen(window, cx);
+        self.sync_traffic_lights(window);
         self.route_focus(&gate, restart_required, window, cx);
 
         let root = div()
@@ -1354,9 +1438,10 @@ impl Shell {
         let fullscreen = window.is_fullscreen();
         if self.titlebar.fullscreen != Some(fullscreen) {
             if self.titlebar.fullscreen.is_some() && cfg!(target_os = "macos") {
+                let inset = self.traffic_light_inset();
                 self.motion.titlebar_tween = Some(WidthTween::new(
-                    titlebar_cluster_start(!fullscreen),
-                    titlebar_cluster_start(fullscreen),
+                    titlebar_cluster_start(!fullscreen, inset),
+                    titlebar_cluster_start(fullscreen, inset),
                 ));
             }
             self.titlebar.fullscreen = Some(fullscreen);
@@ -1672,6 +1757,11 @@ impl Shell {
             .h_full()
             .flex_none()
             .relative()
+            .children(self.render_sidebar_top_chrome(cx))
+            // Everything after the chrome — the workspace card, the
+            // titlebar — must draw after its blur, or the blur samples the
+            // card's edge (see `order_barrier`).
+            .child(crate::kit::frost::order_barrier())
             .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
         let title_bar = self.render_title_bar(cx);
         // Two columns: sidebar | workspace (or settings). The content

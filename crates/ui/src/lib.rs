@@ -284,16 +284,19 @@ fn shell_window_options(bounds: Bounds<gpui::Pixels>, cx: &App) -> WindowOptions
         // (`NSNormalWindowLevel` on macOS, same as zed's main window);
         // `appears_transparent` only affects the titlebar, not the menu bar.
         // macOS: frameless-inset chrome like the original Electron app
-        // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15). No
+        // (`titleBarStyle: "hiddenInset"`). No
         // title text — the strip is custom-drawn (zed sets `title: None` the same way). On
         // Linux/Windows `appears_transparent` hides the system titlebar
         // for our custom-drawn chrome; harmless where unsupported.
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            // Centered on the titlebar's content line (40px bar, content
-            // shifted 4px down, lights ~12px tall → center 22).
-            traffic_light_position: Some(gpui::point(px(14.), px(14.))),
+            // The open-sidebar spot; the shell moves them with the sidebar
+            // (`Shell::traffic_light_inset`).
+            traffic_light_position: Some(gpui::point(
+                px(shell::TRAFFIC_LIGHT_INSET_OPEN),
+                px(shell::TRAFFIC_LIGHT_INSET_OPEN),
+            )),
         }),
         // Our own titlebar strip drags the window (WindowControlArea::
         // Drag + start_window_move) — mark the content view app-owned

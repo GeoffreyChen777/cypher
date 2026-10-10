@@ -233,14 +233,22 @@ impl Shell {
 
     // ---- sidebar sections ----
 
-    /// The fixed sidebar header above the project-card list: product identity
-    /// on the left and one compact Add project action on the right. New
-    /// sessions are created from project/checkout hover actions (or ⌘N).
+    /// The fixed sidebar header over the project-card list: product identity
+    /// on the left, the view / quick chat / Add project actions and the
+    /// `account` button on the right. New sessions are created from
+    /// project/checkout hover actions (or ⌘N). Exactly
+    /// [`SIDEBAR_HEADER_HEIGHT`] tall — the list pads past it.
     pub(super) fn render_sidebar_header(
         &mut self,
+        account: Option<AnyElement>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // One resting/hover tint for every header icon button, applied to the
+        // GLYPH: gpui SVGs take no colour from their parent, so a tint on the
+        // button alone left the + and quick-chat glyphs stuck at full text
+        // while the others rested muted (user report).
+        let tint = |key: &str| motion::hover_blend(key, theme.text_muted.opacity(0.8), theme.text);
         let add_project = div()
             .id("sidebar-add-project")
             .size(px(28.0))
@@ -250,11 +258,6 @@ impl Shell {
             .justify_center()
             .rounded(px(8.0))
             .cursor_pointer()
-            .text_color(motion::hover_blend(
-                "sidebar-add-project",
-                theme.text_muted.opacity(0.8),
-                theme.text,
-            ))
             .bg(motion::hover_blend(
                 "sidebar-add-project",
                 crate::kit::theme::wash(0.0),
@@ -262,7 +265,11 @@ impl Shell {
             ))
             .on_hover(motion::hover_listener("sidebar-add-project"))
             .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
-            .child(icon(icons::PLUS).size(px(14.0)).text_color(theme.text));
+            .child(
+                icon(icons::PLUS)
+                    .size(px(14.0))
+                    .text_color(tint("sidebar-add-project")),
+            );
         // View menu: filter the cards by device and pick their sort. Tinted
         // while a non-default view is active so the narrowed list is obvious.
         let view_active = self.settings.sidebar_device_filter.is_some()
@@ -271,11 +278,7 @@ impl Shell {
         let view_tint = if view_active {
             theme.accent
         } else {
-            motion::hover_blend(
-                "sidebar-view-menu",
-                theme.text_muted.opacity(0.8),
-                theme.text,
-            )
+            tint("sidebar-view-menu")
         };
         let view_button = div()
             .id("sidebar-view-menu")
@@ -314,11 +317,6 @@ impl Shell {
             .justify_center()
             .rounded(px(8.0))
             .cursor_pointer()
-            .text_color(motion::hover_blend(
-                "sidebar-quick-chat",
-                theme.text_muted.opacity(0.8),
-                theme.text,
-            ))
             .bg(motion::hover_blend(
                 "sidebar-quick-chat",
                 crate::kit::theme::wash(0.0),
@@ -329,7 +327,7 @@ impl Shell {
             .child(
                 icon(icons::CHAT_ROUND_LINE)
                     .size(px(14.0))
-                    .text_color(theme.text),
+                    .text_color(tint("sidebar-quick-chat")),
             );
         div()
             .flex_none()
@@ -340,8 +338,8 @@ impl Shell {
             // Align the brand with the project icons inside their inset cards.
             .pl(px(18.0))
             .pr(px(Theme::SPACE_SM))
-            .pt(px(8.0))
-            .pb(px(4.0))
+            .h(px(SIDEBAR_HEADER_HEIGHT))
+            .pt(px(4.0))
             .child(
                 div()
                     .min_w_0()
@@ -364,7 +362,8 @@ impl Shell {
                         .gap(px(2.0))
                         .child(view_button)
                         .child(quick_chat)
-                        .child(add_project),
+                        .child(add_project)
+                        .children(account),
                 )
             })
             .into_any_element()
