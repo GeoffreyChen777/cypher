@@ -4,9 +4,12 @@ use chrono::{TimeDelta, Utc};
 use cypher_proto::{Device, Session, SessionStatus};
 use cypher_sync::DocsStore;
 
+use super::presence::{
+    PRESENCE_FRESH_MS, RELAY_PROBE_ALIVE_CAP, RELAY_PROBE_BACKOFF_CAP, RELAY_PROBE_INTERVAL_MS,
+    RelayProbeRetry, relay_probe_answer,
+};
 use super::{
-    RELAY_PROBE_ALIVE_CAP, RELAY_PROBE_INTERVAL_MS, RelayProbeRetry, WorkspaceHost,
-    WorkspaceHostConfig, device_name_on_boot, linked_worktree_root, merge_sessions,
+    WorkspaceHost, WorkspaceHostConfig, device_name_on_boot, linked_worktree_root, merge_sessions,
 };
 
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
@@ -183,14 +186,14 @@ async fn relay_probe_negative_results_pace_an_offline_peer_down_to_the_cap() {
     assert_eq!(requests, 7, "first hour, including the doubling ramp");
     assert_eq!(second_hour, 2, "steady state is one probe per cap window");
     let backoff = super::lock(&host.inner.relay_probe_backoff);
-    assert_eq!(backoff["peer"].delay, super::RELAY_PROBE_BACKOFF_CAP);
+    assert_eq!(backoff["peer"].delay, RELAY_PROBE_BACKOFF_CAP);
 }
 
 #[test]
 fn relay_probe_treats_an_unhosted_or_foreign_room_as_an_answer_not_an_error() {
     use reqwest::StatusCode;
     use serde_json::json;
-    let answer = super::relay_probe_answer;
+    let answer = relay_probe_answer;
     // The body decides only on success.
     let live = json!({ "hostConnected": true });
     let away = json!({ "hostConnected": false });
@@ -260,10 +263,8 @@ async fn relay_probe_errors_do_not_mean_offline_and_alive_answers_back_off() {
     assert!(host.inner.relay_probe_candidates(now).is_empty());
 
     // Once that self-granted freshness lapses, the backoff still holds.
-    super::lock(&host.inner.presence_seen).insert(
-        "peer".into(),
-        crate::util::now_ms() - super::PRESENCE_FRESH_MS,
-    );
+    super::lock(&host.inner.presence_seen)
+        .insert("peer".into(), crate::util::now_ms() - PRESENCE_FRESH_MS);
     assert!(host.inner.relay_probe_candidates(now).is_empty());
     assert_eq!(
         host.inner
@@ -323,7 +324,7 @@ async fn expedited_probe_keeps_the_backoff_ladder() {
     );
     assert_eq!(
         super::lock(&host.inner.relay_probe_backoff)["peer"].delay,
-        super::RELAY_PROBE_BACKOFF_CAP
+        RELAY_PROBE_BACKOFF_CAP
     );
 }
 
