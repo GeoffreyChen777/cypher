@@ -747,9 +747,12 @@ fn issue_refs_dedupe_and_name_the_worktree() {
     assert_eq!(refs.iter().map(|r| r.number).collect::<Vec<_>>(), [7, 9]);
     assert_eq!(issue_worktree_hint(&refs[0]), "7 Fix the thing");
     assert_eq!(
-        cypher_engine::repos::chat_worktree_name("chat-1", Some(&issue_worktree_hint(&refs[0])))
-            .split_once("-")
-            .map(|(head, _)| head.to_string()),
+        cypher_engine::git::repos::chat_worktree_name(
+            "chat-1",
+            Some(&issue_worktree_hint(&refs[0]))
+        )
+        .split_once("-")
+        .map(|(head, _)| head.to_string()),
         Some("7".into())
     );
     assert!(block_slash_with_issue_refs(&format!("/compact {a}")));

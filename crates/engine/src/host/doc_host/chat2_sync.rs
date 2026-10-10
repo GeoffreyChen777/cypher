@@ -84,17 +84,17 @@ impl DocHost {
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_worker(async move {
-            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone()).with_preview(preview));
+            let sink = Arc::new(crate::host::chat2_host::EngineChatSink::new(&doc, store, chat.clone()).with_preview(preview));
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.
             drop(doc);
-            let fetcher = Arc::new(crate::chat2_host::EdgeCheckpointFetcher::new(
+            let fetcher = Arc::new(crate::host::chat2_host::EdgeCheckpointFetcher::new(
                 http.clone(),
                 edge.clone(),
                 chat.clone(),
             ));
-            let transport = Arc::new(crate::chat2_host::EdgeChatTransport::new(
+            let transport = Arc::new(crate::host::chat2_host::EdgeChatTransport::new(
                 http,
                 edge.clone(),
                 chat.clone(),
@@ -102,7 +102,7 @@ impl DocHost {
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = cypher_sync::wake::subscribe();
-            let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
+            let mut backoff = crate::host::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
                     return; // evicted or purged while dialing
@@ -218,7 +218,7 @@ impl DocHost {
                                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                                 },
-                                _ = crate::workspace_host::token_changed(&mut token_changes) => {
+                                _ = crate::host::workspace_host::token_changed(&mut token_changes) => {
                                     if edge.bearer().await.is_none() {
                                         if let Some(handle) = weak.upgrade() {
                                             lock(&handle.chat2).take();
@@ -244,14 +244,14 @@ impl DocHost {
                     }
                 }
                 tokio::select! {
-                    _ = tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()) => {
-                        backoff = (backoff * 2).min(crate::workspace_host::JOIN_RETRY_CAP);
+                    _ = tokio::time::sleep(backoff + crate::host::workspace_host::join_retry_jitter()) => {
+                        backoff = (backoff * 2).min(crate::host::workspace_host::JOIN_RETRY_CAP);
                     }
                     _ = wake.recv() => {
-                        backoff = crate::workspace_host::JOIN_RETRY_BASE;
+                        backoff = crate::host::workspace_host::JOIN_RETRY_BASE;
                     }
-                    _ = crate::workspace_host::token_changed(&mut token_changes) => {
-                        backoff = crate::workspace_host::JOIN_RETRY_BASE;
+                    _ = crate::host::workspace_host::token_changed(&mut token_changes) => {
+                        backoff = crate::host::workspace_host::JOIN_RETRY_BASE;
                     }
                 }
             }

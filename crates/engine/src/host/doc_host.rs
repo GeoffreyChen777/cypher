@@ -33,8 +33,8 @@ use cypher_doc::{
 use cypher_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
 use cypher_sync::DocsStore;
 
-use crate::sessions::{SessionsEngine, SteerOutcome};
-use crate::workspace_host::WorkspaceHost;
+use crate::host::workspace_host::WorkspaceHost;
+use crate::session::engine::{SessionsEngine, SteerOutcome};
 use crate::{EngineError, new_id, now_ms};
 
 mod chat2_sync;
@@ -83,7 +83,7 @@ pub struct EdgeConfig {
     /// The viewport's pending activity refresh, read by the registry presence
     /// beat so that refresh costs no request of its own. Default = an unshared
     /// slot that stays empty (tests, previews, headless sidecars).
-    pub viewport_activity: crate::viewport_activity::ViewportActivity,
+    pub viewport_activity: crate::host::viewport_activity::ViewportActivity,
 }
 
 impl std::fmt::Debug for EdgeConfig {
@@ -111,7 +111,7 @@ impl EdgeConfig {
     /// its periodic refresh instead of spending an HTTP request per beat.
     pub fn with_viewport_activity(
         mut self,
-        activity: crate::viewport_activity::ViewportActivity,
+        activity: crate::host::viewport_activity::ViewportActivity,
     ) -> Self {
         self.viewport_activity = activity;
         self
@@ -192,7 +192,7 @@ struct DocHostInner {
     sessions: Mutex<Option<SessionsEngine>>,
     workspace: OnceLock<WorkspaceHost>,
     /// Worktree materialization for Run commands (see `set_repos`).
-    repos: OnceLock<crate::repos::Repos>,
+    repos: OnceLock<crate::git::repos::Repos>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -610,7 +610,7 @@ impl DocHost {
 
     /// Wire the repos engine (engine assembly) — worktree materialization for
     /// Run commands carrying a [`cypher_proto::WorktreeSpec`].
-    pub fn set_repos(&self, repos: crate::repos::Repos) {
+    pub fn set_repos(&self, repos: crate::git::repos::Repos) {
         let _ = self.inner.repos.set(repos);
     }
 
@@ -647,7 +647,7 @@ impl DocHost {
         let mut chat2_cursor = 0u64;
         let mut requeue_commands: Vec<SessionCommandEntry> = Vec::new();
         let doc = match stored {
-            Some((bytes, cursor, epoch)) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH => {
+            Some((bytes, cursor, epoch)) if epoch >= crate::host::chat2_host::CHAT2_DOC_EPOCH => {
                 snapshot_len = bytes.len();
                 chat2_cursor = cursor;
                 let raw = loro::LoroDoc::new();
@@ -715,7 +715,7 @@ impl DocHost {
                         chat_id,
                         &snapshot,
                         0,
-                        crate::chat2_host::CHAT2_DOC_EPOCH,
+                        crate::host::chat2_host::CHAT2_DOC_EPOCH,
                     );
                 }
                 doc
@@ -907,7 +907,7 @@ impl DocHost {
             chat_id,
             &snapshot,
             0,
-            crate::chat2_host::CHAT2_DOC_EPOCH,
+            crate::host::chat2_host::CHAT2_DOC_EPOCH,
         )?;
         Ok(())
     }

@@ -35,9 +35,9 @@ use cypher_proto::{RunRequest, SideChatCreated, SideChatPromoted, SideChatSource
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::doc_host::DocHost;
-use crate::sessions::SessionsEngine;
-use crate::workspace_host::WorkspaceHost;
+use crate::host::doc_host::DocHost;
+use crate::host::workspace_host::WorkspaceHost;
+use crate::session::engine::SessionsEngine;
 use crate::{EngineError, new_id, now_ms};
 use cypher_proto::agent_prompt::AgentQuote;
 

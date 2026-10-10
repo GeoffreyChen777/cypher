@@ -3,7 +3,7 @@
 //! The control is device-scoped: the selected device owns both the Pi
 //! extension and the translation model credentials.
 
-use cypher_engine::pi_translation::{PiTranslationSettings, TranslationOutputMode};
+use cypher_engine::pi::translation::{PiTranslationSettings, TranslationOutputMode};
 use cypher_proto::Model;
 use cypher_rpc::methods;
 use gpui::{
@@ -26,7 +26,7 @@ use crate::{
 /// not answer "unknown", it answers with whichever language it does know, and a
 /// confident wrong answer is what lets a message be skipped as "already in the
 /// destination language". This list therefore tracks `LANGUAGES` in
-/// `cypher_engine::pi_translation` and `LANGUAGE_ALIASES` in the extension.
+/// `cypher_engine::pi::translation` and `LANGUAGE_ALIASES` in the extension.
 ///
 /// A language saved before this list was trimmed still shows its stored name
 /// here (the label falls back to the raw value) and still translates — the

@@ -1,7 +1,7 @@
 //! chat2 host wiring (docs/chat2-sync.md C3): the engine-side implementations
 //! of [`cypher_sync::chat_client::ChatDocSink`] and
 //! [`cypher_sync::chat_client::CheckpointFetcher`], binding a
-//! [`crate::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
+//! [`crate::host::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
 //!
 //! The C2 rule is enforced HERE: every sink method persists doc content AND
 //! the room cursor in one `save_snapshot_with_cursor` transaction, so a
@@ -15,7 +15,7 @@ use cypher_sync::chat_client::{ChatDocSink, ChatTransport, CheckpointFetcher};
 use cypher_sync::{DocsStore, SyncError};
 use futures::future::BoxFuture;
 
-use crate::doc_host::EdgeConfig;
+use crate::host::doc_host::EdgeConfig;
 
 /// Doc epoch stamped on every chat2-synced snapshot (docs/chat2-sync.md M1:
 /// thin docs are lineage epoch 2; readers discard-and-adopt below it).

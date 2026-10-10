@@ -14,66 +14,45 @@ use cypher_rpc::{RpcError, RpcReply, RpcService, methods};
 use cypher_sync::DocsStore;
 
 mod auth;
-pub mod chat2_host;
 mod device_identity;
-mod diff_sync;
-mod doc_host;
-pub mod github;
+pub mod git;
+pub mod host;
 mod instance_lock;
-pub mod local_import;
 pub mod mcp;
-mod notification_events;
-pub mod pi_packages;
-pub mod pi_providers;
-pub mod pi_runtime;
-pub mod pi_session_modes;
-pub mod pi_subagents;
-pub mod pi_translation;
+pub mod pi;
 mod profile;
 pub mod registry;
-pub mod repos;
 pub mod rpc;
-pub mod run_journal;
-mod scratch;
-pub mod session_forks;
-mod sessions;
-mod side_chats;
-mod spaces;
+pub mod session;
 mod terminals;
-mod title_settings;
-mod titles;
 mod uploads;
-mod viewport_activity;
-mod web_search_fallback;
-mod workspace_files;
-mod workspace_host;
 
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
-pub use diff_sync::{
+pub use git::diff_sync::{
     CheckoutDiffSync, capture_commit_diff, capture_diff, capture_diff_against, capture_turn_diff,
     merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
-pub use doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use git::repos::{Repos, worktree_branch_from_title};
+pub use host::doc_host::{ChatDocHandle, DocHost, DocHostConfig, EdgeConfig};
+pub use host::spaces::SpacesSync;
+pub use host::workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
 pub use instance_lock::InstanceLock;
 pub use profile::EngineProfile;
 pub use registry::{
     HarnessDescriptor, HarnessRegistry, default_registry, default_registry_with_bridge,
 };
-pub use repos::{Repos, worktree_branch_from_title};
-pub use run_journal::RunJournal;
-pub use session_forks::SessionForks;
-pub use sessions::{QuiesceWindows, SessionsEngine, SteerOutcome};
-pub use side_chats::bounded_transcript_context;
-pub use spaces::SpacesSync;
+pub use session::engine::{QuiesceWindows, SessionsEngine, SteerOutcome};
+pub use session::forks::SessionForks;
+pub use session::journal::RunJournal;
+pub use session::side_chats::bounded_transcript_context;
 pub use terminals::Terminals;
 pub use uploads::Uploads;
-pub use workspace_host::{DEFAULT_ORG_ID, DEFAULT_USER_ID, WorkspaceHost};
 
+use host::workspace_host::WorkspaceHostConfig;
 use registry::default_registry_with_bridge_and_runtime;
 use rpc::EngineRpc;
-use side_chats::SideChats;
-use titles::TitleGenerator;
-use workspace_host::WorkspaceHostConfig;
+use session::side_chats::SideChats;
+use session::titles::TitleGenerator;
 
 use device_identity::{load_or_create_device_id, local_device_name};
 
@@ -82,7 +61,7 @@ pub enum EngineError {
     #[error("doc: {0}")]
     Doc(#[from] cypher_doc::DocError),
     #[error("journal: {0}")]
-    Journal(#[from] run_journal::JournalError),
+    Journal(#[from] session::journal::JournalError),
     #[error("store: {0}")]
     Store(#[from] cypher_sync::StoreError),
     #[error("{}", harness_message(.0))]
@@ -184,11 +163,11 @@ pub struct EngineCore {
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
-    pub title_settings: title_settings::TitleSettingsStore,
+    pub title_settings: session::title_settings::TitleSettingsStore,
     /// This device's GitHub sign-in (device-scoped).
-    pub github: github::Github,
+    pub github: git::github::Github,
     mcp_logins: Arc<mcp::login::Logins>,
-    provider_logins: Arc<pi_providers::Logins>,
+    provider_logins: Arc<pi::providers::Logins>,
     /// Temporary Side Chats: engine-hosted chats opened from a
     /// settled selection. Owned HERE (not by [`EngineRpc`]) so every RPC
     /// service built from this core shares one manager and shutdown reaps
@@ -199,7 +178,7 @@ pub struct EngineCore {
     pub session_forks: SessionForks,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
-    pub local_import: Option<local_import::LocalImporter>,
+    pub local_import: Option<host::local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -209,7 +188,7 @@ pub struct EngineCore {
     /// UpdateStatus stream + ApplyUpdate.
     updater: std::sync::Mutex<Option<cypher_update::Updater>>,
     /// Downloaded, Cypher-owned Pi runtime + six-hour runtime update checker.
-    pi_runtime: std::sync::Mutex<Option<pi_runtime::PiRuntimeManager>>,
+    pi_runtime: std::sync::Mutex<Option<pi::runtime::PiRuntimeManager>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Reloads Pi discovery + parked sessions after a background Runtime
@@ -341,13 +320,16 @@ impl EngineCore {
         // profile's uploads root read-only — transcripts imported earlier
         // embed absolute paths under it (same shape as the legacy adoption).
         if profile.scope() != WorkspaceScope::Local
-            && let Some(root) =
-                local_import::marker_grants_read_root(data_dir, profile.org_id(), profile.user_id())
+            && let Some(root) = host::local_import::marker_grants_read_root(
+                data_dir,
+                profile.org_id(),
+                profile.user_id(),
+            )
         {
             uploads.add_read_only_root(&root);
         }
         let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
-            local_import::LocalImporter::new(
+            host::local_import::LocalImporter::new(
                 data_dir,
                 &device_id,
                 profile.org_id(),
@@ -358,8 +340,8 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let title_settings = title_settings::TitleSettingsStore::new(data_dir);
-        let github = github::Github::new(github::GithubConfig::detect(), data_dir);
+        let title_settings = session::title_settings::TitleSettingsStore::new(data_dir);
+        let github = git::github::Github::new(git::github::GithubConfig::detect(), data_dir);
         sessions.set_titles(
             TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone())
                 .with_settings(title_settings.clone()),
@@ -409,7 +391,7 @@ impl EngineCore {
         let workspace = self.workspace.clone();
         let expected_user = workspace.user_id().to_string();
         let expected_org = workspace.org_id().to_string();
-        workspace.set_notification_event_hook(notification_events::hook(
+        workspace.set_notification_event_hook(host::notification_events::hook(
             auth.clone(),
             expected_user,
             expected_org,
@@ -481,7 +463,7 @@ impl EngineCore {
     /// Install RPC path does, or the harness keeps serving the previous
     /// bundle's model catalog (minus any newly bundled provider) until the
     /// engine restarts.
-    pub fn set_pi_runtime(&self, runtime: pi_runtime::PiRuntimeManager) {
+    pub fn set_pi_runtime(&self, runtime: pi::runtime::PiRuntimeManager) {
         let registry = self.registry.clone();
         let sessions = self.sessions.clone();
         let reload = runtime.spawn_reload_on_install(move || {
@@ -507,7 +489,7 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
     }
 
-    pub fn pi_runtime(&self) -> Option<pi_runtime::PiRuntimeManager> {
+    pub fn pi_runtime(&self) -> Option<pi::runtime::PiRuntimeManager> {
         self.pi_runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -936,7 +918,7 @@ impl Engine {
         // first-run installation. No system Pi fallback: publishing the
         // `current` symlink makes the lazy harness become installed.
         let pi_runtime_data_dir = profile.device_root().to_path_buf();
-        let pi_runtime_paths = pi_runtime::PiRuntimePaths::for_data_dir(profile.device_root());
+        let pi_runtime_paths = pi::runtime::PiRuntimePaths::for_data_dir(profile.device_root());
         // The engine-bridge URL every pi child gets as `CYPHER_ENGINE_SOCKET`:
         // this runtime's own IPC WebSocket (`serve_ipc` binds the same port in
         // headless and headed modes). Test-only `EngineCore::assemble` keeps
@@ -1019,7 +1001,7 @@ impl Engine {
         }
         core.set_updater(updater);
         let pi_runtime =
-            pi_runtime::PiRuntimeManager::spawn(config.edge_url.clone(), &pi_runtime_data_dir);
+            pi::runtime::PiRuntimeManager::spawn(config.edge_url.clone(), &pi_runtime_data_dir);
         // Assembly holds the data-dir instance lock, so no other engine has Pi
         // children running from this runtime tree: keep only the live bundle.
         pi_runtime.enable_cleanup();

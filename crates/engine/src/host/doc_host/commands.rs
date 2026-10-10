@@ -343,7 +343,7 @@ impl DocHost {
         // Reuse: the chat already runs inside a linked worktree of this repo.
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
-            && let Some(cwd) = chat.cwd.map(|cwd| crate::repos::expand_home(&cwd))
+            && let Some(cwd) = chat.cwd.map(|cwd| crate::git::repos::expand_home(&cwd))
             && cwd != spec.repo_path
             && repos
                 .workspace_checkout(
@@ -378,11 +378,11 @@ impl DocHost {
     }
 
     /// The chat row's current model settings, if the row has a config.
-    fn chat_launch_config(&self, chat_id: &str) -> Option<crate::sessions::LaunchConfig> {
+    fn chat_launch_config(&self, chat_id: &str) -> Option<crate::session::engine::LaunchConfig> {
         let chat = self.workspace()?.chat(chat_id).ok().flatten()?;
         chat.config
             .as_ref()
-            .map(crate::sessions::LaunchConfig::of_chat)
+            .map(crate::session::engine::LaunchConfig::of_chat)
     }
 
     /// A steer-turned-run with no in-process `last_request` (engine restarted

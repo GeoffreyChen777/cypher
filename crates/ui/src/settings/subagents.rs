@@ -6,7 +6,7 @@
 //! runtime), so this page is device-targeted like Agents/MCP/Commands.
 //!
 //! Two facts from the extension shape the whole surface and are surfaced
-//! rather than hidden (see `cypher_engine::pi_subagents`):
+//! rather than hidden (see `cypher_engine::pi::subagents`):
 //!
 //! - built-ins ship inside the extension package, and a user profile of the
 //!   same name overrides one. So editing a built-in writes an override, and
@@ -38,7 +38,7 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 
-use cypher_engine::pi_subagents::PiSubagent;
+use cypher_engine::pi::subagents::PiSubagent;
 use cypher_proto::Model;
 use cypher_rpc::methods;
 

@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::pi_runtime::PiRuntimePaths;
+use crate::pi::runtime::PiRuntimePaths;
 
 /// The npm package that implements subagents and ships the built-in profiles.
 const EXTENSION_PACKAGE: &str = "pi-agent-squad";

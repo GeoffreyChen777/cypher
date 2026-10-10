@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use cypher_harness::Harness;
 
-use crate::pi_runtime::PiRuntimePaths;
+use crate::pi::runtime::PiRuntimePaths;
 
 mod config;
 mod legacy;
@@ -89,7 +89,7 @@ pub fn unavailable(paths: &PiRuntimePaths) -> Option<String> {
     {
         return Some("Install or update the Pi Runtime in Agents to use MCP servers.".into());
     }
-    crate::pi_packages::enabled(paths, "npm:pi-mcp-adapter").then(|| {
+    crate::pi::packages::enabled(paths, "npm:pi-mcp-adapter").then(|| {
         "pi-mcp-adapter replaces Pi's built-in MCP. Disable it in Agents to manage MCP servers here."
             .into()
     })

@@ -31,16 +31,16 @@ use cypher_proto::{
 use cypher_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::auth::Auth;
-use crate::diff_sync::CheckoutDiffSync;
-use crate::doc_host::DocHost;
+use crate::git::diff_sync::CheckoutDiffSync;
+use crate::git::repos::{Repos, expand_home, home_dir};
+use crate::host::doc_host::DocHost;
+use crate::host::workspace_host::WorkspaceHost;
 use crate::registry::HarnessRegistry;
-use crate::repos::{Repos, expand_home, home_dir};
-use crate::session_forks::SessionForks;
-use crate::sessions::SessionsEngine;
-use crate::side_chats::SideChats;
+use crate::session::engine::SessionsEngine;
+use crate::session::forks::SessionForks;
+use crate::session::side_chats::SideChats;
 use crate::terminals::Terminals;
 use crate::uploads::Uploads;
-use crate::workspace_host::WorkspaceHost;
 
 mod chats;
 mod diffs;
@@ -87,12 +87,12 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<cypher_update::Updater>,
-    pi_runtime: Option<crate::pi_runtime::PiRuntimeManager>,
+    pi_runtime: Option<crate::pi::runtime::PiRuntimeManager>,
     mcp_logins: std::sync::Arc<crate::mcp::login::Logins>,
-    provider_logins: std::sync::Arc<crate::pi_providers::Logins>,
-    local_import: Option<crate::local_import::LocalImporter>,
-    title_settings: Option<crate::title_settings::TitleSettingsStore>,
-    github: Option<crate::github::Github>,
+    provider_logins: std::sync::Arc<crate::pi::providers::Logins>,
+    local_import: Option<crate::host::local_import::LocalImporter>,
+    title_settings: Option<crate::session::title_settings::TitleSettingsStore>,
+    github: Option<crate::git::github::Github>,
     engine_info: EngineInfo,
     /// Serializes `StartSubagent` (create-child scan → row → initial-run queue)
     /// so concurrent starts of the same `(parentChatId, runId)` cannot race the
@@ -107,7 +107,7 @@ impl EngineRpc {
     }
     pub fn with_provider_logins(
         mut self,
-        logins: std::sync::Arc<crate::pi_providers::Logins>,
+        logins: std::sync::Arc<crate::pi::providers::Logins>,
     ) -> Self {
         self.provider_logins = logins;
         self
@@ -158,19 +158,19 @@ impl EngineRpc {
     /// Share the device's title preferences with the automatic title runner.
     pub fn with_title_settings(
         mut self,
-        settings: crate::title_settings::TitleSettingsStore,
+        settings: crate::session::title_settings::TitleSettingsStore,
     ) -> Self {
         self.title_settings = Some(settings);
         self
     }
 
     /// This device's GitHub sign-in and API access.
-    pub fn with_github(mut self, github: crate::github::Github) -> Self {
+    pub fn with_github(mut self, github: crate::git::github::Github) -> Self {
         self.github = Some(github);
         self
     }
 
-    fn github(&self) -> Result<&crate::github::Github, RpcError> {
+    fn github(&self) -> Result<&crate::git::github::Github, RpcError> {
         self.github
             .as_ref()
             .ok_or_else(|| RpcError::Failed("GitHub isn't available on this engine".into()))
@@ -194,13 +194,13 @@ impl EngineRpc {
         self
     }
 
-    pub fn with_pi_runtime(mut self, runtime: crate::pi_runtime::PiRuntimeManager) -> Self {
+    pub fn with_pi_runtime(mut self, runtime: crate::pi::runtime::PiRuntimeManager) -> Self {
         self.pi_runtime = Some(runtime);
         self
     }
 
     /// Attach the local→synced profile importer (synced runtimes only).
-    pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
+    pub fn with_local_import(mut self, importer: crate::host::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
     }
@@ -217,7 +217,7 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
     }
 
-    fn pi_runtime(&self) -> Result<&crate::pi_runtime::PiRuntimeManager, RpcError> {
+    fn pi_runtime(&self) -> Result<&crate::pi::runtime::PiRuntimeManager, RpcError> {
         self.pi_runtime
             .as_ref()
             .ok_or_else(|| RpcError::Failed("Pi Runtime unavailable".into()))
@@ -254,7 +254,7 @@ impl EngineRpc {
         Ok(())
     }
 
-    fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
+    fn local_importer(&self) -> Result<&crate::host::local_import::LocalImporter, RpcError> {
         self.local_import
             .as_ref()
             .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
@@ -367,7 +367,7 @@ fn preflight(method: &str, params: &serde_json::Value) -> Result<(), RpcError> {
     if method == methods::SAVE_PI_PROVIDER {
         // Validate before forwarding, without echoing malformed credentials.
         let body = strip_target(params.clone());
-        serde_json::from_value::<crate::pi_providers::SaveProvider>(body)
+        serde_json::from_value::<crate::pi::providers::SaveProvider>(body)
             .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
     }
     if method == methods::ADD_MCP_SERVERS {
@@ -759,7 +759,7 @@ impl RpcService for EngineRpc {
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::SET_HARNESS_ENABLED => harnesses::set_harness_enabled(self, params),
             methods::LIST_PI_PACKAGES => {
-                RpcReply::value(&crate::pi_packages::list(self.pi_runtime()?.paths()))
+                RpcReply::value(&crate::pi::packages::list(self.pi_runtime()?.paths()))
             }
             methods::INSTALL_PI => pi::install_pi(self).await,
             methods::INSTALL_PI_PACKAGE => pi::install_pi_package(self, params).await,
@@ -794,9 +794,9 @@ impl RpcService for EngineRpc {
             }
             methods::START_MCP_AUTH => mcp::start_mcp_auth(self, params).await,
             methods::LOGOUT_MCP_SERVER => mcp::logout_mcp_server(self, params).await,
-            methods::GET_WEB_SEARCH_FALLBACK => RpcReply::value(&crate::web_search_fallback::load(
-                self.pi_runtime()?.paths(),
-            )),
+            methods::GET_WEB_SEARCH_FALLBACK => {
+                RpcReply::value(&crate::pi::web_search::load(self.pi_runtime()?.paths()))
+            }
             methods::SET_WEB_SEARCH_FALLBACK => {
                 settings::set_web_search_fallback(self, params).await
             }
@@ -908,13 +908,13 @@ impl RpcService for EngineRpc {
             methods::DELETE_WORKTREE => repos::delete_worktree(self, params).await,
             methods::CREATE_SCRATCH_DIR => {
                 let p: ChatParams = parse_params(params)?;
-                let path = crate::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
+                let path = crate::session::scratch::create(&p.chat_id).map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "path": path }))
             }
             methods::DELETE_SCRATCH_DIR => {
                 let p: DeleteScratchDirParams = parse_params(params)?;
-                let removed =
-                    crate::scratch::delete(&p.chat_id, &p.path).map_err(RpcError::Failed)?;
+                let removed = crate::session::scratch::delete(&p.chat_id, &p.path)
+                    .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "removed": removed }))
             }
             methods::OPEN_TERMINAL => terminals::open_terminal(self, params),

@@ -576,7 +576,7 @@ print(json.dumps({{"ok":True,"data":{{"providers":[{{
     );
     std::fs::write(current.join("provider-service.mjs"), helper).unwrap();
     let runtime =
-        cypher_engine::pi_runtime::PiRuntimeManager::spawn("http://127.0.0.1:1".into(), dir);
+        cypher_engine::pi::runtime::PiRuntimeManager::spawn("http://127.0.0.1:1".into(), dir);
     std::fs::write(
         runtime.paths().agent_dir.join("mcp.json"),
         serde_json::to_vec(&serde_json::json!({

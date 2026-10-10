@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use cypher_doc::{MessagePart, MessageRole, SessionDoc, SessionMessageEntry};
 
-use cypher_engine::local_import::{ImportEvent, marker_grants_read_root};
-use cypher_engine::run_journal::journal_paths;
+use cypher_engine::host::local_import::{ImportEvent, marker_grants_read_root};
+use cypher_engine::session::journal::journal_paths;
 use cypher_engine::{EngineCore, EngineProfile, HarnessId, default_registry};
 
 fn assemble(profile: EngineProfile) -> EngineCore {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use cypher_proto::{Session, SessionStatus, SubagentRunMode, SubagentRunStatus};
 use futures::future::BoxFuture;
 
-use crate::{auth::Auth, workspace_host::NotificationEventHook};
+use crate::{auth::Auth, host::workspace_host::NotificationEventHook};
 
 #[derive(PartialEq)]
 struct Signature {

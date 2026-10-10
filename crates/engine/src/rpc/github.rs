@@ -9,7 +9,7 @@ pub(super) async fn search_github_issues(
     params: Value,
 ) -> Result<RpcReply, RpcError> {
     let p: FileSearchParams = parse_params(params)?;
-    if p.query.chars().count() > crate::github::MAX_QUERY_CHARS {
+    if p.query.chars().count() > crate::git::github::MAX_QUERY_CHARS {
         return Err(RpcError::BadParams(
             "SearchGithubIssues query must not exceed 256 characters".into(),
         ));
@@ -25,7 +25,7 @@ pub(super) async fn search_github_issues(
 
 pub(super) async fn get_github_issue(rpc: &EngineRpc, params: Value) -> Result<RpcReply, RpcError> {
     let p: GithubIssueParams = parse_params(params)?;
-    if !crate::github::valid_repo(&p.repo) || p.number == 0 {
+    if !crate::git::github::valid_repo(&p.repo) || p.number == 0 {
         return Err(RpcError::BadParams("invalid GitHub issue reference".into()));
     }
     let snapshot = rpc

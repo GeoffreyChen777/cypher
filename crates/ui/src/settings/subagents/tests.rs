@@ -1,7 +1,7 @@
 use super::*;
 use crate::settings::setup::tests::pump_until;
-use cypher_engine::pi_runtime::PiRuntimePaths;
-use cypher_engine::pi_subagents;
+use cypher_engine::pi::runtime::PiRuntimePaths;
+use cypher_engine::pi::subagents as pi_subagents;
 use gpui::AppContext;
 use std::sync::Arc;
 

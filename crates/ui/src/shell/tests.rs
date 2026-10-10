@@ -952,7 +952,7 @@ fn update_strip_presentation() {
 
 #[test]
 fn pi_update_strip_presentation() {
-    use cypher_engine::pi_packages::{PiPackageUpdate, PiUpdateStatus};
+    use cypher_engine::pi::packages::{PiPackageUpdate, PiUpdateStatus};
 
     let status = |pi: bool, packages: usize, applying: bool, error: Option<&str>| PiUpdateStatus {
         pi_installed: true,
@@ -992,7 +992,7 @@ fn pi_update_strip_presentation() {
 
 #[test]
 fn about_runtime_line_reports_the_manual_runtime_check() {
-    use cypher_engine::pi_packages::{PiPackageUpdate, PiUpdateStatus};
+    use cypher_engine::pi::packages::{PiPackageUpdate, PiUpdateStatus};
 
     let status = |pi: bool, packages: usize, applying: bool, error: Option<&str>| PiUpdateStatus {
         pi_installed: true,

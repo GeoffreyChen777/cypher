@@ -31,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use cypher_proto::Space;
 
-use crate::repos::Repos;
-use crate::workspace_host::WorkspaceHost;
+use crate::git::repos::Repos;
+use crate::host::workspace_host::WorkspaceHost;
 
 /// Trailing debounce after a filesystem event burst.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);

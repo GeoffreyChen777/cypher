@@ -39,10 +39,10 @@ use cypher_proto::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::EngineError;
-use crate::doc_host::DocHost;
+use crate::host::doc_host::DocHost;
+use crate::host::workspace_host::WorkspaceHost;
 use crate::registry::HarnessRegistry;
-use crate::sessions::SessionsEngine;
-use crate::workspace_host::WorkspaceHost;
+use crate::session::engine::SessionsEngine;
 
 /// Title bound for `<source title> — Fork` (chars).
 const MAX_FORK_TITLE_CHARS: usize = 120;
@@ -498,7 +498,7 @@ impl SessionForks {
         let session_cwd = chat
             .harness_session_cwd
             .clone()
-            .or_else(|| chat.cwd.as_deref().map(crate::repos::expand_home))
+            .or_else(|| chat.cwd.as_deref().map(crate::git::repos::expand_home))
             .unwrap_or_default();
         self.inner.sessions.rebind_harness_session(
             &chat.id,
@@ -580,7 +580,8 @@ impl SessionForks {
                 // The stored session cwd is the harness's REAL directory, so the
                 // row's `~` must be expanded before the two can compare equal.
                 c.is_empty()
-                    || chat.cwd.as_deref().map(crate::repos::expand_home) == Some(c.to_string())
+                    || chat.cwd.as_deref().map(crate::git::repos::expand_home)
+                        == Some(c.to_string())
             });
         if !session_ok {
             return Ok(Err(unavail(

@@ -351,7 +351,7 @@ pub(super) fn mention_links(text: &str) -> Vec<MentionLink> {
                 let parsed = number.parse::<u64>().ok().filter(|n| *n > 0)?;
                 // Canonical only: no leading zeros, and the chip must read
                 // as the issue it points at.
-                (cypher_engine::github::valid_repo(repo)
+                (cypher_engine::git::github::valid_repo(repo)
                     && parsed.to_string() == number
                     && (raw_label == format!("#{parsed}")
                         || raw_label.starts_with(&format!("#{parsed} "))))

@@ -29,7 +29,7 @@ use cypher_proto::{
 };
 use cypher_sync::{DocsStore, RegistryClient, RegistryTransport, RegistryTuning, SyncError};
 
-use crate::doc_host::EdgeConfig;
+use crate::host::doc_host::EdgeConfig;
 use crate::{EngineError, now_ms};
 
 /// Outcome of the idempotent [`WorkspaceHost::create_child_chat`] — lets the

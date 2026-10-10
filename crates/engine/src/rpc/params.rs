@@ -252,7 +252,7 @@ pub(super) struct StartSubagentParams {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SavePiSubagentParams {
     #[serde(flatten)]
-    pub(super) agent: crate::pi_subagents::PiSubagent,
+    pub(super) agent: crate::pi::subagents::PiSubagent,
     #[serde(default)]
     pub(super) original_name: Option<String>,
 }
@@ -435,7 +435,7 @@ pub(super) struct GitHistoryParams {
 }
 
 fn default_git_history_limit() -> usize {
-    crate::repos::GIT_HISTORY_DEFAULT_LIMIT
+    crate::git::repos::GIT_HISTORY_DEFAULT_LIMIT
 }
 
 #[derive(Debug, Deserialize)]

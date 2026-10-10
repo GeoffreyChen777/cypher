@@ -351,7 +351,7 @@ pub fn default_registry_with_bridge(
 pub fn default_registry_with_bridge_and_runtime(
     pi_sessions_root: PathBuf,
     engine_socket: Option<String>,
-    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+    runtime: Option<crate::pi::runtime::PiRuntimePaths>,
 ) -> HarnessRegistry {
     let registry = default_registry_with_runtime(pi_sessions_root.clone(), runtime.clone());
     if let Some(url) = engine_socket {
@@ -387,7 +387,7 @@ pub fn default_registry(pi_sessions_root: PathBuf) -> HarnessRegistry {
 
 fn default_registry_with_runtime(
     pi_sessions_root: PathBuf,
-    runtime: Option<crate::pi_runtime::PiRuntimePaths>,
+    runtime: Option<crate::pi::runtime::PiRuntimePaths>,
 ) -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // CLI resolve doesn't pay the shell-startup latency inline.

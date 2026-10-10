@@ -10,7 +10,7 @@ pub(super) async fn install_pi(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
         .await
         .map_err(RpcError::Failed)?;
     rpc.registry.invalidate_discovery(HarnessId::Pi);
-    RpcReply::value(&crate::pi_packages::list(rpc.pi_runtime()?.paths()))
+    RpcReply::value(&crate::pi::packages::list(rpc.pi_runtime()?.paths()))
 }
 
 pub(super) async fn install_pi_package(
@@ -18,27 +18,27 @@ pub(super) async fn install_pi_package(
     params: Value,
 ) -> Result<RpcReply, RpcError> {
     let p: PiPackageParams = parse_params(params)?;
-    crate::pi_packages::install_package(rpc.pi_runtime()?.paths(), &p.source)
+    crate::pi::packages::install_package(rpc.pi_runtime()?.paths(), &p.source)
         .await
         .map_err(RpcError::Failed)?;
     rpc.reload_pi_runtime().await;
-    RpcReply::value(&crate::pi_packages::list(rpc.pi_runtime()?.paths()))
+    RpcReply::value(&crate::pi::packages::list(rpc.pi_runtime()?.paths()))
 }
 
 pub(super) async fn set_pi_package_enabled(
     rpc: &EngineRpc,
     params: Value,
 ) -> Result<RpcReply, RpcError> {
-    let p: crate::pi_packages::SetPackageEnabled = parse_params(params)?;
-    crate::pi_packages::set_package_enabled(rpc.pi_runtime()?.paths(), p)
+    let p: crate::pi::packages::SetPackageEnabled = parse_params(params)?;
+    crate::pi::packages::set_package_enabled(rpc.pi_runtime()?.paths(), p)
         .map_err(RpcError::Failed)?;
     rpc.reload_pi_runtime().await;
-    RpcReply::value(&crate::pi_packages::list(rpc.pi_runtime()?.paths()))
+    RpcReply::value(&crate::pi::packages::list(rpc.pi_runtime()?.paths()))
 }
 
 pub(super) async fn list_pi_subagents(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
     let paths = rpc.pi_runtime()?.paths().clone();
-    let agents = crate::off_runtime(move || crate::pi_subagents::list(&paths))
+    let agents = crate::off_runtime(move || crate::pi::subagents::list(&paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -51,7 +51,7 @@ pub(super) async fn save_pi_subagent(rpc: &EngineRpc, params: Value) -> Result<R
     let paths = rpc.pi_runtime()?.paths().clone();
     let list_paths = paths.clone();
     crate::off_runtime(move || {
-        crate::pi_subagents::save(&paths, &request.agent, request.original_name.as_deref())
+        crate::pi::subagents::save(&paths, &request.agent, request.original_name.as_deref())
     })
     .await
     .map_err(RpcError::Failed)?
@@ -59,7 +59,7 @@ pub(super) async fn save_pi_subagent(rpc: &EngineRpc, params: Value) -> Result<R
     // The next child spawn has to read the new profile, and the
     // extension loads `agents/` once per process.
     rpc.reload_pi_runtime().await;
-    let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
+    let agents = crate::off_runtime(move || crate::pi::subagents::list(&list_paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -73,12 +73,12 @@ pub(super) async fn delete_pi_subagent(
     let request: DeletePiSubagentParams = parse_params(body)?;
     let paths = rpc.pi_runtime()?.paths().clone();
     let list_paths = paths.clone();
-    crate::off_runtime(move || crate::pi_subagents::delete(&paths, &request.name))
+    crate::off_runtime(move || crate::pi::subagents::delete(&paths, &request.name))
         .await
         .map_err(RpcError::Failed)?
         .map_err(RpcError::BadParams)?;
     rpc.reload_pi_runtime().await;
-    let agents = crate::off_runtime(move || crate::pi_subagents::list(&list_paths))
+    let agents = crate::off_runtime(move || crate::pi::subagents::list(&list_paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&agents)
@@ -86,7 +86,7 @@ pub(super) async fn delete_pi_subagent(
 
 pub(super) async fn get_pi_translation_settings(rpc: &EngineRpc) -> Result<RpcReply, RpcError> {
     let paths = rpc.pi_runtime()?.paths().clone();
-    let settings = crate::off_runtime(move || crate::pi_translation::load(&paths))
+    let settings = crate::off_runtime(move || crate::pi::translation::load(&paths))
         .await
         .map_err(RpcError::Failed)?;
     RpcReply::value(&settings)
@@ -97,11 +97,11 @@ pub(super) async fn set_pi_translation_settings(
     params: Value,
 ) -> Result<RpcReply, RpcError> {
     let body = strip_target(params);
-    let settings: crate::pi_translation::PiTranslationSettings = parse_params(body)?;
+    let settings: crate::pi::translation::PiTranslationSettings = parse_params(body)?;
     settings.validate().map_err(RpcError::BadParams)?;
     let paths = rpc.pi_runtime()?.paths().clone();
     let previous_paths = paths.clone();
-    let previous = crate::off_runtime(move || crate::pi_translation::load(&previous_paths))
+    let previous = crate::off_runtime(move || crate::pi::translation::load(&previous_paths))
         .await
         .map_err(RpcError::Failed)?;
     // Language/display changes and deselection need no model
@@ -115,7 +115,7 @@ pub(super) async fn set_pi_translation_settings(
         )
         .await?;
     }
-    let saved = crate::off_runtime(move || crate::pi_translation::save(&paths, settings))
+    let saved = crate::off_runtime(move || crate::pi::translation::save(&paths, settings))
         .await
         .and_then(|result| result)
         .map_err(RpcError::Failed)?;
@@ -131,7 +131,7 @@ pub(super) fn detect_pi_language(params: Value) -> Result<RpcReply, RpcError> {
             "Text is too long for offline language detection".into(),
         ));
     }
-    RpcReply::value(&crate::pi_translation::detect_language(&p.text))
+    RpcReply::value(&crate::pi::translation::detect_language(&p.text))
 }
 
 pub(super) async fn pi_provider(
@@ -145,7 +145,7 @@ pub(super) async fn pi_provider(
     let (action, args) = match method {
         methods::LIST_PI_PROVIDERS => ("list", serde_json::json!({})),
         methods::SAVE_PI_PROVIDER => {
-            let p = serde_json::from_value::<crate::pi_providers::SaveProvider>(params)
+            let p = serde_json::from_value::<crate::pi::providers::SaveProvider>(params)
                 .map_err(|_| RpcError::BadParams("Invalid provider settings.".into()))?;
             (
                 "save",
@@ -166,7 +166,7 @@ pub(super) async fn pi_provider(
             (action, serde_json::json!({ "id": id }))
         }
     };
-    let result = crate::pi_providers::request(rpc.pi_runtime()?.paths(), action, args).await;
+    let result = crate::pi::providers::request(rpc.pi_runtime()?.paths(), action, args).await;
     // Even a partially completed disk operation needs cache invalidation.
     if action != "list" {
         rpc.reload_pi_runtime().await;
@@ -226,7 +226,7 @@ pub(super) async fn pi_session_modes(rpc: &EngineRpc, params: Value) -> Result<R
             .chat_id
             .as_deref()
             .and_then(|chat_id| sessions.pi_session_file(chat_id));
-        crate::pi_session_modes::read(session.as_deref(), &agent_dir)
+        crate::pi::session_modes::read(session.as_deref(), &agent_dir)
     })
     .await
     .map_err(RpcError::Failed)?;

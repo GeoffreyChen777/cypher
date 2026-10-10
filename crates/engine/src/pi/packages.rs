@@ -118,11 +118,11 @@ const RECOMMENDED: &[(&str, &str)] = &[
     ("npm:pi-provider-newapi", "Additional provider integration."),
 ];
 
-fn settings_path(paths: &crate::pi_runtime::PiRuntimePaths) -> PathBuf {
+fn settings_path(paths: &crate::pi::runtime::PiRuntimePaths) -> PathBuf {
     paths.agent_dir.join("settings.json")
 }
 
-fn npm_dir(paths: &crate::pi_runtime::PiRuntimePaths) -> PathBuf {
+fn npm_dir(paths: &crate::pi::runtime::PiRuntimePaths) -> PathBuf {
     paths.agent_dir.join("npm/node_modules")
 }
 
@@ -155,22 +155,22 @@ fn package_at(root: &Path, name: &str) -> PathBuf {
     }
 }
 
-fn user_package_dir(paths: &crate::pi_runtime::PiRuntimePaths, name: &str) -> PathBuf {
+fn user_package_dir(paths: &crate::pi::runtime::PiRuntimePaths, name: &str) -> PathBuf {
     package_at(&npm_dir(paths), name)
 }
 
-fn bundled_package_dir(paths: &crate::pi_runtime::PiRuntimePaths, name: &str) -> PathBuf {
+fn bundled_package_dir(paths: &crate::pi::runtime::PiRuntimePaths, name: &str) -> PathBuf {
     package_at(&paths.current.join("npm/node_modules"), name)
 }
 
-fn bundled_source(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> Option<String> {
+fn bundled_source(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> Option<String> {
     let path = bundled_package_dir(paths, &source_name(source));
     path.join("package.json")
         .is_file()
         .then(|| path.display().to_string())
 }
 
-fn bundled_setting(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> Option<Value> {
+fn bundled_setting(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> Option<Value> {
     let name = source_name(source);
     let source = bundled_source(paths, source)?;
     Some(if name == "pi-permission-control" {
@@ -183,18 +183,18 @@ fn bundled_setting(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> O
     })
 }
 
-fn npm(paths: &crate::pi_runtime::PiRuntimePaths) -> Option<PathBuf> {
+fn npm(paths: &crate::pi::runtime::PiRuntimePaths) -> Option<PathBuf> {
     paths
         .npm_executable
         .is_file()
         .then(|| paths.npm_executable.clone())
 }
 
-fn pi(paths: &crate::pi_runtime::PiRuntimePaths) -> Option<PathBuf> {
+fn pi(paths: &crate::pi::runtime::PiRuntimePaths) -> Option<PathBuf> {
     paths.executable.is_file().then(|| paths.executable.clone())
 }
 
-fn configured_packages(paths: &crate::pi_runtime::PiRuntimePaths) -> Vec<Value> {
+fn configured_packages(paths: &crate::pi::runtime::PiRuntimePaths) -> Vec<Value> {
     let path = settings_path(paths);
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -215,12 +215,12 @@ fn value_source(value: &Value) -> Option<String> {
 }
 
 /// Whether a curated package is shipped by the active Runtime bundle.
-pub fn bundled(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> bool {
+pub fn bundled(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> bool {
     bundled_source(paths, source).is_some()
 }
 
 /// Whether a package is listed (and not `autoload: false`) in `settings.json`.
-pub fn enabled(paths: &crate::pi_runtime::PiRuntimePaths, source: &str) -> bool {
+pub fn enabled(paths: &crate::pi::runtime::PiRuntimePaths, source: &str) -> bool {
     package_enabled(source, &configured_packages(paths))
 }
 
@@ -235,7 +235,7 @@ fn package_enabled(source: &str, values: &[Value]) -> bool {
 }
 
 fn manifest(
-    paths: &crate::pi_runtime::PiRuntimePaths,
+    paths: &crate::pi::runtime::PiRuntimePaths,
     name: &str,
 ) -> (Option<String>, Option<String>) {
     let bundled = bundled_package_dir(paths, name);
@@ -263,7 +263,7 @@ fn manifest(
     )
 }
 
-pub fn list(paths: &crate::pi_runtime::PiRuntimePaths) -> PiPackagesSnapshot {
+pub fn list(paths: &crate::pi::runtime::PiRuntimePaths) -> PiPackagesSnapshot {
     let configured = configured_packages(paths);
     let mut sources: Vec<String> = RECOMMENDED.iter().map(|(s, _)| (*s).to_string()).collect();
     for value in &configured {
@@ -376,7 +376,7 @@ async fn run(exe: &Path, mut command: Command) -> Result<(), String> {
 }
 
 pub async fn install_package(
-    paths: &crate::pi_runtime::PiRuntimePaths,
+    paths: &crate::pi::runtime::PiRuntimePaths,
     source: &str,
 ) -> Result<(), String> {
     if !source.starts_with("npm:") {
@@ -399,7 +399,7 @@ pub async fn install_package(
     run(&pi, command).await
 }
 
-fn write_settings(paths: &crate::pi_runtime::PiRuntimePaths, value: Value) -> Result<(), String> {
+fn write_settings(paths: &crate::pi::runtime::PiRuntimePaths, value: Value) -> Result<(), String> {
     let path = settings_path(paths);
     let parent = path
         .parent()
@@ -413,7 +413,7 @@ fn write_settings(paths: &crate::pi_runtime::PiRuntimePaths, value: Value) -> Re
 }
 
 pub fn set_package_enabled(
-    paths: &crate::pi_runtime::PiRuntimePaths,
+    paths: &crate::pi::runtime::PiRuntimePaths,
     params: SetPackageEnabled,
 ) -> Result<(), String> {
     let path = settings_path(paths);
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn settings_path_is_inside_the_cypher_runtime_root() {
         let paths =
-            crate::pi_runtime::PiRuntimePaths::for_data_dir(Path::new("/tmp/cypher-isolated"));
+            crate::pi::runtime::PiRuntimePaths::for_data_dir(Path::new("/tmp/cypher-isolated"));
         assert_eq!(
             settings_path(&paths),
             Path::new("/tmp/cypher-isolated/pi-runtime/agent/settings.json")
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn enabling_a_bundled_package_uses_the_stable_runtime_path() {
         let temp = tempfile::tempdir().unwrap();
-        let paths = crate::pi_runtime::PiRuntimePaths::for_data_dir(temp.path());
+        let paths = crate::pi::runtime::PiRuntimePaths::for_data_dir(temp.path());
         let package = paths.current.join("npm/node_modules/pi-web-search");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::pi_runtime::PiRuntimePaths;
+use crate::pi::runtime::PiRuntimePaths;
 
 const FILE_NAME: &str = "translation.json";
 

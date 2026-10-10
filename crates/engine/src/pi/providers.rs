@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::pi_runtime::PiRuntimePaths;
+use crate::pi::runtime::PiRuntimePaths;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +47,7 @@ pub struct SaveProvider {
 /// Serialize local read-modify-write requests across RPC connections.
 static OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const HELPER_SOURCE: &str = include_str!("../../../dist/pi-runtime/provider-service.mjs");
+const HELPER_SOURCE: &str = include_str!("../../../../dist/pi-runtime/provider-service.mjs");
 
 fn helper_path(paths: &PiRuntimePaths) -> Result<std::path::PathBuf, String> {
     let bundled = paths.current.join("provider-service.mjs");
@@ -140,7 +140,7 @@ fn with_claude_cli(
         .retain(|provider| provider.id != "anthropic");
     let cli = cypher_harness::resolve_cli("claude");
     if let Some(path) = &cli {
-        crate::pi_packages::sync_claude_bridge_executable(&paths.agent_dir, path);
+        crate::pi::packages::sync_claude_bridge_executable(&paths.agent_dir, path);
     }
     snapshot.providers.insert(
         0,

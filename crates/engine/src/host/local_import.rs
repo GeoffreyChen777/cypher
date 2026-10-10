@@ -30,10 +30,10 @@ use cypher_sync::DocsStore;
 use serde::{Deserialize, Serialize};
 
 use crate::EngineError;
-use crate::chat2_host::CHAT2_DOC_EPOCH;
-use crate::run_journal::journal_paths;
+use crate::host::chat2_host::CHAT2_DOC_EPOCH;
+use crate::host::workspace_host::WorkspaceHost;
+use crate::session::journal::journal_paths;
 use crate::uploads::Uploads;
-use crate::workspace_host::WorkspaceHost;
 
 /// Marker recording completed imports, at `{data_dir}/local-import.json`.
 /// One entry per target (org, user): the same device may sign into several

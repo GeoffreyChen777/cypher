@@ -38,9 +38,9 @@ use cypher_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
-use crate::doc_host::{ChatDocHandle, DocHost};
+use crate::host::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::HarnessRegistry;
-use crate::run_journal::RunJournal;
+use crate::session::journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
 
 mod run_task;
@@ -176,7 +176,7 @@ struct Inner {
     /// session id is the "do not resume" tombstone after a rejected resume.
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
-    titles: OnceLock<crate::titles::TitleGenerator>,
+    titles: OnceLock<crate::session::titles::TitleGenerator>,
     /// Fired with `(chat_id, cwd)` when a user prompt starts a turn (fresh
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
@@ -315,7 +315,7 @@ impl SessionsEngine {
 
     /// Wire the chat auto-titler (called once at engine assembly). After each
     /// completed exchange the run task fires it for still-untitled chats.
-    pub fn set_titles(&self, titles: crate::titles::TitleGenerator) {
+    pub fn set_titles(&self, titles: crate::session::titles::TitleGenerator) {
         let _ = self.inner.titles.set(titles);
     }
 
@@ -677,10 +677,10 @@ impl SessionsEngine {
         let agent_prompt = agent_prompt_for(harness_id, agent_prompt);
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
-        request.cwd = crate::repos::expand_home(&request.cwd);
+        request.cwd = crate::git::repos::expand_home(&request.cwd);
         // A quick chat's scratch folder lives under the host's temp dir,
         // which a reboot may have emptied: recreate it so the run spawns.
-        crate::scratch::ensure_for_run(chat_id, &request.cwd);
+        crate::session::scratch::ensure_for_run(chat_id, &request.cwd);
         // Visible prompt = the doc/user entry truth; the harness gets the
         // augmented effective prompt when `agent_prompt` is present.
         let visible_prompt = request.prompt.clone();
@@ -1604,7 +1604,7 @@ impl Inner {
         lock(&self.doc_host).clone()
     }
 
-    fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
+    fn workspace(&self) -> Option<crate::host::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
 

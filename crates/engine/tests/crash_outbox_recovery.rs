@@ -3,7 +3,7 @@
 //! durable chat2 outbox restores the transcript update the debounced snapshot
 //! may not have saved.
 use cypher_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
-use cypher_engine::chat2_host::EngineChatSink;
+use cypher_engine::host::chat2_host::EngineChatSink;
 
 use cypher_engine::{EngineCore, EngineProfile, HarnessRegistry, RunJournal};
 use cypher_proto::{AgentEvent, HarnessId};

@@ -369,7 +369,7 @@ async fn local_runtime_serves_update_status_without_edge_routing() {
         .await
         .expect("initial PiUpdateStatus frame timed out")
         .expect("PiUpdateStatus stream closed before its initial frame");
-    let initial: cypher_engine::pi_packages::PiUpdateStatus =
+    let initial: cypher_engine::pi::packages::PiUpdateStatus =
         serde_json::from_value(initial).expect("initial PiUpdateStatus must deserialize");
     assert!(!initial.update_available());
     assert!(initial.checked_at.is_none());

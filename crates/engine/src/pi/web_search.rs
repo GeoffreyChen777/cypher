@@ -16,8 +16,8 @@ use std::path::Path;
 use cypher_proto::WebSearchFallbackSettings;
 use serde::Deserialize;
 
-use crate::pi_packages::{self, SetPackageEnabled};
-use crate::pi_runtime::PiRuntimePaths;
+use crate::pi::packages::{self, SetPackageEnabled};
+use crate::pi::runtime::PiRuntimePaths;
 
 pub const PACKAGE: &str = "npm:pi-web-search-claude-bridge";
 const CONFIG_FILE: &str = "web-search-claude-bridge.json";
@@ -76,8 +76,8 @@ fn resolved_model(path: &Path) -> Option<String> {
 pub fn load(paths: &PiRuntimePaths) -> WebSearchFallbackSettings {
     let pinned = pinned_model(&agent_file(paths, CONFIG_FILE));
     WebSearchFallbackSettings {
-        available: pi_packages::bundled(paths, PACKAGE),
-        enabled: pi_packages::enabled(paths, PACKAGE),
+        available: packages::bundled(paths, PACKAGE),
+        enabled: packages::enabled(paths, PACKAGE),
         automatic: pinned.is_none(),
         resolved: pinned
             .is_none()
@@ -114,7 +114,7 @@ pub fn save(
             serde_json::json!({ "provider": provider, "model": name })
         }
     };
-    if request.enabled && !pi_packages::bundled(paths, PACKAGE) {
+    if request.enabled && !packages::bundled(paths, PACKAGE) {
         return Err(
             "This device's Pi Runtime does not include the web-search fallback; update Runtime first."
                 .into(),
@@ -126,8 +126,8 @@ pub fn save(
     let text = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, format!("{text}\n")).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    if pi_packages::enabled(paths, PACKAGE) != request.enabled {
-        pi_packages::set_package_enabled(
+    if packages::enabled(paths, PACKAGE) != request.enabled {
+        packages::set_package_enabled(
             paths,
             SetPackageEnabled {
                 source: PACKAGE.into(),
@@ -185,7 +185,7 @@ mod tests {
         .unwrap();
         assert_eq!(file["provider"], "openai-codex");
         assert_eq!(file["model"], "gpt-5.5");
-        assert!(pi_packages::enabled(&paths, PACKAGE));
+        assert!(packages::enabled(&paths, PACKAGE));
 
         // Back to automatic: the package's own sentinel, no provider key.
         let auto = save(
@@ -215,7 +215,7 @@ mod tests {
         )
         .unwrap();
         assert!(!off.enabled);
-        assert!(!pi_packages::enabled(&paths, PACKAGE));
+        assert!(!packages::enabled(&paths, PACKAGE));
         assert_eq!(load(&paths).model.as_deref(), Some("openai-codex/gpt-5.5"));
     }
 

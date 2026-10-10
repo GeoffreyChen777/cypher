@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
-use crate::pi_packages::{PiPackageUpdate, PiUpdateStatus};
+use crate::pi::packages::{PiPackageUpdate, PiUpdateStatus};
 
 const INITIAL_CHECK_DELAY: Duration = Duration::from_secs(20);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);

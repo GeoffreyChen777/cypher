@@ -48,9 +48,9 @@ impl RuntimeFacts {
 
 async fn runtime_facts(config: &EngineConfig) -> RuntimeFacts {
     RuntimeFacts {
-        installed: cypher_engine::pi_runtime::installed_runtime(&config.data_dir)
+        installed: cypher_engine::pi::runtime::installed_runtime(&config.data_dir)
             .map(|runtime| runtime.version),
-        latest: cypher_engine::pi_runtime::latest_manifest(&config.edge_url)
+        latest: cypher_engine::pi::runtime::latest_manifest(&config.edge_url)
             .await
             .map(|manifest| manifest.version),
     }
@@ -264,7 +264,7 @@ async fn install_runtime_offline(config: &EngineConfig) -> anyhow::Result<()> {
     let _lock = cypher_engine::InstanceLock::acquire(&config.data_dir).map_err(|_| {
         anyhow::anyhow!("An engine is starting; run `cypher update` again shortly.")
     })?;
-    let manager = cypher_engine::pi_runtime::PiRuntimeManager::spawn(
+    let manager = cypher_engine::pi::runtime::PiRuntimeManager::spawn(
         config.edge_url.clone(),
         &config.data_dir,
     );

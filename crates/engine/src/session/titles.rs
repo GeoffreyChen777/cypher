@@ -26,9 +26,9 @@ use cypher_proto::{
 };
 
 use crate::EngineError;
+use crate::git::repos::Repos;
+use crate::host::workspace_host::WorkspaceHost;
 use crate::registry::HarnessRegistry;
-use crate::repos::Repos;
-use crate::workspace_host::WorkspaceHost;
 
 /// Throwaway title runs are cheap but still cross a process boundary — retry a
 /// couple of times with a short backoff before falling back (zeron's ladder).
@@ -38,7 +38,7 @@ struct Inner {
     workspace: WorkspaceHost,
     registry: Arc<HarnessRegistry>,
     repos: Repos,
-    settings: Option<crate::title_settings::TitleSettingsStore>,
+    settings: Option<crate::session::title_settings::TitleSettingsStore>,
 }
 
 #[derive(Clone)]
@@ -58,7 +58,10 @@ impl TitleGenerator {
         }
     }
 
-    pub fn with_settings(mut self, settings: crate::title_settings::TitleSettingsStore) -> Self {
+    pub fn with_settings(
+        mut self,
+        settings: crate::session::title_settings::TitleSettingsStore,
+    ) -> Self {
         Arc::get_mut(&mut self.inner)
             .expect("configure before sharing")
             .settings = Some(settings);
@@ -130,7 +133,7 @@ impl TitleGenerator {
                 .inner
                 .repos
                 .rename_worktree_branch(
-                    std::path::Path::new(&crate::repos::expand_home(chat_cwd)),
+                    std::path::Path::new(&crate::git::repos::expand_home(chat_cwd)),
                     branch,
                     &title,
                 )

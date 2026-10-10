@@ -1,7 +1,7 @@
 //! Settings → Providers: scan-friendly connections, focused modal forms.
 //! The presentation shares the existing device-scoped provider RPCs. Secrets
 //! stay in ephemeral masked inputs and never enter a chat or synced document.
-use cypher_engine::pi_providers::{LoginStatus, PiProviderInfo, PiProvidersSnapshot};
+use cypher_engine::pi::providers::{LoginStatus, PiProviderInfo, PiProvidersSnapshot};
 use cypher_rpc::methods;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString,

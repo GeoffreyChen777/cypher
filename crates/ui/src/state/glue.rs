@@ -520,7 +520,7 @@ fn spawn_pi_update_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Ta
             };
             let mut frames = 0usize;
             while let Some(value) = rx.recv().await {
-                let parsed: cypher_engine::pi_packages::PiUpdateStatus =
+                let parsed: cypher_engine::pi::packages::PiUpdateStatus =
                     match serde_json::from_value(value) {
                         Ok(parsed) => parsed,
                         Err(err) => {

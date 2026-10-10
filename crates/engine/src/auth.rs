@@ -245,7 +245,7 @@ struct AuthInner {
     access: Mutex<Option<AccessEntry>>,
     /// Shared with the workspace host so the viewport's periodic activity
     /// refresh rides the presence beat instead of spending a request.
-    viewport_activity: crate::viewport_activity::ViewportActivity,
+    viewport_activity: crate::host::viewport_activity::ViewportActivity,
     /// Pending OAuth states plus the cancellation generation that fences code
     /// exchanges already in flight when sign-out occurs.
     sign_in: Mutex<SignInLifecycle>,
@@ -410,7 +410,7 @@ impl Auth {
     /// Live auth status (current value + changes).
     /// The slot the viewport's activity report waits in until the next
     /// presence beat carries it.
-    pub fn viewport_activity(&self) -> crate::viewport_activity::ViewportActivity {
+    pub fn viewport_activity(&self) -> crate::host::viewport_activity::ViewportActivity {
         self.inner.viewport_activity.clone()
     }
 

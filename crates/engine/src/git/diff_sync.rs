@@ -35,8 +35,8 @@ use tokio_util::sync::CancellationToken;
 use cypher_proto::{Chat, CheckoutDiff, DiffFileSummary};
 
 use crate::EngineError;
-use crate::repos::{CheckoutIdentity, Repos};
-use crate::workspace_host::WorkspaceHost;
+use crate::git::repos::{CheckoutIdentity, Repos};
+use crate::host::workspace_host::WorkspaceHost;
 
 /// Hard cap on the unified patch (plus untracked hunks) — "Partial snapshot".
 pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
@@ -285,7 +285,7 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
         }
         // The identity is resolved by running git in this directory, so the
         // row's `~` has to become the host's real home first.
-        let Some(cwd) = chat.cwd.as_deref().map(crate::repos::expand_home) else {
+        let Some(cwd) = chat.cwd.as_deref().map(crate::git::repos::expand_home) else {
             continue;
         };
         let identity = match resolved.get(&cwd) {
@@ -818,7 +818,7 @@ fn decode_diff_source(
         Ok(text) => text,
         Err(_) => return Ok((None, None, true)),
     };
-    let hash = crate::repos::hex(&Sha256::digest(text.as_bytes()));
+    let hash = crate::git::repos::hex(&Sha256::digest(text.as_bytes()));
     Ok((Some(text), Some(hash), false))
 }
 
@@ -1119,7 +1119,7 @@ pub async fn capture_diff_against(
     hasher.update([0u8]);
     hasher.update(files_json.as_bytes());
     hasher.update(if truncated { b"1" } else { b"0" });
-    let checksum = crate::repos::hex(&hasher.finalize());
+    let checksum = crate::git::repos::hex(&hasher.finalize());
 
     Ok(DiffSnapshot {
         branch,
@@ -1212,7 +1212,7 @@ pub async fn capture_commit_diff(
     hasher.update([0u8]);
     hasher.update(files_json.as_bytes());
     hasher.update(if truncated { b"1" } else { b"0" });
-    let checksum = crate::repos::hex(&hasher.finalize());
+    let checksum = crate::git::repos::hex(&hasher.finalize());
     Ok(DiffSnapshot {
         branch,
         head_sha: Some(sha.to_string()),
@@ -1366,7 +1366,7 @@ pub async fn capture_turn_diff(
     hasher.update([0u8]);
     hasher.update(files_json.as_bytes());
     hasher.update(if truncated { b"1" } else { b"0" });
-    let checksum = crate::repos::hex(&hasher.finalize());
+    let checksum = crate::git::repos::hex(&hasher.finalize());
 
     Ok(DiffSnapshot {
         branch,

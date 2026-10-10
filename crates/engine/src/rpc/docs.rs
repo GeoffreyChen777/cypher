@@ -112,7 +112,7 @@ pub(super) fn import_local_workspace(rpc: &EngineRpc) -> Result<RpcReply, RpcErr
     // viewer; items are tiny and bounded by the chat count.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
     tokio::task::spawn_blocking(move || {
-        let emit = |event: crate::local_import::ImportEvent| {
+        let emit = |event: crate::host::local_import::ImportEvent| {
             if let Ok(item) = serde_json::to_value(&event) {
                 let _ = tx.send(item);
             }
