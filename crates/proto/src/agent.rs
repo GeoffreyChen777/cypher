@@ -29,9 +29,9 @@ pub enum ReasoningLevel {
     XHigh,
     Max,
     Ultra,
-    /// xhigh + harness-specific setting.
+    /// Levels of the retired Claude Code harness, still decoded from older
+    /// chats and settings; Pi treats them (and `Ultra`) as max.
     Ultracode,
-    /// Prompt-prefix driven (Claude).
     Ultrathink,
 }
 

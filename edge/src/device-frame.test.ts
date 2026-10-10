@@ -24,5 +24,9 @@ describe("device frame codec", () => {
     expect([frame[0], frame[1]]).toEqual([(length & 0x7f) | 0x80, length >> 7]);
     expect(() => decodeDeviceFrame(frame.subarray(0, 1))).toThrow();
     expect(() => decodeDeviceFrame(frame.subarray(0, 10))).toThrow();
+    // A sixth length byte overflows u32: rejected, never wrapped into a small length.
+    expect(() => decodeDeviceFrame(Uint8Array.of(0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0x7b, 0x7d))).toThrow(
+      "bad frame length"
+    );
   });
 });

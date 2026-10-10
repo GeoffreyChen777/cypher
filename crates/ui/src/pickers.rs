@@ -488,8 +488,8 @@ impl Pickers {
         }
         // Fall back to the first OFFERED harness: the registry lists the mock
         // harness first, and resolving chips against it would boot the
-        // new-chat canvas onto "Mock" instead of Claude Code + its default
-        // model (it stays available under `CYPHER_HARNESS=mock`).
+        // new-chat canvas onto "Mock" instead of Pi + its default model (it
+        // stays available under `CYPHER_HARNESS=mock`).
         self.harnesses
             .ready()
             .and_then(|list| offered_harnesses(list).first().map(|d| d.id))

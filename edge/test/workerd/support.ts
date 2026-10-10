@@ -35,13 +35,16 @@ export function seedRecipient(sql: SqlStorage, at: number, clientId = "phone", p
  * sent (text frames for the registry room). */
 export function peer(device: string) {
   let attachment: unknown = { userId: "u", device, ready: true };
+  /** Text frames only; binary sends (ChatRoom rows) are accepted and dropped. */
   const frames: string[] = [];
   return {
     frames,
     ws: {
       deserializeAttachment: () => attachment,
       serializeAttachment: (v: unknown) => { attachment = v; },
-      send: (s: string) => frames.push(s),
+      send: (s: string | ArrayBuffer) => {
+        if (typeof s === "string") frames.push(s);
+      },
       close: () => {}
     } as unknown as WebSocket
   };

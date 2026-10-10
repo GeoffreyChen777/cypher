@@ -51,7 +51,9 @@ export const decodeDeviceFrame = (
   let offset = 0;
   let length = 0;
   for (let shift = 0; ; shift += 7) {
-    if (shift > 35 || offset >= bytes.length) throw new Error("bad frame length");
+    // Five bytes cover a u32 length; a sixth is an overflow (the Rust codec
+    // rejects it the same way).
+    if (shift > 28 || offset >= bytes.length) throw new Error("bad frame length");
     const byte = bytes[offset++]!;
     length |= (byte & 0x7f) << shift;
     if ((byte & 0x80) === 0) break;

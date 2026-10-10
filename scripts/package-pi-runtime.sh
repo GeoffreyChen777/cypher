@@ -9,7 +9,7 @@
 #   scripts/package-pi-runtime.sh
 #
 # Optional:
-#   PI_RUNTIME_VERSION=0.85.1.2
+#   PI_RUNTIME_VERSION=1.0.1.4
 #   OUT_DIR=target/package
 
 set -euo pipefail

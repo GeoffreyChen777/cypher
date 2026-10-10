@@ -41,6 +41,7 @@ and restart the dev UI, keep the running engine, then verify and report.
 root, in two terminals or as background jobs:
 
 ```sh
+mkdir -p ~/.cypher-development
 nohup scripts/dev-engine.sh local > ~/.cypher-development/local-engine.log 2>&1 &
 # wait for the engine (the first build takes a few minutes):
 until CYPHER_DATA_DIR=~/.cypher-development/local-engine target/debug/cypher status --verbose \
