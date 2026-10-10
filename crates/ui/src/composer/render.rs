@@ -47,159 +47,192 @@ impl Composer {
         // Card text selects + copies like transcript text. Keys carry the
         // request and page, so a selection never washes another page's copy.
         let scope = self.wizard_selection;
-        let text_key = {
-            let prefix = format!("{}:{page}", wizard.request_id);
-            move |part: &str| -> Arc<str> { format!("{prefix}:{part}").into() }
+        let key_prefix = format!("{}:{page}", wizard.request_id);
+        let frame = WizardFrame {
+            theme,
+            wizard,
+            question,
+            view,
+            page,
+            pages,
+            last,
+            typed_empty,
+            pick_only,
+            optional_comment,
+            can_advance,
+            prompt,
+            chrome_title,
+            multi,
+            scope,
+            key_prefix,
         };
 
-        let options = question.options.iter().enumerate().map(|(ix, label)| {
-            let picked = wizard.is_picked(ix) && typed_empty;
-            let custom = view.custom_ix == Some(ix);
-            let description = view.descriptions.get(ix).cloned().flatten();
-            let hover_key = format!("wizard-option-{ix}");
-            let number = (ix < 9).then(|| SharedString::from(format!("{}", ix + 1)));
+        let header = self.wizard_header(&frame, cx);
+        let body = self.wizard_body(&frame, cx);
+        let footer = self.wizard_footer(&frame, cx);
+        let theme = &frame.theme;
 
-            // Leading marker: the option's number key (a checkbox on
-            // multi-select pages); a solid check once picked.
-            let marker = div()
-                .flex_none()
-                .size(px(20.0))
-                .mt(px(if description.is_some() { 0.0 } else { -1.0 }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(if multi { 5.0 } else { 6.0 }))
-                .when(picked, |el| el.bg(theme.text))
-                .when(!picked && multi, |el| {
-                    el.border_1().border_color(theme.border_strong)
-                })
-                .when(!picked && !multi, |el| el.bg(crate::kit::theme::ink(0.06)))
-                .map(|el| {
-                    if picked {
-                        el.child(
-                            crate::kit::icons::icon(crate::kit::icons::CHECK)
-                                .size(px(12.0))
-                                .text_color(theme.on_solid),
-                        )
-                    } else if custom {
-                        el.child(
-                            crate::kit::icons::icon(crate::kit::icons::PEN)
-                                .size(px(11.0))
-                                .text_color(theme.text_muted),
-                        )
-                    } else if multi {
-                        el
+        div()
+            .id("question-panel")
+            .track_focus(&self.wizard_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_wizard_key(event, window, cx)
+            }))
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .w_full()
+            .min_w_0()
+            .max_w(px(560.0))
+            .mx_auto()
+            .overflow_hidden()
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_dialog)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(crate::markdown::render::selection_frame_reset(scope))
+            .child(header)
+            .child(body)
+            .child(footer)
+            .into_any_element()
+    }
+
+    /// One answer option: its number-key (or checkbox) marker, label and
+    /// description.
+    fn wizard_option(
+        &self,
+        frame: &WizardFrame,
+        ix: usize,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &frame.theme;
+        let multi = frame.multi;
+        let scope = frame.scope;
+        let picked = frame.wizard.is_picked(ix) && frame.typed_empty;
+        let custom = frame.view.custom_ix == Some(ix);
+        let description = frame.view.descriptions.get(ix).cloned().flatten();
+        let hover_key = format!("wizard-option-{ix}");
+        let number = (ix < 9).then(|| SharedString::from(format!("{}", ix + 1)));
+
+        let marker = wizard_option_marker(
+            picked,
+            custom,
+            multi,
+            description.is_some(),
+            number.clone(),
+            theme,
+        );
+
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(if custom {
+                        gpui::FontWeight::NORMAL
                     } else {
-                        el.text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted)
-                            .children(number.clone())
-                    }
-                });
-
-            let text = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .font_weight(if custom {
-                            gpui::FontWeight::NORMAL
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(if custom { theme.text_muted } else { theme.text })
+                    .map(|el| {
+                        if custom {
+                            el.child("Write a different answer…")
                         } else {
-                            gpui::FontWeight::MEDIUM
-                        })
-                        .text_color(if custom { theme.text_muted } else { theme.text })
-                        .map(|el| {
-                            if custom {
-                                el.child("Write a different answer…")
-                            } else {
-                                el.child(crate::markdown::render::selectable_plain_text(
-                                    scope,
-                                    text_key(&format!("option{ix}")),
-                                    SharedString::from(label.clone()),
-                                    &theme,
-                                ))
-                            }
-                        }),
-                )
-                .children(description.map(|description| {
-                    div()
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
-                        .text_color(theme.text_muted)
-                        .child(crate::markdown::render::selectable_plain_text(
-                            scope,
-                            text_key(&format!("option{ix}-description")),
-                            SharedString::from(description),
-                            &theme,
-                        ))
-                }));
-
-            div()
-                .id(("wizard-option", ix))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(10.0))
-                .px(px(10.0))
-                .py(px(9.0))
-                .rounded(px(10.0))
-                .border_1()
-                .when(custom && !picked, |el| el.border_dashed())
-                .border_color(if picked {
-                    theme.border_strong
-                } else {
-                    theme.border
-                })
-                .bg(if picked {
-                    crate::kit::theme::ink(0.07)
-                } else {
-                    motion::hover_blend(
-                        &hover_key,
-                        crate::kit::theme::ink(if custom { 0.0 } else { 0.02 }),
-                        crate::kit::theme::ink(0.05),
-                    )
-                })
-                .on_hover(motion::hover_listener(hover_key))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    // A drag or double-click over the copy is a text
-                    // selection, not a pick.
-                    if let gpui::ClickEvent::Mouse(click) = event {
-                        let moved = click.up.position - click.down.position;
-                        if click.down.click_count > 1
-                            || f32::from(moved.x).abs() > 3.0
-                            || f32::from(moved.y).abs() > 3.0
-                        {
-                            return;
+                            el.child(crate::markdown::render::selectable_plain_text(
+                                scope,
+                                frame.text_key(&format!("option{ix}")),
+                                SharedString::from(label.to_owned()),
+                                theme,
+                            ))
                         }
-                    }
-                    this.wizard_select(ix, cx)
-                }))
-                .child(marker)
-                .child(text)
-                // Multi-select and the custom row keep their number key on the
-                // trailing edge, where it doesn't read as a checkbox state.
-                .when(multi || custom, |el| {
-                    el.children(number.map(|number| {
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .line_height(px(18.0))
-                            .text_color(theme.text_faint)
-                            .child(number)
-                    }))
-                })
-        });
+                    }),
+            )
+            .children(description.map(|description| {
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::markdown::render::selectable_plain_text(
+                        scope,
+                        frame.text_key(&format!("option{ix}-description")),
+                        SharedString::from(description),
+                        theme,
+                    ))
+            }));
 
-        // ---- top row: who is asking, and where in the set this page is ----
-        let header = div()
+        div()
+            .id(("wizard-option", ix))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(9.0))
+            .rounded(px(10.0))
+            .border_1()
+            .when(custom && !picked, |el| el.border_dashed())
+            .border_color(if picked {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(if picked {
+                crate::kit::theme::ink(0.07)
+            } else {
+                motion::hover_blend(
+                    &hover_key,
+                    crate::kit::theme::ink(if custom { 0.0 } else { 0.02 }),
+                    crate::kit::theme::ink(0.05),
+                )
+            })
+            .on_hover(motion::hover_listener(hover_key))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                // A drag or double-click over the copy is a text
+                // selection, not a pick.
+                if let gpui::ClickEvent::Mouse(click) = event {
+                    let moved = click.up.position - click.down.position;
+                    if click.down.click_count > 1
+                        || f32::from(moved.x).abs() > 3.0
+                        || f32::from(moved.y).abs() > 3.0
+                    {
+                        return;
+                    }
+                }
+                this.wizard_select(ix, cx)
+            }))
+            .child(marker)
+            .child(text)
+            // Multi-select and the custom row keep their number key on the
+            // trailing edge, where it doesn't read as a checkbox state.
+            .when(multi || custom, |el| {
+                el.children(number.map(|number| {
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_faint)
+                        .child(number)
+                }))
+            })
+    }
+
+    /// Top row: who is asking, and where in the set this page is.
+    fn wizard_header(&self, frame: &WizardFrame, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = &frame.theme;
+        let pages = frame.pages;
+        let page = frame.page;
+        div()
             .flex_none()
             .h(px(40.0))
             .pl(px(16.0))
@@ -209,7 +242,7 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .child(
-                crate::kit::icons::icon(if wizard.slash.is_some() {
+                crate::kit::icons::icon(if frame.wizard.slash.is_some() {
                     crate::kit::icons::TUNING
                 } else {
                     crate::kit::icons::QUESTION_CIRCLE
@@ -224,7 +257,7 @@ impl Composer {
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
-                    .child(chrome_title),
+                    .child(frame.chrome_title.clone()),
             )
             .when(pages > 1, |el| {
                 el.child(
@@ -273,9 +306,19 @@ impl Composer {
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                     ),
-            );
+            )
+    }
 
-        // ---- body: the question, its context, then the answer ----
+    /// Body: the question, its context, then the answer.
+    fn wizard_body(
+        &self,
+        frame: &WizardFrame,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &frame.theme;
+        let scope = frame.scope;
+        let question = &frame.question;
+        let optional_comment = &frame.optional_comment;
         let mut body = div()
             .id("wizard-scroll")
             .min_w_0()
@@ -288,7 +331,7 @@ impl Composer {
             .flex_col();
         let (question_text, context) = match optional_comment.as_ref() {
             Some(copy) => (copy.question.clone(), copy.context.clone()),
-            None => split_question_context(&prompt),
+            None => split_question_context(&frame.prompt),
         };
         body = body.child(
             div()
@@ -299,97 +342,41 @@ impl Composer {
                 .cursor_text()
                 .child(crate::markdown::render::selectable_plain_text(
                     scope,
-                    text_key("question"),
+                    frame.text_key("question"),
                     SharedString::from(question_text),
-                    &theme,
+                    theme,
                 )),
         );
         if let Some(context) = context {
             body = body.child(wizard_context_block(
                 &context,
                 scope,
-                text_key("context"),
-                &theme,
+                frame.text_key("context"),
+                theme,
             ));
         }
         if let Some(copy) = optional_comment.as_ref() {
-            // What the user already picked, shown as the answer it is.
-            body = body.child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_col()
-                    .child(wizard_section_label(
-                        if copy.selected_label == "Selected options" {
-                            "Your picks"
-                        } else {
-                            "Your pick"
-                        },
-                        &theme,
-                    ))
-                    .child(div().flex().flex_col().gap(px(6.0)).children(
-                        copy.selected.lines().enumerate().map(|(ix, line)| {
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_start()
-                                .gap(px(10.0))
-                                .px(px(10.0))
-                                .py(px(9.0))
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .bg(crate::kit::theme::ink(0.07))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .size(px(20.0))
-                                        .mt(px(-1.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(6.0))
-                                        .bg(theme.text)
-                                        .child(
-                                            crate::kit::icons::icon(crate::kit::icons::CHECK)
-                                                .size(px(12.0))
-                                                .text_color(theme.on_solid),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(13.0))
-                                        .line_height(px(18.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .cursor_text()
-                                        .child(crate::markdown::render::selectable_plain_text(
-                                            scope,
-                                            text_key(&format!("picked{ix}")),
-                                            SharedString::from(line.to_owned()),
-                                            &theme,
-                                        )),
-                                )
-                        }),
-                    )),
-            );
+            body = body.child(wizard_picked_answers(frame, copy));
         }
         if !question.options.is_empty() {
+            let options = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(ix, label)| self.wizard_option(frame, ix, label, cx));
             body = body.child(
                 div()
                     .mt(px(16.0))
                     .flex()
                     .flex_col()
                     // Single-select needs no label: the numbered rows say it.
-                    .when(multi, |el| {
-                        el.child(wizard_section_label("Pick any that apply", &theme))
+                    .when(frame.multi, |el| {
+                        el.child(wizard_section_label("Pick any that apply", theme))
                     })
                     .child(div().flex().flex_col().gap(px(6.0)).children(options)),
             );
         }
-        if !pick_only {
+        if !frame.pick_only {
             let (label, hint) = if optional_comment.is_some() {
                 (
                     "Add a comment (optional)",
@@ -408,7 +395,7 @@ impl Composer {
                     .mt(px(16.0))
                     .flex()
                     .flex_col()
-                    .child(wizard_section_label(label, &theme))
+                    .child(wizard_section_label(label, theme))
                     .child(
                         div()
                             .w_full()
@@ -430,9 +417,17 @@ impl Composer {
                     })),
             );
         }
+        body
+    }
 
-        // ---- footer: keyboard hints on the left, actions on the right ----
-        let option_count = question.options.len().min(9);
+    /// Footer: keyboard hints on the left, actions on the right.
+    fn wizard_footer(&self, frame: &WizardFrame, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = &frame.theme;
+        let page = frame.page;
+        let pick_only = frame.pick_only;
+        let last = frame.last;
+        let can_advance = frame.can_advance;
+        let option_count = frame.question.options.len().min(9);
         let esc_action = if page > 0 {
             Some("back")
         } else if pick_only {
@@ -455,28 +450,28 @@ impl Composer {
                 };
                 el.child(wizard_key_hint(
                     &keys,
-                    if multi { "toggle" } else { "choose" },
-                    &theme,
+                    if frame.multi { "toggle" } else { "choose" },
+                    theme,
                 ))
             })
             .when(!pick_only, |el| {
                 el.child(wizard_key_hint(
                     "↵",
                     if last { "submit" } else { "next" },
-                    &theme,
+                    theme,
                 ))
             })
-            .children(esc_action.map(|action| wizard_key_hint("esc", action, &theme)));
-        let back = if optional_comment.is_some() {
+            .children(esc_action.map(|action| wizard_key_hint("esc", action, theme)));
+        let back = if frame.optional_comment.is_some() {
             Some(
-                crate::kit::popover::btn_ghost(&theme, "Skip", "wizard-comment-skip")
+                crate::kit::popover::btn_ghost(theme, "Skip", "wizard-comment-skip")
                     .id("wizard-comment-skip")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_skip_comment(cx)))
                     .into_any_element(),
             )
         } else if page > 0 {
             Some(
-                crate::kit::popover::btn_ghost(&theme, "Back", "wizard-back")
+                crate::kit::popover::btn_ghost(theme, "Back", "wizard-back")
                     .id("wizard-back")
                     .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
                     .into_any_element(),
@@ -486,8 +481,8 @@ impl Composer {
         };
         // A single-select page answers on the click itself; a primary button
         // appears only where the answer needs confirming.
-        let show_primary = !pick_only || pages > 1;
-        let footer = div()
+        let show_primary = !pick_only || frame.pages > 1;
+        div()
             .flex_none()
             .h(px(48.0))
             .pl(px(16.0))
@@ -502,7 +497,7 @@ impl Composer {
             .children(back)
             .when(show_primary, |el| {
                 el.child(
-                    crate::kit::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                    crate::kit::popover::btn_primary(theme, if last { "Submit" } else { "Next" })
                         .id("wizard-submit")
                         .px(px(14.0))
                         .when(!can_advance, |el| el.opacity(0.4).cursor_default())
@@ -512,33 +507,7 @@ impl Composer {
                             }
                         })),
                 )
-            });
-
-        div()
-            .id("question-panel")
-            .track_focus(&self.wizard_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(event, window, cx)
-            }))
-            .occlude()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .w_full()
-            .min_w_0()
-            .max_w(px(560.0))
-            .mx_auto()
-            .overflow_hidden()
-            .rounded(px(14.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_dialog)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(crate::markdown::render::selection_frame_reset(scope))
-            .child(header)
-            .child(body)
-            .child(footer)
-            .into_any_element()
+            })
     }
 
     /// What the context gauge shows: the selected session's latest
@@ -708,6 +677,145 @@ impl Composer {
             }
         }
     }
+}
+
+/// The question card's per-frame snapshot, shared by its sections.
+struct WizardFrame {
+    theme: Theme,
+    wizard: Wizard,
+    question: UserInputQuestion,
+    view: PageView,
+    page: usize,
+    pages: usize,
+    last: bool,
+    typed_empty: bool,
+    pick_only: bool,
+    optional_comment: Option<OptionalCommentCopy>,
+    can_advance: bool,
+    prompt: String,
+    chrome_title: SharedString,
+    multi: bool,
+    scope: crate::markdown::selection::SelectionScope,
+    key_prefix: String,
+}
+
+impl WizardFrame {
+    /// A selectable text's key: the request and page, then `part`.
+    fn text_key(&self, part: &str) -> Arc<str> {
+        format!("{}:{part}", self.key_prefix).into()
+    }
+}
+
+/// An option's leading marker: its number key (a checkbox on multi-select
+/// pages); a solid check once picked.
+fn wizard_option_marker(
+    picked: bool,
+    custom: bool,
+    multi: bool,
+    described: bool,
+    number: Option<SharedString>,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(20.0))
+        .mt(px(if described { 0.0 } else { -1.0 }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(if multi { 5.0 } else { 6.0 }))
+        .when(picked, |el| el.bg(theme.text))
+        .when(!picked && multi, |el| {
+            el.border_1().border_color(theme.border_strong)
+        })
+        .when(!picked && !multi, |el| el.bg(crate::kit::theme::ink(0.06)))
+        .map(|el| {
+            if picked {
+                el.child(
+                    crate::kit::icons::icon(crate::kit::icons::CHECK)
+                        .size(px(12.0))
+                        .text_color(theme.on_solid),
+                )
+            } else if custom {
+                el.child(
+                    crate::kit::icons::icon(crate::kit::icons::PEN)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                )
+            } else if multi {
+                el
+            } else {
+                el.text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .children(number)
+            }
+        })
+}
+
+/// What the user already picked, shown as the answer it is.
+fn wizard_picked_answers(frame: &WizardFrame, copy: &OptionalCommentCopy) -> gpui::Div {
+    let theme = &frame.theme;
+    let scope = frame.scope;
+    div()
+        .mt(px(16.0))
+        .flex()
+        .flex_col()
+        .child(wizard_section_label(
+            if copy.selected_label == "Selected options" {
+                "Your picks"
+            } else {
+                "Your pick"
+            },
+            theme,
+        ))
+        .child(div().flex().flex_col().gap(px(6.0)).children(
+            copy.selected.lines().enumerate().map(|(ix, line)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(10.0))
+                    .px(px(10.0))
+                    .py(px(9.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(crate::kit::theme::ink(0.07))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(20.0))
+                            .mt(px(-1.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .bg(theme.text)
+                            .child(
+                                crate::kit::icons::icon(crate::kit::icons::CHECK)
+                                    .size(px(12.0))
+                                    .text_color(theme.on_solid),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.0))
+                            .line_height(px(18.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .cursor_text()
+                            .child(crate::markdown::render::selectable_plain_text(
+                                scope,
+                                frame.text_key(&format!("picked{ix}")),
+                                SharedString::from(line.to_owned()),
+                                theme,
+                            )),
+                    )
+            }),
+        ))
 }
 
 /// Focus lands on the prompt input (window-level focus fallbacks — e.g. after
