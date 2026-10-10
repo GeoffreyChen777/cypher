@@ -102,12 +102,18 @@ final class SessionCommandTests: XCTestCase {
     func testInputCommandOutcomesReadOnlySettledAnswers() {
         let root: [String: LoroValue] = [
             "commands": .list(value: [
-                .map(value: ["id": .string(value: "c1"), "kind": .string(value: "respondInput"),
-                             "status": .string(value: "rejected")]),
-                .map(value: ["id": .string(value: "c2"), "kind": .string(value: "respondInput"),
-                             "status": .string(value: "pending")]),
-                .map(value: ["id": .string(value: "c3"), "kind": .string(value: "steer"),
-                             "status": .string(value: "applied")]),
+                .map(value: [
+                    "id": .string(value: "c1"), "kind": .string(value: "respondInput"),
+                    "status": .string(value: "rejected"),
+                ]),
+                .map(value: [
+                    "id": .string(value: "c2"), "kind": .string(value: "respondInput"),
+                    "status": .string(value: "pending"),
+                ]),
+                .map(value: [
+                    "id": .string(value: "c3"), "kind": .string(value: "steer"),
+                    "status": .string(value: "applied"),
+                ]),
             ])
         ]
         XCTAssertEqual(SessionStore.inputCommandOutcomes(root: root), ["c1": "rejected"])
