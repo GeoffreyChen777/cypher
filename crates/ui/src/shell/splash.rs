@@ -112,15 +112,17 @@ impl Shell {
     /// Capture knobs that open a dialog once its data has landed.
     fn open_capture_dialogs(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         // Capture knob: the add-space palette needs only the device registry.
-        if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
-            self.debug_dialog = None;
+        if self.dev.open_dialog.as_deref() == Some("add-space")
+            && !state.read(cx).devices.is_empty()
+        {
+            self.dev.open_dialog = None;
             self.open_add_space(cx);
         }
         // Capture knob: pop the requested dialog once chats have landed.
-        if let Some(which) = self.debug_dialog.clone()
+        if let Some(which) = self.dev.open_dialog.clone()
             && let Some(first) = state.read(cx).chats.first().map(|c| c.id.clone())
         {
-            self.debug_dialog = None;
+            self.dev.open_dialog = None;
             match which.as_str() {
                 "rename" => self.open_rename_chat(first, cx),
                 "delete" => {

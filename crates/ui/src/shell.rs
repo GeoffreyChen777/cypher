@@ -1145,6 +1145,17 @@ struct SidebarUi {
     collapsed: std::collections::HashSet<String>,
 }
 
+/// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`); see
+/// [`debug_knobs`]. Main window only.
+struct DevKnobs {
+    /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
+    setup: bool,
+    /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
+    /// [`Shell::new`].
+    open_dialog: Option<String>,
+    gate: Option<GatePhase>,
+}
+
 pub struct Shell {
     /// The window's main state: lists (sidebar, spaces, sessions) in
     /// lists-only mode — its `selected_chat` FOLLOWS the focused tile's
@@ -1176,8 +1187,9 @@ pub struct Shell {
     nav: NavHistory,
     /// The settings pages, created on first visit, and the first-run setup.
     pages: SettingsPages,
-    /// `CYPHER_FORCE_GATE=setup` keeps the first-run overlay visible.
-    debug_setup: bool,
+    /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
+    /// [`debug_knobs`].
+    dev: DevKnobs,
     /// The window's modal dialogs and palettes (`None` while closed).
     dialogs: ShellDialogs,
     /// In-app updates, the About dialog and the Pi runtime update.
@@ -1212,10 +1224,6 @@ pub struct Shell {
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
     notification_activity: crate::shell::notification_activity::DesktopActivity,
-    /// Dev/testing knobs (`CYPHER_OPEN_DIALOG`, `CYPHER_FORCE_GATE`) — see
-    /// [`Shell::new`].
-    debug_dialog: Option<String>,
-    debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
@@ -1465,7 +1473,11 @@ impl Shell {
                 shortcuts_sub: None,
                 notifications_sub: None,
             },
-            debug_setup,
+            dev: DevKnobs {
+                setup: debug_setup,
+                open_dialog: debug_dialog,
+                gate: debug_gate,
+            },
             dialogs: ShellDialogs {
                 rename_chat: None,
                 delete_chat: None,
@@ -1517,8 +1529,6 @@ impl Shell {
             settings,
             was_window_active: false,
             notification_activity: Default::default(),
-            debug_dialog,
-            debug_gate,
             sidebar_tween: None,
             fullscreen: None,
             titlebar_tween: None,

@@ -27,7 +27,7 @@ impl Shell {
     pub(super) fn showing_setup(&self) -> bool {
         crate::settings::setup::setup_should_show(
             self.settings.pi_runtime_setup_version >= 1,
-            self.debug_setup,
+            self.dev.setup,
             self.pages.setup_dismissed,
         )
     }

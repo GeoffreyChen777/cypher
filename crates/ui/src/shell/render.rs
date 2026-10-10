@@ -1196,7 +1196,8 @@ impl Render for Shell {
         self.sync.flow = sync_flow_after_auth(self.sync.flow, workspace_scope, auth.as_ref());
         let restart_required = self.sync.flow == SyncFlow::SignedOutRestartRequired;
         let gate = self
-            .debug_gate
+            .dev
+            .gate
             .clone()
             .unwrap_or_else(|| self.state.read(cx).gate());
 
@@ -1622,13 +1623,13 @@ impl Shell {
         // Capture knob: `CYPHER_OPEN_DIALOG=model` pops the combined
         // harness/model menu (needs `window`, so it fires here rather
         // than in `on_state_changed`).
-        if self.debug_dialog.as_deref() == Some("model")
+        if self.dev.open_dialog.as_deref() == Some("model")
             && let Some(composer) = self
                 .focused_slot()
                 .and_then(|sid| self.tiles.slots.get(&sid))
                 .map(|slot| slot.composer.clone())
         {
-            self.debug_dialog = None;
+            self.dev.open_dialog = None;
             composer.update(cx, |c, cx| c.debug_open_model_menu(window, cx));
         }
     }
